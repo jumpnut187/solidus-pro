@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Build/dist
+build/
+dist/
+*.egg-info/
+
+# Numba cache
+*.nbc
+*.nbi
+
+# Logs
+logs/
+*.log
+
+# Temporary files
+*.tmp
+temp/
+.temp/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Data files (optional - uncomment if you don't want to track)
+# data/*.csv
+# models/*.joblib
+
+# Memory mapped files
+*.mmap

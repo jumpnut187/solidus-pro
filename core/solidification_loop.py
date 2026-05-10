@@ -1,0 +1,626 @@
+"""Time-integration loop extracted from SolidificationEngine."""
+
+from __future__ import annotations
+
+import os
+from typing import Any, Callable, Optional
+
+import numpy as np
+from config.hardware_config import hardware
+
+try:
+    from numba import get_num_threads, set_num_threads
+    NUMBA_THREADING_AVAILABLE = True
+except ImportError:
+    NUMBA_THREADING_AVAILABLE = False
+
+
+ProgressCallback = Optional[Callable[[int, int, str], None]]
+DEFAULT_SCHEDULE_CURVE_EXPONENT = 2.0
+THERMAL_COUPLED_SOLVER_MODE = "thermal_coupled"
+
+
+def _resolve_solidification_thread_target() -> int:
+    """
+    Resolve Numba thread target for solidification kernels.
+
+    Environment overrides:
+    - CASTSIM_SOLIDIFICATION_THREADS=all|physical|logical|<int>
+    - CASTSIM_NUMBA_THREADS=all|physical|logical|<int>
+    """
+    logical_cores = int(getattr(hardware, "logical_cores", 0) or (os.cpu_count() or 1))
+    physical_cores = int(getattr(hardware, "physical_cores", 0) or logical_cores)
+    max_threads = max(logical_cores, 1)
+
+    raw_value = (
+        os.getenv("CASTSIM_SOLIDIFICATION_THREADS")
+        or os.getenv("CASTSIM_NUMBA_THREADS")
+        or "all"
+    ).strip().lower()
+
+    if raw_value in ("all", "max", "logical"):
+        target = logical_cores
+    elif raw_value in ("physical", "phy"):
+        target = physical_cores
+    else:
+        try:
+            target = int(raw_value)
+        except ValueError:
+            target = logical_cores
+
+    return max(1, min(int(target), max_threads))
+
+
+def _configure_numba_threads_for_solidification(engine: Any, *, show_progress: bool) -> None:
+    """Set Numba thread count so solidification can use full CPU resources."""
+    if not NUMBA_THREADING_AVAILABLE:
+        return
+
+    target_threads = _resolve_solidification_thread_target()
+    set_num_threads(target_threads)
+    active_threads = int(get_num_threads())
+    setattr(engine, "_solidification_numba_threads", active_threads)
+
+    if show_progress:
+        logical_cores = int(getattr(hardware, "logical_cores", 0) or (os.cpu_count() or active_threads))
+        physical_cores = int(getattr(hardware, "physical_cores", 0) or logical_cores)
+        print(
+            "  CPU threading: "
+            f"Numba thread pool configured {active_threads}/{logical_cores} "
+            f"(physical cores: {physical_cores})"
+        )
+
+
+def _run_front_based_integration(
+    engine: Any,
+    chill_boost: np.ndarray,
+    riser_slowdown: np.ndarray,
+    *,
+    show_progress: bool,
+    progress_callback: ProgressCallback,
+) -> int:
+    """Legacy front-based time loop (fallback path)."""
+    wcb_diffusivity = 45 / (7200 * 600)
+    thermal_rate_factor = engine.alloy.thermal_diffusivity / wcb_diffusivity
+
+    freezing_range = engine.alloy.liquidus_temp - engine.alloy.solidus_temp
+    wcb_freezing_range = 61
+    freezing_range_factor = wcb_freezing_range / max(freezing_range, 1)
+    engine.material_solidification_factor = thermal_rate_factor * freezing_range_factor
+
+    if show_progress:
+        print("  Simulating solidification progression...")
+        print(f"    Material: {engine.alloy.name}")
+        print(
+            f"    Thermal diffusivity: {engine.alloy.thermal_diffusivity:.2e} m²/s "
+            f"(factor: {thermal_rate_factor:.2f}x vs WCB)"
+        )
+        print(f"    Freezing range: {freezing_range:.0f}°C (factor: {freezing_range_factor:.2f}x vs WCB)")
+        print(f"    Combined solidification rate factor: {engine.material_solidification_factor:.2f}x")
+        if np.any(chill_boost > 1.0):
+            print(f"    Chill effect: up to {np.max(chill_boost):.1f}x faster cooling")
+        if np.any(riser_slowdown < 1.0):
+            print(f"    Riser exothermic effect: {(1.0 / np.min(riser_slowdown)):.1f}x slower cooling")
+
+        perf_opts = []
+        if engine._use_gpu:
+            perf_opts.append(f"GPU ({engine._gpu_device_name})")
+        if engine._use_incremental:
+            perf_opts.append("Incremental front tracking")
+        if perf_opts:
+            print(f"    Performance: {', '.join(perf_opts)}")
+
+    if engine._use_incremental:
+        engine._incremental_engine = engine._incremental_engine_cls(len(engine.mesh.voxel_centers))
+        engine._incremental_engine.initialize_front(
+            np.asarray(engine.mesh.voxel_states),
+            np.asarray(engine.mesh.voxel_neighbors),
+        )
+
+    iteration = 0
+    max_iterations = int(engine.max_time / engine.time_step)
+    target_snapshots = 100
+    last_snapshot_progress = -1.0
+    progress_interval = 100.0 / target_snapshots
+    last_progress_report = 0
+
+    history_capture_fn = getattr(engine, "_should_capture_fraction_history", None)
+    if callable(history_capture_fn):
+        capture_fraction_history = bool(history_capture_fn())
+    else:
+        capture_fraction_history = (
+            engine.analysis_options.fraction_liquid
+            or engine.analysis_options.hot_tear
+            or engine.analysis_options.shrinkage
+            or engine.analysis_options.feeding_path
+        )
+
+    if capture_fraction_history:
+        engine.fraction_liquid_history.append(engine.mesh.voxel_states.copy())
+        engine.fraction_liquid_times.append(0.0)
+
+    while iteration < max_iterations:
+        if engine._use_incremental and engine._incremental_engine is not None:
+            if engine._incremental_engine.is_complete(np.asarray(engine.mesh.voxel_states)):
+                break
+        elif np.all(engine.mesh.voxel_states >= 1.0):
+            break
+
+        effective_slowdown = riser_slowdown * engine._air_gap_slowdown
+        previous_states = np.asarray(engine.mesh.voxel_states, dtype=np.float32).copy()
+
+        if engine._use_incremental and engine._incremental_engine is not None:
+            engine.mesh.voxel_states[:] = engine._incremental_engine.update(
+                np.asarray(engine.mesh.voxel_states, dtype=np.float32),
+                np.asarray(engine.mesh.voxel_neighbors, dtype=np.int32),
+                np.asarray(engine.mesh.voxel_moduli, dtype=np.float32),
+                np.asarray(engine._get_normalized_heights(), dtype=np.float32),
+                np.asarray(chill_boost, dtype=np.float32),
+                np.asarray(effective_slowdown, dtype=np.float32),
+                engine.time_step,
+                engine.material_solidification_factor,
+            )
+        elif engine._use_gpu:
+            engine.mesh.voxel_states[:] = engine._gpu_update_fn(
+                np.asarray(engine.mesh.voxel_states, dtype=np.float32),
+                np.asarray(engine.mesh.voxel_neighbors, dtype=np.int32),
+                np.asarray(engine.mesh.voxel_moduli, dtype=np.float32),
+                np.asarray(engine._get_normalized_heights(), dtype=np.float32),
+                np.asarray(chill_boost, dtype=np.float32),
+                np.asarray(effective_slowdown, dtype=np.float32),
+                engine.time_step,
+                engine.material_solidification_factor,
+            )
+        else:
+            engine.mesh.voxel_states = engine._update_solidification_with_part_types(
+                chill_boost,
+                effective_slowdown,
+                engine.material_solidification_factor,
+            )
+
+        feeding_fraction_solid = getattr(engine, "feeding_fraction_solid", None)
+        if feeding_fraction_solid is not None:
+            critical_fs = float(getattr(engine.alloy, "critical_fraction_solid", 1.0))
+            crossed_feeding_limit = (
+                (previous_states < critical_fs)
+                & (engine.mesh.voxel_states >= critical_fs)
+                & np.isnan(feeding_fraction_solid)
+            )
+            feeding_fraction_solid[crossed_feeding_limit] = engine.mesh.voxel_states[crossed_feeding_limit]
+
+        newly_solid = (engine.mesh.voxel_states >= 1.0) & (engine.solidification_times == 0)
+        engine.solidification_times[newly_solid] = engine.time
+
+        engine.time += engine.time_step
+        iteration += 1
+
+        if engine._chill_centers is not None and iteration % int(10.0 / engine.time_step) == 0:
+            engine._update_dynamic_chill_boost()
+        if iteration % int(20.0 / engine.time_step) == 0:
+            engine._update_mold_air_gap_effect()
+        if iteration % int(5.0 / engine.time_step) == 0:
+            engine._update_riser_exothermic_effect(riser_slowdown)
+
+        current_progress_pct = np.mean(engine.mesh.voxel_states) * 100
+        if capture_fraction_history and current_progress_pct - last_snapshot_progress >= progress_interval:
+            engine.fraction_liquid_history.append(engine.mesh.voxel_states.copy())
+            engine.fraction_liquid_times.append(engine.time)
+            last_snapshot_progress = current_progress_pct
+
+        if progress_callback and int(current_progress_pct) > last_progress_report:
+            progress_callback(int(current_progress_pct), 100, "Solidification")
+            last_progress_report = int(current_progress_pct)
+
+        if show_progress and iteration % max(1, max_iterations // 10) == 0:
+            print(f"    Progress: {current_progress_pct:.1f}% solidified (t={engine.time:.1f}s)")
+
+    if capture_fraction_history:
+        engine.fraction_liquid_history.append(engine.mesh.voxel_states.copy())
+        engine.fraction_liquid_times.append(engine.time)
+        final_progress = np.mean(engine.mesh.voxel_states) * 100
+        fully_solid = bool(np.all(engine.mesh.voxel_states >= 1.0))
+        if not fully_solid:
+            solid_state = np.ones_like(engine.mesh.voxel_states)
+            engine.fraction_liquid_history.append(solid_state)
+            engine.fraction_liquid_times.append(engine.time + 0.1)
+            if show_progress:
+                print(
+                    f"    Note: Simulation ended at {final_progress:.1f}% solid "
+                    f"with residual liquid - added 100% solid snapshot"
+                )
+        if show_progress and engine.analysis_options.fraction_liquid:
+            print(f"  ✓ Fraction liquid: {len(engine.fraction_liquid_times)} snapshots captured")
+            print(f"    Time range: 0.0s to {engine.fraction_liquid_times[-1]:.1f}s")
+
+    feeding_fraction_solid = getattr(engine, "feeding_fraction_solid", None)
+    if feeding_fraction_solid is not None:
+        unresolved = np.isnan(feeding_fraction_solid)
+        feeding_fraction_solid[unresolved] = np.asarray(engine.mesh.voxel_states, dtype=np.float32)[unresolved]
+
+    if progress_callback:
+        progress_callback(100, 100, "Solidification")
+
+    engine._logger.info(
+        "Solidification simulation completed",
+        context={
+            "total_time_seconds": engine.time,
+            "iterations": iteration,
+            "alloy": engine.alloy.name,
+            "voxel_count": len(engine.mesh.voxel_states),
+        },
+    )
+
+    if show_progress:
+        print(f"  ✓ Solidification complete at t={engine.time:.1f}s")
+        if engine.analysis_options.fraction_liquid:
+            print(f"    Fraction liquid snapshots: {len(engine.fraction_liquid_times)}")
+        if engine._use_incremental and engine._incremental_engine is not None:
+            stats = engine._incremental_engine.get_stats()
+            print(f"  Incremental stats: {stats['estimated_speedup']:.1f}x estimated speedup")
+            print(f"    Front updates avoided: {stats['full_array_updates_avoided']:,} voxel-iterations")
+
+    return iteration
+
+
+def compute_schedule_fraction_solid(
+    start_times: np.ndarray,
+    local_times: np.ndarray,
+    eval_time: float,
+    pre_solid_mask: np.ndarray,
+    *,
+    curve_exponent: float = DEFAULT_SCHEDULE_CURVE_EXPONENT,
+) -> np.ndarray:
+    """Compute fraction solid from precomputed solidification schedules."""
+    fraction_solid = np.zeros_like(start_times, dtype=np.float32)
+    active = local_times > 0.0
+    if np.any(active):
+        progress = np.clip(
+            (eval_time - start_times[active]) / local_times[active],
+            0.0,
+            1.0,
+        )
+        if abs(curve_exponent - 1.0) > 1e-6:
+            progress = np.power(progress, curve_exponent)
+        fraction_solid[active] = progress.astype(np.float32, copy=False)
+    fraction_solid[pre_solid_mask] = 1.0
+    return fraction_solid
+
+
+def build_schedule_fraction_history(
+    start_times: np.ndarray,
+    local_times: np.ndarray,
+    pre_solid_mask: np.ndarray,
+    final_time: float,
+    *,
+    curve_exponent: float = DEFAULT_SCHEDULE_CURVE_EXPONENT,
+    sample_count: int = 101,
+) -> tuple[list[np.ndarray], list[float]]:
+    """Sample the schedule on a uniform time grid for playback and history analyses."""
+    if final_time <= 0.0:
+        sample_times = np.array([0.0], dtype=np.float32)
+    else:
+        sample_times = np.linspace(
+            0.0,
+            final_time,
+            num=max(sample_count, 2),
+            dtype=np.float32,
+        )
+
+    history = [
+        compute_schedule_fraction_solid(
+            start_times,
+            local_times,
+            float(sample_time),
+            pre_solid_mask,
+            curve_exponent=curve_exponent,
+        )
+        for sample_time in sample_times
+    ]
+    history_times = [float(sample_time) for sample_time in sample_times]
+
+    # Only append a synthetic all-solid snapshot if the last sample genuinely
+    # failed to reach solid fraction due to floating-point rounding.  When the
+    # schedule is uncapped, the true final time equals max(end_times), so the
+    # last voxel is exactly at its end_time and should be solid.
+    if not np.all(np.isclose(history[-1], 1.0, atol=1e-6, rtol=0)):
+        history.append(np.ones_like(start_times, dtype=np.float32))
+        history_times.append(float(final_time) + 0.1)
+
+    return history, history_times
+
+
+def _run_schedule_based_integration(
+    engine: Any,
+    *,
+    show_progress: bool,
+    progress_callback: ProgressCallback,
+) -> int:
+    """Schedule-driven fraction-solid loop used by the authoritative engine."""
+    start_times = np.asarray(engine.solidification_start_times, dtype=np.float32)
+    end_times = np.asarray(engine.solidification_end_times, dtype=np.float32)
+    local_times = np.asarray(engine.local_solidification_time, dtype=np.float32)
+    pre_solid_mask = np.asarray(engine.mesh.voxel_states, dtype=np.float32) >= 1.0
+    curve_exponent = float(
+        getattr(engine, "_schedule_curve_exponent", DEFAULT_SCHEDULE_CURVE_EXPONENT)
+    )
+
+    last_progress_report = 0
+
+    history_capture_fn = getattr(engine, "_should_capture_fraction_history", None)
+    if callable(history_capture_fn):
+        capture_fraction_history = bool(history_capture_fn())
+    else:
+        capture_fraction_history = (
+            engine.analysis_options.fraction_liquid
+            or engine.analysis_options.hot_tear
+            or engine.analysis_options.shrinkage
+            or engine.analysis_options.feeding_path
+        )
+
+    final_schedule_time = float(
+        np.max(end_times[local_times > 0.0]) if np.any(local_times > 0.0) else 0.0
+    )
+    max_time = float(engine.max_time)
+
+    # Compute final states directly from schedule; no need to iterate through 0.1s
+    # steps when the uncapped horizon may be 30+ ks (hours of wall-clock time).
+    final_states = compute_schedule_fraction_solid(
+        start_times,
+        local_times,
+        final_schedule_time,
+        pre_solid_mask,
+        curve_exponent=curve_exponent,
+    )
+    engine.mesh.voxel_states[:] = final_states
+    engine.time = final_schedule_time
+
+    # Set solidification_times from the schedule directly.
+    engine.solidification_times[:] = end_times
+
+    # feeding_fraction_solid: record the first time each voxel crosses critical_fs.
+    # For schedule-driven mode we can approximate this from the schedule itself.
+    critical_fs = float(getattr(engine.alloy, "critical_fraction_solid", 1.0))
+    feeding_fraction_solid = getattr(engine, "feeding_fraction_solid", None)
+    if feeding_fraction_solid is not None:
+        t_critical = start_times + local_times * (critical_fs ** (1.0 / curve_exponent))
+        t_critical = np.where(np.isfinite(t_critical), t_critical, final_schedule_time)
+        mask = np.isnan(feeding_fraction_solid) & (local_times > 0)
+        feeding_fraction_solid[mask] = np.clip(
+            t_critical[mask], 0.0, final_schedule_time
+        )
+
+    # Report progress at discretized percentages so the callback still fires.
+    if progress_callback or show_progress:
+        n_reports = 10
+        for pct in range(10, 101, 10):
+            t_at_pct = final_schedule_time * pct / 100.0
+            states_at_pct = compute_schedule_fraction_solid(
+                start_times, local_times, t_at_pct, pre_solid_mask, curve_exponent=curve_exponent
+            )
+            current_progress_pct = float(np.mean(states_at_pct)) * 100
+            if progress_callback and int(current_progress_pct) > last_progress_report:
+                progress_callback(int(current_progress_pct), 100, "Solidification")
+                last_progress_report = int(current_progress_pct)
+            if show_progress:
+                print(f"    Progress: {current_progress_pct:.1f}% solidified (t={t_at_pct:.1f}s)")
+
+    if capture_fraction_history:
+        history, history_times = build_schedule_fraction_history(
+            start_times,
+            local_times,
+            pre_solid_mask,
+            final_schedule_time,
+            curve_exponent=curve_exponent,
+        )
+        engine.fraction_liquid_history = history
+        engine.fraction_liquid_times = history_times
+        if show_progress and engine.analysis_options.fraction_liquid:
+            print(f"  ✓ Fraction liquid: {len(engine.fraction_liquid_times)} snapshots captured")
+            print(f"    Time range: 0.0s to {engine.fraction_liquid_times[-1]:.1f}s")
+
+    if progress_callback:
+        progress_callback(100, 100, "Solidification")
+
+    engine._logger.info(
+        "Solidification simulation completed",
+        context={
+            "total_time_seconds": engine.time,
+            "iterations": 0,
+            "alloy": engine.alloy.name,
+            "voxel_count": len(engine.mesh.voxel_states),
+            "mode": "schedule",
+        },
+    )
+
+    if show_progress:
+        print(f"  ✓ Solidification complete at t={engine.time:.1f}s")
+        if engine.analysis_options.fraction_liquid:
+            print(f"    Fraction liquid snapshots: {len(engine.fraction_liquid_times)}")
+
+    return 0
+
+
+def _run_thermal_coupled_integration(
+    engine: Any,
+    *,
+    show_progress: bool,
+    progress_callback: ProgressCallback,
+) -> int:
+    """Thermal-field integration loop for the coupled heat/solidification solver."""
+    heat_model = getattr(engine, "_thermal_heat_model", None)
+    solidification_model = getattr(engine, "_thermal_solidification_model", None)
+    if heat_model is None or solidification_model is None:
+        raise RuntimeError("Thermal-coupled mode requires initialized thermal models.")
+
+    iteration = 0
+    max_iterations = int(engine.max_time / engine.time_step)
+    last_progress_report = 0
+    last_snapshot_progress = -1.0
+    progress_interval = 1.0
+    history_capture_fn = getattr(engine, "_should_capture_fraction_history", None)
+    if callable(history_capture_fn):
+        capture_fraction_history = bool(history_capture_fn())
+    else:
+        capture_fraction_history = (
+            engine.analysis_options.fraction_liquid
+            or engine.analysis_options.hot_tear
+            or engine.analysis_options.shrinkage
+            or engine.analysis_options.feeding_path
+        )
+
+    if capture_fraction_history:
+        engine.fraction_liquid_history = [np.asarray(engine.mesh.voxel_states, dtype=np.float32).copy()]
+        engine.fraction_liquid_times = [0.0]
+
+    while iteration < max_iterations:
+        previous_states = np.asarray(engine.mesh.voxel_states, dtype=np.float32).copy()
+        if np.all(previous_states >= 0.99):
+            break
+
+        previous_temperatures = np.asarray(heat_model.temperatures, dtype=np.float64).copy()
+        heat_model.step(engine.time_step)
+
+        temperatures = np.asarray(heat_model.temperatures, dtype=np.float64)
+        cooling_rate_step = np.maximum(heat_model.get_cooling_rate(previous_temperatures, engine.time_step), 0.0)
+        latent_heat_rate = solidification_model.update(temperatures, engine.time_step)
+        heat_model.set_heat_source(latent_heat_rate)
+
+        current_states = np.asarray(solidification_model.fraction_solid, dtype=np.float32)
+        engine.mesh.voxel_states[:] = current_states
+        engine.time = heat_model.time
+        iteration += 1
+
+        start_times = np.asarray(solidification_model.solidification_time, dtype=np.float64)
+        end_times = np.asarray(solidification_model._solidification_end, dtype=np.float64)
+        local_times = np.asarray(solidification_model.local_solidification_time, dtype=np.float64)
+
+        finite_start = np.isfinite(start_times)
+        finite_end = np.isfinite(end_times)
+        finite_local = np.isfinite(local_times)
+
+        engine.solidification_start_times[:] = np.where(finite_start, start_times, 0.0).astype(np.float32)
+        engine.solidification_end_times[:] = np.where(finite_end, end_times, 0.0).astype(np.float32)
+        engine.local_solidification_time[:] = np.where(
+            finite_local,
+            local_times,
+            np.where(finite_start, np.maximum(engine.time - start_times, engine.time_step), 0.0),
+        ).astype(np.float32)
+        engine.solidification_times[:] = engine.solidification_end_times
+
+        if getattr(engine, "feeding_fraction_solid", None) is not None:
+            critical_fs = float(getattr(engine.alloy, "critical_fraction_solid", 1.0))
+            crossed_feeding_limit = (
+                (previous_states < critical_fs)
+                & (current_states >= critical_fs)
+                & np.isnan(engine.feeding_fraction_solid)
+            )
+            engine.feeding_fraction_solid[crossed_feeding_limit] = current_states[crossed_feeding_limit]
+
+        if getattr(engine, "_thermal_peak_cooling_rates", None) is not None:
+            engine._thermal_peak_cooling_rates[:] = np.maximum(
+                np.asarray(engine._thermal_peak_cooling_rates, dtype=np.float32),
+                cooling_rate_step.astype(np.float32),
+            )
+            engine.cooling_rates = np.asarray(engine._thermal_peak_cooling_rates, dtype=np.float32).copy()
+
+        engine._thermal_latest_temperatures = temperatures.astype(np.float32, copy=True)
+        if getattr(engine, "_thermal_heat_model", None) is not None and getattr(engine, "_thermal_voxel_size_m", None):
+            neighbor_map = np.asarray(engine.mesh.voxel_neighbors, dtype=np.int32)
+            if hasattr(heat_model, "get_gradient_magnitude"):
+                gradients_m = heat_model.get_gradient_magnitude(
+                    neighbor_map,
+                    float(engine._thermal_voxel_size_m),
+                )
+            else:
+                gradients_m = heat_model.temperature_field.get_gradient_magnitude(
+                    neighbor_map,
+                    float(engine._thermal_voxel_size_m),
+                )
+            engine._thermal_latest_gradients = (gradients_m / 1000.0).astype(np.float32)
+            engine.thermal_gradients = engine._thermal_latest_gradients.copy()
+
+        current_progress_pct = float(np.mean(current_states) * 100.0)
+        if capture_fraction_history and current_progress_pct - last_snapshot_progress >= progress_interval:
+            engine.fraction_liquid_history.append(current_states.copy())
+            engine.fraction_liquid_times.append(engine.time)
+            last_snapshot_progress = current_progress_pct
+
+        if progress_callback and int(current_progress_pct) > last_progress_report:
+            progress_callback(int(current_progress_pct), 100, "Solidification")
+            last_progress_report = int(current_progress_pct)
+
+        if show_progress and iteration % max(1, max_iterations // 10) == 0:
+            print(
+                f"    Progress: {current_progress_pct:.1f}% solidified "
+                f"(t={engine.time:.1f}s, Tmin={np.min(temperatures):.1f}C, Tmax={np.max(temperatures):.1f}C)"
+            )
+
+    if capture_fraction_history:
+        engine.fraction_liquid_history.append(np.asarray(engine.mesh.voxel_states, dtype=np.float32).copy())
+        engine.fraction_liquid_times.append(engine.time)
+
+    if getattr(engine, "feeding_fraction_solid", None) is not None:
+        unresolved = np.isnan(engine.feeding_fraction_solid)
+        engine.feeding_fraction_solid[unresolved] = np.asarray(engine.mesh.voxel_states, dtype=np.float32)[unresolved]
+
+    if progress_callback:
+        progress_callback(100, 100, "Solidification")
+
+    engine._logger.info(
+        "Solidification simulation completed",
+        context={
+            "total_time_seconds": engine.time,
+            "iterations": iteration,
+            "alloy": engine.alloy.name,
+            "voxel_count": len(engine.mesh.voxel_states),
+            "mode": THERMAL_COUPLED_SOLVER_MODE,
+        },
+    )
+
+    if show_progress:
+        print(f"  ✓ Solidification complete at t={engine.time:.1f}s")
+        if engine.analysis_options.fraction_liquid:
+            print(f"    Fraction liquid snapshots: {len(engine.fraction_liquid_times)}")
+
+    return iteration
+
+
+def run_time_integration(
+    engine: Any,
+    chill_boost: np.ndarray,
+    riser_slowdown: np.ndarray,
+    *,
+    show_progress: bool,
+    progress_callback: ProgressCallback,
+) -> int:
+    """
+    Execute the solidification time loop and update engine state in place.
+    """
+    _configure_numba_threads_for_solidification(engine, show_progress=show_progress)
+
+    solver_mode = getattr(getattr(engine, "analysis_options", None), "solver_mode", None)
+    if solver_mode == THERMAL_COUPLED_SOLVER_MODE:
+        return _run_thermal_coupled_integration(
+            engine,
+            show_progress=show_progress,
+            progress_callback=progress_callback,
+        )
+
+    has_schedule = (
+        getattr(engine, "solidification_start_times", None) is not None
+        and getattr(engine, "solidification_end_times", None) is not None
+        and getattr(engine, "local_solidification_time", None) is not None
+    )
+    if has_schedule:
+        return _run_schedule_based_integration(
+            engine,
+            show_progress=show_progress,
+            progress_callback=progress_callback,
+        )
+    return _run_front_based_integration(
+        engine,
+        chill_boost,
+        riser_slowdown,
+        show_progress=show_progress,
+        progress_callback=progress_callback,
+    )

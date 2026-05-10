@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "notes": "Reference values for calibration harness. Replace with measured MAGMASOFT/SOLIDCast values when available.",
+  "cases": {
+    "baseline_block_2in": {
+      "source": "provisional_internal_reference",
+      "metrics": {
+        "cast_shrinkage_mean": 0.0691231,
+        "cast_porosity_mean": 0.0611421,
+        "side_porosity_mean": 0.0863130,
+        "side_solidification_time_mean": 48.64
+      },
+      "tolerance": {
+        "cast_shrinkage_mean": 0.03,
+        "cast_porosity_mean": 0.03,
+        "side_porosity_mean": 0.03,
+        "side_solidification_time_mean": 6.0
+      }
+    },
+    "riser_post_block": {
+      "source": "provisional_internal_reference",
+      "metrics": {
+        "cast_shrinkage_mean": 0.0041262,
+        "cast_porosity_mean": 0.1152219,
+        "post_porosity_to_riser_ratio": 0.5742329
+      },
+      "tolerance": {
+        "cast_shrinkage_mean": 0.01,
+        "cast_porosity_mean": 0.04,
+        "post_porosity_to_riser_ratio": 0.2
+      }
+    },
+    "chill_block": {
+      "source": "provisional_internal_reference",
+      "metrics": {
+        "cast_shrinkage_mean": 0.0182867,
+        "cast_porosity_mean": 0.0470726,
+        "side_porosity_mean": 0.0503623,
+        "side_solidification_time_mean": 20.544
+      },
+      "tolerance": {
+        "cast_shrinkage_mean": 0.02,
+        "cast_porosity_mean": 0.03,
+        "side_porosity_mean": 0.03,
+        "side_solidification_time_mean": 6.0
+      }
+    },
+    "dual_riser_block": {
+      "source": "provisional_internal_reference",
+      "metrics": {
+        "cast_shrinkage_mean": 0.0151786,
+        "cast_porosity_mean": 0.1146407
+      },
+      "tolerance": {
+        "cast_shrinkage_mean": 0.02,
+        "cast_porosity_mean": 0.04
+      }
+    }
+  }
+}

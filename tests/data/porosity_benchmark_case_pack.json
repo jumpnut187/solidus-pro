@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "description": "Internal benchmark case pack for porosity/shrinkage calibration gates.",
+  "cases": [
+    {
+      "id": "baseline_block_2in",
+      "builder": "single_block_2in",
+      "reference_id": "baseline_block_2in",
+      "acceptance": {
+        "cast_shrinkage_mean_max": 0.25,
+        "cast_porosity_mean_max": 0.25
+      }
+    },
+    {
+      "id": "riser_post_block",
+      "builder": "cast_with_riser_post",
+      "reference_id": "riser_post_block",
+      "compare_to": "baseline_block_2in",
+      "acceptance": {
+        "cast_shrinkage_mean_ratio_max": 0.80,
+        "post_porosity_to_riser_ratio_max": 0.90
+      }
+    },
+    {
+      "id": "chill_block",
+      "builder": "cast_with_chill",
+      "reference_id": "chill_block",
+      "compare_to": "baseline_block_2in",
+      "acceptance": {
+        "side_porosity_ratio_max": 0.90,
+        "side_solidification_time_ratio_max": 0.90
+      }
+    },
+    {
+      "id": "dual_riser_block",
+      "builder": "cast_with_two_risers",
+      "reference_id": "dual_riser_block",
+      "compare_to": "baseline_block_2in",
+      "acceptance": {
+        "cast_shrinkage_mean_ratio_max": 0.70
+      }
+    }
+  ]
+}

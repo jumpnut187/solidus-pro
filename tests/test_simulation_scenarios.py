@@ -1,0 +1,532 @@
+from __future__ import annotations
+
+import unittest
+from contextlib import ExitStack
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import numpy as np
+
+from core.memory_limits import MemorySeverity, MemoryValidationResult
+from core.materials import get_alloy
+from core.part_manager import PartManager, PartType
+from core.solidification import AnalysisOptions, SolidificationEngine
+from core.simulation_pipeline import PipelineInputs, build_part_manager_from_parts, run_pipeline
+
+
+def _ok_validation(*_args, **_kwargs) -> MemoryValidationResult:
+    return MemoryValidationResult(
+        can_proceed=True,
+        severity=MemorySeverity.OK,
+        estimated_voxels=1_000,
+        max_allowed_voxels=1_000_000,
+        estimated_memory_mb=1.0,
+        available_memory_mb=10_000.0,
+        message="ok",
+    )
+
+
+def _memory_monitor_check(_self: object) -> tuple[bool, str]:
+    return True, "ok"
+
+
+def _run_pipeline_with_patched_memory(
+    part_manager: PartManager,
+    *,
+    alloy_name: str = "WCB",
+    hot_tear: bool = False,
+    stress_analysis: bool = False,
+    sand_restraint_index: float = 0.5,
+) -> object:
+    inputs = PipelineInputs(
+        alloy_name=alloy_name,
+        voxel_size=0.5,
+        refinement_level=0,
+        memory_mode="conservative",
+        analysis_options={
+            "shrinkage": True,
+            "hotspot": True,
+            "niyama": True,
+            "fraction_liquid": True,
+            "hot_tear": hot_tear,
+            "stress_analysis": stress_analysis,
+            "sand_restraint_index": sand_restraint_index,
+        },
+        use_gpu=False,
+        use_incremental=False,
+        show_progress=False,
+        max_voxels_for_visualization=5_000,
+    )
+
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch("core.voxel_mesh.auto_adjust_voxel_size", return_value=(0.5, False, ""))
+        )
+        stack.enter_context(
+            patch("core.voxel_mesh.validate_mesh_parameters", side_effect=_ok_validation)
+        )
+        stack.enter_context(patch("core.voxel_mesh.MemoryMonitor.start", lambda self: None))
+        stack.enter_context(
+            patch("core.voxel_mesh.MemoryMonitor.check", _memory_monitor_check)
+        )
+        return run_pipeline(inputs, part_manager=part_manager).engine
+
+
+def _single_cast_manager(filepath: str) -> PartManager:
+    manager = PartManager()
+    part_id = manager.load_part(filepath, name="cast")
+    assert part_id is not None
+    part = manager.get_part(part_id)
+    assert part is not None
+    part.set_part_type(PartType.CAST)
+    part.set_position(0.0, 0.0, 0.0)
+    return manager
+
+
+def _cast_with_riser_manager() -> PartManager:
+    manager = PartManager()
+    cast_id = manager.load_part("sample_stl_files/small_block.stl", name="cast")
+    riser_id = manager.load_part("sample_stl_files/cylinder.stl", name="riser")
+    assert cast_id is not None and riser_id is not None
+
+    cast = manager.get_part(cast_id)
+    riser = manager.get_part(riser_id)
+    assert cast is not None and riser is not None
+
+    cast.set_part_type(PartType.CAST)
+    riser.set_part_type(PartType.RISER)
+    cast.set_position(0.0, 0.0, 0.0)
+    riser.set_position(0.0, 0.0, 0.5)
+    return manager
+
+
+def _cast_with_chill_manager() -> PartManager:
+    manager = PartManager()
+    cast_id = manager.load_part("sample_stl_files/block_2inch.stl", name="cast")
+    chill_id = manager.load_part("sample_stl_files/small_block.stl", name="chill")
+    assert cast_id is not None and chill_id is not None
+
+    cast = manager.get_part(cast_id)
+    chill = manager.get_part(chill_id)
+    assert cast is not None and chill is not None
+
+    cast.set_part_type(PartType.CAST)
+    chill.set_part_type(PartType.CHILL)
+    cast.set_position(0.0, 0.0, 0.0)
+    chill.set_position(1.5, 0.0, 0.0)
+    return manager
+
+
+def _cast_with_two_risers_manager() -> PartManager:
+    manager = PartManager()
+    cast_id = manager.load_part("sample_stl_files/block_2inch.stl", name="cast")
+    riser_a_id = manager.load_part("sample_stl_files/small_block.stl", name="riser_a")
+    riser_b_id = manager.load_part("sample_stl_files/small_block.stl", name="riser_b")
+    assert cast_id is not None and riser_a_id is not None and riser_b_id is not None
+
+    cast = manager.get_part(cast_id)
+    riser_a = manager.get_part(riser_a_id)
+    riser_b = manager.get_part(riser_b_id)
+    assert cast is not None and riser_a is not None and riser_b is not None
+
+    cast.set_part_type(PartType.CAST)
+    riser_a.set_part_type(PartType.RISER)
+    riser_b.set_part_type(PartType.RISER)
+    cast.set_position(0.0, 0.0, 0.0)
+    riser_a.set_position(-0.75, 0.0, 1.0)
+    riser_b.set_position(0.75, 0.0, 1.0)
+    return manager
+
+
+def _cast_with_riser_post_manager() -> PartManager:
+    manager = PartManager()
+    cast_id = manager.load_part("sample_stl_files/block_2inch.stl", name="cast")
+    post_id = manager.load_part("sample_stl_files/small_block.stl", name="riser_post")
+    riser_id = manager.load_part("sample_stl_files/cylinder.stl", name="riser")
+    assert cast_id is not None and post_id is not None and riser_id is not None
+
+    cast = manager.get_part(cast_id)
+    post = manager.get_part(post_id)
+    riser = manager.get_part(riser_id)
+    assert cast is not None and post is not None and riser is not None
+
+    cast.set_part_type(PartType.CAST)
+    post.set_part_type(PartType.RISER_POST)
+    riser.set_part_type(PartType.RISER)
+    cast.set_position(0.0, 0.0, 0.0)
+    post.set_position(0.0, 0.0, 1.0)
+    riser.set_position(0.0, 0.0, 2.0)
+    return manager
+
+
+class ScenarioRegressionTests(unittest.TestCase):
+    def test_saved_riser_post_payload_is_normalized_on_load(self) -> None:
+        manager = build_part_manager_from_parts([
+            {
+                "name": "Riser Post 1",
+                "part_type": "riser",
+                "filepath": "sample_stl_files/small_block.stl",
+            }
+        ])
+
+        parts = manager.get_all_parts()
+        self.assertEqual(len(parts), 1)
+        self.assertEqual(parts[0].part_type, PartType.RISER_POST)
+
+    def test_surface_cast_voxels_start_liquid_in_fraction_history(self) -> None:
+        engine = _run_pipeline_with_patched_memory(
+            _single_cast_manager("sample_stl_files/small_block.stl")
+        )
+
+        self.assertTrue(engine.fraction_liquid_history)
+        first_snapshot = np.asarray(engine.fraction_liquid_history[0], dtype=np.float32)
+        surface_indices = engine.mesh.get_surface_voxel_indices()
+        self.assertGreater(len(surface_indices), 0)
+        self.assertTrue(np.all(first_snapshot[surface_indices] < 1.0))
+
+    def test_thicker_sections_solidify_slower_than_thin_sections(self) -> None:
+        thin_engine = _run_pipeline_with_patched_memory(
+            _single_cast_manager("sample_stl_files/small_block.stl")
+        )
+        thick_engine = _run_pipeline_with_patched_memory(
+            _single_cast_manager("sample_stl_files/block_2inch.stl")
+        )
+
+        self.assertGreater(
+            float(np.max(thick_engine.solidification_times)),
+            float(np.max(thin_engine.solidification_times)),
+        )
+
+    def test_riser_reduces_cast_shrinkage_and_keeps_pipe_behavior_in_riser(self) -> None:
+        baseline_engine = _run_pipeline_with_patched_memory(
+            _single_cast_manager("sample_stl_files/small_block.stl")
+        )
+        riser_engine = _run_pipeline_with_patched_memory(_cast_with_riser_manager())
+
+        cast_mask = riser_engine.mesh.voxel_part_types == 0
+        riser_mask = riser_engine.mesh.voxel_part_types == 1
+
+        self.assertTrue(np.any(cast_mask))
+        self.assertTrue(np.any(riser_mask))
+        self.assertLess(
+            float(np.mean(riser_engine.shrinkage_probability[cast_mask])),
+            float(np.mean(baseline_engine.shrinkage_probability)),
+        )
+        self.assertGreater(
+            float(np.mean(riser_engine.shrinkage_probability[riser_mask])),
+            float(np.mean(riser_engine.shrinkage_probability[cast_mask])),
+        )
+        self.assertIsNotNone(riser_engine.feeding_path_lengths)
+        valid_cast_paths = cast_mask & (riser_engine.feeding_path_lengths >= 0.0)
+        self.assertTrue(np.any(valid_cast_paths))
+        self.assertGreater(
+            float(
+                np.max(
+                    riser_engine.feeding_path_lengths[valid_cast_paths]
+                    - riser_engine.surface_distances[valid_cast_paths]
+                )
+            ),
+            0.0,
+        )
+        self.assertGreaterEqual(
+            float(np.max(riser_engine.solidification_times[riser_mask])),
+            float(np.max(riser_engine.solidification_times[cast_mask])),
+        )
+        self.assertGreaterEqual(
+            int(np.count_nonzero(riser_engine.shrinkage_probability[riser_mask] > 0.15)),
+            8,
+        )
+        self.assertEqual(
+            int(np.count_nonzero(riser_engine.shrinkage_probability[cast_mask] > 0.15)),
+            0,
+        )
+
+    def test_riser_post_behaves_like_feeder_neck_not_primary_defect_sink(self) -> None:
+        baseline_engine = _run_pipeline_with_patched_memory(
+            _single_cast_manager("sample_stl_files/block_2inch.stl")
+        )
+        feeder_engine = _run_pipeline_with_patched_memory(_cast_with_riser_post_manager())
+
+        cast_mask = feeder_engine.mesh.voxel_part_types == 0
+        riser_mask = feeder_engine.mesh.voxel_part_types == 1
+        post_mask = feeder_engine.mesh.voxel_part_types == 3
+
+        self.assertTrue(np.any(cast_mask))
+        self.assertTrue(np.any(riser_mask))
+        self.assertTrue(np.any(post_mask))
+
+        self.assertGreaterEqual(
+            float(np.max(feeder_engine.solidification_times[riser_mask])),
+            float(np.max(feeder_engine.solidification_times[post_mask])),
+        )
+        self.assertLess(
+            float(np.mean(feeder_engine.shrinkage_probability[post_mask])),
+            float(np.mean(feeder_engine.shrinkage_probability[riser_mask])),
+        )
+        self.assertLess(
+            float(np.mean(feeder_engine.porosity_probability[post_mask])),
+            float(np.mean(feeder_engine.porosity_probability[riser_mask])),
+        )
+        self.assertLess(
+            float(np.mean(feeder_engine.shrinkage_probability[cast_mask])),
+            float(np.mean(baseline_engine.shrinkage_probability)),
+        )
+
+    def test_two_risers_reduce_cast_shrinkage_more_than_single_riser(self) -> None:
+        baseline_engine = _run_pipeline_with_patched_memory(
+            _single_cast_manager("sample_stl_files/block_2inch.stl")
+        )
+        two_riser_engine = _run_pipeline_with_patched_memory(_cast_with_two_risers_manager())
+
+        two_cast_mask = two_riser_engine.mesh.voxel_part_types == 0
+        two_riser_mask = two_riser_engine.mesh.voxel_part_types == 1
+
+        self.assertLess(
+            float(np.mean(two_riser_engine.shrinkage_probability[two_cast_mask])),
+            float(np.mean(baseline_engine.shrinkage_probability)),
+        )
+        self.assertGreater(
+            float(np.max(two_riser_engine.shrinkage_probability[two_riser_mask])),
+            0.0,
+        )
+        self.assertIsNotNone(two_riser_engine.feeding_path_lengths)
+        valid_cast_paths = two_cast_mask & (two_riser_engine.feeding_path_lengths >= 0.0)
+        self.assertTrue(np.any(valid_cast_paths))
+
+    def test_chill_reduces_nearby_shrinkage_and_solidification_time(self) -> None:
+        baseline_engine = _run_pipeline_with_patched_memory(
+            _single_cast_manager("sample_stl_files/block_2inch.stl")
+        )
+        chill_engine = _run_pipeline_with_patched_memory(_cast_with_chill_manager())
+
+        baseline_cast = baseline_engine.mesh.voxel_part_types == 0
+        chill_cast = chill_engine.mesh.voxel_part_types == 0
+        baseline_mid_side = baseline_cast & np.isclose(baseline_engine.mesh.voxel_centers[:, 0], 0.5)
+        chill_mid_side = chill_cast & np.isclose(chill_engine.mesh.voxel_centers[:, 0], 0.5)
+
+        self.assertTrue(np.any(baseline_mid_side))
+        self.assertTrue(np.any(chill_mid_side))
+        self.assertLess(
+            float(np.mean(chill_engine.shrinkage_probability[chill_mid_side])),
+            float(np.mean(baseline_engine.shrinkage_probability[baseline_mid_side])),
+        )
+        self.assertLess(
+            float(np.mean(chill_engine.porosity_probability[chill_mid_side])),
+            float(np.mean(baseline_engine.porosity_probability[baseline_mid_side])),
+        )
+        self.assertLess(
+            float(np.mean(chill_engine.solidification_times[chill_mid_side])),
+            float(np.mean(baseline_engine.solidification_times[baseline_mid_side])),
+        )
+
+    def test_chill_voxels_are_excluded_from_shrinkage_porosity_risk(self) -> None:
+        chill_engine = _run_pipeline_with_patched_memory(_cast_with_chill_manager())
+        chill_mask = chill_engine.mesh.voxel_part_types == 2
+
+        self.assertTrue(np.any(chill_mask))
+        self.assertTrue(
+            np.allclose(chill_engine.shrinkage_probability[chill_mask], 0.0),
+            msg="Chill voxels should not accumulate shrinkage risk",
+        )
+        self.assertTrue(
+            np.allclose(chill_engine.porosity_probability[chill_mask], 0.0),
+            msg="Chill voxels should not accumulate porosity risk",
+        )
+
+    def test_directional_solidification_improves_niyama_near_chill(self) -> None:
+        baseline_engine = _run_pipeline_with_patched_memory(
+            _single_cast_manager("sample_stl_files/block_2inch.stl")
+        )
+        chill_engine = _run_pipeline_with_patched_memory(_cast_with_chill_manager())
+
+        baseline_cast = baseline_engine.mesh.voxel_part_types == 0
+        chill_cast = chill_engine.mesh.voxel_part_types == 0
+        baseline_mid_side = baseline_cast & np.isclose(baseline_engine.mesh.voxel_centers[:, 0], 0.5)
+        chill_mid_side = chill_cast & np.isclose(chill_engine.mesh.voxel_centers[:, 0], 0.5)
+
+        self.assertTrue(np.any(baseline_mid_side))
+        self.assertTrue(np.any(chill_mid_side))
+        self.assertLess(
+            float(np.mean(chill_engine.niyama_severity[chill_mid_side])),
+            float(np.mean(baseline_engine.niyama_severity[baseline_mid_side])),
+        )
+
+    def test_nominal_run_output_sanity(self) -> None:
+        engine = _run_pipeline_with_patched_memory(_single_cast_manager("sample_stl_files/block_2inch.stl"))
+
+        self.assertTrue(np.all(engine.shrinkage_probability >= 0.0))
+        self.assertTrue(np.all(engine.shrinkage_probability <= 1.0))
+        self.assertTrue(np.all(engine.porosity_probability >= 0.0))
+        self.assertTrue(np.all(engine.porosity_probability <= 1.0))
+        self.assertTrue(np.all(engine.solidification_times > 0.0))
+        self.assertTrue(np.all(engine.solidification_times <= engine.time + 1e-6))
+
+        snapshots = np.asarray(engine.fraction_liquid_history, dtype=np.float32)
+        self.assertGreaterEqual(len(snapshots), 2)
+        self.assertTrue(np.all(np.diff(snapshots, axis=0) >= -1e-6))
+
+        feeding = engine._calculate_feeding_effectiveness()
+        self.assertGreater(float(np.mean(feeding)), 0.5)
+        self.assertGreater(np.count_nonzero(feeding > 0.9), 0)
+
+    def test_small_block_has_single_interior_hotspot(self) -> None:
+        engine = _run_pipeline_with_patched_memory(
+            _single_cast_manager("sample_stl_files/small_block.stl")
+        )
+
+        hotspot_mask = engine.hotspot_intensity > 0.95
+        hotspot_indices = np.flatnonzero(hotspot_mask)
+
+        self.assertEqual(len(hotspot_indices), 1)
+        center = engine.mesh.voxel_centers[hotspot_indices[0]]
+        self.assertTrue(np.allclose(center, np.zeros(3, dtype=np.float32)))
+
+    def test_thick_thin_transition_has_more_hot_tear_than_small_block(self) -> None:
+        simple_engine = _run_pipeline_with_patched_memory(
+            _single_cast_manager("sample_stl_files/small_block.stl"),
+            hot_tear=True,
+        )
+        transition_engine = _run_pipeline_with_patched_memory(
+            _single_cast_manager("sample_stl_files/thick_thin_test.stl"),
+            hot_tear=True,
+        )
+
+        self.assertGreater(
+            int(np.count_nonzero(transition_engine.hot_tear_zones)),
+            int(np.count_nonzero(simple_engine.hot_tear_zones)),
+        )
+        self.assertGreater(
+            float(np.max(transition_engine.hot_tear_risk)),
+            float(np.max(simple_engine.hot_tear_risk)),
+        )
+
+    def test_hot_tear_response_varies_by_alloy(self) -> None:
+        wcb_engine = _run_pipeline_with_patched_memory(
+            _single_cast_manager("sample_stl_files/thick_thin_test.stl"),
+            alloy_name="WCB",
+            hot_tear=True,
+        )
+        cf8_engine = _run_pipeline_with_patched_memory(
+            _single_cast_manager("sample_stl_files/thick_thin_test.stl"),
+            alloy_name="CF8",
+            hot_tear=True,
+        )
+        c958_engine = _run_pipeline_with_patched_memory(
+            _single_cast_manager("sample_stl_files/thick_thin_test.stl"),
+            alloy_name="C958",
+            hot_tear=True,
+        )
+
+        self.assertGreater(
+            float(np.max(cf8_engine.hot_tear_risk)),
+            float(np.max(wcb_engine.hot_tear_risk)),
+        )
+        self.assertGreater(
+            float(np.max(wcb_engine.hot_tear_risk)),
+            float(np.max(c958_engine.hot_tear_risk)),
+        )
+        self.assertGreater(
+            int(np.count_nonzero(cf8_engine.hot_tear_zones)),
+            int(np.count_nonzero(c958_engine.hot_tear_zones)),
+        )
+
+    def test_higher_sand_restraint_increases_hot_tear_risk(self) -> None:
+        low_restraint_engine = _run_pipeline_with_patched_memory(
+            _single_cast_manager("sample_stl_files/thick_thin_test.stl"),
+            hot_tear=True,
+            sand_restraint_index=0.1,
+        )
+        high_restraint_engine = _run_pipeline_with_patched_memory(
+            _single_cast_manager("sample_stl_files/thick_thin_test.stl"),
+            hot_tear=True,
+            sand_restraint_index=0.9,
+        )
+
+        self.assertGreater(
+            float(np.max(high_restraint_engine.hot_tear_risk)),
+            float(np.max(low_restraint_engine.hot_tear_risk)),
+        )
+        self.assertGreaterEqual(
+            int(np.count_nonzero(high_restraint_engine.hot_tear_zones)),
+            int(np.count_nonzero(low_restraint_engine.hot_tear_zones)),
+        )
+
+    def test_default_sand_restraint_matches_explicit_neutral(self) -> None:
+        default_engine = _run_pipeline_with_patched_memory(
+            _single_cast_manager("sample_stl_files/thick_thin_test.stl"),
+            hot_tear=True,
+        )
+        explicit_neutral_engine = _run_pipeline_with_patched_memory(
+            _single_cast_manager("sample_stl_files/thick_thin_test.stl"),
+            hot_tear=True,
+            sand_restraint_index=0.5,
+        )
+
+        np.testing.assert_allclose(
+            default_engine.hot_tear_risk,
+            explicit_neutral_engine.hot_tear_risk,
+            rtol=1e-6,
+            atol=1e-7,
+        )
+        np.testing.assert_array_equal(
+            default_engine.hot_tear_zones,
+            explicit_neutral_engine.hot_tear_zones,
+        )
+
+    def test_sand_restraint_scales_crack_without_changing_stress_fields(self) -> None:
+        class _FakeStressAnalyzer:
+            def __init__(self, *_args, **_kwargs) -> None:
+                pass
+
+            def analyze(self, *_args, **_kwargs):
+                return SimpleNamespace(
+                    effective_stress=np.array([10.0, 10.0, 10.0], dtype=np.float32),
+                    distortion_magnitude=np.array([0.2, 0.2, 0.2], dtype=np.float32),
+                    crack_susceptibility=np.array([0.5, 0.5, 0.5], dtype=np.float32),
+                    max_stress=10.0,
+                    max_distortion=0.2,
+                )
+
+        mesh = SimpleNamespace(
+            voxel_centers=np.array(
+                [[0.0, 0.0, 0.0], [0.3, 0.0, 0.0], [1.0, 0.0, 0.0]],
+                dtype=np.float32,
+            ),
+            voxel_states=np.ones(3, dtype=np.float32),
+            base_voxel_size=0.1,
+        )
+
+        low_engine = SolidificationEngine(
+            mesh,
+            get_alloy("WCB"),
+            AnalysisOptions(stress_analysis=True, sand_restraint_index=0.1),
+        )
+        high_engine = SolidificationEngine(
+            mesh,
+            get_alloy("WCB"),
+            AnalysisOptions(stress_analysis=True, sand_restraint_index=0.9),
+        )
+        low_engine.solidification_times = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+        high_engine.solidification_times = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+        surface_distances = np.array([0.0, 0.25, 1.0], dtype=np.float32)
+        low_engine.surface_distances = surface_distances
+        high_engine.surface_distances = surface_distances
+        low_engine.feeding_distances = surface_distances
+        high_engine.feeding_distances = surface_distances
+
+        with patch("core.solidification.StressAnalyzer", _FakeStressAnalyzer):
+            low_engine._calculate_stress_analysis()
+            high_engine._calculate_stress_analysis()
+
+        np.testing.assert_allclose(low_engine.effective_stress, high_engine.effective_stress)
+        np.testing.assert_allclose(low_engine.distortion_magnitude, high_engine.distortion_magnitude)
+        self.assertGreater(high_engine.crack_susceptibility[0], low_engine.crack_susceptibility[0])
+        self.assertAlmostEqual(
+            float(high_engine.crack_susceptibility[2]),
+            float(low_engine.crack_susceptibility[2]),
+            places=6,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

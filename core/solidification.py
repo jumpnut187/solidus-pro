@@ -1,0 +1,4414 @@
+"""
+Solidification Physics Engine
+Simulates solidification from edges inward and vertical progression
+Based on geometric modulus and feeding distance
+Optimized for M3 multi-core processing
+Uses memory-mapped arrays for large simulations
+
+Supports multiple analysis types:
+- Shrinkage/Porosity prediction
+- Hot Spot detection (last-to-freeze regions)
+- Niyama Criterion (thermal gradient / sqrt(cooling rate))
+- Fraction Liquid tracking over time
+
+Performance Optimizations:
+- GPU acceleration when available (Metal/CUDA)
+- Incremental solidification front tracking (3-5x speedup)
+- Sparse array operations for memory efficiency
+"""
+
+import numpy as np
+import time
+from typing import Tuple, Dict, Optional, List
+from collections import deque
+from scipy.spatial.distance import cdist
+from scipy.spatial import cKDTree
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from physics.heat_transfer import BoundaryType, HeatTransferModel
+from physics.solidification_physics import SolidificationModel as ThermalSolidificationModel
+from core.acceleration import (
+    compute_distances_parallel,
+    compute_shrinkage_parallel,
+    update_solidification_front_parallel,
+    update_solidification_with_part_types_parallel,
+    update_solidification_with_feeding_connectivity,
+    compute_min_distances_parallel,
+    compute_chill_boost_parallel,
+    compute_niyama_parallel,
+    compute_thermal_gradient_parallel,
+    compute_strain_rate_parallel,
+    compute_modulus_variance_parallel,
+    compute_near_surface_interior_parallel,
+    compute_constraint_strain_parallel,
+    compute_chill_internal_thickness_parallel,
+    compute_dynamic_chill_boost_parallel,
+    compute_mold_air_gap_effect_parallel,
+    compute_riser_influence_parallel,
+    compute_solid_path_strain_parallel,
+    identify_mushy_zone_voxels_parallel,
+    accelerator
+)
+from core.materials import AlloyProperties
+from core.voxel_mesh import AdaptiveVoxelMesh
+from core.memory_manager import create_managed_array, get_memory_manager
+from config.hardware_config import hardware
+from core.solidification_loop import (
+    DEFAULT_SCHEDULE_CURVE_EXPONENT,
+    compute_schedule_fraction_solid,
+    run_time_integration,
+)
+from core.analysis_strategies import run_post_analyses
+from core.shrinkage_parallel import compute_shrinkage_chunk
+
+# Import error logger
+try:
+    from core.error_logger import logger
+except ImportError:
+    class DummyLogger:
+        def debug(self, msg, **kwargs): pass
+        def info(self, msg, **kwargs): pass
+        def warning(self, msg, **kwargs): pass
+        def error(self, msg, **kwargs): pass
+        def exception(self, msg, **kwargs): pass
+        def log_performance(self, *args, **kwargs): pass
+        def log_simulation_error(self, *args, **kwargs): pass
+    logger = DummyLogger()
+
+# Optional performance modules
+try:
+    from core.gpu_compute import gpu_compute, compute_distances_accelerated, update_solidification_accelerated
+    GPU_AVAILABLE = gpu_compute.is_gpu_available
+except ImportError:
+    GPU_AVAILABLE = False
+
+try:
+    from core.incremental_solidification import IncrementalSolidificationEngine
+    INCREMENTAL_AVAILABLE = True
+except ImportError:
+    INCREMENTAL_AVAILABLE = False
+
+# New analysis modules
+try:
+    from core.feeding_path import FeedingPathAnalyzer, FeedingPathResult
+    FEEDING_PATH_AVAILABLE = True
+except ImportError:
+    FEEDING_PATH_AVAILABLE = False
+
+try:
+    from core.stress_analysis import StressAnalyzer, StressAnalysisResult
+    STRESS_ANALYSIS_AVAILABLE = True
+except ImportError:
+    STRESS_ANALYSIS_AVAILABLE = False
+
+try:
+    from core.microstructure import MicrostructurePredictor, MicrostructureResult
+    MICROSTRUCTURE_AVAILABLE = True
+except ImportError:
+    MICROSTRUCTURE_AVAILABLE = False
+
+
+@dataclass
+class AnalysisOptions:
+    """Configuration for which analyses to run"""
+    shrinkage: bool = True
+    hotspot: bool = True
+    niyama: bool = False
+    hot_tear: bool = False          # Hot tear susceptibility analysis
+    sand_burn_in: bool = False      # Sand burn-in / metal penetration analysis
+    fraction_liquid: bool = False
+    feeding_path: bool = False      # Feeding path analysis (MAGMASOFT-style)
+    stress_analysis: bool = False   # Thermal stress and distortion analysis
+    microstructure: bool = False    # SDAS and mechanical property prediction
+    sand_restraint_index: float = 0.5  # 0-1 mold restraint/collapse behavior for hot tear & crack risk
+    use_gpu: bool = False           # GPU acceleration (requires cupy or pyopencl)
+    use_incremental: bool = False   # Incremental solidification (can be slower for small models)
+    solver_mode: str = "thermal_coupled"
+
+
+SOLVER_MODE_SCHEDULE_LEGACY = "schedule_legacy"
+SOLVER_MODE_THERMAL_COUPLED = "thermal_coupled"
+VALID_SOLVER_MODES = {
+    SOLVER_MODE_SCHEDULE_LEGACY,
+    SOLVER_MODE_THERMAL_COUPLED,
+}
+
+
+# Niyama critical thresholds by alloy (values below indicate defect risk)
+# Based on literature and foundry experience
+NIYAMA_THRESHOLDS = {
+    'WCB': 1.0,    # Carbon steel - moderate threshold
+    'CF8': 0.7,    # Stainless steel - lower due to poor conductivity, wide freezing range
+    'C958': 1.2,   # Bronze - higher due to better feeding characteristics
+    'C964': 1.1,   # Copper-nickel - castability and feeding are generally good
+    'CA6NM': 0.95,  # Cast steel alloy with moderate casting behavior
+    'MONEL400': 0.85,  # Monel 400 - moderate risk profile
+    'IN625': 0.9,  # Inconel 625 - conservative default for high-alloy behavior
+}
+
+
+class SolidificationEngine:
+    """
+    Simulates casting solidification with shrinkage and porosity prediction
+    Supports multiple analysis types: shrinkage, hot spots, Niyama, fraction liquid
+    
+    Performance Optimizations:
+    - GPU acceleration (Metal/CUDA) when available
+    - Incremental front tracking (3-5x speedup for large models)
+    - Sparse array operations for memory efficiency
+    """
+    
+    def __init__(self, voxel_mesh: AdaptiveVoxelMesh, alloy: AlloyProperties,
+                 analysis_options: Optional[AnalysisOptions] = None):
+        """
+        Args:
+            voxel_mesh: Adaptive voxel mesh
+            alloy: Material properties
+            analysis_options: Which analyses to run (default: shrinkage + hotspot)
+        """
+        self.mesh = voxel_mesh
+        self.alloy = alloy
+        self.analysis_options = analysis_options or AnalysisOptions()
+        
+        # Simulation state
+        self.time = 0.0
+        
+        # Dynamic chill logic data
+        self._chill_centers: Optional[np.ndarray] = None
+        self._chill_thicknesses: Optional[np.ndarray] = None
+        self._chill_surface_centers: Optional[np.ndarray] = None
+        self._chill_boost: Optional[np.ndarray] = None
+        
+        # Mold air gap effect data
+        self._air_gap_slowdown: Optional[np.ndarray] = None
+        self._thermal_heat_model: Optional[HeatTransferModel] = None
+        self._thermal_solidification_model: Optional[ThermalSolidificationModel] = None
+        self._thermal_peak_cooling_rates: Optional[np.ndarray] = None
+        self._thermal_latest_temperatures: Optional[np.ndarray] = None
+        self._thermal_latest_gradients: Optional[np.ndarray] = None
+        self._thermal_voxel_size_m: Optional[float] = None
+
+        self.time_step = 0.1  # seconds
+        self.max_time = None  # Will be calculated dynamically based on geometry
+        
+        # Core results (always computed)
+        self.solidification_times = None
+        self.solidification_start_times = None
+        self.solidification_end_times = None
+        self.local_solidification_time = None
+        self.surface_distances = None
+        self.feeding_distances = None
+        self.feeding_fraction_solid = None
+        self.feeding_path_lengths = None
+        
+        # Shrinkage/Porosity results
+        self.shrinkage_risk = None
+        self.shrinkage_probability = None
+        self.porosity_risk = None
+        self.porosity_probability = None
+        
+        # Hot Spot results
+        self.hotspot_intensity = None  # 0-1, higher = more severe hot spot
+        
+        # Niyama Criterion results
+        self.niyama_values = None       # Niyama number at each voxel
+        self.niyama_defect_risk = None  # Boolean mask of defect-prone voxels
+        self.thermal_gradients = None   # Thermal gradient magnitude (°C/mm)
+        self.cooling_rates = None       # Cooling rate (°C/s)
+        
+        # Hot Tear analysis results
+        self.hot_tear_risk = None       # 0-1, higher = more hot tear risk
+        self.hot_tear_zones = None      # Boolean mask of hot tear prone voxels
+        self.strain_rate = None         # Estimated strain rate from differential cooling
+        self.btr_mask = None            # Voxels in Brittle Temperature Range during solidification
+        
+        # Sand Burn-In analysis results
+        self.sand_burn_in_risk = None   # 0-1, higher = more burn-in risk
+        self.sand_burn_in_zones = None  # Boolean mask of burn-in prone surface voxels
+        
+        # Feeding Path analysis results (MAGMASOFT-style)
+        self.feeding_path_result = None    # FeedingPathResult object
+        self.feeding_quality = None        # 0-1 feeding quality score
+        self.feeding_blocked = None        # Boolean mask of blocked voxels
+        self.feeding_open_fraction = None  # Weighted fraction of thermal history with open feeder connectivity
+        self.feeding_latest_open_time = None  # Latest time an open feeder path remained available
+        self.feeding_effectiveness = None  # 0-1 Darcy / path effectiveness for shrinkage feeding
+        self.feeding_darcy_margin = None   # -1 to 1 pressure margin ((P_ferro - ΔP) / (P_ferro + ΔP))
+        
+        # Stress/Distortion analysis results
+        self.stress_result = None          # StressAnalysisResult object
+        self.effective_stress = None       # Effective stress (MPa)
+        self.distortion_magnitude = None   # Distortion magnitude (inches)
+        self.crack_susceptibility = None   # Crack risk score (0-1)
+        
+        # Microstructure prediction results
+        self.microstructure_result = None  # MicrostructureResult object
+        self.sdas = None                   # Secondary dendrite arm spacing (μm)
+        self.predicted_uts = None          # Predicted UTS (MPa)
+        
+        # Fraction Liquid history (for time slider)
+        self.fraction_liquid_history = None  # List of (time, fraction_liquid_array) tuples
+        self.fraction_liquid_times = None    # Time stamps for each snapshot
+        self._schedule_curve_exponent = DEFAULT_SCHEDULE_CURVE_EXPONENT
+        
+        # Statistics
+        self.total_shrinkage_volume = 0.0
+        self.affected_voxel_count = 0
+        self.hotspot_count = 0
+        self.niyama_defect_count = 0
+        self.hot_tear_count = 0         # Number of hot tear risk voxels
+        self.sand_burn_in_count = 0     # Number of sand burn-in risk voxels
+        self.feeding_blocked_count = 0  # Number of voxels with blocked feeding
+        self.max_stress_mpa = 0.0       # Maximum thermal stress
+        self.avg_sdas_um = 0.0          # Average SDAS
+        
+        # Chvorinov time estimation results
+        self.chvorinov_time = None       # Estimated solidification time per region
+        self.local_modulus = None        # Local geometric modulus
+        
+        # Performance engines
+        self._incremental_engine = None
+        self._use_gpu = self.analysis_options.use_gpu and GPU_AVAILABLE
+        self._use_incremental = self.analysis_options.use_incremental and INCREMENTAL_AVAILABLE
+        self._logger = logger
+        self._gpu_update_fn = update_solidification_accelerated if GPU_AVAILABLE else None
+        self._incremental_engine_cls = IncrementalSolidificationEngine if INCREMENTAL_AVAILABLE else None
+        self._gpu_device_name = gpu_compute.device_name if GPU_AVAILABLE else "GPU"
+        self._feeding_path_available = FEEDING_PATH_AVAILABLE
+        self._stress_analysis_available = STRESS_ANALYSIS_AVAILABLE
+        self._microstructure_available = MICROSTRUCTURE_AVAILABLE
+        self._niyama_thresholds = NIYAMA_THRESHOLDS
+
+    def _get_solver_mode(self) -> str:
+        """Return a normalized solver mode, defaulting to the new thermal path."""
+        solver_mode = getattr(self.analysis_options, "solver_mode", SOLVER_MODE_THERMAL_COUPLED)
+        if solver_mode not in VALID_SOLVER_MODES:
+            return SOLVER_MODE_THERMAL_COUPLED
+        return solver_mode
+
+    def _get_mean_voxel_size_inches(self) -> float:
+        """Get a representative voxel size for thermal calculations."""
+        voxel_sizes = getattr(self.mesh, "voxel_sizes", None)
+        if voxel_sizes is not None and len(voxel_sizes) > 0:
+            return float(np.mean(np.asarray(voxel_sizes, dtype=np.float64)))
+        base_voxel_size = getattr(self.mesh, "base_voxel_size", None)
+        if base_voxel_size is not None:
+            return float(base_voxel_size)
+        return 0.1
+
+    def _initialize_thermal_models(self, show_progress: bool) -> None:
+        """Create the coupled thermal and fraction-solid models for the new solver path."""
+        n_voxels = len(self.mesh.voxel_centers)
+        voxel_size_in = self._get_mean_voxel_size_inches()
+        voxel_size_m = max(voxel_size_in * 0.0254, 1e-6)
+        self._thermal_voxel_size_m = voxel_size_m
+
+        self._thermal_heat_model = HeatTransferModel(
+            n_voxels=n_voxels,
+            voxel_size=voxel_size_m,
+            neighbors=np.asarray(self.mesh.voxel_neighbors, dtype=np.int32),
+            alloy=self.alloy,
+            use_temperature_dependent=False,
+        )
+        self._thermal_solidification_model = ThermalSolidificationModel(
+            n_voxels=n_voxels,
+            alloy=self.alloy,
+        )
+        self._thermal_peak_cooling_rates = np.zeros(n_voxels, dtype=np.float32)
+
+        mold_temperature = 200.0
+        chill_temperature = 25.0
+        initial_temperatures = np.full(n_voxels, self.alloy.pouring_temp, dtype=np.float64)
+        chill_indices = self._get_chill_voxel_indices()
+        if len(chill_indices) > 0:
+            initial_temperatures[chill_indices] = chill_temperature
+
+        self._thermal_heat_model.set_initial_temperature(initial_temperatures)
+        self._thermal_heat_model.set_heat_source(np.zeros(n_voxels, dtype=np.float64))
+        self._configure_thermal_boundaries(mold_temperature=mold_temperature, chill_temperature=chill_temperature)
+
+        if len(chill_indices) > 0:
+            thermal_model = self._thermal_solidification_model
+            thermal_model._fraction_solid[chill_indices] = 1.0
+            thermal_model._fraction_solid_prev[chill_indices] = 1.0
+            thermal_model._solidification_start[chill_indices] = 0.0
+            thermal_model._solidification_end[chill_indices] = 0.0
+
+        self.mesh.voxel_states[:] = 0.0
+        if len(chill_indices) > 0:
+            self.mesh.voxel_states[chill_indices] = 1.0
+            self.solidification_start_times[chill_indices] = 0.0
+            self.solidification_end_times[chill_indices] = 0.0
+            self.local_solidification_time[chill_indices] = 0.0
+            self.solidification_times[chill_indices] = 0.0
+            if self.feeding_fraction_solid is not None:
+                self.feeding_fraction_solid[chill_indices] = 1.0
+
+        self._thermal_latest_temperatures = initial_temperatures.astype(np.float32, copy=True)
+        self._thermal_latest_gradients = np.zeros(n_voxels, dtype=np.float32)
+
+        if show_progress:
+            print("  Thermal-coupled mode active")
+            print(f"    Representative voxel size: {voxel_size_in:.4f}\" ({voxel_size_m:.6f} m)")
+            print(f"    Surface mold temperature: {mold_temperature:.1f} C")
+            print(f"    Chill temperature: {chill_temperature:.1f} C")
+            backend_label = (
+                "Numba parallel kernels"
+                if getattr(self._thermal_heat_model, "numba_parallel_eligible", False)
+                else "NumPy/vectorized kernels"
+            )
+            print(f"    Thermal solver backend: {backend_label}")
+
+    def _configure_thermal_boundaries(self, *, mold_temperature: float, chill_temperature: float) -> None:
+        """Map current part types to simple thermal boundary conditions."""
+        if self._thermal_heat_model is None:
+            return
+
+        surface_indices = np.asarray(self.mesh.get_surface_voxel_indices(), dtype=np.int32)
+        if surface_indices.size == 0:
+            return
+
+        if self.mesh.voxel_part_types is None:
+            part_types = np.zeros(len(self.mesh.voxel_centers), dtype=np.int32)
+        else:
+            part_types = np.asarray(self.mesh.voxel_part_types, dtype=np.int32)
+
+        cast_surface = surface_indices[part_types[surface_indices] == 0]
+        riser_surface = surface_indices[part_types[surface_indices] == 1]
+        riser_post_surface = surface_indices[part_types[surface_indices] == 3]
+        chill_indices = self._get_chill_voxel_indices().astype(np.int32, copy=False)
+
+        if cast_surface.size > 0:
+            self._thermal_heat_model.add_boundary(
+                cast_surface,
+                BoundaryType.INTERFACE,
+                htc=500.0,
+                T_infinity=mold_temperature,
+            )
+        if riser_post_surface.size > 0:
+            self._thermal_heat_model.add_boundary(
+                riser_post_surface,
+                BoundaryType.INTERFACE,
+                htc=350.0,
+                T_infinity=mold_temperature,
+            )
+        if riser_surface.size > 0:
+            self._thermal_heat_model.add_boundary(
+                riser_surface,
+                BoundaryType.INTERFACE,
+                htc=220.0,
+                T_infinity=mold_temperature,
+            )
+        if chill_indices.size > 0:
+            self._thermal_heat_model.add_boundary(
+                chill_indices,
+                BoundaryType.FIXED_TEMPERATURE,
+                value=chill_temperature,
+            )
+    
+    def _calculate_max_simulation_time(self):
+        """
+        Calculate maximum simulation time based on geometry using Chvorinov's Rule.
+        
+        Chvorinov's Rule: t = B * (V/A)^n
+        where:
+            t = solidification time (seconds)
+            B = mold constant (depends on mold and metal properties)
+            V/A = geometric modulus (volume/surface area)
+            n = exponent (typically 2 for sand molds)
+        
+        For sand casting of steel:
+            B ≈ 3.0-4.0 min/cm² → ~200-250 s/in²
+        
+        The maximum modulus in the casting determines the last-to-freeze time.
+        We add a safety factor for risers (which solidify even later).
+        """
+        # Get maximum geometric modulus (thickest section)
+        max_modulus = np.max(self.mesh.voxel_moduli)  # inches
+        
+        # Mold constant B for sand casting (seconds per inch²)
+        # Calibrated to match MAGMASOFT-scale simulations
+        # Steel in green sand: ~200-300 s/in²
+        # Steel in dry sand/no-bake: ~250-350 s/in²
+        base_mold_constant = 280.0  # s/in² - baseline for WCB in sand
+        
+        # Adjust mold constant for material thermal properties
+        # Materials with lower thermal diffusivity solidify slower
+        wcb_diffusivity = 45 / (7200 * 600)  # WCB baseline
+        diffusivity_ratio = wcb_diffusivity / self.alloy.thermal_diffusivity
+        
+        # Materials with higher latent heat take longer to solidify
+        wcb_latent = 272000  # J/kg
+        latent_ratio = self.alloy.latent_heat / wcb_latent
+        
+        # Combined material factor
+        material_factor = np.sqrt(diffusivity_ratio * latent_ratio)
+        
+        mold_constant = base_mold_constant * material_factor
+        
+        # Chvorinov's Rule: t = B * M²
+        # where M is modulus in inches
+        base_solidification_time = mold_constant * (max_modulus ** 2)
+        
+        # Safety factor for:
+        # 1. Risers (solidify ~1.5-2x longer than casting)
+        # 2. Uncertainty in geometry measurement
+        # 3. Exothermic riser effects
+        riser_indices = self._get_riser_voxel_indices()
+        if len(riser_indices) > 0:
+            safety_factor = 2.5  # Risers need extra time
+        else:
+            safety_factor = 1.5  # No risers, less margin needed
+        
+        # Calculate max time with bounds
+        calculated_time = base_solidification_time * safety_factor
+
+        # Enforce reasonable bounds for thermal_coupled; schedule_legacy uses
+        # uncapped Chvorinov horizon so large risers stay visibly liquid through
+        # their full feed path before snapping solid at the actual endpoint.
+        min_time = 120.0    # At least 2 minutes for any casting
+        solver_mode = self._get_solver_mode()
+        if solver_mode == SOLVER_MODE_THERMAL_COUPLED:
+            max_time = 14400.0  # Cap thermal solver at 4 hours
+            self.max_time = np.clip(calculated_time, min_time, max_time)
+        else:
+            self.max_time = max(calculated_time, min_time)
+        
+        # Store for reporting
+        self._max_modulus = max_modulus
+        self._mold_constant = mold_constant
+        self._material_factor = material_factor
+
+    def initialize(self):
+        """Initialize simulation arrays using memory-managed storage"""
+        n_voxels = self.mesh.get_voxel_count()
+        
+        print("\n  Allocating simulation arrays...")
+        
+        # Core arrays (always needed)
+        self.solidification_times = create_managed_array(n_voxels, dtype=np.float32, name="solidification_times")
+        self.solidification_start_times = create_managed_array(
+            n_voxels, dtype=np.float32, name="solidification_start_times"
+        )
+        self.solidification_end_times = create_managed_array(
+            n_voxels, dtype=np.float32, name="solidification_end_times"
+        )
+        self.local_solidification_time = create_managed_array(
+            n_voxels, dtype=np.float32, name="local_solidification_time"
+        )
+        self.surface_distances = create_managed_array(n_voxels, dtype=np.float32, name="surface_distances")
+        # Preserve the legacy public name. This array still stores geometric
+        # distance to the nearest surface, not a traced feeder-path length.
+        self.feeding_distances = self.surface_distances
+        self.feeding_fraction_solid = create_managed_array(
+            n_voxels,
+            dtype=np.float32,
+            name="feeding_fraction_solid",
+        )
+        self.feeding_fraction_solid[:] = np.nan
+        
+        # Shrinkage/Porosity arrays
+        if self.analysis_options.shrinkage:
+            self.shrinkage_probability = create_managed_array(n_voxels, dtype=np.float32, name="shrinkage_probability")
+            self.shrinkage_risk = self.shrinkage_probability
+            self.porosity_probability = create_managed_array(n_voxels, dtype=np.float32, name="porosity_probability")
+            self.porosity_risk = self.porosity_probability
+        
+        # Hot Spot arrays
+        if self.analysis_options.hotspot:
+            self.hotspot_intensity = create_managed_array(n_voxels, dtype=np.float32, name="hotspot_intensity")
+        
+        # Niyama Criterion arrays
+        if self.analysis_options.niyama:
+            self.niyama_values = create_managed_array(n_voxels, dtype=np.float32, name="niyama_values")
+            self.niyama_defect_risk = create_managed_array(n_voxels, dtype=np.bool_, name="niyama_defect_risk")
+            self.thermal_gradients = create_managed_array(n_voxels, dtype=np.float32, name="thermal_gradients")
+            self.cooling_rates = create_managed_array(n_voxels, dtype=np.float32, name="cooling_rates")
+        
+        # Sand Burn-In arrays (only surface voxels affected)
+        if self.analysis_options.sand_burn_in:
+            self.sand_burn_in_risk = create_managed_array(n_voxels, dtype=np.float32, name="sand_burn_in_risk")
+            self.sand_burn_in_zones = create_managed_array(n_voxels, dtype=np.bool_, name="sand_burn_in_zones")
+        
+        # Fraction Liquid tracking
+        if self._should_capture_fraction_history():
+            # Store snapshots every 10 seconds (configurable)
+            self.fraction_liquid_history = []
+            self.fraction_liquid_times = []
+        
+        # Log simulation initialization
+        logger.info(f"Initializing solidification simulation", context={
+            'alloy': self.alloy.name,
+            'voxel_count': n_voxels,
+            'time_step': self.time_step,
+            'analyses': {
+                'shrinkage': self.analysis_options.shrinkage,
+                'hotspot': self.analysis_options.hotspot,
+                'niyama': self.analysis_options.niyama,
+                'sand_burn_in': self.analysis_options.sand_burn_in,
+                'fraction_liquid': self.analysis_options.fraction_liquid
+            }
+        })
+        
+        print("\n" + "="*60)
+        print("Initializing Solidification Simulation")
+        print("="*60)
+        print(f"Alloy: {self.alloy.name}")
+        print(f"Voxels: {n_voxels:,}")
+        print(f"Time step: {self.time_step}s")
+        
+        # Report analysis options
+        analyses = []
+        if self.analysis_options.shrinkage:
+            analyses.append("Shrinkage")
+        if self.analysis_options.hotspot:
+            analyses.append("Hot Spots")
+        if self.analysis_options.niyama:
+            analyses.append(f"Niyama (threshold={NIYAMA_THRESHOLDS.get(self.alloy.name.split()[0], 1.0)})")
+        if self.analysis_options.sand_burn_in:
+            analyses.append("Sand Burn-In")
+        if self.analysis_options.fraction_liquid:
+            analyses.append("Fraction Liquid")
+        print(f"Analyses: {', '.join(analyses)}")
+        print(f"Solver mode: {self._get_solver_mode()}")
+        
+        # Report part types if available
+        if self.mesh.voxel_part_types is not None:
+            cast_count = np.sum(self.mesh.voxel_part_types == 0)
+            riser_count = np.sum(self.mesh.voxel_part_types == 1)
+            chill_count = np.sum(self.mesh.voxel_part_types == 2)
+            print(f"Part types: CAST={cast_count:,}, RISER={riser_count:,}, CHILL={chill_count:,}")
+        
+        # Calculate dynamic max_time based on geometry using Chvorinov's Rule
+        self._calculate_max_simulation_time()
+        print(f"\nSolidification Time Estimate (Chvorinov's Rule):")
+        print(f"  Max modulus (thickest section): {self._max_modulus:.2f}\"")
+        print(f"  Mold constant: {self._mold_constant:.0f} s/in² (material factor: {self._material_factor:.2f}x)")
+        print(f"  Estimated max time: {self.max_time:.0f}s ({self.max_time/60:.1f} min)")
+        print(f"  Formula: t = B × M² × safety_factor")
+        
+        print("="*60 + "\n")
+    
+    def run_simulation(self, show_progress: bool = True, progress_callback=None) -> bool:
+        """
+        Run complete solidification simulation
+        
+        Args:
+            show_progress: Print progress to console
+            progress_callback: Optional callback function(current, total, stage) for UI updates
+        
+        Returns:
+            True if successful
+        """
+        if show_progress:
+            print("Running solidification simulation...")
+
+        run_start = time.perf_counter()
+        stage_timings: Dict[str, float] = {}
+        self.stage_timings = stage_timings
+
+        def _record_stage(stage_name: str, started_at: float) -> None:
+            stage_timings[stage_name] = stage_timings.get(stage_name, 0.0) + (time.perf_counter() - started_at)
+
+        self._feeding_path_cache = None
+        self._connected_feeder_mask_cache = None
+
+        solver_mode = self._get_solver_mode()
+        surface_indices = self.mesh.get_surface_voxel_indices()
+
+        # Step 1: Initialize state (cast/riser start liquid; chill/tooling is pre-solid)
+        self.mesh.voxel_states[:] = 0.0
+        chill_indices = self._get_chill_voxel_indices()
+        if len(chill_indices) > 0:
+            self.mesh.voxel_states[chill_indices] = 1.0
+            if show_progress:
+                print(f"  Chill voxels initialized: {len(chill_indices):,}")
+
+        if show_progress:
+            print(f"  Initial solidification fronts: {len(surface_indices):,}")
+
+        # Step 2: Calculate feeding distances from surface
+        if show_progress:
+            print("  Calculating feeding distances...")
+
+        stage_start = time.perf_counter()
+        self._calculate_feeding_distances()
+        _record_stage("feeding_distances", stage_start)
+
+        if solver_mode == SOLVER_MODE_THERMAL_COUPLED:
+            chill_boost = np.ones(len(self.mesh.voxel_centers), dtype=np.float32)
+            riser_slowdown = np.ones(len(self.mesh.voxel_centers), dtype=np.float32)
+            self._air_gap_slowdown = np.ones(len(self.mesh.voxel_centers), dtype=np.float32)
+
+            stage_start = time.perf_counter()
+            self._initialize_thermal_models(show_progress=show_progress)
+            _record_stage("thermal_model_init", stage_start)
+        else:
+            # Step 3: Calculate chill influence (nearby voxels solidify faster)
+            stage_start = time.perf_counter()
+            chill_boost = self._calculate_chill_influence()
+            _record_stage("chill_influence", stage_start)
+
+            # Step 4: Calculate riser slowdown (exothermic effect)
+            stage_start = time.perf_counter()
+            riser_slowdown = self._calculate_riser_influence()
+            _record_stage("riser_influence", stage_start)
+
+            # Step 4b: Initialize mold air gap effect (starts at 1.0 = no effect)
+            # Air gap forms as metal shrinks away from sand mold, creating insulating gap
+            stage_start = time.perf_counter()
+            self._air_gap_slowdown = np.ones(len(self.mesh.voxel_centers), dtype=np.float32)
+            _record_stage("air_gap_init", stage_start)
+            if show_progress:
+                print("  Mold air gap effect initialized (will develop during solidification)...")
+
+            # Step 4c: Build schedule-driven fraction-solid timing model.
+            stage_start = time.perf_counter()
+            self._initialize_solidification_schedule(chill_boost, riser_slowdown)
+            _record_stage("schedule_init", stage_start)
+
+        # Step 5: Simulate solidification progression
+        stage_start = time.perf_counter()
+        run_time_integration(
+            self,
+            chill_boost,
+            riser_slowdown,
+            show_progress=show_progress,
+            progress_callback=progress_callback,
+        )
+        _record_stage("time_integration", stage_start)
+
+        # Analysis strategies run in dependency-aware order
+        stage_start = time.perf_counter()
+        run_post_analyses(self, show_progress=show_progress)
+        _record_stage("post_analyses", stage_start)
+
+        stage_timings["total_simulation_wall"] = time.perf_counter() - run_start
+        self.last_stage_timings = dict(stage_timings)
+
+        if show_progress:
+            timing_rows = [(name, sec) for name, sec in stage_timings.items() if name != "total_simulation_wall"]
+            if timing_rows:
+                total_tracked = max(sum(sec for _, sec in timing_rows), 1e-12)
+                print("  Stage timing breakdown:")
+                for name, seconds in sorted(timing_rows, key=lambda item: item[1], reverse=True):
+                    pct = (seconds / total_tracked) * 100.0
+                    print(f"    {name}: {seconds:.3f}s ({pct:.1f}%)")
+            print(f"  Total simulation wall time: {stage_timings['total_simulation_wall']:.3f}s")
+        return True
+
+    def _compute_graph_distance_to_riser(self, active_mask: np.ndarray) -> np.ndarray:
+        """Compute shortest topological distance from each active voxel to any riser voxel."""
+        n_voxels = len(self.mesh.voxel_centers)
+        distances = np.full(n_voxels, np.inf, dtype=np.float32)
+        riser_indices = self._get_riser_voxel_indices()
+        if len(riser_indices) == 0:
+            return distances
+
+        q: deque[int] = deque()
+        for idx in riser_indices:
+            if active_mask[idx]:
+                distances[idx] = 0.0
+                q.append(int(idx))
+
+        neighbors = np.asarray(self.mesh.voxel_neighbors, dtype=np.int32)
+        while q:
+            current = q.popleft()
+            next_distance = distances[current] + 1.0
+            for nb in neighbors[current]:
+                if nb < 0 or not active_mask[nb]:
+                    continue
+                if next_distance < distances[nb]:
+                    distances[nb] = next_distance
+                    q.append(int(nb))
+        return distances
+
+    @staticmethod
+    def _average_exothermic_factor_over_duration(duration_s: float) -> float:
+        """Average the existing riser exothermic model over a static schedule interval."""
+        if duration_s <= 0.0:
+            return 1.0
+
+        ignition_delay_s = 10.0
+        burn_duration_s = 120.0
+        insulation_only_factor = 0.7
+        full_exothermic_factor = 0.5
+        burnout_start_s = ignition_delay_s + burn_duration_s
+        decay_time_constant = 60.0
+
+        ramp_duration = min(duration_s, ignition_delay_s)
+        ramp_area = ramp_duration
+        if ramp_duration > 0.0:
+            ramp_area -= (1.0 - insulation_only_factor) * (ramp_duration ** 2) / (2.0 * ignition_delay_s)
+
+        burn_duration = max(min(duration_s, burnout_start_s) - ignition_delay_s, 0.0)
+        burn_area = burn_duration * full_exothermic_factor
+
+        burnout_duration = max(duration_s - burnout_start_s, 0.0)
+        burnout_area = 0.0
+        if burnout_duration > 0.0:
+            burnout_area = (
+                insulation_only_factor * burnout_duration
+                + (full_exothermic_factor - insulation_only_factor)
+                * decay_time_constant
+                * (1.0 - np.exp(-burnout_duration / decay_time_constant))
+            )
+
+        average_factor = (ramp_area + burn_area + burnout_area) / duration_s
+        return float(np.clip(average_factor, full_exothermic_factor, 1.0))
+
+    @staticmethod
+    def _average_riser_post_factor_over_duration(duration_s: float) -> float:
+        """Average the existing riser-post hot-sand slowdown over a static schedule interval."""
+        if duration_s <= 0.0:
+            return 1.0
+
+        sand_saturation_time_constant = 30.0
+        max_hot_sand_slowdown = 0.6
+        average_factor = (
+            max_hot_sand_slowdown
+            + (1.0 - max_hot_sand_slowdown)
+            * sand_saturation_time_constant
+            * (1.0 - np.exp(-duration_s / sand_saturation_time_constant))
+            / duration_s
+        )
+        return float(np.clip(average_factor, max_hot_sand_slowdown, 1.0))
+
+    def _calculate_schedule_riser_slowdown(self, base_completion_times: np.ndarray) -> np.ndarray:
+        """Collapse the time-dependent riser model into a schedule-friendly static slowdown field."""
+        n_voxels = len(self.mesh.voxel_centers)
+        schedule_slowdown = np.ones(n_voxels, dtype=np.float32)
+
+        if self.mesh.voxel_part_types is None:
+            return schedule_slowdown
+
+        part_types = np.asarray(self.mesh.voxel_part_types, dtype=np.int32)
+        riser_indices = np.where(part_types == 1)[0]
+        if len(riser_indices) == 0:
+            return schedule_slowdown
+
+        avg_riser_factor = self._average_exothermic_factor_over_duration(
+            float(np.max(base_completion_times[riser_indices]))
+        )
+        schedule_slowdown[riser_indices] = avg_riser_factor
+
+        riser_post_indices = np.where(part_types == 3)[0]
+        if len(riser_post_indices) > 0:
+            avg_post_factor = self._average_riser_post_factor_over_duration(
+                float(np.max(base_completion_times[riser_post_indices]))
+            )
+            schedule_slowdown[riser_post_indices] = avg_post_factor
+
+        cast_indices = np.where(part_types == 0)[0]
+        if len(cast_indices) == 0:
+            return schedule_slowdown
+
+        riser_centers = self.mesh.voxel_centers[riser_indices]
+        cast_centers = self.mesh.voxel_centers[cast_indices]
+        if len(riser_centers) == 0 or len(cast_centers) == 0:
+            return schedule_slowdown
+
+        base_feeding_distance = 6.0
+        material_factor = self.alloy.feeding_distance_multiplier / 3.0
+        riser_influence_radius = base_feeding_distance * material_factor
+        min_influence_factor = 0.6
+
+        riser_tree = cKDTree(riser_centers)
+        distances, _ = riser_tree.query(cast_centers, k=1)
+        compute_riser_influence_parallel(
+            schedule_slowdown,
+            np.ascontiguousarray(cast_indices, dtype=np.int64),
+            np.ascontiguousarray(distances, dtype=np.float32),
+            np.float32(riser_influence_radius),
+            np.float32(avg_riser_factor),
+            np.float32(min_influence_factor),
+        )
+        return schedule_slowdown
+
+    def _initialize_solidification_schedule(
+        self,
+        chill_boost: np.ndarray,
+        riser_slowdown: np.ndarray,
+    ) -> None:
+        """
+        Build schedule-driven fraction-solid timing fields.
+
+        The visualization state uses a timed fraction-solid model rather than
+        neighbor-front filling. This keeps surface/chill regions early and
+        feeder-connected riser regions late.
+        """
+        n_voxels = len(self.mesh.voxel_centers)
+        if n_voxels == 0:
+            return
+
+        if self.mesh.voxel_part_types is None:
+            part_types = np.zeros(n_voxels, dtype=np.int32)
+        else:
+            part_types = np.asarray(self.mesh.voxel_part_types, dtype=np.int32)
+
+        cast_mask = part_types == 0
+        riser_mask = part_types == 1
+        chill_mask = part_types == 2
+        riser_post_mask = part_types == 3
+        active_mask = cast_mask | riser_mask | riser_post_mask
+
+        start_times = np.zeros(n_voxels, dtype=np.float32)
+        end_times = np.zeros(n_voxels, dtype=np.float32)
+        local_times = np.zeros(n_voxels, dtype=np.float32)
+        self._calculate_chvorinov_times()
+        base_completion_times = np.asarray(self.chvorinov_time, dtype=np.float32)
+        chill_term = np.maximum(np.asarray(chill_boost, dtype=np.float32), 1.0)
+        schedule_riser_slowdown = self._calculate_schedule_riser_slowdown(base_completion_times)
+
+        completion_times = base_completion_times.copy()
+        completion_times = completion_times / chill_term
+        completion_times = completion_times / np.maximum(schedule_riser_slowdown, 0.15)
+        completion_times[~active_mask] = 0.0
+
+        # For schedule_legacy, preserve the uncapped Chvorinov horizon so the
+        # fraction-liquid slider spans the full solidification path.  Thermal-coupled
+        # still uses the capped max_time as its loop bound.
+        solver_mode = self._get_solver_mode()
+        if solver_mode == SOLVER_MODE_THERMAL_COUPLED:
+            completion_times[active_mask] = np.clip(
+                completion_times[active_mask],
+                self.time_step,
+                self.max_time - self.time_step,
+            )
+
+        # Enforce directional progression toward connected risers.
+        riser_distance = self._compute_graph_distance_to_riser(active_mask)
+        connected = active_mask & np.isfinite(riser_distance)
+        if np.any(connected):
+            max_dist = max(float(np.max(riser_distance[connected])), 1.0)
+            toward_riser = 1.0 - (riser_distance / max_dist)
+            directional_extension = 0.20 * float(np.max(completion_times[active_mask]))
+            completion_times[connected] += directional_extension * np.clip(
+                toward_riser[connected],
+                0.0,
+                1.0,
+            )
+
+        # Hold feeders latest in connected systems.
+        if np.any(active_mask):
+            active_peak = float(np.max(completion_times[active_mask]))
+            if np.any(riser_mask):
+                completion_times[riser_mask] = np.maximum(completion_times[riser_mask], active_peak * 0.97)
+            if np.any(riser_post_mask):
+                completion_times[riser_post_mask] = np.maximum(completion_times[riser_post_mask], active_peak * 0.92)
+
+        superheat = max(float(self.alloy.pouring_temp - self.alloy.liquidus_temp), 1.0)
+        freezing_range = max(float(self.alloy.liquidus_temp - self.alloy.solidus_temp), 1.0)
+        mushy_fraction = np.clip(
+            freezing_range / (superheat + freezing_range),
+            0.15,
+            0.45,
+        )
+        local_times[active_mask] = np.maximum(
+            completion_times[active_mask] * mushy_fraction,
+            self.time_step,
+        )
+        end_times[active_mask] = completion_times[active_mask]
+        start_times[active_mask] = np.maximum(
+            end_times[active_mask] - local_times[active_mask],
+            0.0,
+        )
+
+        # Chills/tooling are already solid and do not follow casting schedule.
+        start_times[chill_mask] = 0.0
+        end_times[chill_mask] = 0.0
+
+        # Keep all active voxels fully solid by the configured simulation horizon.
+        # For schedule_legacy, avoid clipping end_times to max_time so the fraction-
+        # liquid slider can span the full uncapped Chvorinov horizon.
+        if solver_mode == SOLVER_MODE_THERMAL_COUPLED:
+            end_times[active_mask] = np.clip(
+                end_times[active_mask], self.time_step, self.max_time - self.time_step
+            )
+            start_times[active_mask] = np.minimum(
+                start_times[active_mask],
+                np.maximum(end_times[active_mask] - self.time_step, 0.0),
+            )
+            local_times[active_mask] = np.maximum(
+                end_times[active_mask] - start_times[active_mask], self.time_step
+            )
+
+        self.solidification_start_times[:] = start_times
+        self.solidification_end_times[:] = end_times
+        self.local_solidification_time[:] = local_times
+    
+    def _calculate_feeding_distances(self):
+        """
+        Calculate distance from each voxel to the nearest free surface.
+
+        This quantity is still exposed through ``feeding_distances`` for
+        backward compatibility, but it is a surface-distance proxy rather than
+        a traced feeder-path length through the mush.
+        """
+        surface_indices = self.mesh.get_surface_voxel_indices()
+        surface_centers = self.mesh.voxel_centers[surface_indices]
+        
+        n_voxels = len(self.mesh.voxel_centers)
+        
+        print(f"  Computing feeding distances from {len(surface_indices):,} surface voxels...")
+        
+        if len(surface_centers) == 0:
+            self.surface_distances = np.zeros(n_voxels, dtype=np.float32)
+            self.feeding_distances = self.surface_distances
+            return
+        
+        # Ensure arrays are contiguous float32
+        voxel_centers = np.ascontiguousarray(self.mesh.voxel_centers, dtype=np.float32)
+        surface_centers = np.ascontiguousarray(surface_centers, dtype=np.float32)
+        
+        # Use GPU-accelerated distance computation if available
+        if self._use_gpu:
+            print(f"  Using GPU-accelerated distance computation...")
+            self.surface_distances = compute_distances_accelerated(voxel_centers, surface_centers)
+        else:
+            # Use KD-tree nearest-neighbor query on CPU.
+            # This scales much better than O(n_voxels * n_surface) pairwise scans.
+            try:
+                surface_tree = cKDTree(surface_centers)
+                distances, _ = surface_tree.query(voxel_centers, k=1, workers=-1)
+                self.surface_distances = np.asarray(distances, dtype=np.float32)
+                print("  Feeding distances computed (KD-tree)")
+            except Exception:
+                # Conservative fallback path if KD-tree query is unavailable.
+                self.surface_distances = compute_min_distances_parallel(voxel_centers, surface_centers)
+                print(f"  Feeding distances computed (JIT-parallel)")
+        
+        self.feeding_distances = self.surface_distances
+    
+    def _get_chill_voxel_indices(self) -> np.ndarray:
+        """Get indices of voxels that are part of chills"""
+        if self.mesh.voxel_part_types is None:
+            return np.array([], dtype=int)
+        return np.where(self.mesh.voxel_part_types == 2)[0]  # 2 = CHILL
+
+    def _get_riser_post_voxel_indices(self) -> np.ndarray:
+        """Get indices of voxels that are part of feeder necks / riser posts."""
+        if self.mesh.voxel_part_types is None:
+            return np.array([], dtype=int)
+        return np.where(self.mesh.voxel_part_types == 3)[0]  # 3 = RISER_POST
+    
+    def _get_riser_voxel_indices(self) -> np.ndarray:
+        """Get indices of voxels that are part of risers"""
+        if self.mesh.voxel_part_types is None:
+            return np.array([], dtype=int)
+        return np.where(self.mesh.voxel_part_types == 1)[0]  # 1 = RISER
+
+    def _get_feeder_voxel_indices(self) -> np.ndarray:
+        """Get indices of all feeder-system voxels (riser body + riser post)."""
+        if self.mesh.voxel_part_types is None:
+            return np.array([], dtype=int)
+        return np.where(
+            (self.mesh.voxel_part_types == 1) | (self.mesh.voxel_part_types == 3)
+        )[0]
+
+    def _get_connected_feeder_mask(self) -> np.ndarray:
+        """
+        Mark feeder-system voxels that are topologically connected to a riser body.
+
+        Connected feeder necks should not be penalized like isolated cast metal.
+
+        Cached per engine run; repeated calls within the same run return the same
+        array without recomputing graph distance.
+        """
+        cached = getattr(self, "_connected_feeder_mask_cache", None)
+        if cached is not None:
+            return cached
+
+        n_voxels = len(self.mesh.voxel_centers)
+        connected = np.zeros(n_voxels, dtype=bool)
+        feeder_indices = self._get_feeder_voxel_indices()
+        riser_indices = self._get_riser_voxel_indices()
+        if len(feeder_indices) == 0 or len(riser_indices) == 0:
+            return connected
+
+        feeder_mask = np.zeros(n_voxels, dtype=bool)
+        feeder_mask[feeder_indices] = True
+        connected_dist = self._compute_graph_distance_to_riser(feeder_mask)
+        connected[feeder_mask] = np.isfinite(connected_dist[feeder_mask])
+        self._connected_feeder_mask_cache = connected
+        return connected
+    
+    def _group_risers_by_component(self) -> List[np.ndarray]:
+        """
+        Group riser voxels into separate connected components.
+        Each component represents one physical riser.
+        
+        Uses flood-fill via neighbor connectivity to identify separate risers.
+        
+        Returns:
+            List of arrays, each containing voxel indices for one riser.
+        """
+        riser_indices = self._get_riser_voxel_indices()
+        if len(riser_indices) == 0:
+            return []
+        
+        # Create set for faster lookup
+        riser_set = set(riser_indices)
+        visited = set()
+        components = []
+
+        for start_idx in riser_indices:
+            if start_idx in visited:
+                continue
+
+            component = []
+            queue: deque[int] = deque([start_idx])
+
+            while queue:
+                current = queue.popleft()
+                if current in visited:
+                    continue
+                visited.add(current)
+                component.append(current)
+
+                for ni in range(self.mesh.voxel_neighbors.shape[1]):
+                    neighbor = self.mesh.voxel_neighbors[current, ni]
+                    if neighbor >= 0 and neighbor in riser_set and neighbor not in visited:
+                        queue.append(neighbor)
+
+            if component:
+                components.append(np.array(component, dtype=np.int64))
+
+        return components
+    
+    def _calculate_riser_centerlines(self) -> Dict[int, Tuple[float, float, float, float, float]]:
+        """
+        Calculate XY centerline, radius, and Z range for each riser.
+        
+        Returns:
+            Dict mapping voxel index -> (center_x, center_y, radius, z_min, z_max)
+            Each riser voxel maps to its riser's geometry.
+        """
+        components = self._group_risers_by_component()
+        if not components:
+            return {}
+        
+        # Map each voxel to its riser's centerline info
+        voxel_to_centerline = {}
+        
+        for riser_indices in components:
+            if len(riser_indices) == 0:
+                continue
+            
+            # Get centers of all voxels in this riser
+            riser_centers = self.mesh.voxel_centers[riser_indices]
+            
+            # Calculate XY center (centerline axis)
+            center_x = np.mean(riser_centers[:, 0])
+            center_y = np.mean(riser_centers[:, 1])
+            
+            # Calculate radius (max distance from centerline in XY plane)
+            xy_distances = np.sqrt(
+                (riser_centers[:, 0] - center_x) ** 2 +
+                (riser_centers[:, 1] - center_y) ** 2
+            )
+            radius = np.max(xy_distances) if len(xy_distances) > 0 else 1.0
+            
+            # Get Z range
+            z_min = np.min(riser_centers[:, 2])
+            z_max = np.max(riser_centers[:, 2])
+            
+            # Map each voxel to this centerline data
+            for idx in riser_indices:
+                voxel_to_centerline[idx] = (center_x, center_y, radius, z_min, z_max)
+        
+        return voxel_to_centerline
+    
+
+    
+    def _calculate_chill_influence(self) -> np.ndarray:
+        """
+        Calculate chill influence on each voxel using spatially-varying thickness
+        and dynamic decay factors (Air Gap & Saturation).
+        
+        Optimized with Numba JIT parallel computation and point-based EDT.
+        """
+        n_voxels = len(self.mesh.voxel_centers)
+        
+        chill_indices = self._get_chill_voxel_indices()
+        if len(chill_indices) == 0:
+            return np.ones(n_voxels, dtype=np.float32)
+            
+        # 1. Initialize chill data if not already cached
+        if self._chill_centers is None:
+            self._chill_centers = np.ascontiguousarray(self.mesh.voxel_centers[chill_indices], dtype=np.float32)
+            
+            # Find chill surface voxels for point-based EDT
+            chill_mask = (self.mesh.voxel_part_types == 2)
+            # A chill voxel is on the surface if it's marked as surface_voxel OR 
+            # if it has a non-chill neighbor (simplified: use mesh.surface_voxels bitmask)
+            chill_surface_mask = chill_mask & self.mesh.surface_voxels
+            chill_surface_indices = np.where(chill_surface_mask)[0]
+            
+            if len(chill_surface_indices) == 0:
+                # Fallback to all chill voxels if surface bitmask is empty
+                chill_surface_indices = chill_indices
+                
+            self._chill_surface_centers = np.ascontiguousarray(self.mesh.voxel_centers[chill_surface_indices], dtype=np.float32)
+            
+            # Calculate spatially-varying thickness (Internal EDT)
+            # Thickness = 2 * distance to boundary
+            print(f"  Calculating spatially-varying chill thickness (EDT)...")
+            self._chill_thicknesses = compute_chill_internal_thickness_parallel(
+                self._chill_centers, self._chill_surface_centers
+            )
+            
+            # Limit thickness sanity check
+            max_t = np.max(self._chill_thicknesses)
+            avg_t = np.mean(self._chill_thicknesses)
+            print(f"    Total chill voxels: {len(chill_indices):,}")
+            print(f"    Varying thickness: max={max_t:.2f}\", avg={avg_t:.2f}\"")
+
+        # 2. Compute dynamic boost
+        # Initial call at t=0
+        max_chill_boost = 3.0
+        voxel_centers = np.ascontiguousarray(self.mesh.voxel_centers, dtype=np.float32)
+        voxel_states = np.ascontiguousarray(self.mesh.voxel_states, dtype=np.float32)
+        
+        if self.mesh.voxel_part_types is not None:
+            part_types = np.ascontiguousarray(self.mesh.voxel_part_types, dtype=np.int32)
+        else:
+            part_types = np.zeros(n_voxels, dtype=np.int32)
+            
+        self._chill_boost = compute_dynamic_chill_boost_parallel(
+            voxel_centers, self._chill_centers, self._chill_thicknesses,
+            voxel_states, part_types, self.time, max_chill_boost
+        )
+        
+        return self._chill_boost
+
+    def _update_dynamic_chill_boost(self):
+        """Update the chill boost array based on current simulation time and progress."""
+        if self._chill_centers is None:
+            return
+            
+        n_voxels = len(self.mesh.voxel_centers)
+        max_chill_boost = 3.0
+        voxel_centers = np.ascontiguousarray(self.mesh.voxel_centers, dtype=np.float32)
+        voxel_states = np.ascontiguousarray(self.mesh.voxel_states, dtype=np.float32)
+        
+        if self.mesh.voxel_part_types is not None:
+            part_types = np.ascontiguousarray(self.mesh.voxel_part_types, dtype=np.int32)
+        else:
+            part_types = np.zeros(n_voxels, dtype=np.int32)
+            
+        self._chill_boost[:] = compute_dynamic_chill_boost_parallel(
+            voxel_centers, self._chill_centers, self._chill_thicknesses,
+            voxel_states, part_types, self.time, max_chill_boost
+        )
+    
+    def _update_mold_air_gap_effect(self):
+        """
+        Update the mold air gap slowdown array based on current simulation time and progress.
+        
+        Physical Model:
+        As metal solidifies and shrinks, it pulls away from the sand mold wall,
+        creating a microscopic air gap. Since air is a great insulator, this
+        SLOWS heat extraction from the casting, especially at surfaces.
+        
+        The effect:
+        - Increases with time (gap grows progressively)
+        - Increases with local solidification (only solid metal can shrink)
+        - Only affects surface and near-surface voxels
+        """
+        if self._air_gap_slowdown is None:
+            return
+        
+        # Use feeding_distances as distance-from-surface metric
+        if self.feeding_distances is None:
+            return
+            
+        voxel_states = np.ascontiguousarray(self.mesh.voxel_states, dtype=np.float32)
+        feeding_distances = np.ascontiguousarray(self.feeding_distances, dtype=np.float32)
+        surface_mask = np.ascontiguousarray(self.mesh.surface_voxels, dtype=np.bool_)
+        
+        # Air gap parameters
+        air_gap_time_constant = 60.0  # Gap develops over ~1 minute
+        surface_influence_depth = 0.5  # Effect extends 0.5 inches from surface
+        max_slowdown = 0.75  # Maximum 25% slower at full effect
+        
+        self._air_gap_slowdown[:] = compute_mold_air_gap_effect_parallel(
+            voxel_states,
+            feeding_distances,
+            surface_mask,
+            self.time,
+            air_gap_time_constant,
+            surface_influence_depth,
+            max_slowdown
+        )
+    
+    def _calculate_riser_influence(self) -> np.ndarray:
+        """
+        Calculate riser exothermic/thermal influence on each voxel.
+        
+        TIME-DEPENDENT EXOTHERMIC MODEL:
+        Real exothermic sleeves are chemical reactions with distinct phases:
+        
+        Phase 1: IGNITION DELAY (0 to ignition_delay_s)
+            - Sleeve needs to reach ignition temperature before reaction starts
+            - Effect is reduced during this period (acts like simple sand riser)
+        
+        Phase 2: ACTIVE BURN (ignition_delay_s to ignition_delay_s + burn_duration_s)
+            - Full exothermic effect - riser voxels solidify much slower
+            - Maximum feeding influence on nearby casting voxels
+        
+        Phase 3: BURN-OUT (after ignition_delay_s + burn_duration_s)
+            - Exothermic reaction complete, sleeve becomes insulator
+            - Effect decays from full exothermic to insulation-only mode
+        
+        The riser influence extends into the casting at the CAST-RISER interface,
+        creating proper directional solidification toward the risers.
+        
+        Returns:
+            Array of multipliers (<1 means slower solidification)
+        """
+        n_voxels = len(self.mesh.voxel_centers)
+        riser_slowdown = np.ones(n_voxels, dtype=np.float32)
+        
+        riser_indices = self._get_riser_voxel_indices()
+        if len(riser_indices) == 0:
+            return riser_slowdown
+        
+        riser_centers = self.mesh.voxel_centers[riser_indices]
+        
+        # Exothermic time-dependent parameters
+        ignition_delay_s = 10.0   # Seconds for sleeve to reach ignition temp
+        burn_duration_s = 120.0   # Duration of active exothermic reaction
+        insulation_only_factor = 0.7  # Post-burnout: just insulation (70% rate = 1.4x longer)
+        
+        # Full exothermic parameters
+        full_exothermic_factor = 0.5  # Active burn: 50% rate (2x longer)
+        
+        # Calculate time-dependent exothermic effectiveness
+        current_time = self.time
+        
+        if current_time < ignition_delay_s:
+            # Phase 1: Ignition Delay - sleeve hasn't ignited yet
+            # Linear ramp from no effect to partial effect
+            ignition_progress = current_time / ignition_delay_s
+            exothermic_factor = 1.0 - (1.0 - insulation_only_factor) * ignition_progress
+        elif current_time < (ignition_delay_s + burn_duration_s):
+            # Phase 2: Active Burn - full exothermic effect
+            exothermic_factor = full_exothermic_factor
+        else:
+            # Phase 3: Burn-Out - decay from full effect to insulation-only
+            time_since_burnout = current_time - (ignition_delay_s + burn_duration_s)
+            decay_time_constant = 60.0  # Decay over ~1 minute
+            decay_factor = np.exp(-time_since_burnout / decay_time_constant)
+            
+            # Blend from full_exothermic_factor back to insulation_only_factor
+            exothermic_factor = insulation_only_factor + \
+                (full_exothermic_factor - insulation_only_factor) * decay_factor
+        
+        # CRITICAL: Feeding distance determines how far risers can feed
+        # This must be large enough to cover the casting geometry
+        # Using material's feeding distance multiplier
+        base_feeding_distance = 6.0  # Base feeding distance in inches
+        material_factor = self.alloy.feeding_distance_multiplier / 3.0
+        riser_influence_radius = base_feeding_distance * material_factor
+        
+        min_influence_factor = 0.6  # At edge of influence, 60% rate (1.7x longer)
+        
+        # Only print on initial call (time == 0)
+        if self.time < self.time_step:
+            print(f"  Time-dependent exothermic model active:")
+            print(f"    Ignition delay: {ignition_delay_s:.0f}s, Burn duration: {burn_duration_s:.0f}s")
+            print(f"  Applying riser thermal influence to {len(riser_indices):,} riser voxels...")
+            print(f"  Riser influence radius: {riser_influence_radius:.1f}\" (feeding distance)")
+        
+        # Apply exothermic effect to riser voxels (time-dependent)
+        riser_slowdown[riser_indices] = exothermic_factor
+        
+        # HOT SAND SATURATION: Apply slowdown to RISER_POST voxels (type 3)
+        # The sand around riser posts becomes heat-saturated over time,
+        # keeping the post liquid longer than normal casting would solidify.
+        # This is a time-dependent effect - sand takes time to heat up.
+        riser_post_indices = np.where(self.mesh.voxel_part_types == 3)[0]
+        if len(riser_post_indices) > 0:
+            # Hot sand saturation parameters
+            sand_saturation_time_constant = 30.0  # Sand saturates over ~30s
+            max_hot_sand_slowdown = 0.6  # Hot saturated sand: 60% rate (1.7x longer)
+            
+            # Effect builds up as sand heats
+            sand_saturation_factor = 1.0 - np.exp(-self.time / sand_saturation_time_constant)
+            
+            # Blend from normal (1.0) toward hot sand slowdown
+            post_slowdown = 1.0 - (1.0 - max_hot_sand_slowdown) * sand_saturation_factor
+            
+            riser_slowdown[riser_post_indices] = post_slowdown
+            
+            if self.time < self.time_step:
+                print(f"  Hot sand saturation active for {len(riser_post_indices):,} RISER_POST voxels")
+        
+        # Calculate riser influence on nearby CAST voxels
+        # This creates directional solidification TOWARD the risers
+        cast_indices = np.where(self.mesh.voxel_part_types == 0)[0]
+        
+        if len(cast_indices) > 0:
+            # Build KD-tree for riser centers
+            riser_tree = cKDTree(riser_centers)
+            
+            # Find cast voxels within riser influence radius
+            cast_centers = self.mesh.voxel_centers[cast_indices]
+            
+            # Query distances for all cast voxels to nearest riser
+            distances, _ = riser_tree.query(cast_centers, k=1)
+            
+            # Apply influence with smooth falloff (JIT-optimized)
+            cast_indices_arr = np.ascontiguousarray(cast_indices, dtype=np.int64)
+            distances_arr = np.ascontiguousarray(distances, dtype=np.float32)
+            
+            influenced_count = compute_riser_influence_parallel(
+                riser_slowdown,
+                cast_indices_arr,
+                distances_arr,
+                np.float32(riser_influence_radius),
+                np.float32(exothermic_factor),
+                np.float32(min_influence_factor)
+            )
+            
+            if self.time < self.time_step and influenced_count > 0:
+                print(f"    Riser feeding influence extends to {influenced_count:,} casting voxels")
+                print(f"    Slowdown range: {exothermic_factor:.0%} to {min_influence_factor:.0%} of normal rate")
+        
+        return riser_slowdown
+    
+    def _update_riser_exothermic_effect(self, riser_slowdown: np.ndarray):
+        """
+        Update riser slowdown array based on current simulation time.
+        Called periodically to model time-dependent exothermic behavior.
+        """
+        riser_indices = self._get_riser_voxel_indices()
+        if len(riser_indices) == 0:
+            return
+        
+        # Recalculate with current time
+        new_slowdown = self._calculate_riser_influence()
+        riser_slowdown[:] = new_slowdown
+    
+    def _calculate_chill_shrinkage_reduction(self) -> np.ndarray:
+        """
+        Calculate shrinkage reduction factor based on proximity to chills.
+        
+        Chills promote DIRECTIONAL SOLIDIFICATION - the metal near chills solidifies
+        FIRST while liquid metal from the interior can still feed it. This drastically
+        reduces shrinkage near chills because:
+        
+        1. Early solidification = liquid feed metal available from interior
+        2. Progressive solidification front moves AWAY from chill toward hot spots
+        3. Shrinkage defects concentrate where metal solidifies LAST (away from chills)
+        
+        The shrinkage reduction zone is based on chill thickness:
+        - Thicker chills have more thermal mass → affect deeper into casting
+        - Shrinkage reduction zone = 1.5 × chill thickness (extends slightly beyond
+          the solidification acceleration zone to account for feeding benefits)
+        
+        Returns:
+            Array of reduction multipliers (0.15-1.0, where lower = less shrinkage)
+        """
+        n_voxels = len(self.mesh.voxel_centers)
+        chill_reduction = np.ones(n_voxels, dtype=np.float32)
+        
+        chill_indices = self._get_chill_voxel_indices()
+        if len(chill_indices) == 0:
+            return chill_reduction
+        
+        chill_centers = self.mesh.voxel_centers[chill_indices]
+        
+        # Get chill thickness from cached data (computed during _calculate_chill_influence).
+        # The maximum resolved thickness is the safer proxy here: the mean collapses
+        # the influence radius for sparse voxelized chills and can erase the intended
+        # directional-solidification benefit entirely.
+        if self._chill_thicknesses is not None and len(self._chill_thicknesses) > 0:
+            chill_thickness = np.max(self._chill_thicknesses)
+        else:
+            # Fallback: estimate based on voxel size
+            chill_thickness = self.mesh.base_voxel_size * 5.0  # ~5 voxels deep
+        
+        # Shrinkage reduction zone = 1.5 × chill thickness
+        # This is slightly larger than the solidification boost zone because
+        # the feeding benefit extends beyond the direct cooling zone
+        chill_influence_radius = chill_thickness * 1.5
+        
+        max_reduction = 0.15  # At chill contact, only 15% of calculated shrinkage remains (85% reduction)
+        min_reduction = 1.0  # At edge of influence, no reduction
+        
+        print(f"  Chill shrinkage reduction zone: {chill_influence_radius:.2f}\" (1.5 × {chill_thickness:.2f}\" thickness)")
+        
+        # Build KD-tree for chill centers
+        chill_tree = cKDTree(chill_centers)
+        
+        # Get CAST voxel indices (only casting voxels get shrinkage reduction, not risers)
+        if self.mesh.voxel_part_types is not None:
+            cast_mask = self.mesh.voxel_part_types == 0
+        else:
+            cast_mask = np.ones(n_voxels, dtype=bool)
+        
+        cast_indices = np.where(cast_mask)[0]
+        
+        if len(cast_indices) > 0:
+            cast_centers = self.mesh.voxel_centers[cast_indices]
+            
+            # Query distances for all cast voxels to nearest chill; distances beyond the
+            # influence radius are not needed and are returned as inf.
+            distances, _ = chill_tree.query(
+                cast_centers,
+                k=1,
+                distance_upper_bound=chill_influence_radius,
+            )
+            
+        # Apply reduction with smooth falloff (quadratic for smoother transition)
+        within_radius = distances < chill_influence_radius
+        if np.any(within_radius):
+            normalized_dist = distances[within_radius] / chill_influence_radius
+            # Use quadratic falloff for smoother gradient
+            reduction = max_reduction + (min_reduction - max_reduction) * (normalized_dist * np.sqrt(normalized_dist))
+            chill_reduction[cast_indices[within_radius]] = reduction
+        
+        return chill_reduction
+    
+    def _calculate_riser_feeding_reduction(self) -> np.ndarray:
+        """
+        Calculate shrinkage reduction for cast and feeder-neck voxels near risers.
+
+        THIS IS THE KEY MECHANISM for riser effectiveness:
+        - Voxels within feeding distance of a riser can receive liquid metal
+        - This liquid metal compensates for solidification shrinkage
+        - Result: dramatically reduced shrinkage/porosity near risers
+
+        The feeding distance is based on Pellini's rule and the material's
+        feeding_distance_multiplier property.
+
+        Returns:
+            Array of reduction multipliers (0.1-1.0, where lower = less shrinkage)
+        """
+        stage_start = time.perf_counter()
+        stage_timings = self.stage_timings
+        n_voxels = len(self.mesh.voxel_centers)
+        riser_feeding_reduction = np.ones(n_voxels, dtype=np.float32)
+        
+        riser_indices = self._get_riser_voxel_indices()
+        print(f"  DEBUG: Found {len(riser_indices)} riser voxels for feeding calculation")
+        
+        if len(riser_indices) == 0:
+            print(f"  DEBUG: No riser voxels found - voxel_part_types exists: {self.mesh.voxel_part_types is not None}")
+            if self.mesh.voxel_part_types is not None:
+                unique_types = np.unique(self.mesh.voxel_part_types)
+                print(f"  DEBUG: Unique part types: {unique_types}")
+            return riser_feeding_reduction
+        
+        # Calculate feeding distance based on material properties and section thickness
+        # Pellini's rule: feeding_distance = T * sqrt(thickness) where T is material constant
+        # For a riser, we use riser diameter as characteristic thickness
+        # Typical feeding distances: 4-8 inches for steel risers
+        
+        # Use material's feeding distance multiplier (WCB=3.0, CF8=2.5, C958=4.0)
+        base_feeding_distance = 6.0  # Base feeding distance in inches
+        material_factor = self.alloy.feeding_distance_multiplier / 3.0  # Normalize to WCB
+        feeding_distance = base_feeding_distance * material_factor
+        
+        print(f"  Riser feeding distance: {feeding_distance:.1f}\" (material factor: {material_factor:.2f})")
+        
+        # Reduction parameters
+        # At riser contact: 90% shrinkage reduction (only 10% remains)
+        # At feeding distance edge: no reduction
+        max_reduction = 0.10  # At riser contact, only 10% shrinkage
+        min_reduction = 1.0   # At edge, full shrinkage
+
+        if self.mesh.voxel_part_types is not None:
+            part_types = np.asarray(self.mesh.voxel_part_types, dtype=np.int32)
+            cast_mask = part_types == 0
+            riser_post_mask = part_types == 3
+        else:
+            cast_mask = np.ones(n_voxels, dtype=bool)
+            riser_post_mask = np.zeros(n_voxels, dtype=bool)
+
+        target_indices = np.where(cast_mask | riser_post_mask)[0]
+        connected_feeder_mask = self._get_connected_feeder_mask()
+        path_lengths = getattr(self, "feeding_path_lengths", None)
+        if path_lengths is not None:
+            path_lengths = np.asarray(path_lengths, dtype=np.float32)
+
+        if len(target_indices) > 0:
+            # Feeder necks still need protection, but not as aggressively as casting.
+            post_contact_reduction = 0.35
+
+            fed_cast_count = 0
+            fed_post_count = 0
+            if path_lengths is None:
+                riser_centers = self.mesh.voxel_centers[riser_indices]
+                riser_tree = cKDTree(riser_centers)
+                target_centers = self.mesh.voxel_centers[target_indices]
+                distances, _ = riser_tree.query(target_centers, k=1)
+            else:
+                distances = path_lengths[target_indices]
+
+            target_indices_arr = np.asarray(target_indices, dtype=np.int64)
+            distances_arr = np.asarray(distances, dtype=np.float32)
+            riser_post_targets = riser_post_mask[target_indices_arr]
+            connected_targets = connected_feeder_mask[target_indices_arr]
+            in_range = (
+                (distances_arr >= 0.0)
+                & (distances_arr < feeding_distance)
+            )
+
+            if np.any(in_range):
+                valid_targets = target_indices_arr[in_range]
+                valid_distances = distances_arr[in_range]
+                valid_post = riser_post_targets[in_range]
+                valid_connected = connected_targets[in_range]
+                normalized_dist = valid_distances / feeding_distance
+                base_contact = np.where(
+                    valid_post,
+                    post_contact_reduction,
+                    max_reduction,
+                )
+                reduction = base_contact + (min_reduction - base_contact) * (normalized_dist ** 2)
+
+                feeder_neck_mask = valid_post & (~valid_connected)
+                if np.any(feeder_neck_mask):
+                    reduction[feeder_neck_mask] = np.maximum(
+                        reduction[feeder_neck_mask],
+                        0.70,
+                    )
+
+                riser_feeding_reduction[valid_targets] = reduction
+                fed_post_count = int(np.count_nonzero(valid_post))
+                fed_cast_count = int(np.count_nonzero(~valid_post))
+
+            if fed_cast_count > 0 or fed_post_count > 0:
+                print(
+                    "  Riser feeding reduces shrinkage in "
+                    f"{fed_cast_count:,} casting voxels and {fed_post_count:,} feeder-neck voxels"
+                )
+                print(
+                    "  Feeding reduction range: "
+                    f"{max_reduction:.0%} at cast contact, {post_contact_reduction:.0%} at feeder-neck contact"
+                )
+
+        stage_timings["riser_feeding_reduction"] = (
+            stage_timings.get("riser_feeding_reduction", 0.0) + time.perf_counter() - stage_start
+        )
+        return riser_feeding_reduction
+    
+    def _calculate_ferrostatic_pressure(self) -> np.ndarray:
+        """
+        Calculate ferro-static pressure at each voxel based on metal head.
+
+        This is the DRIVING FORCE for feeding: P = ρ * g * h
+
+        Physics from Info.md:
+        - Ferro-static pressure pushes liquid metal from risers into casting
+        - It must overcome interdendritic pressure drop (friction)
+        - Porosity forms when P_ferro < ΔP_interdendritic
+
+        The pressure head is calculated as:
+        - Height of liquid metal above each voxel
+        - Risers provide additional head based on their height
+
+        Returns:
+            Array of ferro-static pressures in Pa
+        """
+        voxel_heights = self.mesh.voxel_centers[:, 2]
+
+        riser_indices = self._get_riser_voxel_indices()
+
+        if len(riser_indices) > 0:
+            max_riser_height = float(np.max(voxel_heights[riser_indices]))
+        else:
+            max_riser_height = float(np.max(voxel_heights))
+
+        g = 9.81  # m/s²
+        inches_to_meters = 0.0254
+
+        height_diff_meters = np.maximum(
+            0.0, (max_riser_height - voxel_heights) * inches_to_meters
+        )
+        ferrostatic_pressure = (
+            self.alloy.density_liquid * g * height_diff_meters
+        ).astype(np.float32)
+
+        return ferrostatic_pressure
+
+    def _should_capture_fraction_history(self) -> bool:
+        """Capture mush history when downstream analyses depend on freeze-off timing."""
+        return bool(
+            self.analysis_options.fraction_liquid
+            or self.analysis_options.hot_tear
+            or self.analysis_options.shrinkage
+            or self.analysis_options.feeding_path
+        )
+
+    def _estimate_feeding_reference_times(self) -> Optional[np.ndarray]:
+        """
+        Estimate when each voxel reaches the critical feeding cutoff.
+
+        The stored fraction-history snapshots are fraction-solid states. We use
+        the first snapshot that crosses the alloy coherency threshold as the
+        reference time for history-aware feeding analysis.
+        """
+        history = getattr(self, "fraction_liquid_history", None)
+        history_times = getattr(self, "fraction_liquid_times", None)
+        if not history or not history_times:
+            return None
+
+        critical_fs = float(getattr(self.alloy, "critical_fraction_solid", 1.0))
+        n_voxels = len(np.asarray(history[0], dtype=np.float32))
+        reference_times = np.full(n_voxels, float(history_times[-1]), dtype=np.float32)
+        assigned = np.zeros(n_voxels, dtype=bool)
+
+        for snapshot, time_value in zip(history, history_times):
+            snapshot_fs = np.asarray(snapshot, dtype=np.float32)
+            crossed = (~assigned) & (snapshot_fs >= critical_fs)
+            if np.any(crossed):
+                reference_times[crossed] = np.float32(time_value)
+                assigned[crossed] = True
+
+        return reference_times
+
+    def _ensure_feeding_path_result(
+        self,
+        fraction_solid: np.ndarray,
+    ) -> Optional["FeedingPathResult"]:
+        """
+        Build a riser-connected path estimate for Darcy feeding resistance.
+
+        Without risers, the solver still falls back to the legacy
+        distance-to-surface proxy.
+
+        Results are cached per run; repeated calls with the same fraction_solid
+        return the cached result to avoid duplicate FeedingPathAnalyzer.analyze()
+        calls.
+        """
+        if not FEEDING_PATH_AVAILABLE:
+            return None
+
+        riser_indices = self._get_riser_voxel_indices()
+        if len(riser_indices) == 0:
+            return None
+
+        cache_key = id(fraction_solid)
+        cached = getattr(self, "_feeding_path_cache", None)
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
+
+        analyzer = FeedingPathAnalyzer(self.mesh, self.alloy)
+        history = getattr(self, "fraction_liquid_history", None)
+        history_times = getattr(self, "fraction_liquid_times", None)
+        reference_times = self._estimate_feeding_reference_times()
+        result = analyzer.analyze(
+            np.asarray(riser_indices, dtype=np.int64),
+            np.ascontiguousarray(np.clip(fraction_solid, 0.0, 1.0), dtype=np.float64),
+            show_progress=False,
+            history=history,
+            history_times=history_times,
+            reference_times=reference_times,
+        )
+        self.feeding_path_result = result
+        self.feeding_quality = result.feeding_quality
+        self.feeding_blocked = result.blocked_voxels
+        self.feeding_open_fraction = result.history_open_fraction
+        self.feeding_latest_open_time = result.latest_open_time
+        self.feeding_path_lengths = result.path_length.astype(np.float32)
+        self._feeding_path_cache = (cache_key, result)
+        return result
+
+    def _get_effective_feeding_distance_field(
+        self,
+        fraction_solid: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """
+        Return the best available feeding distance metric for shrinkage/porosity.
+
+        Prefer traced riser path length through the current mush when available.
+        Fall back to the legacy surface-distance proxy otherwise.
+        """
+        path_lengths = getattr(self, "feeding_path_lengths", None)
+        if path_lengths is None and fraction_solid is not None:
+            ensure_feeding_path_result = getattr(self, "_ensure_feeding_path_result", None)
+            if callable(ensure_feeding_path_result):
+                result = ensure_feeding_path_result(fraction_solid)
+                if result is not None:
+                    path_lengths = result.path_length
+
+        if path_lengths is not None:
+            path_lengths = np.asarray(path_lengths, dtype=np.float32)
+            valid = path_lengths >= 0.0
+            if np.any(valid):
+                fallback = getattr(self, "surface_distances", None)
+                if fallback is None:
+                    fallback = self.feeding_distances
+                effective = np.asarray(fallback, dtype=np.float32).copy()
+                effective[valid] = path_lengths[valid]
+                return effective
+
+        fallback = getattr(self, "surface_distances", None)
+        if fallback is None:
+            fallback = self.feeding_distances
+        return np.asarray(fallback, dtype=np.float32)
+
+    def _estimate_feeder_neck_resistance_factors(self) -> np.ndarray:
+        """
+        Estimate added flow resistance at CAST/RISER_POST feeder-neck interfaces.
+
+        This is represented as a Darcy pressure-drop multiplier.
+        """
+        part_types = getattr(self.mesh, "voxel_part_types", None)
+        neighbors = getattr(self.mesh, "voxel_neighbors", None)
+        if part_types is None or neighbors is None:
+            return np.ones(len(self.mesh.voxel_centers), dtype=np.float32)
+
+        part_types_arr = np.asarray(part_types, dtype=np.int32)
+        neighbors_arr = np.asarray(neighbors, dtype=np.int32)
+        riser_post_mask = part_types_arr == 3
+
+        n_voxels = len(part_types_arr)
+        factors = np.ones(n_voxels, dtype=np.float32)
+        factors[riser_post_mask] = 1.20
+
+        cast_mask = part_types_arr == 0
+        cast_indices = np.flatnonzero(cast_mask)
+        if len(cast_indices) == 0:
+            return factors
+
+        valid_neighbors = np.where(neighbors_arr >= 0, neighbors_arr, 0)
+        neighbor_is_post = riser_post_mask[valid_neighbors]
+        any_post_neighbor = np.any(neighbor_is_post, axis=1)
+        factors[cast_indices[any_post_neighbor[cast_indices]]] = 1.35
+
+        return factors
+    
+    def _calculate_feeding_effectiveness(self) -> np.ndarray:
+        """
+        Calculate feeding effectiveness based on ferro-static pressure vs
+        interdendritic pressure drop (Darcy's Law).
+
+        This implements the physics from Info.md:
+        - P_ferro = ρ * g * h (driving force from riser height)
+        - ΔP = (μ * L * v) / K (resistance from mushy zone, Darcy's Law)
+        - Feeding is effective when P_ferro > ΔP
+
+        The effectiveness ratio determines shrinkage reduction:
+        - High ratio (P_ferro >> ΔP): Good feeding, low shrinkage
+        - Low ratio (P_ferro ≈ ΔP): Marginal feeding, some shrinkage
+        - Very low (P_ferro < ΔP): Feeding blocked, high shrinkage
+
+        Returns:
+            Array of feeding effectiveness (0-1), where 1 = fully effective
+        """
+        stage_start = time.perf_counter()
+        stage_timings = getattr(self, "stage_timings", {})
+        n_voxels = len(self.mesh.voxel_centers)
+        feeding_effectiveness = np.ones(n_voxels, dtype=np.float32)
+        darcy_margin = np.ones(n_voxels, dtype=np.float32)
+
+        ferrostatic_pressure = self._calculate_ferrostatic_pressure()
+
+        critical_fs = self.alloy.critical_fraction_solid
+        transient_fraction_solid = getattr(self, "feeding_fraction_solid", None)
+        connected_feeder_mask = self._get_connected_feeder_mask()
+        feeding_path_result = self._ensure_feeding_path_result(
+            transient_fraction_solid
+        ) if transient_fraction_solid is not None else None
+        effective_feeding_distances = SolidificationEngine._get_effective_feeding_distance_field(
+            self,
+            transient_fraction_solid,
+        )
+        feeder_neck_factors = np.asarray(
+            self._estimate_feeder_neck_resistance_factors(), dtype=np.float32
+        )
+        local_temperatures = getattr(self, "_thermal_latest_temperatures", None)
+        local_cooling_rates = getattr(self, "cooling_rates", None)
+        local_sdas = getattr(self, "sdas", None)
+
+        base_velocity = 0.0005  # m/s
+
+        print(f"  Calculating feeding effectiveness (P_ferro vs ΔP_darcy)...")
+        print(f"    Material: {self.alloy.name}")
+        print(f"    Critical fraction solid: {critical_fs:.2f}")
+
+        path_length_arr = None
+        history_open_arr = None
+        if feeding_path_result is not None:
+            path_length_arr = np.asarray(
+                feeding_path_result.path_length, dtype=np.float32
+            )
+            hof = getattr(feeding_path_result, "history_open_fraction", None)
+            if hof is not None:
+                history_open_arr = np.asarray(hof, dtype=np.float32)
+
+        fraction_solid_arr = np.where(
+            transient_fraction_solid is not None,
+            np.where(np.isnan(transient_fraction_solid), self.mesh.voxel_states, transient_fraction_solid),
+            self.mesh.voxel_states,
+        )
+        fraction_solid_arr = np.clip(fraction_solid_arr, 0.0, 1.0)
+
+        feeding_dist_arr = effective_feeding_distances.copy()
+        if path_length_arr is not None:
+            use_path = path_length_arr >= 0.0
+            np.copyto(feeding_dist_arr, path_length_arr, where=use_path)
+            blocked_mask = (~use_path) & (feeding_dist_arr >= 0.001) & (~connected_feeder_mask)
+            feeding_effectiveness[blocked_mask] = 0.0
+            darcy_margin[blocked_mask] = -1.0
+
+        surface_mask = feeding_dist_arr < 0.001
+        connected_mask = connected_feeder_mask
+
+        fully_fed_mask = surface_mask | connected_mask
+        fully_fed_count = int(np.count_nonzero(fully_fed_mask))
+        feeding_effectiveness[fully_fed_mask] = 1.0
+        darcy_margin[fully_fed_mask] = 1.0
+
+        process_mask = ~fully_fed_mask
+
+        if np.any(process_mask):
+            idx_arr = np.where(process_mask)[0]
+            fs_proc = fraction_solid_arr[idx_arr]
+            dist_proc = feeding_dist_arr[idx_arr]
+
+            if local_temperatures is not None:
+                local_temp_arr = local_temperatures[idx_arr]
+            else:
+                local_temp_arr = self.alloy.liquidus_temp - (
+                    fs_proc * max(self.alloy.freezing_range, 1.0)
+                )
+
+            vis_arr = np.array(
+                [
+                    self.alloy.get_dynamic_viscosity(temperature=lt, fraction_solid=fs)
+                    for lt, fs in zip(local_temp_arr, fs_proc)
+                ],
+                dtype=np.float64,
+            )
+
+            if local_sdas is not None:
+                sdas_arr = local_sdas[idx_arr]
+            else:
+                sdas_arr = np.array(
+                    [
+                        self.alloy.get_sdas_from_cooling_rate(
+                            float(max(local_cooling_rates[i], 1e-4))
+                            if local_cooling_rates is not None
+                            else None
+                        )
+                        for i in idx_arr
+                    ],
+                    dtype=np.float64,
+                )
+
+            perm_arr = np.array(
+                [
+                    self.alloy.get_permeability(
+                        fs,
+                        sdas_um=float(s),
+                        cooling_rate=(
+                            float(max(local_cooling_rates[i], 1e-4))
+                            if local_cooling_rates is not None
+                            else None
+                        ),
+                    )
+                    for i, fs, s in zip(idx_arr, fs_proc, sdas_arr)
+                ],
+                dtype=np.float64,
+            )
+
+            dist_m_arr = dist_proc * 0.0254
+            pd_arr = np.array(
+                [
+                    (
+                        self.alloy.get_pressure_drop(
+                            fs,
+                            base_velocity,
+                            float(vis_arr[j]),
+                            float(dist_m_arr[j]),
+                            sdas_um=float(sdas_arr[j]),
+                            cooling_rate=(
+                                float(max(local_cooling_rates[idx_arr[j]], 1e-4))
+                                if local_cooling_rates is not None
+                                else None
+                            ),
+                        )
+                        * float(feeder_neck_factors[idx_arr[j]])
+                    )
+                    if perm_arr[j] > 1e-20
+                    else 1e10
+                    for j, fs in enumerate(fs_proc)
+                ],
+                dtype=np.float64,
+            )
+
+            p_ferro_proc = ferrostatic_pressure[idx_arr]
+
+            pressure_ratio = np.where(pd_arr > 0, p_ferro_proc / pd_arr, np.inf)
+
+            darcy_margin[idx_arr] = np.clip(
+                (p_ferro_proc - pd_arr) / np.maximum(p_ferro_proc + pd_arr, 1e-9),
+                -1.0,
+                1.0,
+            ).astype(np.float32)
+
+            feeding_eff_proc = np.ones(len(idx_arr), dtype=np.float32)
+            gt2 = pressure_ratio >= 2.0
+            gte1_lt2 = (pressure_ratio >= 1.0) & (pressure_ratio < 2.0)
+            gte05_lt1 = (pressure_ratio >= 0.5) & (pressure_ratio < 1.0)
+            lt05 = pressure_ratio < 0.5
+
+            feeding_eff_proc[gt2] = 1.0
+            feeding_eff_proc[gte1_lt2] = (0.5 + 0.5 * (pressure_ratio[gte1_lt2] - 1.0)).astype(np.float32)
+            feeding_eff_proc[gte05_lt1] = pressure_ratio[gte05_lt1].astype(np.float32)
+            feeding_eff_proc[lt05] = np.clip(pressure_ratio[lt05] * 2.0, 0.1, 1.0).astype(np.float32)
+
+            if history_open_arr is not None:
+                open_frac = history_open_arr[idx_arr]
+                can_scale = (dist_m_arr >= 0.001) & (~connected_feeder_mask[idx_arr])
+                feeding_eff_proc[can_scale] *= (0.4 + 0.6 * open_frac[can_scale]).astype(np.float32)
+                low_open = can_scale & (open_frac < 0.15) & (feeding_eff_proc < 0.5)
+                feeding_eff_proc[low_open] = np.minimum(feeding_eff_proc[low_open], 0.15).astype(np.float32)
+                darcy_margin[idx_arr[low_open]] = np.minimum(
+                    darcy_margin[idx_arr[low_open]], -0.5
+                ).astype(np.float32)
+
+            feeding_effectiveness[idx_arr] = feeding_eff_proc.astype(np.float32)
+
+            partially_fed_count = int(np.count_nonzero(~gt2 & ~surface_mask[idx_arr]))
+            blocked_count = int(np.count_nonzero(lt05))
+
+            feed_hist, _ = np.histogram(feeding_effectiveness, bins=[0.0, 0.25, 0.5, 0.75, 1.01])
+            print(f"    Fully fed voxels: {fully_fed_count:,}")
+            print(f"    Partially fed voxels: {partially_fed_count:,}")
+            print(f"    Blocked voxels: {blocked_count:,}")
+
+            print(
+                f"    Ferro-static pressure range: {np.min(ferrostatic_pressure):.0f} - "
+                f"{np.max(ferrostatic_pressure):.0f} Pa"
+            )
+            positive_dist = feeding_dist_arr[feeding_dist_arr > 0.0]
+            if len(positive_dist) > 0:
+                print(
+                    f"    Path length range used: {np.min(positive_dist):.3f} - "
+                    f"{np.max(positive_dist):.3f} in"
+                )
+            positive_perm = perm_arr[perm_arr > 0.0]
+            if len(positive_perm) > 0:
+                print(
+                    f"    Permeability range: {np.min(positive_perm):.3e} - "
+                    f"{np.max(positive_perm):.3e} m^2"
+                )
+            positive_drop = pd_arr[pd_arr > 0.0]
+            if len(positive_drop) > 0:
+                print(
+                    f"    Darcy pressure-drop range: {np.min(positive_drop):.0f} - "
+                    f"{np.max(positive_drop):.0f} Pa"
+                )
+            positive_visc = vis_arr[vis_arr > 0.0]
+            if len(positive_visc) > 0:
+                print(
+                    f"    Dynamic viscosity range: {np.min(positive_visc):.4f} - "
+                    f"{np.max(positive_visc):.4f} Pa·s"
+                )
+            positive_sdas = sdas_arr[sdas_arr > 0.0]
+            if len(positive_sdas) > 0:
+                print(
+                    f"    SDAS range used: {np.min(positive_sdas):.1f} - "
+                    f"{np.max(positive_sdas):.1f} μm"
+                )
+            print(
+                "    Feeder-neck resistance factor range: "
+                f"{np.min(feeder_neck_factors):.2f} - {np.max(feeder_neck_factors):.2f}"
+            )
+            print(
+                "    Fraction-solid at feeding check: "
+                f"min={np.min(fs_proc):.2f}, mean={np.mean(fs_proc):.2f}, max={np.max(fs_proc):.2f}"
+            )
+            print(
+                "    Feeding effectiveness bins [0-0.25, 0.25-0.5, 0.5-0.75, 0.75-1.0]: "
+                f"{feed_hist.tolist()}"
+            )
+            if history_open_arr is not None:
+                print(
+                    "    Open-path history fraction: "
+                    f"min={np.min(history_open_arr):.2f}, "
+                    f"mean={np.mean(history_open_arr):.2f}, "
+                    f"max={np.max(history_open_arr):.2f}"
+                )
+            print(
+                "    Darcy margin range: "
+                f"{np.min(darcy_margin):.2f} - {np.max(darcy_margin):.2f}"
+            )
+
+        stage_timings["feeding_effectiveness"] = (
+            stage_timings.get("feeding_effectiveness", 0.0) + time.perf_counter() - stage_start
+        )
+
+        self.feeding_effectiveness = feeding_effectiveness.astype(np.float32)
+        self.feeding_darcy_margin = darcy_margin.astype(np.float32)
+        
+        return feeding_effectiveness
+    
+    def _update_solidification_with_part_types(self, 
+                                               chill_boost: np.ndarray,
+                                               riser_slowdown: np.ndarray,
+                                               material_factor: float = 1.0) -> np.ndarray:
+        """
+        Update solidification front accounting for chill, riser, and material effects.
+        
+        Uses the enhanced feeding connectivity function that traces RISER connectivity
+        through part_types to ensure voxels at riser post junctions stay liquid
+        longer and properly feed into the risers (directional solidification).
+        
+        Args:
+            chill_boost: Multiplier for chill acceleration effect
+            riser_slowdown: Multiplier for riser exothermic effect
+            material_factor: Material-specific solidification rate multiplier
+                            (based on thermal diffusivity and freezing range)
+        
+        Returns:
+            Updated voxel states
+        """
+        heights = self._get_normalized_heights()
+        
+        # Ensure arrays are contiguous for JIT
+        voxel_states = np.ascontiguousarray(self.mesh.voxel_states, dtype=np.float32)
+        neighbors = np.ascontiguousarray(self.mesh.voxel_neighbors, dtype=np.int32)
+        moduli = np.ascontiguousarray(self.mesh.voxel_moduli, dtype=np.float32)
+        heights = np.ascontiguousarray(heights, dtype=np.float32)
+        chill_boost = np.ascontiguousarray(chill_boost, dtype=np.float32)
+        riser_slowdown = np.ascontiguousarray(riser_slowdown, dtype=np.float32)
+        
+        # Get part types array for feeding connectivity detection
+        # Use the new enhanced function if part_types is available
+        if self.mesh.voxel_part_types is not None:
+            part_types = np.ascontiguousarray(self.mesh.voxel_part_types, dtype=np.int32)
+            
+            # Use the ENHANCED feeding connectivity function
+            # This traces RISER voxel connectivity through neighbors to establish
+            # proper directional solidification toward risers
+            new_states = update_solidification_with_feeding_connectivity(
+                voxel_states, neighbors, moduli, heights,
+                chill_boost, riser_slowdown, part_types, self.time_step,
+                np.float32(material_factor)
+            )
+        else:
+            # Fallback to original function if no part types available
+            new_states = update_solidification_with_part_types_parallel(
+                voxel_states, neighbors, moduli, heights,
+                chill_boost, riser_slowdown, self.time_step,
+                np.float32(material_factor)
+            )
+        
+        return new_states
+
+    def _estimate_local_section_size(self) -> np.ndarray:
+        """
+        Estimate a local section-size proxy from voxel modulus.
+
+        The engine uses ``thickness ~= 2 * modulus`` as a rough section-size
+        estimate. This is acceptable for compact prismatic regions and useful
+        for relative ranking, but it is shape-dependent and should not be read
+        as a literal wall thickness for complex junctions or ribs.
+        """
+        return self.mesh.voxel_moduli * 2.0
+
+    def _compute_shrinkage_base_risk(
+        self,
+        valid_indices: np.ndarray,
+        normalized_heights: np.ndarray,
+        local_section_size: np.ndarray,
+        riser_mask: np.ndarray,
+        riser_post_mask: np.ndarray,
+    ) -> Tuple[
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+    ]:
+        """
+        Compute the heuristic base shrinkage severity before feeding modifiers.
+
+        This is a weighted engineering score built from isolation, geometry, and
+        time-sequence terms. Feeding, chill, and riser-path corrections are
+        applied later as separate factors.
+        """
+        heights = normalized_heights[valid_indices]
+        moduli = self.mesh.voxel_moduli[valid_indices]
+        thicknesses = local_section_size[valid_indices]
+        times = self.solidification_times[valid_indices]
+        is_riser = riser_mask[valid_indices]
+        is_riser_post = riser_post_mask[valid_indices]
+
+        height_factor = heights ** 2.0
+        height_factor = np.where(is_riser_post, heights ** 1.2, height_factor)
+        interior_factor = np.minimum(moduli / 1.5, 1.0)
+        thickness_factor = np.clip((thicknesses - 0.5) / 1.5, 0.0, 1.0)
+        thickness_factor = np.where(
+            is_riser,
+            np.clip((thicknesses - 0.5) / 1.0, 0.0, 1.0),
+            thickness_factor,
+        )
+        thickness_factor = np.where(
+            is_riser_post,
+            np.clip((thicknesses - 0.5) / 1.2, 0.0, 1.0),
+            thickness_factor,
+        )
+        time_factor = np.where(times > 0, np.minimum(times / 800.0, 1.0), 0.0)
+        # Keep stronger late-freeze weighting in feeders so riser pipe behavior
+        # remains visible instead of being over-suppressed.
+        time_factor = np.where(is_riser, time_factor * 0.85, time_factor)
+        time_factor = np.where(is_riser_post, time_factor * 0.65, time_factor)
+
+        if self.hotspot_intensity is not None:
+            isolation_factor = self.hotspot_intensity[valid_indices]
+        else:
+            isolation_factor = np.zeros(len(valid_indices), dtype=np.float32)
+
+        base_risk = (
+            0.40 * isolation_factor +
+            0.20 * height_factor +
+            0.20 * interior_factor +
+            0.15 * thickness_factor +
+            0.05 * time_factor
+        )
+        base_risk = base_risk ** 1.5
+        return (
+            base_risk,
+            heights,
+            moduli,
+            thicknesses,
+            times,
+            is_riser,
+            is_riser_post,
+            height_factor,
+            interior_factor,
+            thickness_factor,
+            time_factor,
+        )
+
+    def _compute_riser_pipe_modifier(
+        self,
+        valid_indices: np.ndarray,
+        is_riser: np.ndarray,
+        riser_centerlines: Dict[int, Tuple[float, float, float, float, float]],
+    ) -> np.ndarray:
+        """
+        Concentrate riser shrinkage into a center-top pipe region.
+
+        Outside the pipe core, riser shrinkage is intentionally suppressed
+        because the riser acts as a feeder reservoir rather than a uniformly
+        shrinking casting section.
+        """
+        n = len(valid_indices)
+        riser_modifier = np.ones(n, dtype=np.float32)
+
+        riser_mask = is_riser
+        if not np.any(riser_mask):
+            return riser_modifier
+
+        riser_idx_arr = valid_indices[riser_mask]
+        centers = self.mesh.voxel_centers[riser_idx_arr]
+
+        comp_ids = np.full(len(self.mesh.voxel_centers), -1, dtype=np.int32)
+        for comp_id, riser_ids in enumerate(self._group_risers_by_component()):
+            comp_ids[riser_ids] = comp_id
+
+        local_comp_ids = comp_ids[riser_idx_arr]
+
+        unique_comps = np.unique(local_comp_ids)
+        comp_center_x = np.zeros(len(unique_comps), dtype=np.float32)
+        comp_center_y = np.zeros(len(unique_comps), dtype=np.float32)
+        comp_radius = np.zeros(len(unique_comps), dtype=np.float32)
+        comp_z_min = np.zeros(len(unique_comps), dtype=np.float32)
+        comp_z_max = np.zeros(len(unique_comps), dtype=np.float32)
+
+        for k, cid in enumerate(unique_comps):
+            center_x, center_y, radius, z_min, z_max = riser_centerlines[riser_idx_arr[local_comp_ids == cid][0]]
+            comp_center_x[k] = center_x
+            comp_center_y[k] = center_y
+            comp_radius[k] = radius
+            comp_z_min[k] = z_min
+            comp_z_max[k] = z_max
+
+        cidx = np.searchsorted(unique_comps, local_comp_ids)
+        cx = comp_center_x[cidx]
+        cy = comp_center_y[cidx]
+        cr = comp_radius[cidx]
+        cz_min = comp_z_min[cidx]
+        cz_max = comp_z_max[cidx]
+
+        radial_dist = np.sqrt(
+            (centers[:, 0] - cx) ** 2 + (centers[:, 1] - cy) ** 2
+        )
+        normalized_radial = np.minimum(1.0, radial_dist / np.maximum(cr, 0.1))
+
+        z_range = np.maximum(cz_max - cz_min, 0.1)
+        riser_heights = np.clip((centers[:, 2] - cz_min) / z_range, 0.0, 1.0)
+
+        pipe_radius_fraction = 0.40
+        pipe_start_height = 0.25
+
+        radial_pipe_factor = np.where(
+            normalized_radial < pipe_radius_fraction,
+            1.0,
+            np.where(
+                normalized_radial < pipe_radius_fraction * 2,
+                1.0 - np.sqrt(
+                    np.clip(
+                        (normalized_radial - pipe_radius_fraction) / pipe_radius_fraction,
+                        0.0,
+                        1.0,
+                    )
+                ),
+                0.15,
+            ),
+        )
+
+        height_pipe_factor = np.where(
+            riser_heights > pipe_start_height,
+            (riser_heights - pipe_start_height) / (1.0 - pipe_start_height),
+            0.15,
+        )
+
+        pipe_factor = radial_pipe_factor * height_pipe_factor
+        riser_modifier[riser_mask] = (0.18 + pipe_factor * 1.32).astype(np.float32)
+
+        return riser_modifier
+
+    def _calculate_shrinkage_evidence(
+        self,
+        feeding_effectiveness: Optional[np.ndarray] = None,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Combine directional, isolation, and feed-loss signals for shrinkage.
+
+        The shrinkage base score intentionally remains heuristic, but CAST and
+        RISER_POST voxels should only become visible when the thermal/feeding
+        evidence supports a real defect mechanism.
+        """
+        mesh = getattr(self, "mesh", None)
+        voxel_centers = getattr(mesh, "voxel_centers", None) if mesh is not None else None
+        if voxel_centers is not None:
+            n_voxels = len(voxel_centers)
+        elif feeding_effectiveness is not None:
+            n_voxels = len(feeding_effectiveness)
+        elif getattr(self, "shrinkage_risk", None) is not None:
+            n_voxels = len(self.shrinkage_risk)
+        elif getattr(self, "shrinkage_probability", None) is not None:
+            n_voxels = len(self.shrinkage_probability)
+        else:
+            n_voxels = 0
+
+        directional = np.zeros(n_voxels, dtype=np.float32)
+        niyama_severity = getattr(self, "niyama_severity", None)
+        if niyama_severity is not None:
+            directional = np.clip(np.asarray(niyama_severity, dtype=np.float32), 0.0, 1.0)
+        else:
+            niyama_values = getattr(self, "niyama_values", None)
+            alloy = getattr(self, "alloy", None)
+            if niyama_values is not None and alloy is not None:
+                alloy_key = alloy.name.split()[0]
+                threshold = float(
+                    getattr(alloy, "niyama_threshold", NIYAMA_THRESHOLDS.get(alloy_key, 1.0))
+                )
+                directional = np.clip(
+                    1.0 - (np.asarray(niyama_values, dtype=np.float32) / max(threshold, 1e-6)),
+                    0.0,
+                    1.0,
+                )
+
+        feed_loss = np.zeros(n_voxels, dtype=np.float32)
+        if feeding_effectiveness is None:
+            feeding_effectiveness = getattr(self, "feeding_effectiveness", None)
+        if feeding_effectiveness is not None:
+            feed_loss = np.maximum(
+                feed_loss,
+                1.0 - np.clip(np.asarray(feeding_effectiveness, dtype=np.float32), 0.0, 1.0),
+            )
+
+        feeding_quality = getattr(self, "feeding_quality", None)
+        if feeding_quality is not None:
+            feed_loss = np.maximum(
+                feed_loss,
+                1.0 - np.clip(np.asarray(feeding_quality, dtype=np.float32), 0.0, 1.0),
+            )
+
+        open_fraction = getattr(self, "feeding_open_fraction", None)
+        if open_fraction is not None:
+            feed_loss = np.maximum(
+                feed_loss,
+                1.0 - np.clip(np.asarray(open_fraction, dtype=np.float32), 0.0, 1.0),
+            )
+
+        feeding_blocked = getattr(self, "feeding_blocked", None)
+        blocked_mask = np.zeros(n_voxels, dtype=bool)
+        if feeding_blocked is not None:
+            blocked_mask = np.asarray(feeding_blocked, dtype=bool)
+            feed_loss = np.where(blocked_mask, np.maximum(feed_loss, 0.95), feed_loss)
+
+        darcy_margin = getattr(self, "feeding_darcy_margin", None)
+        if darcy_margin is not None:
+            darcy_loss = np.clip(
+                (1.0 - np.asarray(darcy_margin, dtype=np.float32)) * 0.5,
+                0.0,
+                1.0,
+            )
+            feed_loss = np.maximum(feed_loss, darcy_loss)
+
+        path_health = np.zeros(n_voxels, dtype=np.float32)
+        if feeding_quality is not None:
+            path_health = np.maximum(
+                path_health,
+                np.clip(np.asarray(feeding_quality, dtype=np.float32), 0.0, 1.0),
+            )
+        if open_fraction is not None:
+            path_health = np.maximum(
+                path_health,
+                np.clip(np.asarray(open_fraction, dtype=np.float32), 0.0, 1.0),
+            )
+        healthy_path = (path_health >= 0.85) & (~blocked_mask)
+        feed_loss = np.where(
+            healthy_path,
+            np.minimum(feed_loss, 0.35),
+            feed_loss,
+        )
+
+        try:
+            isolation = self._calculate_isolation_score()
+        except Exception:
+            isolation = np.zeros(n_voxels, dtype=np.float32)
+        isolation = np.clip(np.asarray(isolation, dtype=np.float32), 0.0, 1.0)
+
+        solid_times = np.asarray(getattr(self, "solidification_times", np.zeros(n_voxels)), dtype=np.float32)
+        finite_times = solid_times[np.isfinite(solid_times) & (solid_times > 0.0)]
+        late_factor = np.zeros(n_voxels, dtype=np.float32)
+        if len(finite_times) > 1:
+            p50 = float(np.percentile(finite_times, 50.0))
+            p95 = float(np.percentile(finite_times, 95.0))
+            late_factor = np.clip((solid_times - p50) / max(p95 - p50, 1e-6), 0.0, 1.0)
+
+        weighted = (
+            (0.40 * directional)
+            + (0.35 * feed_loss)
+            + (0.25 * isolation)
+        ).astype(np.float32)
+        trigger = np.maximum.reduce([directional, feed_loss, isolation]).astype(np.float32)
+        evidence = np.maximum(weighted, late_factor * trigger)
+
+        connected_feeder_fn = getattr(self, "_get_connected_feeder_mask", None)
+        if callable(connected_feeder_fn):
+            connected_feeder_mask = np.asarray(connected_feeder_fn(), dtype=bool)
+        else:
+            connected_feeder_mask = np.zeros(n_voxels, dtype=bool)
+
+        if open_fraction is not None:
+            open_ok = np.asarray(open_fraction, dtype=np.float32) >= 0.65
+        else:
+            open_ok = np.ones(n_voxels, dtype=bool)
+        if feeding_quality is not None:
+            quality_ok = np.asarray(feeding_quality, dtype=np.float32) >= 0.50
+        else:
+            quality_ok = np.ones(n_voxels, dtype=bool)
+
+        healthy_connected_feeder = (
+            connected_feeder_mask
+            & (~blocked_mask)
+            & open_ok
+            & quality_ok
+            & (feed_loss < 0.65)
+        )
+
+        return (
+            np.clip(evidence, 0.0, 1.0).astype(np.float32),
+            np.clip(feed_loss, 0.0, 1.0).astype(np.float32),
+            healthy_connected_feeder,
+        )
+    
+    def _calculate_shrinkage(self):
+        """
+        Calculate heuristic shrinkage risk for each voxel.
+
+        The primary output is ``self.shrinkage_risk``: a bounded 0-1
+        engineering risk field. ``self.shrinkage_probability`` remains as a
+        legacy public alias for compatibility with existing UI/export code.
+
+        The risk combines:
+        - heuristic base severity from isolation, section size, and height
+        - riser pipe shaping inside riser volumes
+        - chill and riser feeding reductions
+        - Darcy-style feeding penalty from the transient mush state
+        
+        IMPORTANT: Risers ARE included in shrinkage analysis because:
+        1. Risers are designed to contain shrinkage (riser "pipe" or cavity)
+        2. Showing shrinkage in risers validates they're working properly
+        3. Risers solidify LAST so they accumulate the most shrinkage
+        
+        Chill voxels are excluded since they are external cooling devices.
+        
+        CHILL EFFECT ON SHRINKAGE:
+        Chills promote directional solidification - areas near chills solidify FIRST
+        while being fed by liquid metal from the interior. This REDUCES shrinkage
+        near chills. The chill_reduction factor decreases shrinkage probability
+        based on proximity to chills.
+        """
+        n_voxels = len(self.mesh.voxel_centers)
+        self.shrinkage_risk = np.zeros(n_voxels, dtype=np.float32)
+        self.shrinkage_probability = self.shrinkage_risk
+        stage_timings = self.stage_timings
+        
+        # Use a local section-size proxy instead of claiming an exact thickness.
+        local_thickness = self._estimate_local_section_size()
+        
+        # Get normalized heights (0 = bottom, 1 = top)
+        normalized_heights = self._get_normalized_heights()
+        
+        # Get part type indices
+        riser_indices = self._get_riser_voxel_indices()
+        riser_post_indices = self._get_riser_post_voxel_indices()
+        chill_indices = self._get_chill_voxel_indices()
+        connected_feeder_mask = self._get_connected_feeder_mask()
+        
+        # Calculate chill proximity reduction factor
+        # Voxels near chills get REDUCED shrinkage because directional solidification
+        # ensures they solidify while liquid feed metal is still available
+        chill_reduction = self._calculate_chill_shrinkage_reduction()
+        
+        # Calculate riser feeding reduction factor
+        # Voxels within feeding distance of a riser get REDUCED shrinkage because
+        # the riser feeds them liquid metal to compensate for shrinkage
+        self._ensure_feeding_path_result(self.feeding_fraction_solid)
+        riser_feeding_reduction = self._calculate_riser_feeding_reduction()
+        
+        # NEW: Calculate feeding effectiveness based on ferro-static pressure
+        # vs interdendritic pressure drop (Darcy's Law)
+        # This implements the physics from Info.md:
+        # - P_ferro = ρgh (driving force) must overcome ΔP = μLv/K (friction)
+        # - When P_ferro < ΔP, feeding is blocked and porosity forms
+        feeding_effectiveness = self._calculate_feeding_effectiveness()
+        
+        # INTEGRATION: Use feeding path blocked data when available
+        # The feeding path analysis traces actual connectivity from risers
+        # Blocked voxels have NO feed path regardless of pressure calculations
+        if self.feeding_blocked is not None:
+            blocked_count = np.sum(self.feeding_blocked)
+            if blocked_count > 0:
+                print(f"  Using feeding path connectivity: {blocked_count:,} blocked voxels")
+                # Blocked voxels have ZERO feeding effectiveness
+                feeding_effectiveness = np.where(
+                    self.feeding_blocked & ~connected_feeder_mask,
+                    0.1,  # Minimum effectiveness = blocked
+                    feeding_effectiveness
+                )
+            else:
+                print(f"  Feeding paths: all voxels have feed path connectivity")
+
+        shrinkage_evidence, feed_loss_evidence, healthy_connected_feeder = (
+            self._calculate_shrinkage_evidence(feeding_effectiveness)
+        )
+        
+        # Only exclude chills (external cooling devices)
+        # Risers ARE included - they should show shrinkage (riser pipe)
+        chill_set = set(chill_indices)
+        print(f"  Including {len(riser_indices):,} riser voxels in shrinkage analysis (risers contain shrinkage)")
+        print(f"  Excluding {len(chill_set):,} chill voxels (external cooling devices)")
+        if len(chill_indices) > 0:
+            min_reduction = np.min(chill_reduction)
+            affected_by_chill = np.sum(chill_reduction < 1.0)
+            print(f"  Chill shrinkage reduction: up to {(1.0-min_reduction)*100:.0f}% near chill contact")
+            print(f"  Voxels with reduced shrinkage from chills: {affected_by_chill:,}")
+        
+        # Debug: Check solidification times
+        print(f"  Solidification time range: {np.min(self.solidification_times):.1f} - {np.max(self.solidification_times):.1f}s")
+        print(f"  Mean solidification time: {np.mean(self.solidification_times):.1f}s")
+        print(f"  Voxels with time > 0: {np.sum(self.solidification_times > 0):,}")
+        
+        # VECTORIZED shrinkage calculation for speed
+        n_workers = hardware.get_optimal_thread_count('compute')
+        print(f"  Computing shrinkage probability (vectorized + multiprocessing/JIT)...")
+        
+        # Create exclusion mask - only exclude chills
+        exclude_mask = np.zeros(n_voxels, dtype=bool)
+        for idx in chill_set:
+            exclude_mask[idx] = True
+        include_mask = ~exclude_mask
+        
+        # Create riser mask for boosted shrinkage
+        riser_mask = np.zeros(n_voxels, dtype=bool)
+        for idx in riser_indices:
+            riser_mask[idx] = True
+        riser_post_mask = np.zeros(n_voxels, dtype=bool)
+        for idx in riser_post_indices:
+            riser_post_mask[idx] = True
+        
+        # Calculate riser centerlines for inverted cone pattern
+        # Each riser voxel maps to its riser's centerline geometry
+        riser_centerlines = self._calculate_riser_centerlines()
+        print(f"  Riser centerlines calculated for {len(set(riser_centerlines.values())):,} risers")
+        
+        # Create filter masks - different thresholds for risers vs casting
+        # Risers have simpler geometry so use lower thresholds
+        # UPDATED: Relaxed casting thickness threshold (was 1.5", now 0.5") to catch internal porosity
+        thick_enough_cast = local_thickness >= 0.5
+        thick_enough_riser = local_thickness >= 0.5  # Lower threshold for risers
+        interior_enough_cast = self.mesh.voxel_moduli >= 0.3
+        interior_enough_riser = self.mesh.voxel_moduli >= 0.2  # Lower threshold for risers
+        
+        # Valid mask: casting uses strict thresholds, feeders use relaxed thresholds
+        valid_cast = include_mask & ~riser_mask & ~riser_post_mask & thick_enough_cast & interior_enough_cast
+        valid_riser = include_mask & riser_mask & thick_enough_riser & interior_enough_riser
+        valid_post = include_mask & riser_post_mask & thick_enough_riser & interior_enough_riser
+        valid_mask = valid_cast | valid_riser | valid_post
+        
+        # Get indices of valid voxels
+        valid_indices = np.where(valid_mask)[0]
+        
+        if len(valid_indices) > 0:
+            (
+                base_risk,
+                heights,
+                moduli,
+                thicknesses,
+                times,
+                is_riser,
+                is_riser_post,
+                height_factor,
+                interior_factor,
+                thickness_factor,
+                time_factor,
+            ) = self._compute_shrinkage_base_risk(
+                valid_indices,
+                normalized_heights,
+                local_thickness,
+                riser_mask,
+                riser_post_mask,
+            )
+            riser_modifier = self._compute_riser_pipe_modifier(
+                valid_indices,
+                is_riser,
+                riser_centerlines,
+            )
+            base_risk = base_risk * riser_modifier
+            connected_valid_feeders = healthy_connected_feeder[valid_indices]
+            feeder_neck_modifier = np.where(
+                is_riser_post & connected_valid_feeders,
+                0.35,
+                np.where(is_riser_post, 0.75, 1.0),
+            )
+            base_risk = base_risk * feeder_neck_modifier
+            
+            # Scale by material shrinkage AND feeding characteristics
+            # Materials with higher feeding_distance_multiplier have better fluidity
+            # and can feed shrinkage over longer distances -> less porosity
+            shrinkage_scale = self.alloy.volumetric_shrinkage / 6.0
+            
+            # Feeding efficiency: better feeding = less isolated shrinkage
+            # WCB baseline = 3.0, CF8 = 2.5 (worse), C958 = 4.0 (better)
+            feeding_efficiency = 3.0 / self.alloy.feeding_distance_multiplier
+            
+            scaled_risk = base_risk * shrinkage_scale * feeding_efficiency
+            
+            # Apply chill shrinkage reduction (directional solidification benefit)
+            # Voxels near chills solidify FIRST while feed path is open -> less shrinkage
+            chill_reduction_factors = chill_reduction[valid_indices]
+            
+            # Apply riser feeding reduction (CRITICAL for proper simulation)
+            # Voxels within feeding distance of a riser have REDUCED shrinkage
+            # because the riser feeds them liquid metal to compensate
+            riser_feeding_factors = riser_feeding_reduction[valid_indices]
+            
+            # Apply feeding effectiveness based on ferro-static pressure vs Darcy pressure drop
+            # This is the physics-based model from Info.md:
+            # - Low effectiveness means P_ferro < ΔP (feeding blocked)
+            # - High effectiveness means P_ferro >> ΔP (good feeding)
+            # When feeding is blocked, shrinkage is NOT reduced (multiply by inverse)
+            feeding_effectiveness_factors = feeding_effectiveness[valid_indices]
+            
+            # Invert feeding effectiveness: low effectiveness = high shrinkage multiplier
+            # When feeding is 100% effective, this = 1.0 (shrinkage as calculated)
+            # When feeding is blocked (0.1), this = 1.9 (90% more shrinkage)
+            feeding_penalty = 2.0 - feeding_effectiveness_factors
+            
+            # Combine all factors with multiprocessing + JIT:
+            stage_start = time.perf_counter()
+            final_risk = np.clip(
+                scaled_risk * chill_reduction_factors * riser_feeding_factors * feeding_penalty,
+                0.0,
+                1.0,
+            ).astype(np.float32)
+
+            # CAST and RISER_POST voxels need supporting thermal/feeding
+            # evidence. This damps broad geometry-only false positives while
+            # keeping isolated, low-Niyama, or freeze-off regions visible.
+            evidence_factors = shrinkage_evidence[valid_indices]
+            feed_loss_factors = feed_loss_evidence[valid_indices]
+            cast_or_post = ~is_riser
+            low_evidence = cast_or_post & (evidence_factors < 0.28)
+            low_evidence_cap = 0.04 + (0.10 * evidence_factors)
+            final_risk = np.where(
+                low_evidence,
+                np.minimum(final_risk * (0.35 + evidence_factors), low_evidence_cap),
+                final_risk,
+            )
+
+            high_evidence = cast_or_post & (evidence_factors >= 0.45)
+            evidence_floor = (
+                0.08
+                + (0.30 * np.clip((evidence_factors - 0.45) / 0.55, 0.0, 1.0))
+            )
+            feed_loss_floor = 0.10 + (0.25 * feed_loss_factors)
+            risk_floor = np.maximum(evidence_floor, feed_loss_floor) * np.sqrt(chill_reduction_factors)
+            final_risk = np.where(
+                high_evidence,
+                np.maximum(final_risk, risk_floor),
+                final_risk,
+            )
+            final_risk = np.where(
+                is_riser,
+                np.maximum(final_risk, np.clip(base_risk * 1.80, 0.0, 1.0)),
+                final_risk,
+            )
+            final_risk = np.clip(final_risk, 0.0, 1.0).astype(np.float32)
+            stage_timings["riser_pipe_modifier"] = (
+                stage_timings.get("riser_pipe_modifier", 0.0) + time.perf_counter() - stage_start
+            )
+            
+            # Assign to result array
+            self.shrinkage_risk[valid_indices] = final_risk.astype(np.float32)
+            self.shrinkage_probability = self.shrinkage_risk
+            
+            # Debug output for first few qualifying voxels
+            debug_count = min(10, len(valid_indices))
+            for j in range(debug_count):
+                i = valid_indices[j]
+                riser_label = " [RISER]" if is_riser[j] else ""
+                if is_riser_post[j]:
+                    riser_label = " [RISER_POST]"
+                chill_label = f", chill_red={chill_reduction_factors[j]:.2f}" if chill_reduction_factors[j] < 1.0 else ""
+                riser_feed_label = f", riser_feed={riser_feeding_factors[j]:.2f}" if riser_feeding_factors[j] < 1.0 else ""
+                feed_eff_label = f", feed_eff={feeding_effectiveness_factors[j]:.2f}" if feeding_effectiveness_factors[j] < 0.9 else ""
+                print(f"    Debug voxel {i}{riser_label}: thick={thicknesses[j]:.2f}\", mod={moduli[j]:.2f}\", "
+                      f"height={heights[j]:.2f}, height_f={height_factor[j]:.2f}, "
+                      f"interior_f={interior_factor[j]:.2f}, thick_f={thickness_factor[j]:.2f}, "
+                      f"time_f={time_factor[j]:.2f}, time={times[j]:.1f}s{chill_label}{riser_feed_label}{feed_eff_label}, "
+                      f"base_r={base_risk[j]:.3f}, final_r={final_risk[j]:.3f}")
+        
+        # Report shrinkage by part type
+        cast_shrinkage = self.shrinkage_risk[~riser_mask & ~riser_post_mask & include_mask]
+        riser_shrinkage = self.shrinkage_risk[riser_mask]
+        riser_post_shrinkage = self.shrinkage_risk[riser_post_mask]
+
+        print(f"  Max shrinkage risk: {np.max(self.shrinkage_risk):.3f}")
+        print(f"  Mean shrinkage risk: {np.mean(self.shrinkage_risk):.3f}")
+        if len(cast_shrinkage) > 0:
+            print(f"  CAST shrinkage: max={np.max(cast_shrinkage):.3f}, mean={np.mean(cast_shrinkage):.3f}")
+        else:
+            print(f"  CAST shrinkage: (no cast voxels)")
+        if len(riser_shrinkage) > 0:
+            print(f"  RISER shrinkage: max={np.max(riser_shrinkage):.3f}, mean={np.mean(riser_shrinkage):.3f}")
+            print(
+                f"  RISER shrinkage voxels above 15%: {np.sum(riser_shrinkage > 0.15):,}, "
+                f"above 30%: {np.sum(riser_shrinkage > 0.30):,}"
+            )
+        else:
+            print(f"  RISER shrinkage: (no riser voxels)")
+        if len(riser_post_shrinkage) > 0:
+            print(
+                f"  RISER_POST shrinkage: max={np.max(riser_post_shrinkage):.3f}, "
+                f"mean={np.mean(riser_post_shrinkage):.3f}"
+            )
+        else:
+            print(f"  RISER_POST shrinkage: (no riser-post voxels)")
+        print(f"  Thickness range: {np.min(local_thickness):.4f} - {np.max(local_thickness):.4f} inches")
+        print(f"  Modulus range: {np.min(self.mesh.voxel_moduli):.4f} - {np.max(self.mesh.voxel_moduli):.4f} inches")
+        print(
+            f"  Surface-distance range: {np.min(self.surface_distances):.4f} - "
+            f"{np.max(self.surface_distances):.4f} inches"
+        )
+        
+        # Debug: count voxels that pass each filter
+        thick_enough_count = np.sum(local_thickness >= 1.5)
+        interior_enough_count = np.sum(self.mesh.voxel_moduli >= 0.3)
+        both = np.sum((local_thickness >= 1.5) & (self.mesh.voxel_moduli >= 0.3))
+        
+        print(f"  Thick sections (≥1.5\"): {thick_enough_count:,}")
+        print(f"  Interior voxels (≥0.3\" from surface): {interior_enough_count:,}")
+        print(f"  Both thick AND interior: {both:,}")
+        
+        # Count voxels above threshold
+        above_threshold = np.sum(self.shrinkage_risk > 0.05)
+        print(f"  Voxels above 5% threshold: {above_threshold:,}")
+    
+    def _calculate_porosity(self):
+        """
+        Calculate bounded hybrid porosity risk.
+
+        ``self.porosity_probability`` is retained as a legacy public alias for
+        downstream visualization and exports.
+        """
+        shrinkage_risk = getattr(self, "shrinkage_risk", None)
+        shrinkage_probability = getattr(self, "shrinkage_probability", None)
+        if shrinkage_risk is None and shrinkage_probability is None:
+            return
+            
+        print("  Computing porosity risk (Niyama + path blockage + Darcy margin)...")
+        if shrinkage_risk is None:
+            shrinkage_risk = shrinkage_probability
+        shrinkage_risk = np.asarray(shrinkage_risk, dtype=np.float32)
+        n_voxels = len(shrinkage_risk)
+
+        mesh = getattr(self, "mesh", None)
+        part_types = getattr(mesh, "voxel_part_types", None) if mesh is not None else None
+        if part_types is not None:
+            part_types = np.asarray(part_types, dtype=np.int32)
+            cast_mask = part_types == 0
+            riser_mask = part_types == 1
+            chill_mask = part_types == 2
+            riser_post_mask = part_types == 3
+        else:
+            cast_mask = np.ones(n_voxels, dtype=bool)
+            riser_mask = np.zeros(n_voxels, dtype=bool)
+            chill_mask = np.zeros(n_voxels, dtype=bool)
+            riser_post_mask = np.zeros(n_voxels, dtype=bool)
+        connected_feeder_fn = getattr(self, "_get_connected_feeder_mask", None)
+        if callable(connected_feeder_fn):
+            connected_feeder_mask = np.asarray(connected_feeder_fn(), dtype=bool)
+        else:
+            connected_feeder_mask = np.zeros(n_voxels, dtype=bool)
+        _, _, healthy_connected_feeder = SolidificationEngine._calculate_shrinkage_evidence(self)
+
+        niyama_severity = getattr(self, "niyama_severity", None)
+        if niyama_severity is not None:
+            directional_risk = np.clip(np.asarray(niyama_severity, dtype=np.float32), 0.0, 1.0)
+        else:
+            niyama_values = getattr(self, "niyama_values", None)
+            if niyama_values is not None:
+                alloy = getattr(self, "alloy", None)
+                alloy_key = alloy.name.split()[0] if alloy is not None else ""
+                niyama_threshold = float(
+                    getattr(
+                        alloy,
+                        "niyama_threshold",
+                        NIYAMA_THRESHOLDS.get(alloy_key, 1.0),
+                    )
+                )
+                directional_risk = np.clip(
+                    1.0 - (np.asarray(niyama_values, dtype=np.float32) / max(niyama_threshold, 1e-6)),
+                    0.0,
+                    1.0,
+                )
+            else:
+                directional_risk = np.zeros(n_voxels, dtype=np.float32)
+
+        blockage_severity = np.zeros(n_voxels, dtype=np.float32)
+        feeding_quality = getattr(self, "feeding_quality", None)
+        if feeding_quality is not None:
+            blockage_severity = np.maximum(
+                blockage_severity,
+                1.0 - np.clip(np.asarray(feeding_quality, dtype=np.float32), 0.0, 1.0),
+            )
+        feeding_open_fraction = getattr(self, "feeding_open_fraction", None)
+        if feeding_open_fraction is not None:
+            blockage_severity = np.maximum(
+                blockage_severity,
+                1.0 - np.clip(np.asarray(feeding_open_fraction, dtype=np.float32), 0.0, 1.0),
+            )
+        feeding_blocked = getattr(self, "feeding_blocked", None)
+        if feeding_blocked is not None:
+            blockage_severity = np.where(
+                np.asarray(feeding_blocked, dtype=bool),
+                np.maximum(blockage_severity, 0.95),
+                blockage_severity,
+            )
+
+        darcy_margin = getattr(self, "feeding_darcy_margin", None)
+        if darcy_margin is not None:
+            darcy_severity = np.clip(
+                (1.0 - np.asarray(darcy_margin, dtype=np.float32)) * 0.5,
+                0.0,
+                1.0,
+            )
+        else:
+            feeding_effectiveness = getattr(self, "feeding_effectiveness", None)
+            if feeding_effectiveness is not None:
+                darcy_severity = 1.0 - np.clip(np.asarray(feeding_effectiveness, dtype=np.float32), 0.0, 1.0)
+            else:
+                darcy_severity = blockage_severity.copy()
+
+        # Provisional calibration:
+        # - Niyama remains the dominant directional solidification term.
+        # - Blocked / unstable paths carry nearly equal weight because loss of
+        #   connectivity dominates centerline shrinkage outcomes.
+        # - Darcy margin is used as a secondary physical discriminator between
+        #   marginal and clearly feedable regions.
+        criterion = (
+            (0.45 * directional_risk)
+            + (0.35 * blockage_severity)
+            + (0.20 * darcy_severity)
+        ).astype(np.float32)
+        # Keep some coupling to shrinkage, but avoid over-driving casting
+        # porosity from shrinkage alone in well-fed regions.
+        shrinkage_floor = np.where(cast_mask, 0.18 * shrinkage_risk, 0.35 * shrinkage_risk)
+        criterion = np.maximum(criterion, shrinkage_floor)
+        susceptibility = (0.35 + (0.65 * shrinkage_risk)).astype(np.float32)
+        porosity_risk = criterion * susceptibility
+        severe_feed_loss = (blockage_severity > 0.8) & (darcy_severity > 0.65)
+        porosity_risk = np.where(
+            severe_feed_loss,
+            np.maximum(porosity_risk, 0.70 + (0.20 * directional_risk)),
+            porosity_risk,
+        )
+        porosity_risk = np.where(
+            riser_post_mask & healthy_connected_feeder,
+            porosity_risk * 0.35,
+            porosity_risk,
+        )
+        # Well-fed casting regions should not dominate porosity maps when a
+        # connected feeder path remains open.
+        porosity_risk = np.where(
+            cast_mask & healthy_connected_feeder,
+            porosity_risk * 0.28,
+            porosity_risk,
+        )
+        # Global cast damping keeps feeder-driven defects concentrated toward
+        # risers/posts rather than broad casting coverage.
+        porosity_risk = np.where(
+            cast_mask,
+            porosity_risk * 0.80,
+            porosity_risk,
+        )
+        # Preserve visible feeder shrinkage tendency in risers.
+        porosity_risk = np.where(
+            riser_mask,
+            np.maximum(porosity_risk, 0.60 * shrinkage_risk),
+            porosity_risk,
+        )
+
+        self.porosity_risk = np.clip(porosity_risk, 0.0, 1.0).astype(np.float32)
+        if np.any(chill_mask):
+            self.porosity_risk[chill_mask] = 0.0
+        self.porosity_probability = self.porosity_risk
+        print(
+            "    Porosity criterion components: "
+            f"Niyama mean={np.mean(directional_risk):.2f}, "
+            f"blockage mean={np.mean(blockage_severity):.2f}, "
+            f"Darcy mean={np.mean(darcy_severity):.2f}"
+        )
+    
+    def _calculate_hotspots(self):
+        """
+        Calculate hot spot intensity based on solidification sequence and ISOLATION.
+        
+        Hot spots are regions that:
+        1. Solidify last (high solidification time)
+        2. Are isolated from risers/feeders (high feeding distance)
+        3. Have high geometric modulus (thick sections)
+        4. NEW: Become ISOLATED liquid pools during solidification
+        
+        The key defect mechanism is LIQUID ISOLATION:
+        - As solidification progresses edge-inward, some liquid regions get
+          surrounded by solid, cutting off their feed path
+        - These isolated pools CANNOT receive feed metal to compensate shrinkage
+        - This creates centerline porosity and shrinkage voids
+        
+        We detect isolation by analyzing the fraction liquid history:
+        - Find when each voxel's liquid neighbors become solid
+        - Mark voxels that solidified while their path to surface was blocked
+        """
+        n_voxels = len(self.mesh.voxel_centers)
+        self.hotspot_intensity = np.zeros(n_voxels, dtype=np.float32)
+        
+        # Get solidification time stats
+        max_solid_time = np.max(self.solidification_times)
+        if max_solid_time <= 0:
+            print("  Warning: No solidification time data for hot spot analysis")
+            return
+        
+        # Exclude chills from hot spot analysis
+        chill_indices = self._get_chill_voxel_indices()
+        chill_set = set(chill_indices)
+        
+        # Get normalized values for each factor
+        # Factor 1: Solidification time (higher = later = hotter)
+        normalized_time = self.solidification_times / max_solid_time
+        
+        # Factor 2: Distance from surface (feeding distance)
+        surface_distances = self.surface_distances if self.surface_distances is not None else self.feeding_distances
+        max_feeding_dist = np.max(surface_distances)
+        normalized_feeding = surface_distances / max(max_feeding_dist, 0.1)
+        
+        # Factor 3: Geometric modulus (higher = thicker = hotter)
+        max_modulus = np.max(self.mesh.voxel_moduli)
+        normalized_modulus = self.mesh.voxel_moduli / max(max_modulus, 0.1)
+        
+        # NEW Factor 4: ISOLATION detection
+        # Calculate how "isolated" each voxel becomes during solidification
+        # A voxel is isolated if it solidifies AFTER its neighbors have blocked feed paths
+        isolation_score = self._calculate_isolation_score()
+        
+        # Combine factors with weights
+        # Isolation is now a key factor - these are the true defect-prone areas
+        hotspot_score = (
+            0.35 * normalized_time +       # 35% weight: solidification sequence
+            0.20 * normalized_feeding +    # 20% weight: distance from surface
+            0.15 * normalized_modulus +    # 15% weight: section thickness
+            0.30 * isolation_score         # 30% weight: liquid isolation (NEW)
+        )
+        
+        # Capture regions solidifying in the last 40% of time
+        # This balances showing multiple hot spot zones vs noise
+        late_threshold = 0.60
+        hotspot_mask = normalized_time > late_threshold
+        
+        # Also include highly isolated voxels even if they solidified earlier
+        hotspot_mask |= (isolation_score > 0.5)
+        
+        # Scale intensity for visualization (0-1)
+        # Voxels that solidify last get higher intensity
+        # Continuous gradient from threshold to max
+        self.hotspot_intensity = np.where(
+            hotspot_mask,
+            np.clip((hotspot_score - 0.3) * 1.5, 0.0, 1.0),  # Rescale for better gradient
+            0.0
+        ).astype(np.float32)
+        
+        # Zero out chills
+        for idx in chill_set:
+            self.hotspot_intensity[idx] = 0.0
+        
+        # Count hot spots (moderate intensity threshold for counting)
+        self.hotspot_count = np.sum(self.hotspot_intensity > 0.2)
+        
+        print(f"  Hot spots identified: {self.hotspot_count:,}")
+        print(f"  Max hot spot intensity: {np.max(self.hotspot_intensity):.3f}")
+        print(f"  Isolated liquid pool factor max: {np.max(isolation_score):.3f}")
+        print(f"  Mean hot spot intensity (non-zero): {np.mean(self.hotspot_intensity[self.hotspot_intensity > 0]):.3f}"
+              if self.hotspot_count > 0 else "  Mean hot spot intensity: 0")
+    
+    def _calculate_isolation_score(self) -> np.ndarray:
+        """
+        Calculate how "isolated" each voxel became during solidification.
+        
+        A voxel is isolated if:
+        1. It solidified while surrounded mostly by solid neighbors
+        2. Its path to the casting surface was blocked by solid material
+        
+        Returns:
+            Array of isolation scores (0-1), higher = more isolated
+        """
+        n_voxels = len(self.mesh.voxel_centers)
+        isolation_score = np.zeros(n_voxels, dtype=np.float32)
+        
+        neighbors = self.mesh.voxel_neighbors
+        solid_times = self.solidification_times
+        
+        # For each voxel, count how many neighbors solidified BEFORE it
+        # High count = this voxel was surrounded by solid when it solidified
+        for i in range(n_voxels):
+            my_solid_time = solid_times[i]
+            if my_solid_time <= 0:
+                continue
+            
+            neighbors_before = 0
+            total_neighbors = 0
+            
+            for j in range(neighbors.shape[1]):
+                neighbor_idx = neighbors[i, j]
+                if neighbor_idx >= 0:
+                    total_neighbors += 1
+                    neighbor_time = solid_times[neighbor_idx]
+                    # Neighbor solidified before me?
+                    if neighbor_time > 0 and neighbor_time < my_solid_time:
+                        neighbors_before += 1
+            
+            if total_neighbors > 0:
+                # Ratio of neighbors that solidified before this voxel
+                isolation_score[i] = neighbors_before / total_neighbors
+        
+        # Boost score for voxels that are far from surface AND have high isolation
+        surface_distances = self.surface_distances if self.surface_distances is not None else self.feeding_distances
+        surface_factor = surface_distances / np.max(surface_distances + 0.1)
+        isolation_score = isolation_score * (0.5 + 0.5 * surface_factor)
+        
+        return np.clip(isolation_score, 0.0, 1.0).astype(np.float32)
+    
+    def _calculate_niyama(self):
+        """
+        Calculate Niyama criterion for centerline shrinkage prediction.
+        
+        Niyama = G / sqrt(R)
+        where:
+            G = thermal gradient (°C/cm or °C/inch)
+            R = cooling rate (°C/s)
+        
+        Low Niyama values (typically < 1.0 for steel) indicate high risk
+        of centerline shrinkage/porosity due to insufficient thermal gradient
+        to promote directional solidification.
+        
+        Material-specific thresholds are interpreted in the engine's
+        approximate ``°C * sqrt(s) / mm`` units:
+        - WCB (carbon steel): < 1.0 indicates risk
+        - CF8 (stainless): < 0.7 indicates risk
+        - C958 (bronze): < 1.2 indicates risk
+        
+        KEY DIFFERENCE FROM HOT SPOTS:
+        - Hot spots: Regions that solidify LAST (by time sequence)
+        - Niyama: Regions with poor thermal gradient relative to cooling rate
+        
+        Niyama focuses on DIRECTIONAL SOLIDIFICATION - areas where thermal
+        gradients don't favor directional freezing away from the interior.
+        This is different from timing-based hot spots and produces different
+        defect predictions in complex geometries.
+        """
+        n_voxels = len(self.mesh.voxel_centers)
+        self.niyama_values = np.zeros(n_voxels, dtype=np.float32)
+        self.thermal_gradients = np.zeros(n_voxels, dtype=np.float32)
+        self.cooling_rates = np.zeros(n_voxels, dtype=np.float32)
+        
+        # Get alloy name for threshold
+        alloy_key = self.alloy.name.split()[0]  # Extract 'WCB', 'CF8', or 'C958'
+        niyama_threshold = float(getattr(self.alloy, "niyama_threshold", NIYAMA_THRESHOLDS.get(alloy_key, 1.0)))
+        
+        # Temperature range for solidification
+        temp_range = self.alloy.liquidus_temp - self.alloy.solidus_temp  # °C
+        solver_mode = self._get_solver_mode()
+
+        if (
+            solver_mode == SOLVER_MODE_THERMAL_COUPLED
+            and self._thermal_latest_temperatures is not None
+            and self._thermal_voxel_size_m is not None
+        ):
+            if self._thermal_heat_model is not None:
+                gradients_m = self._thermal_heat_model.temperature_field.get_gradient_magnitude(
+                    np.asarray(self.mesh.voxel_neighbors, dtype=np.int32),
+                    self._thermal_voxel_size_m,
+                )
+            else:
+                gradients_m = np.zeros(n_voxels, dtype=np.float32)
+            self.thermal_gradients = (gradients_m / 1000.0).astype(np.float32)
+            if self._thermal_peak_cooling_rates is not None:
+                self.cooling_rates = np.maximum(
+                    np.asarray(self._thermal_peak_cooling_rates, dtype=np.float32),
+                    0.01,
+                ).astype(np.float32)
+            else:
+                self.cooling_rates = np.full(n_voxels, 0.01, dtype=np.float32)
+            directional_extraction_factor = np.ones(n_voxels, dtype=np.float32)
+        else:
+            # ===== THERMAL GRADIENT CALCULATION =====
+            surface_distances = self.surface_distances if self.surface_distances is not None else self.feeding_distances
+            surface_feeding_dists = surface_distances
+
+            min_distance_to_boundary = 0.1  # inches - minimum distance for gradient calculation
+            effective_distance_in = np.maximum(surface_feeding_dists, min_distance_to_boundary)
+            effective_distance_mm = effective_distance_in * 25.4
+
+            base_gradient = temp_range / effective_distance_mm  # °C/mm
+            directional_extraction_factor = np.ones(n_voxels, dtype=np.float32)
+            if self._chill_boost is not None:
+                directional_extraction_factor = np.sqrt(
+                    np.maximum(np.asarray(self._chill_boost, dtype=np.float32), 1.0)
+                )
+            self.thermal_gradients = (base_gradient * directional_extraction_factor).astype(np.float32)
+
+            # ===== COOLING RATE CALCULATION =====
+            min_cooling_rate_value = 0.01  # °C/s - minimum to avoid division by zero
+            time_factor = np.where(
+                self.solidification_times > 0,
+                1.0 / np.maximum(self.solidification_times, 0.1),
+                1.0
+            )
+            self.cooling_rates = (temp_range * time_factor + min_cooling_rate_value).astype(np.float32)
+        
+        # Do not apply additional alloy k/cp multipliers here. The simplified
+        # solidification loop already bakes alloy thermal response into the
+        # solidification-time field, so adding another conductivity/specific-
+        # heat scaling here double-counts material effects.
+        
+        # ===== NIYAMA NUMBER CALCULATION =====
+        # Niyama = G / sqrt(R)
+        # 
+        # High Niyama: High gradient, low cooling rate → good directional solidification
+        # Low Niyama: Low gradient, high cooling rate → poor directional solidification
+        #
+        # This produces a DIFFERENT spatial pattern than hot spots:
+        # - Hot spots: Interior regions that solidify last (by time)
+        # - Niyama: Regions with steep thermal gradients BUT fast cooling
+        #   (e.g., thick sections near chills may have HIGH gradient but VERY HIGH cooling)
+        
+        # Protect against sqrt of negative or zero
+        safe_cooling_rates = np.maximum(self.cooling_rates, 1e-10)
+        self.niyama_values = (self.thermal_gradients / np.sqrt(safe_cooling_rates)).astype(np.float32)
+        
+        # ===== ENHANCED DEFECT RISK WITH ISOLATION =====
+        directional_factor = np.ones(n_voxels, dtype=np.float32)
+        chill_reduction = np.ones(n_voxels, dtype=np.float32)
+        if self._chill_centers is not None:
+            chill_reduction = self._calculate_chill_shrinkage_reduction()
+            directional_factor = 1.0 + np.clip(1.0 - chill_reduction, 0.0, 0.75)
+        effective_niyama = self.niyama_values * directional_factor
+
+        # Get isolation scores from hot spot analysis
+        isolation_score = self._calculate_isolation_score()
+        if self._chill_centers is not None:
+            # Chills should reduce isolated-liquid risk by promoting directional
+            # freezing toward hotter feedable regions.
+            isolation_relief = 1.0 - 0.7 * np.clip(1.0 - chill_reduction, 0.0, 1.0)
+            isolation_score = isolation_score * np.clip(isolation_relief, 0.25, 1.0)
+        
+        # Identify defect risk zones:
+        # 1. Standard Niyama threshold
+        basic_niyama_risk = effective_niyama < niyama_threshold
+
+        # 2. Enhanced: voxels with moderate Niyama BUT high isolation
+        #    These are "feeding path blocked" defects - isolated liquid pools
+        moderate_niyama_risk = effective_niyama < (niyama_threshold * 1.5)
+        high_isolation = isolation_score > 0.4
+        isolation_enhanced_risk = moderate_niyama_risk & high_isolation
+        
+        # Combine both risk criteria
+        self.niyama_defect_risk = basic_niyama_risk | isolation_enhanced_risk
+        
+        # Exclude surface voxels (they're always fine - high gradient)
+        surface_indices = self.mesh.get_surface_voxel_indices()
+        self.niyama_defect_risk[surface_indices] = False
+        
+        # Exclude chills
+        chill_indices = self._get_chill_voxel_indices()
+        self.niyama_defect_risk[chill_indices] = False
+        
+        # Create a combined defect severity score for visualization
+        severity_from_niyama = np.clip(1.0 - (effective_niyama / niyama_threshold), 0, 1)
+        severity_from_isolation = isolation_score
+        
+        # Combined severity for visualization
+        self.niyama_severity = np.maximum(
+            severity_from_niyama,
+            severity_from_isolation * 0.7
+        ).astype(np.float32)
+        
+        # Count defect risk voxels
+        self.niyama_defect_count = np.sum(self.niyama_defect_risk)
+        isolation_enhanced_count = np.sum(isolation_enhanced_risk & ~basic_niyama_risk)
+        
+        print(f"  Niyama threshold for {alloy_key}: {niyama_threshold:.2f}")
+        print(f"  Niyama value range: {np.min(self.niyama_values):.3f} - {np.max(self.niyama_values):.3f}")
+        print(f"  Mean Niyama: {np.mean(self.niyama_values):.3f}")
+        print(
+            f"  Directional-solidification factor range: "
+            f"{np.min(directional_factor):.2f} - {np.max(directional_factor):.2f}"
+        )
+        print(f"  Basic defect risk (Ny < {niyama_threshold}): {np.sum(basic_niyama_risk):,}")
+        print(f"  Additional risk from isolation: {isolation_enhanced_count:,}")
+        print(f"  Total defect risk voxels: {self.niyama_defect_count:,}")
+        print(f"  Thermal gradient range: {np.min(self.thermal_gradients):.2f} - {np.max(self.thermal_gradients):.2f} C/mm")
+        print(f"  Cooling rate range: {np.min(self.cooling_rates):.2f} - {np.max(self.cooling_rates):.2f} C/s")
+        print("  Material scaling: alloy threshold only (no extra k/cp multiplier)")
+
+    def _analyze_btr_history(
+        self,
+        btr_start: float,
+        btr_end: float,
+        critical_fraction_solid: float,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Reconstruct BTR exposure from stored fraction-solid snapshots.
+
+        The solver state is still a simplified fraction-solid proxy, but using
+        the snapshot history is more defensible than mapping BTR exposure from
+        global normalized time alone.
+        """
+        n_voxels = len(self.mesh.voxel_centers)
+        in_btr = np.zeros(n_voxels, dtype=bool)
+        constrained_in_btr = np.zeros(n_voxels, dtype=bool)
+        solid_neighbor_fraction = np.zeros(n_voxels, dtype=np.float32)
+
+        if not self.fraction_liquid_history:
+            return in_btr, constrained_in_btr, solid_neighbor_fraction
+
+        neighbors = np.asarray(self.mesh.voxel_neighbors, dtype=np.int32)
+        for snapshot in self.fraction_liquid_history:
+            fraction_solid = np.asarray(snapshot, dtype=np.float32)
+            snapshot_btr = (fraction_solid >= btr_start) & (fraction_solid <= btr_end)
+            if not np.any(snapshot_btr):
+                continue
+
+            in_btr |= snapshot_btr
+            for voxel_index in np.flatnonzero(snapshot_btr):
+                neighbor_indices = neighbors[voxel_index]
+                valid_neighbors = neighbor_indices[neighbor_indices >= 0]
+                if len(valid_neighbors) == 0:
+                    continue
+                supporting_fraction = float(
+                    np.mean(fraction_solid[valid_neighbors] >= critical_fraction_solid)
+                )
+                solid_neighbor_fraction[voxel_index] = max(
+                    solid_neighbor_fraction[voxel_index],
+                    supporting_fraction,
+                )
+                if supporting_fraction >= 0.5:
+                    constrained_in_btr[voxel_index] = True
+
+        return in_btr, constrained_in_btr, solid_neighbor_fraction
+
+    def _get_sand_restraint_index(self) -> float:
+        """Return the clamped mold restraint index used by hot tear and crack models."""
+        raw_value = getattr(self.analysis_options, "sand_restraint_index", 0.5)
+        try:
+            return float(np.clip(float(raw_value), 0.0, 1.0))
+        except (TypeError, ValueError):
+            return 0.5
+
+    def _compute_surface_restraint_weight(self) -> np.ndarray:
+        """
+        Compute a 0-1 surface-proximity weight for mold-restraint effects.
+
+        The influence is strongest at/near the mold wall and decays toward the
+        interior over a short section-size-based distance.
+        """
+        n_voxels = len(self.mesh.voxel_centers)
+        surface_distances = self.surface_distances if self.surface_distances is not None else self.feeding_distances
+        if surface_distances is None:
+            return np.zeros(n_voxels, dtype=np.float32)
+
+        influence_distance = max(0.5, float(self.mesh.base_voxel_size) * 5.0)
+        distances = np.asarray(surface_distances, dtype=np.float32)
+        weights = np.clip(1.0 - distances / influence_distance, 0.0, 1.0)
+        return weights.astype(np.float32)
+    
+    def _calculate_hot_tear_risk(self):
+        """
+        Calculate hot tear susceptibility zones with mechanical constraint model.
+        
+        Hot tears (also called "hot cracks" or "hot shortness") form during
+        the final stages of solidification when the alloy is in the Brittle
+        Temperature Range (BTR). In this range:
+        
+        1. Dendrites have formed a rigid network (high fraction solid, ~0.85-0.99)
+        2. Remaining liquid films between dendrites have very low strength
+        3. Tensile stress from differential thermal contraction opens cracks
+        4. Unlike shrinkage porosity, hot tears are MECHANICAL failures
+        
+        === ENHANCED MECHANICAL CONSTRAINT MODEL ===
+        
+        The key physics that the original model missed:
+        
+        1. THIN SECTIONS SOLIDIFY FIRST
+           - Low modulus regions (thin walls, fins) solidify before thick sections
+           - Once solid, they become RIGID and begin thermal contraction
+        
+        2. MECHANICAL CONSTRAINT PROPAGATION
+           - Solid thin sections are connected to still-mushy thick sections
+           - As thin sections contract, they PULL on the mushy zones
+           - The mushy zone cannot flow to accommodate (too much solid fraction)
+        
+        3. ACCUMULATED STRAIN ALONG SOLID PATHS
+           - Strain = α × ΔT × L_solid_path
+           - Longer solid paths = more accumulated contraction = more strain on mush
+           - T-junctions and L-junctions are critical locations
+        
+        4. BTR VULNERABILITY WINDOW
+           - Voxels are only vulnerable while in the BTR (85-99% solid)
+           - Before BTR: liquid can flow to heal cracks
+           - After BTR: solid has ductility to deform plastically
+        
+        Hot Tear Risk Factors (updated weights):
+        - Mechanical constraint strain from solid neighbors (40%)
+        - Accumulated strain along solid paths (25%)
+        - Geometric stress concentrators (20%)
+        - Differential cooling rate strain (15%)
+        """
+        n_voxels = len(self.mesh.voxel_centers)
+        
+        # Initialize result arrays
+        self.hot_tear_risk = np.zeros(n_voxels, dtype=np.float32)
+        self.strain_rate = np.zeros(n_voxels, dtype=np.float32)
+        self.btr_mask = np.zeros(n_voxels, dtype=bool)
+        
+        # Material properties for hot tearing
+        hts = self.alloy.hot_tear_susceptibility
+        btr_start = self.alloy.btr_fraction_solid_start
+        btr_end = self.alloy.btr_fraction_solid_end
+        temp_range = self.alloy.liquidus_temp - self.alloy.solidus_temp
+        thermal_expansion = self.alloy.thermal_expansion
+        
+        print(f"  Hot tear susceptibility (HTS): {hts:.2f}")
+        print(f"  BTR range: {btr_start:.0%} to {btr_end:.0%} solid")
+        print(f"  Thermal expansion: {thermal_expansion:.2e} 1/K")
+        print(f"  Freezing range: {temp_range:.1f} °C")
+        
+        # Prepare arrays for JIT functions
+        neighbor_matrix = self.mesh.voxel_neighbors
+        neighbor_matrix_int = np.ascontiguousarray(neighbor_matrix, dtype=np.int64)
+        voxel_moduli = np.ascontiguousarray(self.mesh.voxel_moduli, dtype=np.float32)
+        solidification_times = np.ascontiguousarray(self.solidification_times, dtype=np.float32)
+        voxel_centers = np.ascontiguousarray(self.mesh.voxel_centers, dtype=np.float32)
+        
+        # ===== 1. MECHANICAL CONSTRAINT STRAIN (NEW) =====
+        # Strain from already-solidified neighbors pulling on mushy voxels
+        print(f"  Computing mechanical constraint strain (JIT-parallel)...")
+        constraint_strain = compute_constraint_strain_parallel(
+            solidification_times,
+            voxel_moduli,
+            neighbor_matrix_int,
+            thermal_expansion,
+            temp_range
+        )
+        
+        # Normalize constraint strain
+        max_constraint = np.max(constraint_strain)
+        if max_constraint > 0:
+            normalized_constraint = constraint_strain / max_constraint
+        else:
+            normalized_constraint = constraint_strain
+        
+        print(f"    Constraint strain range: {np.min(constraint_strain):.2e} - {max_constraint:.2e}")
+        
+        # ===== 2. SOLID PATH ACCUMULATED STRAIN (NEW) =====
+        # Strain accumulated along connected solid paths to mushy zones
+        print(f"  Computing solid path strain (JIT-parallel)...")
+        max_path_length = np.max(self.feeding_distances) * 2.0  # Max path = 2x max feeding distance
+        path_strain = compute_solid_path_strain_parallel(
+            solidification_times,
+            voxel_centers,
+            neighbor_matrix_int,
+            thermal_expansion,
+            temp_range,
+            max(max_path_length, 1.0)
+        )
+        
+        # Normalize path strain
+        max_path_strain = np.max(path_strain)
+        if max_path_strain > 0:
+            normalized_path_strain = path_strain / max_path_strain
+        else:
+            normalized_path_strain = path_strain
+        
+        print(f"    Path strain range: {np.min(path_strain):.2e} - {max_path_strain:.2e}")
+        
+        # ===== 3. IDENTIFY MUSHY ZONE UNDER CONSTRAINT (NEW) =====
+        # Find voxels that were in BTR while constrained by solid neighbors
+        print(f"  Identifying constrained mushy zones (JIT-parallel)...")
+        # Convert BTR fraction solid to normalized time fractions
+        # BTR start ~0.85 solid corresponds to ~0.3 normalized time (early-mid solidification)
+        # BTR end ~0.99 solid corresponds to ~0.85 normalized time (late solidification)
+        btr_time_start = 0.25  # Conservative: include voxels that might have been in BTR
+        btr_time_end = 0.90
+        
+        mushy_constrained = identify_mushy_zone_voxels_parallel(
+            solidification_times,
+            voxel_moduli,
+            neighbor_matrix_int,
+            btr_time_start,
+            btr_time_end
+        )
+
+        history_btr_mask, history_constrained, history_constraint_fraction = self._analyze_btr_history(
+            btr_start,
+            btr_end,
+            self.alloy.critical_fraction_solid,
+        )
+        mushy_constrained = mushy_constrained | history_constrained
+
+        print(f"    Mushy-constrained voxels: {np.sum(mushy_constrained):,}")
+        print(f"    History BTR voxels: {np.sum(history_btr_mask):,}")
+        
+        # ===== 4. DIFFERENTIAL COOLING STRAIN (ORIGINAL) =====
+        # Strain rate from cooling rate differential with neighbors
+        if self.thermal_gradients is None or self.cooling_rates is None:
+            # Estimate cooling rates from solidification times
+            time_factor = np.where(
+                self.solidification_times > 0,
+                1.0 / np.maximum(self.solidification_times, 0.1),
+                1.0
+            )
+            self.cooling_rates = (temp_range * time_factor + 0.01).astype(np.float32)
+        
+        cooling_rates = np.ascontiguousarray(self.cooling_rates, dtype=np.float32)
+        
+        print(f"  Computing differential cooling strain (JIT-parallel)...")
+        self.strain_rate = compute_strain_rate_parallel(
+            cooling_rates,
+            neighbor_matrix_int,
+            thermal_expansion
+        )
+        
+        # Normalize differential strain
+        max_diff_strain = np.max(self.strain_rate)
+        if max_diff_strain > 0:
+            normalized_diff_strain = self.strain_rate / max_diff_strain
+        else:
+            normalized_diff_strain = self.strain_rate
+        
+        # ===== 5. GEOMETRIC STRESS CONCENTRATORS (ORIGINAL) =====
+        # Section changes where thin meets thick - amplifies strain
+        print(f"  Computing geometric stress concentrators (JIT-parallel)...")
+        modulus_variance = compute_modulus_variance_parallel(voxel_moduli, neighbor_matrix_int)
+        
+        max_variance = np.max(modulus_variance)
+        if max_variance > 0:
+            normalized_variance = modulus_variance / max_variance
+        else:
+            normalized_variance = modulus_variance
+        
+        # ===== 6. BTR MASK (ENHANCED) =====
+        # Combine multiple criteria for BTR vulnerability
+        max_solid_time = np.max(self.solidification_times)
+        if max_solid_time > 0:
+            normalized_time = self.solidification_times / max_solid_time
+        else:
+            normalized_time = np.zeros(n_voxels)
+        
+        # Traditional mid-solidification criterion
+        mid_solidification = (normalized_time > 0.2) & (normalized_time < 0.9)
+        
+        # Near-surface interior voxels
+        surface_indices = self.mesh.get_surface_voxel_indices()
+        surface_mask = np.zeros(n_voxels, dtype=np.bool_)
+        surface_mask[surface_indices] = True
+        
+        feeding_distances = np.ascontiguousarray(
+            self.surface_distances if self.surface_distances is not None else self.feeding_distances,
+            dtype=np.float32,
+        )
+        near_surface_interior = compute_near_surface_interior_parallel(
+            feeding_distances, surface_mask, 0.5
+        )
+        
+        # Enhanced BTR mask: combines multiple vulnerability indicators
+        # 1. Mushy zone under mechanical constraint (primary)
+        # 2. Mid-solidification AND near surface or high strain (secondary)
+        # 3. High constraint strain even if other criteria not met
+        self.btr_mask = (
+            history_btr_mask |
+            mushy_constrained |
+            (mid_solidification & (near_surface_interior | (normalized_diff_strain > 0.3))) |
+            (np.maximum(normalized_constraint, history_constraint_fraction) > 0.5)
+        )
+        
+        # ===== 7. HOT TEAR RISK CALCULATION (ENHANCED) =====
+        # Updated component weights emphasizing mechanical constraint
+        w_constraint = 0.40   # Mechanical constraint from solid neighbors (NEW - primary)
+        w_path = 0.25         # Accumulated strain along solid paths (NEW)
+        w_geometry = 0.20     # Section change stress concentration
+        w_diff = 0.15         # Differential cooling rate strain (reduced)
+        
+        # Combine all strain components
+        combined_strain = (
+            w_constraint * normalized_constraint +
+            w_path * normalized_path_strain +
+            w_geometry * normalized_variance +
+            w_diff * normalized_diff_strain
+        )
+        combined_strain = np.maximum(combined_strain, history_constraint_fraction * 0.6)
+
+        # Mold restraint from sand strength/collapse behavior.
+        # Neutral at 0.5, higher values increase near-surface restraint in BTR.
+        sand_restraint_index = self._get_sand_restraint_index()
+        restraint_offset = sand_restraint_index - 0.5
+        surface_restraint_weight = self._compute_surface_restraint_weight()
+        btr_restraint_mask = self.btr_mask.astype(np.float32)
+        hot_tear_multiplier = np.clip(
+            1.0 + 0.8 * restraint_offset * surface_restraint_weight * btr_restraint_mask,
+            0.7,
+            1.3,
+        )
+        combined_strain = combined_strain * hot_tear_multiplier
+        
+        # BTR weight: risk is MUCH higher for voxels in BTR/mushy-constrained state
+        # Full risk in BTR, reduced but non-zero outside (may still have been vulnerable)
+        btr_weight = np.where(self.btr_mask, 1.0, 0.15)
+        
+        # Apply material susceptibility and BTR weighting
+        self.hot_tear_risk = np.clip(hts * combined_strain * btr_weight, 0.0, 1.0).astype(np.float32)
+        
+        # ===== 8. IDENTIFY HOT TEAR ZONES =====
+        # Adaptive threshold based on material susceptibility
+        # Higher threshold for low-susceptibility alloys, lower for high-susceptibility
+        risk_threshold = 0.12 * (1.0 - hts * 0.5)  # ~0.12 for WCB, ~0.08 for CF8
+        
+        self.hot_tear_zones = self.hot_tear_risk > risk_threshold
+        
+        # Exclude surface voxels (free surface can't have hot tears - no constraint)
+        surface_indices_set = set(surface_indices)
+        self.hot_tear_zones[list(surface_indices_set)] = False
+        
+        # Exclude chills and risers (external parts)
+        chill_indices = self._get_chill_voxel_indices()
+        self.hot_tear_zones[chill_indices] = False
+        
+        riser_indices = self._get_riser_voxel_indices()
+        self.hot_tear_zones[riser_indices] = False
+        
+        # Count hot tear risk zones
+        self.hot_tear_count = np.sum(self.hot_tear_zones)
+        
+        # Store additional results for visualization/debugging
+        self.constraint_strain = constraint_strain
+        self.path_strain = path_strain
+        self.mushy_constrained = mushy_constrained
+        
+        # Print summary
+        print(f"  === Hot Tear Analysis Summary ===")
+        print(f"  Strain rate range: {np.min(self.strain_rate):.2e} - {np.max(self.strain_rate):.2e} 1/s")
+        print(f"  Voxels in BTR mask: {np.sum(self.btr_mask):,}")
+        print(f"  Mushy-constrained voxels: {np.sum(mushy_constrained):,}")
+        print(
+            "  Sand restraint index: "
+            f"{sand_restraint_index:.2f} (hot-tear multiplier range: "
+            f"{np.min(hot_tear_multiplier):.3f} - {np.max(hot_tear_multiplier):.3f})"
+        )
+        print(f"  Hot tear risk threshold: {risk_threshold:.3f}")
+        print(f"  Hot tear risk range: {np.min(self.hot_tear_risk):.3f} - {np.max(self.hot_tear_risk):.3f}")
+        print(f"  Hot tear zone voxels: {self.hot_tear_count:,}")
+    
+    def _calculate_sand_burn_in(self):
+        """
+        Calculate sand burn-in (metal penetration) risk for surface voxels.
+        
+        Sand burn-in is a surface defect where molten metal penetrates into
+        the sand mold pores, causing a rough, sandy surface finish on the casting.
+        This is different from internal defects like shrinkage or hot tears.
+        
+        Sand Burn-In Risk Factors:
+        1. HIGH POURING TEMPERATURE (superheat above liquidus)
+           - More superheat = lower viscosity = easier penetration
+           - Metal stays liquid longer at surface = more time to penetrate
+        
+        2. HIGH FERROSTATIC PRESSURE (metal head height)
+           - Pressure pushes metal into sand pores
+           - Bottom/lower surfaces have higher pressure
+        
+        3. LONG METAL-MOLD CONTACT TIME
+           - More time for heat to transfer to sand
+           - Sand binder breakdown allows penetration
+        
+        4. SAND PROPERTIES (mold permeability and grain fineness)
+           - Coarse sand (high permeability) = more penetration
+           - Fine sand (low permeability) = better surface finish
+        
+        5. MATERIAL PROPERTIES
+           - Fluidity (surface tension, viscosity)
+           - Alloys with better fluidity penetrate more easily
+        
+        Only SURFACE VOXELS are analyzed - burn-in is a surface defect.
+        
+        MITIGATION strategies shown in tooltip:
+        - Reduce pouring temperature (lower superheat)
+        - Use finer sand or mold washes/coatings
+        - Add chills to speed surface solidification
+        - Reduce metal head height where possible
+        
+        Raises:
+            ValueError: If mesh has no voxels or alloy properties are missing
+            RuntimeError: If surface voxel detection fails
+        """
+        n_voxels = len(self.mesh.voxel_centers)
+        
+        # Validate inputs
+        if n_voxels == 0:
+            raise ValueError("Mesh has no voxels for sand burn-in analysis")
+        
+        if not hasattr(self.alloy, 'sand_burn_in_susceptibility'):
+            logger.warning(
+                f"Alloy '{self.alloy.name}' missing sand_burn_in_susceptibility, using default 0.5",
+                context={'alloy': self.alloy.name}
+            )
+            material_susceptibility = 0.5
+        else:
+            material_susceptibility = self.alloy.sand_burn_in_susceptibility
+        
+        # Initialize result arrays
+        self.sand_burn_in_risk = np.zeros(n_voxels, dtype=np.float32)
+        self.sand_burn_in_zones = np.zeros(n_voxels, dtype=np.bool_)
+        
+        # Get surface voxel indices - burn-in only affects surface
+        try:
+            surface_indices = self.mesh.get_surface_voxel_indices()
+        except Exception as e:
+            logger.error(
+                f"Failed to get surface voxel indices for sand burn-in analysis: {e}",
+                exc_info=True,
+                context={'n_voxels': n_voxels}
+            )
+            raise RuntimeError(f"Surface voxel detection failed: {e}") from e
+        
+        n_surface = len(surface_indices)
+        
+        if n_surface == 0:
+            logger.warning(
+                "No surface voxels found for sand burn-in analysis",
+                context={'n_voxels': n_voxels}
+            )
+            print("  Warning: No surface voxels found for sand burn-in analysis")
+            self.sand_burn_in_count = 0
+            return
+        
+        print(f"  Analyzing {n_surface:,} surface voxels for sand burn-in risk...")
+        
+        # ===== MATERIAL FACTOR =====
+        # Material-specific burn-in susceptibility (already validated above)
+        # Higher fluidity alloys penetrate sand more easily
+        print(f"    Material susceptibility: {material_susceptibility:.2f} ({self.alloy.name})")
+        
+        # ===== TEMPERATURE FACTOR =====
+        # Superheat above liquidus drives penetration
+        # More superheat = lower viscosity = easier to penetrate sand pores
+        superheat = self.alloy.pouring_temp - self.alloy.liquidus_temp  # °C
+        # Normalize: ~200°C superheat is high risk, 50°C is low risk
+        temp_factor = np.clip(superheat / 200.0, 0.0, 1.0)
+        print(f"    Superheat: {superheat:.0f}°C (factor: {temp_factor:.2f})")
+        
+        # ===== PRESSURE FACTOR (varies by voxel height) =====
+        # Ferrostatic pressure: P = ρgh
+        # Lower surfaces have higher pressure = more penetration risk
+        voxel_heights = self.mesh.voxel_centers[:, 2]  # Z coordinates
+        max_height = np.max(voxel_heights)
+        min_height = np.min(voxel_heights)
+        height_range = max_height - min_height
+        
+        if height_range > 0:
+            # Pressure factor: 1.0 at bottom, 0.0 at top
+            # Inverted normalized height (lower = higher pressure)
+            surface_heights = voxel_heights[surface_indices]
+            pressure_factor = 1.0 - (surface_heights - min_height) / height_range
+        else:
+            pressure_factor = np.ones(n_surface) * 0.5  # Flat casting
+        
+        # Also factor in absolute metal head (in inches)
+        # 12 inches of steel head ≈ 25 kPa ≈ moderate burn-in risk
+        metal_head_factor = np.clip(height_range / 12.0, 0.1, 1.0)
+        pressure_factor = pressure_factor * metal_head_factor
+        
+        print(f"    Metal head height: {height_range:.2f}\" (factor: {metal_head_factor:.2f})")
+        
+        # ===== CONTACT TIME FACTOR =====
+        # How long the surface stays liquid before solidifying
+        # Surface voxels that stay liquid longer have more burn-in risk
+        # (Surface voxels solidify first in our edge-inward simulation, so this
+        # captures areas where initial solidification is delayed)
+        surface_solid_times = self.solidification_times[surface_indices]
+        max_surface_time = np.max(surface_solid_times) if np.max(surface_solid_times) > 0 else 1.0
+        
+        # Normalize: longer contact time = higher risk
+        # Typical burn-in occurs in first 30-60 seconds of metal-mold contact
+        time_factor = np.clip(surface_solid_times / 60.0, 0.0, 1.0)
+        
+        print(f"    Surface solidification time range: {np.min(surface_solid_times):.1f} - {np.max(surface_solid_times):.1f}s")
+        
+        # ===== SAND PROPERTY FACTOR =====
+        # Default to medium sand if no mold interface is set
+        # Permeability: 25-50 (fine) to 100-200 (coarse)
+        # Grain Fineness: 70-100 (fine) to 30-50 (coarse)
+        default_permeability = 80.0  # Medium sand
+        default_grain_fineness = 55.0  # Medium grain
+        
+        # Sand factor: higher permeability + lower GFN = more penetration
+        # Normalize permeability: 150+ = high risk (1.0), 30 = low risk (0.0)
+        perm_factor = np.clip((default_permeability - 30) / 120.0, 0.0, 1.0)
+        
+        # Normalize grain fineness: 40 = high risk (1.0), 100 = low risk (0.0)  
+        gfn_factor = np.clip((100 - default_grain_fineness) / 60.0, 0.0, 1.0)
+        
+        # Combined sand factor (average of permeability and grain effects)
+        sand_factor = (perm_factor + gfn_factor) / 2.0
+        
+        print(f"    Sand permeability: {default_permeability:.0f} AFS (factor: {perm_factor:.2f})")
+        print(f"    Sand grain fineness: {default_grain_fineness:.0f} AFS (factor: {gfn_factor:.2f})")
+        print(f"    Combined sand factor: {sand_factor:.2f}")
+        
+        # ===== CHILL PROXIMITY REDUCTION =====
+        # Chills near surface voxels speed up solidification
+        # This REDUCES burn-in risk because metal solidifies faster
+        chill_reduction = np.ones(n_surface, dtype=np.float32)
+        
+        try:
+            chill_indices = self._get_chill_voxel_indices()
+            
+            if len(chill_indices) > 0:
+                try:
+                    from scipy.spatial import cKDTree
+                    chill_centers = self.mesh.voxel_centers[chill_indices]
+                    surface_centers = self.mesh.voxel_centers[surface_indices]
+                    
+                    chill_tree = cKDTree(chill_centers)
+                    distances, _ = chill_tree.query(
+                        surface_centers,
+                        k=1,
+                        distance_upper_bound=chill_burn_in_radius,
+                    )
+                    
+                    # Chill effect radius for burn-in reduction based on chill thickness
+                    if self._chill_thicknesses is not None and len(self._chill_thicknesses) > 0:
+                        chill_thickness = np.mean(self._chill_thicknesses)
+                    else:
+                        chill_thickness = self.mesh.base_voxel_size * 5.0
+                    chill_burn_in_radius = chill_thickness * 1.5  # Same as shrinkage reduction zone
+                    max_reduction = 0.3  # At chill contact, only 30% burn-in risk
+                    
+                    within_radius = np.isfinite(distances) & (distances < chill_burn_in_radius)
+                    if np.any(within_radius):
+                        # Linear reduction with distance
+                        normalized_dist = distances[within_radius] / chill_burn_in_radius
+                        chill_reduction[within_radius] = (
+                            max_reduction + (1.0 - max_reduction) * normalized_dist
+                        )
+                    
+                    chill_affected = np.sum(chill_reduction < 1.0)
+                    if chill_affected > 0:
+                        print(f"    Chill reduces burn-in risk for {chill_affected:,} surface voxels (radius: {chill_burn_in_radius:.2f}\")")
+                except ImportError:
+                    logger.warning(
+                        "scipy not available for chill proximity calculation in sand burn-in analysis",
+                        context={'n_chill_voxels': len(chill_indices)}
+                    )
+                    print("    Warning: scipy not available, skipping chill proximity reduction")
+                except Exception as e:
+                    logger.warning(
+                        f"Chill proximity calculation failed in sand burn-in analysis: {e}",
+                        context={'n_chill_voxels': len(chill_indices), 'error': str(e)}
+                    )
+                    print(f"    Warning: Chill proximity calculation failed: {e}")
+        except Exception as e:
+            logger.warning(
+                f"Failed to get chill voxel indices for sand burn-in analysis: {e}",
+                context={'error': str(e)}
+            )
+            print(f"    Warning: Could not detect chill voxels: {e}")
+        
+        # ===== CALCULATE COMBINED BURN-IN RISK =====
+        # Weight factors based on foundry experience:
+        # - Temperature (superheat): 35% - primary driver
+        # - Pressure (metal head): 30% - significant for bottom surfaces
+        # - Contact time: 20% - affects penetration depth
+        # - Sand properties: 15% - mold quality factor
+        
+        w_temp = 0.35
+        w_pressure = 0.30
+        w_time = 0.20
+        w_sand = 0.15
+        
+        # Calculate risk for each surface voxel
+        base_risk = (
+            w_temp * temp_factor +           # Scalar applied to all
+            w_pressure * pressure_factor +   # Array, varies by height
+            w_time * time_factor +           # Array, varies by solidification time
+            w_sand * sand_factor             # Scalar applied to all
+        )
+        
+        # Apply material susceptibility and chill reduction
+        surface_risk = base_risk * material_susceptibility * chill_reduction
+        
+        # Clamp to 0-1 range
+        surface_risk = np.clip(surface_risk, 0.0, 1.0).astype(np.float32)
+        
+        # Store results in full arrays (only surface voxels have non-zero values)
+        self.sand_burn_in_risk[surface_indices] = surface_risk
+        
+        # ===== IDENTIFY BURN-IN ZONES =====
+        # Threshold for flagging as burn-in zone
+        # Lower threshold than internal defects since this is a surface quality issue
+        risk_threshold = 0.20  # 20% risk threshold
+        
+        # Create zone mask
+        zone_mask = np.zeros(n_voxels, dtype=bool)
+        zone_mask[surface_indices] = surface_risk > risk_threshold
+        self.sand_burn_in_zones = zone_mask
+        
+        # Exclude chill voxels themselves (they're external parts, not casting surface)
+        try:
+            chill_indices = self._get_chill_voxel_indices()
+            if len(chill_indices) > 0:
+                self.sand_burn_in_zones[chill_indices] = False
+        except Exception:
+            pass  # Already logged above if chill detection failed
+        
+        # Count affected zones
+        self.sand_burn_in_count = np.sum(self.sand_burn_in_zones)
+        
+        # Print summary
+        print(f"  Sand burn-in risk range: {np.min(surface_risk):.3f} - {np.max(surface_risk):.3f}")
+        print(f"  Mean surface burn-in risk: {np.mean(surface_risk):.3f}")
+        print(f"  Sand burn-in threshold: {risk_threshold:.2f}")
+        print(f"  Surface voxels at risk: {self.sand_burn_in_count:,} ({self.sand_burn_in_count/n_surface*100:.1f}% of surface)")
+    
+    def _generate_statistics(self):
+        """Generate simulation statistics"""
+        # Lower threshold to catch more potential shrinkage
+        shrinkage_threshold = 0.20  # 20% probability (was 30%)
+        
+        # Shrinkage statistics
+        if self.analysis_options.shrinkage and self.shrinkage_probability is not None:
+            # Count affected voxels
+            self.affected_voxel_count = np.sum(
+                (self.shrinkage_probability > shrinkage_threshold) |
+                (self.porosity_probability > shrinkage_threshold)
+            )
+            
+            # Estimate shrinkage volume
+            affected_mask = (self.shrinkage_probability > shrinkage_threshold) | \
+                           (self.porosity_probability > shrinkage_threshold)
+            
+            if np.any(affected_mask):
+                affected_volumes = self.mesh.voxel_volumes[affected_mask]
+                affected_shrinkage = self.shrinkage_probability[affected_mask]
+                affected_porosity = self.porosity_probability[affected_mask]
+                
+                # Use maximum of shrinkage and porosity for each voxel
+                combined_probability = np.maximum(affected_shrinkage, affected_porosity)
+                
+                self.total_shrinkage_volume = np.sum(affected_volumes * combined_probability)
+            else:
+                self.total_shrinkage_volume = 0.0
+            
+            print(f"  Shrinkage threshold: {shrinkage_threshold*100:.1f}%")
+            print(f"  Shrinkage-affected voxels: {self.affected_voxel_count:,}")
+        
+        # Hot spot statistics
+        if self.analysis_options.hotspot and self.hotspot_intensity is not None:
+            hotspot_threshold = 0.3
+            self.hotspot_count = np.sum(self.hotspot_intensity > hotspot_threshold)
+        
+        # Niyama statistics
+        if self.analysis_options.niyama and self.niyama_values is not None:
+            alloy_key = self.alloy.name.split()[0]
+            niyama_threshold = NIYAMA_THRESHOLDS.get(alloy_key, 1.0)
+            self.niyama_defect_count = np.sum(self.niyama_defect_risk)
+        
+        # Hot tear statistics
+        if self.analysis_options.hot_tear and self.hot_tear_risk is not None:
+            self.hot_tear_count = np.sum(self.hot_tear_zones)
+            if self.hot_tear_count > 0:
+                max_risk = np.max(self.hot_tear_risk)
+                mean_risk = np.mean(self.hot_tear_risk[self.hot_tear_zones])
+                print(f"  Hot tear zones: {self.hot_tear_count:,} voxels")
+                print(f"  Max hot tear risk: {max_risk:.3f}, Mean in zones: {mean_risk:.3f}")
+        
+        # Report part type breakdown
+        if self.mesh.voxel_part_types is not None:
+            cast_voxels = np.sum(self.mesh.voxel_part_types == 0)
+            riser_voxels = np.sum(self.mesh.voxel_part_types == 1)
+            chill_voxels = np.sum(self.mesh.voxel_part_types == 2)
+            print(f"  Part breakdown: CAST={cast_voxels:,}, RISER={riser_voxels:,}, CHILL={chill_voxels:,}")
+    
+    def _get_normalized_heights(self) -> np.ndarray:
+        """
+        Get normalized height (Z-coordinate) for each voxel
+        0 = bottom, 1 = top
+        """
+        z_coords = self.mesh.voxel_centers[:, 2]
+        z_min = np.min(z_coords)
+        z_max = np.max(z_coords)
+        
+        if z_max > z_min:
+            return (z_coords - z_min) / (z_max - z_min)
+        else:
+            return np.zeros_like(z_coords)
+    
+    def get_shrinkage_voxels(self, threshold: float = 0.05) -> np.ndarray:
+        """
+        Get indices of voxels with significant shrinkage
+        
+        Args:
+            threshold: Probability threshold (0-1) - default 5%
+        
+        Returns:
+            Array of voxel indices
+        """
+        shrinkage_mask = (
+            (self.shrinkage_probability > threshold) |
+            (self.porosity_probability > threshold)
+        )
+        part_types = getattr(self.mesh, "voxel_part_types", None)
+        if part_types is not None and len(part_types) == len(shrinkage_mask):
+            chill_mask = np.asarray(part_types, dtype=np.int32) == 2
+            shrinkage_mask = shrinkage_mask & ~chill_mask
+        return np.where(shrinkage_mask)[0]
+    
+    def get_shrinkage_intensity(self, voxel_index: int) -> float:
+        """
+        Get combined shrinkage/porosity intensity for visualization
+        
+        Args:
+            voxel_index: Voxel index
+        
+        Returns:
+            Intensity value (0-1), clamped to maximum of 1.0
+        """
+        intensities = self.get_shrinkage_display_intensity()
+        if voxel_index < 0 or voxel_index >= len(intensities):
+            return 0.0
+        return float(intensities[voxel_index])
+
+    def get_shrinkage_display_intensity(self) -> np.ndarray:
+        """
+        Build display-ready shrinkage/porosity intensity by part type.
+
+        All CAST, RISER, and RISER_POST voxels use combined risk via
+        max(shrinkage_probability, porosity_probability) so the Shrinkage/Porosity
+        view reflects the dominant defect mode.  CHILL voxels are forced to 0.0
+        so external cooling devices remain hidden from shrinkage visualization.
+        """
+        shrink = getattr(self, "shrinkage_probability", None)
+        poro = getattr(self, "porosity_probability", None)
+
+        if shrink is None and poro is None:
+            return np.zeros(0, dtype=np.float32)
+        if shrink is None:
+            shrink_arr = np.zeros_like(np.asarray(poro, dtype=np.float32))
+        else:
+            shrink_arr = np.asarray(shrink, dtype=np.float32)
+        if poro is None:
+            poro_arr = np.zeros_like(shrink_arr, dtype=np.float32)
+        else:
+            poro_arr = np.asarray(poro, dtype=np.float32)
+
+        if len(poro_arr) != len(shrink_arr):
+            min_len = min(len(shrink_arr), len(poro_arr))
+            shrink_arr = shrink_arr[:min_len]
+            poro_arr = poro_arr[:min_len]
+
+        display = np.maximum(shrink_arr, poro_arr).astype(np.float32, copy=True)
+        part_types = getattr(self.mesh, "voxel_part_types", None)
+        if part_types is not None and len(part_types) == len(display):
+            part_types_arr = np.asarray(part_types, dtype=np.int32)
+            chill_mask = part_types_arr == 2
+            if np.any(chill_mask):
+                display[chill_mask] = 0.0
+
+        return np.clip(display, 0.0, 1.0).astype(np.float32, copy=False)
+    
+    def get_hotspot_voxels(self, threshold: float = 0.3) -> np.ndarray:
+        """
+        Get indices of voxels identified as hot spots
+        
+        Args:
+            threshold: Intensity threshold (0-1)
+        
+        Returns:
+            Array of voxel indices
+        """
+        if self.hotspot_intensity is None:
+            return np.array([], dtype=int)
+        return np.where(self.hotspot_intensity > threshold)[0]
+    
+    def get_niyama_defect_voxels(self) -> np.ndarray:
+        """
+        Get indices of voxels with Niyama values below threshold (defect risk)
+        
+        Returns:
+            Array of voxel indices
+        """
+        if self.niyama_defect_risk is None:
+            return np.array([], dtype=int)
+        return np.where(self.niyama_defect_risk)[0]
+    
+    def get_fraction_liquid_at_time(self, time_seconds: float) -> Optional[np.ndarray]:
+        """
+        Get fraction liquid state at a specific time during solidification.
+        Uses direct schedule evaluation when available, otherwise interpolates
+        between stored fraction-solid snapshots.
+        
+        Args:
+            time_seconds: Time in seconds
+        
+        Returns:
+            Array of fraction liquid values (0=solid, 1=liquid), or None if not available
+        """
+        if (
+            self.solidification_start_times is not None
+            and self.local_solidification_time is not None
+            and self.solidification_end_times is not None
+            and np.any(np.asarray(self.local_solidification_time, dtype=np.float32) > 0.0)
+        ):
+            start_times = np.asarray(self.solidification_start_times, dtype=np.float32)
+            local_times = np.asarray(self.local_solidification_time, dtype=np.float32)
+            end_times = np.asarray(self.solidification_end_times, dtype=np.float32)
+            fraction_solid = compute_schedule_fraction_solid(
+                start_times,
+                local_times,
+                time_seconds,
+                (local_times <= 0.0) & (end_times <= 0.0),
+                curve_exponent=self._schedule_curve_exponent,
+            )
+            return 1.0 - fraction_solid
+
+        if not self.fraction_liquid_times or not self.fraction_liquid_history:
+            return None
+        
+        times = np.array(self.fraction_liquid_times)
+        
+        # Handle edge cases
+        if time_seconds <= times[0]:
+            return 1.0 - self.fraction_liquid_history[0]
+        if time_seconds >= times[-1]:
+            return 1.0 - self.fraction_liquid_history[-1]
+        
+        # Find bracketing snapshots for interpolation
+        idx_after = np.searchsorted(times, time_seconds)
+        idx_before = idx_after - 1
+        
+        # Linear interpolation factor
+        t_before = times[idx_before]
+        t_after = times[idx_after]
+        alpha = (time_seconds - t_before) / (t_after - t_before) if t_after > t_before else 0.0
+        
+        # Interpolate between snapshots (states are fraction solid, we return fraction liquid)
+        state_before = self.fraction_liquid_history[idx_before]
+        state_after = self.fraction_liquid_history[idx_after]
+        interpolated_state = state_before * (1 - alpha) + state_after * alpha
+        
+        # Fraction liquid = 1 - fraction solid
+        return 1.0 - interpolated_state
+    
+    def get_fraction_liquid_time_range(self) -> Tuple[float, float]:
+        """
+        Get the time range available for fraction liquid visualization.
+        
+        Returns:
+            Tuple of (min_time, max_time) in seconds
+        """
+        if not self.fraction_liquid_times:
+            return (0.0, 0.0)
+        return (self.fraction_liquid_times[0], self.fraction_liquid_times[-1])
+    
+    def _calculate_feeding_paths(self):
+        """
+        Calculate feeding paths from risers to casting voxels.
+        
+        MAGMASOFT-style analysis that traces liquid metal flow paths
+        and identifies blocked regions that cannot be fed.
+        """
+        n_voxels = len(self.mesh.voxel_centers)
+        
+        # Get riser voxel indices
+        riser_indices = self._get_riser_voxel_indices()
+        
+        if len(riser_indices) == 0:
+            # No risers - all feeding from surface
+            surface_indices = self.mesh.get_surface_voxel_indices()
+            riser_indices = surface_indices
+        
+        # Create analyzer
+        analyzer = FeedingPathAnalyzer(self.mesh, self.alloy)
+        
+        if self.feeding_fraction_solid is not None:
+            fraction_solid = np.clip(np.asarray(self.feeding_fraction_solid, dtype=np.float32), 0.0, 1.0)
+        else:
+            fraction_solid = 0.5 * np.ones(n_voxels, dtype=np.float32)
+
+        # Run analysis
+        self.feeding_path_result = analyzer.analyze(
+            riser_indices,
+            fraction_solid,
+            show_progress=False,
+            history=getattr(self, "fraction_liquid_history", None),
+            history_times=getattr(self, "fraction_liquid_times", None),
+            reference_times=self._estimate_feeding_reference_times(),
+        )
+        
+        # Store key results
+        self.feeding_quality = self.feeding_path_result.feeding_quality
+        self.feeding_blocked = self.feeding_path_result.blocked_voxels
+        self.feeding_open_fraction = self.feeding_path_result.history_open_fraction
+        self.feeding_latest_open_time = self.feeding_path_result.latest_open_time
+        self.feeding_blocked_count = self.feeding_path_result.n_blocked
+        
+        # If we have Niyama data, create combined defect risk
+        if self.niyama_defect_risk is not None:
+            self.combined_defect_risk = analyzer.get_combined_defect_risk(
+                self.niyama_defect_risk
+            )
+        
+        print(f"    Feeding path results: {self.feeding_path_result.fed_fraction*100:.1f}% fed")
+        print(f"    Blocked voxels: {self.feeding_blocked_count:,}")
+    
+    def _calculate_stress_analysis(self):
+        """
+        Calculate thermal stress and distortion from differential solidification.
+        """
+        n_voxels = len(self.mesh.voxel_centers)
+        
+        # Create analyzer
+        analyzer = StressAnalyzer(self.mesh, self.alloy)
+        
+        # Get fraction solid (use final state)
+        fraction_solid = np.clip(self.mesh.voxel_states, 0, 1).astype(np.float32)
+        
+        # Run analysis
+        self.stress_result = analyzer.analyze(
+            np.asarray(self.solidification_times),
+            fraction_solid,
+            show_progress=False
+        )
+        
+        # Store key results
+        self.effective_stress = self.stress_result.effective_stress
+        self.distortion_magnitude = self.stress_result.distortion_magnitude
+        self.crack_susceptibility = self.stress_result.crack_susceptibility
+
+        sand_restraint_index = self._get_sand_restraint_index()
+        restraint_offset = sand_restraint_index - 0.5
+        crack_multiplier = np.clip(
+            1.0 + 0.5 * restraint_offset * self._compute_surface_restraint_weight(),
+            0.8,
+            1.2,
+        ).astype(np.float32)
+        self.crack_susceptibility = np.clip(
+            np.asarray(self.crack_susceptibility, dtype=np.float32) * crack_multiplier,
+            0.0,
+            1.0,
+        )
+        self.stress_result.crack_susceptibility = self.crack_susceptibility
+        self.max_stress_mpa = self.stress_result.max_stress
+        
+        print(f"    Max stress: {self.max_stress_mpa:.1f} MPa")
+        print(
+            "    Sand restraint index: "
+            f"{sand_restraint_index:.2f} (crack multiplier range: "
+            f"{np.min(crack_multiplier):.3f} - {np.max(crack_multiplier):.3f})"
+        )
+        print(f"    Max distortion: {self.stress_result.max_distortion*1000:.3f} mils")
+    
+    def _calculate_microstructure(self):
+        """
+        Predict secondary dendrite arm spacing (SDAS) and mechanical properties.
+        """
+        n_voxels = len(self.mesh.voxel_centers)
+        
+        # Create predictor
+        predictor = MicrostructurePredictor(self.mesh, self.alloy)
+        
+        # Run prediction from solidification times
+        self.microstructure_result = predictor.predict_from_solidification(
+            np.asarray(self.solidification_times),
+            show_progress=False
+        )
+        
+        # Store key results
+        self.sdas = self.microstructure_result.sdas
+        self.predicted_uts = self.microstructure_result.predicted_uts
+        self.avg_sdas_um = self.microstructure_result.avg_sdas
+        
+        print(f"    Average SDAS: {self.avg_sdas_um:.0f} μm")
+        print(f"    SDAS range: {self.microstructure_result.min_sdas:.0f} - {self.microstructure_result.max_sdas:.0f} μm")
+    
+    def _calculate_chvorinov_times(self):
+        """
+        Calculate local solidification time estimates using Chvorinov's rule.
+        
+        Quick Win #1: Shows predicted solidification time per region.
+        
+        Chvorinov's Rule: t = B * M²
+        where M is the local modulus (distance to surface)
+        """
+        n_voxels = len(self.mesh.voxel_centers)
+        
+        # Use local modulus (distance to surface)
+        self.local_modulus = np.asarray(self.mesh.voxel_moduli).copy()
+        
+        # Mold constant (from _calculate_max_simulation_time)
+        if hasattr(self, '_mold_constant'):
+            B = self._mold_constant
+        else:
+            B = 280.0  # Default for steel in sand
+        
+        # Chvorinov time: t = B * M²
+        self.chvorinov_time = B * (self.local_modulus ** 2)
+        
+        # Clamp to reasonable values
+        self.chvorinov_time = np.clip(self.chvorinov_time, 1.0, self.max_time)
+    
+    def get_chvorinov_time_at_voxel(self, voxel_index: int) -> float:
+        """
+        Get estimated solidification time at a specific voxel.
+        
+        Args:
+            voxel_index: Voxel index
+            
+        Returns:
+            Estimated solidification time in seconds
+        """
+        if self.chvorinov_time is None:
+            return 0.0
+        return float(self.chvorinov_time[voxel_index])
+    
+    def get_defect_volume_estimate(self, threshold: float = 0.3) -> Dict:
+        """
+        Quick Win #3: Calculate total defect volume estimate.
+        
+        Args:
+            threshold: Probability threshold for defect inclusion
+            
+        Returns:
+            Dict with volume statistics
+        """
+        n_voxels = len(self.mesh.voxel_centers)
+        
+        # Combined shrinkage/porosity mask
+        if self.shrinkage_probability is not None and self.porosity_probability is not None:
+            defect_mask = (self.shrinkage_probability > threshold) | \
+                          (self.porosity_probability > threshold)
+            combined_prob = np.maximum(self.shrinkage_probability, self.porosity_probability)
+        elif self.shrinkage_probability is not None:
+            defect_mask = self.shrinkage_probability > threshold
+            combined_prob = self.shrinkage_probability
+        else:
+            return {'total_volume_in3': 0.0, 'defect_count': 0, 'casting_volume_in3': 0.0}
+        
+        # Calculate volumes
+        casting_volume = float(np.sum(self.mesh.voxel_volumes))
+        
+        if np.any(defect_mask):
+            defect_volumes = self.mesh.voxel_volumes[defect_mask]
+            defect_probs = combined_prob[defect_mask]
+            
+            # Weighted volume (probability × volume)
+            weighted_volume = float(np.sum(defect_volumes * defect_probs))
+            
+            # Maximum possible volume (if all defect voxels were 100% defect)
+            max_defect_volume = float(np.sum(defect_volumes))
+            
+            defect_count = int(np.sum(defect_mask))
+        else:
+            weighted_volume = 0.0
+            max_defect_volume = 0.0
+            defect_count = 0
+        
+        return {
+            'total_volume_in3': weighted_volume,
+            'max_volume_in3': max_defect_volume,
+            'defect_count': defect_count,
+            'casting_volume_in3': casting_volume,
+            'defect_percentage': weighted_volume / casting_volume * 100 if casting_volume > 0 else 0,
+            'threshold_used': threshold
+        }
+    
+    def get_feeding_arrows(self, sample_fraction: float = 0.05) -> List:
+        """
+        Quick Win #2: Get feeding path visualization arrows.
+        
+        Returns list of (start_point, direction) for drawing feeding flow.
+        
+        Args:
+            sample_fraction: Fraction of voxels to include
+            
+        Returns:
+            List of (start, direction) tuples
+        """
+        if self.feeding_path_result is None:
+            return []
+        
+        # Get arrows from the analyzer
+        try:
+            analyzer = FeedingPathAnalyzer(self.mesh, self.alloy)
+            analyzer.result = self.feeding_path_result
+            return analyzer.get_feeding_arrows(sample_fraction)
+        except Exception:
+            return []
+    
+    def export_results(self) -> Dict:
+        """
+        Export simulation results as dictionary
+        
+        Returns:
+            Dictionary with all results including all analysis types
+        """
+        results = {
+            'alloy': self.alloy.name,
+            'simulation_time': self.time,
+            'voxel_count': len(self.mesh.voxel_centers),
+            'solidification_times': self.solidification_times,
+            'solidification_start_times': self.solidification_start_times,
+            'solidification_end_times': self.solidification_end_times,
+            'local_solidification_time': self.local_solidification_time,
+            'analysis_options': {
+                'shrinkage': self.analysis_options.shrinkage,
+                'hotspot': self.analysis_options.hotspot,
+                'niyama': self.analysis_options.niyama,
+                'hot_tear': self.analysis_options.hot_tear,
+                'sand_burn_in': self.analysis_options.sand_burn_in,
+                'fraction_liquid': self.analysis_options.fraction_liquid
+            }
+        }
+        
+        # Shrinkage results
+        if self.analysis_options.shrinkage:
+            results['affected_voxels'] = self.affected_voxel_count
+            results['shrinkage_volume'] = self.total_shrinkage_volume
+            results['shrinkage_percentage'] = (self.affected_voxel_count / 
+                                               len(self.mesh.voxel_centers) * 100)
+            results['shrinkage_risk'] = self.shrinkage_risk
+            results['porosity_risk'] = self.porosity_risk
+            results['shrinkage_data'] = self.shrinkage_probability
+            results['porosity_data'] = self.porosity_probability
+        
+        # Hot spot results
+        if self.analysis_options.hotspot:
+            results['hotspot_count'] = self.hotspot_count
+            results['hotspot_intensity'] = self.hotspot_intensity
+        
+        # Niyama results
+        if self.analysis_options.niyama:
+            alloy_key = self.alloy.name.split()[0]
+            results['niyama_threshold'] = NIYAMA_THRESHOLDS.get(alloy_key, 1.0)
+            results['niyama_defect_count'] = self.niyama_defect_count
+            results['niyama_values'] = self.niyama_values
+            results['niyama_defect_risk'] = self.niyama_defect_risk
+            results['thermal_gradients'] = self.thermal_gradients
+            results['cooling_rates'] = self.cooling_rates
+        
+        # Hot tear results
+        if self.analysis_options.hot_tear:
+            results['hot_tear_count'] = self.hot_tear_count
+            results['hot_tear_risk'] = self.hot_tear_risk
+            results['hot_tear_zones'] = self.hot_tear_zones
+        
+        # Sand burn-in results
+        if self.analysis_options.sand_burn_in:
+            results['sand_burn_in_count'] = self.sand_burn_in_count
+            results['sand_burn_in_risk'] = self.sand_burn_in_risk
+            results['sand_burn_in_zones'] = self.sand_burn_in_zones
+        
+        # Fraction liquid results
+        if self.analysis_options.fraction_liquid:
+            results['fraction_liquid_times'] = self.fraction_liquid_times
+            results['fraction_liquid_snapshots'] = len(self.fraction_liquid_history)
+        
+        # Feeding path results
+        if self.analysis_options.feeding_path and self.feeding_path_result is not None:
+            results['feeding_quality'] = self.feeding_quality
+            results['feeding_blocked_count'] = self.feeding_blocked_count
+            results['fed_fraction'] = self.feeding_path_result.fed_fraction
+        
+        # Stress analysis results
+        if self.analysis_options.stress_analysis and self.stress_result is not None:
+            results['max_stress_mpa'] = self.max_stress_mpa
+            results['effective_stress'] = self.effective_stress
+            results['distortion_magnitude'] = self.distortion_magnitude
+            results['crack_susceptibility'] = self.crack_susceptibility
+        
+        # Microstructure results
+        if self.analysis_options.microstructure and self.microstructure_result is not None:
+            results['avg_sdas_um'] = self.avg_sdas_um
+            results['sdas'] = self.sdas
+            results['predicted_uts'] = self.predicted_uts
+        
+        # Chvorinov time (always available)
+        if self.chvorinov_time is not None:
+            results['chvorinov_time'] = self.chvorinov_time
+            results['local_modulus'] = self.local_modulus
+        
+        # Defect volume estimate
+        results['defect_volume_estimate'] = self.get_defect_volume_estimate()
+        
+        return results

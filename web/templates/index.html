@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Casting Solidification Simulator</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}?v=20241202">
+    <!-- Three.js for 3D visualization -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.js"></script>
+    <!-- Font Awesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="header-logo">
+                <i class="fas fa-cube"></i>
+                <span>Casting Solidification Simulator</span>
+            </div>
+            <div class="header-actions">
+                <button class="btn btn-icon" onclick="clearAll()" title="New Simulation">
+                    <i class="fas fa-file"></i>
+                </button>
+                <button class="btn btn-secondary" onclick="openHelpDialog()" title="Help / Guide">
+                    <i class="fas fa-circle-question"></i> Help
+                </button>
+                <button class="btn btn-icon" onclick="toggleDarkMode()" title="Toggle Dark Mode">
+                    <i class="fas fa-moon"></i>
+                </button>
+                <button class="btn btn-primary" onclick="openSaveDialog()">
+                    <i class="fas fa-save"></i> Save
+                </button>
+                <button class="btn btn-secondary" onclick="openLoadDialog()">
+                    <i class="fas fa-folder-open"></i> Load
+                </button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <div class="main-content">
+            <!-- Left Sidebar - Controls -->
+            <aside class="sidebar sidebar-left">
+                <!-- Parts Panel -->
+                <div class="panel">
+                    <div class="panel-header" onclick="togglePanel(this)">
+                        <h3><i class="fas fa-layer-group"></i> Parts</h3>
+                        <i class="fas fa-chevron-down"></i>
+                    </div>
+                    <div class="panel-content">
+                        <div class="parts-actions">
+                            <button class="btn btn-primary btn-block" onclick="uploadParts()">
+                                <i class="fas fa-upload"></i> Upload STL(s)
+                            </button>
+                            <input type="file" id="fileInput" accept=".stl" multiple style="display: none" onchange="handleMultiFileUpload(event)">
+                        </div>
+                        <div class="parts-list" id="partsList">
+                            <div class="empty-state">
+                                <i class="fas fa-cube"></i>
+                                <p>No parts loaded</p>
+                                <small>Upload STL files to get started</small>
+                                <small>Names with "riser" or "chill" auto-assign type</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Part Properties Panel -->
+                <div class="panel" id="partPropertiesPanel" style="display: none;">
+                    <div class="panel-header" onclick="togglePanel(this)">
+                        <h3><i class="fas fa-sliders-h"></i> Part Properties</h3>
+                        <i class="fas fa-chevron-down"></i>
+                    </div>
+                    <div class="panel-content">
+                        <div class="form-group">
+                            <label>Name</label>
+                            <input type="text" id="partName" class="form-control" onchange="updateSelectedPart()">
+                        </div>
+                        <div class="form-group">
+                            <label>Type</label>
+                            <select id="partType" class="form-control" onchange="updateSelectedPart()">
+                                <option value="cast">🔩 Cast (Analyzed)</option>
+                                <option value="riser">🔥 Riser (Feeder)</option>
+                                <option value="riser_post">📍 Riser Post (Neck)</option>
+                                <option value="chill">❄️ Chill (Cooling)</option>
+                            </select>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group form-col">
+                                <label>Position X</label>
+                                <input type="number" id="posX" class="form-control" step="0.1" onchange="updateSelectedPart()">
+                            </div>
+                            <div class="form-group form-col">
+                                <label>Y</label>
+                                <input type="number" id="posY" class="form-control" step="0.1" onchange="updateSelectedPart()">
+                            </div>
+                            <div class="form-group form-col">
+                                <label>Z</label>
+                                <input type="number" id="posZ" class="form-control" step="0.1" onchange="updateSelectedPart()">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>Scale</label>
+                            <input type="range" id="partScale" min="0.1" max="5" step="0.1" value="1" class="slider" onchange="updateSelectedPart()">
+                            <span id="scaleValue">1.0x</span>
+                        </div>
+                        <button class="btn btn-danger btn-block" onclick="deleteSelectedPart()">
+                            <i class="fas fa-trash"></i> Remove Part
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Material Panel -->
+                <div class="panel">
+                    <div class="panel-header" onclick="togglePanel(this)">
+                        <h3><i class="fas fa-flask"></i> Material</h3>
+                        <i class="fas fa-chevron-down"></i>
+                    </div>
+                    <div class="panel-content">
+                        <div class="form-group">
+                            <label>Alloy</label>
+                            <select id="alloySelect" class="form-control" onchange="updateMaterialInfo()">
+                                <option value="WCB">WCB (Carbon Steel)</option>
+                                <option value="CF8">CF8 (Stainless Steel 304)</option>
+                                <option value="C958">C958 (Aluminum Bronze)</option>
+                                <option value="CA6NM">CA6NM (Cast Steel)</option>
+                            </select>
+                        </div>
+                        <div class="material-info" id="materialInfo">
+                            <!-- Populated by JS -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Mesh Settings Panel -->
+                <div class="panel">
+                    <div class="panel-header" onclick="togglePanel(this)">
+                        <h3><i class="fas fa-th"></i> Mesh Settings</h3>
+                        <i class="fas fa-chevron-down"></i>
+                    </div>
+                    <div class="panel-content">
+                        <div class="form-group">
+                            <label class="checkbox">
+                                <input type="checkbox" id="autoMesh" checked onchange="toggleAutoMesh()">
+                                <span>Auto Mesh (ML Recommended)</span>
+                            </label>
+                        </div>
+                        <div id="manualMeshSettings">
+                            <div class="form-group">
+                                <label>Voxel Size (inches)</label>
+                                <input type="number" id="voxelSize" class="form-control" value="0.1" min="0.02" max="0.5" step="0.01" onchange="updateMeshPreview()">
+                            </div>
+                            <div class="form-group">
+                                <label>Refinement Level</label>
+                                <select id="refinementLevel" class="form-control" onchange="updateMeshPreview()">
+                                    <option value="1">1 - Coarse</option>
+                                    <option value="2">2 - Medium</option>
+                                    <option value="3">3 - Fine</option>
+                                    <option value="4" selected>4 - Very Fine</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="mesh-preview" id="meshPreview">
+                            <div class="preview-stat">
+                                <span>Estimated Voxels:</span>
+                                <strong id="estVoxels">--</strong>
+                            </div>
+                            <div class="preview-stat">
+                                <span>Memory:</span>
+                                <strong id="estMemory">--</strong>
+                            </div>
+                            <div class="preview-stat" id="autoMeshInfo" style="display: none;">
+                                <span>Confidence:</span>
+                                <strong id="mlConfidence">--</strong>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- 3D Viewport -->
+            <main class="viewport-container">
+                <div class="viewport-toolbar">
+                    <div class="toolbar-group">
+                        <button class="btn btn-icon" onclick="resetCamera()" title="Reset View">
+                            <i class="fas fa-home"></i>
+                        </button>
+                        <button class="btn btn-icon" onclick="setView('front')" title="Front View">F</button>
+                        <button class="btn btn-icon" onclick="setView('top')" title="Top View">T</button>
+                        <button class="btn btn-icon" onclick="setView('side')" title="Side View">S</button>
+                        <button class="btn btn-icon" onclick="setView('iso')" title="Isometric">
+                            <i class="fas fa-cube"></i>
+                        </button>
+                    </div>
+                    <div class="toolbar-group">
+                        <button class="btn btn-icon" onclick="toggleWireframe()" title="Toggle Wireframe">
+                            <i class="fas fa-border-all"></i>
+                        </button>
+                        <button class="btn btn-icon" onclick="toggleAxes()" title="Toggle Axes">
+                            <i class="fas fa-arrows-alt"></i>
+                        </button>
+                        <button class="btn btn-icon" onclick="toggleGrid()" title="Toggle Grid">
+                            <i class="fas fa-th-large"></i>
+                        </button>
+                    </div>
+                    <div class="toolbar-group">
+                        <button class="btn btn-icon" id="measureBtn" onclick="startMeasurement()" title="Measure Distance">
+                            <i class="fas fa-ruler"></i>
+                        </button>
+                        <button class="btn btn-icon" onclick="takeScreenshot()" title="Screenshot">
+                            <i class="fas fa-camera"></i>
+                        </button>
+                    </div>
+                </div>
+                <div id="viewport3d" class="viewport3d"></div>
+                <div class="viewport-info" id="viewportInfo">
+                    <span id="modelInfo">No model loaded</span>
+                </div>
+            </main>
+
+            <!-- Right Sidebar - Simulation & Results -->
+            <aside class="sidebar sidebar-right">
+                <!-- Analysis Options Panel -->
+                <div class="panel">
+                    <div class="panel-header" onclick="togglePanel(this)">
+                        <h3><i class="fas fa-cogs"></i> Analysis Options</h3>
+                        <i class="fas fa-chevron-down"></i>
+                    </div>
+                    <div class="panel-content">
+                        <div class="checkbox-group">
+                            <label class="checkbox">
+                                <input type="checkbox" id="optShrinkage" checked>
+                                <span>Shrinkage / Porosity</span>
+                            </label>
+                            <label class="checkbox">
+                                <input type="checkbox" id="optHotspot" checked>
+                                <span>Hot Spots</span>
+                            </label>
+                            <label class="checkbox">
+                                <input type="checkbox" id="optNiyama">
+                                <span>Niyama Criterion</span>
+                            </label>
+                            <label class="checkbox">
+                                <input type="checkbox" id="optHotTear">
+                                <span>Hot Tear Risk</span>
+                            </label>
+                            <div class="form-group" style="margin: 6px 0 10px 24px;">
+                                <label>Sand Restraint: <span id="sandRestraintValue">0.50</span></label>
+                                <input
+                                    type="range"
+                                    id="sandRestraintIndex"
+                                    min="0"
+                                    max="100"
+                                    value="50"
+                                    class="slider"
+                                    oninput="updateSandRestraintLabel()"
+                                >
+                                <small class="text-secondary">0 = collapsible mold, 1 = rigid mold</small>
+                            </div>
+                            <label class="checkbox">
+                                <input type="checkbox" id="optSandBurnIn">
+                                <span>Sand Burn-In</span>
+                            </label>
+                            <label class="checkbox">
+                                <input type="checkbox" id="optFractionLiquid">
+                                <span>Fraction Liquid</span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Run Simulation Panel -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <h3><i class="fas fa-play-circle"></i> Simulation</h3>
+                    </div>
+                    <div class="panel-content">
+                        <button class="btn btn-success btn-lg btn-block" id="runSimBtn" onclick="runSimulation()">
+                            <i class="fas fa-play"></i> Run Simulation
+                        </button>
+                        <div class="progress-container" id="simProgress" style="display: none;">
+                            <div class="progress-bar">
+                                <div class="progress-fill" id="progressFill"></div>
+                            </div>
+                            <div class="progress-text" id="progressText">Initializing...</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Results Panel -->
+                <div class="panel" id="resultsPanel" style="display: none;">
+                    <div class="panel-header" onclick="togglePanel(this)">
+                        <h3><i class="fas fa-chart-bar"></i> Results</h3>
+                        <i class="fas fa-chevron-down"></i>
+                    </div>
+                    <div class="panel-content">
+                        <div class="form-group">
+                            <label>Display</label>
+                            <select id="resultDisplay" class="form-control" onchange="updateResultDisplay()">
+                                <option value="model">Model Only</option>
+                                <option value="shrinkage">Shrinkage/Porosity</option>
+                                <option value="hotspot">Hot Spots</option>
+                                <option value="niyama">Niyama Criterion</option>
+                                <option value="fraction_liquid">Fraction Liquid</option>
+                            </select>
+                        </div>
+                        <!-- Fraction Liquid Controls - two sliders like Python version -->
+                        <div class="form-group" id="fractionLiquidControls" style="display: none;">
+                            <label>🟡 Liquid ← Time → Solid ⬜</label>
+                            <input type="range" id="flTimeSlider" min="0" max="100" value="0" class="slider" oninput="updateFractionLiquidTime()">
+                            <small id="flTimeValue">0% - Just Poured</small>
+                            
+                            <!-- Animation Controls -->
+                            <div class="animation-controls" style="margin-top: 10px; display: flex; align-items: center; gap: 8px;">
+                                <button id="flPlayBtn" class="btn btn-sm btn-primary" onclick="toggleFLAnimation()" title="Play/Pause">
+                                    <i class="fas fa-play" id="flPlayIcon"></i>
+                                </button>
+                                <button class="btn btn-sm btn-secondary" onclick="resetFLAnimation()" title="Reset">
+                                    <i class="fas fa-undo"></i>
+                                </button>
+                                <input type="range" id="flSpeedSlider" min="1" max="10" value="5" style="width: 80px;" oninput="updateFLSpeed()">
+                                <small id="flSpeedValue" style="min-width: 35px;">1.0x</small>
+                            </div>
+                            
+                            <label style="margin-top: 10px;">Threshold: <span id="flThresholdValue">1%</span></label>
+                            <input type="range" id="flThresholdSlider" min="1" max="100" value="1" class="slider" oninput="updateFractionLiquidThreshold()">
+                            <small class="text-secondary">Show voxels with liquid > threshold</small>
+                        </div>
+                        <div class="form-group" id="thresholdControls">
+                            <label>Min Risk %: <span id="thresholdValue">30%</span> <small class="text-secondary" style="font-weight: normal;">(recommended: 30%)</small></label>
+                            <div style="position: relative; padding-top: 18px; margin-bottom: 5px;">
+                                <div style="position: absolute; left: 30%; top: 0; transform: translateX(-50%); text-align: center; z-index: 1;">
+                                    <small style="color: #4CAF50; font-size: 10px; font-weight: bold;">▼</small>
+                                </div>
+                                <input type="range" id="threshold" min="0" max="100" value="30" class="slider" onchange="updateThreshold()" style="width: 100%;">
+                            </div>
+                        </div>
+                        <div class="result-stats" id="resultStats">
+                            <!-- Populated by JS -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Visualization Panel -->
+                <div class="panel">
+                    <div class="panel-header" onclick="togglePanel(this)">
+                        <h3><i class="fas fa-palette"></i> Visualization</h3>
+                        <i class="fas fa-chevron-down"></i>
+                    </div>
+                    <div class="panel-content">
+                        <div class="form-group">
+                            <label>Model Opacity: <span id="opacityValue">35%</span></label>
+                            <input type="range" id="modelOpacity" min="0" max="100" value="35" class="slider" onchange="updateModelOpacity()">
+                        </div>
+                        <div class="checkbox-group">
+                            <label class="checkbox">
+                                <input type="checkbox" id="showColorBar" onchange="toggleColorBar()">
+                                <span>Show Color Bar</span>
+                            </label>
+                            <label class="checkbox">
+                                <input type="checkbox" id="showModel" checked onchange="toggleModelVisibility()">
+                                <span>Show Model</span>
+                            </label>
+                            <label class="checkbox">
+                                <input type="checkbox" id="showGrid" checked onchange="toggleGrid(true)">
+                                <span>Show Grid</span>
+                            </label>
+                            <label class="checkbox">
+                                <input type="checkbox" id="showAxes" checked onchange="toggleAxes(true)">
+                                <span>Show Axes</span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Cross Section Panel -->
+                <div class="panel">
+                    <div class="panel-header" onclick="togglePanel(this)">
+                        <h3><i class="fas fa-cut"></i> Cross Section</h3>
+                        <i class="fas fa-chevron-down"></i>
+                    </div>
+                    <div class="panel-content">
+                        <div class="form-group">
+                            <label>
+                                <input type="checkbox" id="enableCrossSection" onchange="toggleCrossSection()">
+                                Enable Cross Section
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label>Axis</label>
+                            <select id="crossSectionAxis" class="form-control" onchange="updateCrossSection()">
+                                <option value="x">X Axis</option>
+                                <option value="y">Y Axis</option>
+                                <option value="z">Z Axis</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Position: <span id="crossSectionValue">50%</span></label>
+                            <input type="range" id="crossSectionPos" min="0" max="100" value="50" class="slider" onchange="updateCrossSection()">
+                        </div>
+                    </div>
+                </div>
+            </aside>
+        </div>
+
+        <!-- Status Bar -->
+        <footer class="status-bar">
+            <div class="status-left">
+                <span id="statusText">Ready</span>
+            </div>
+            <div class="status-right">
+                <span id="voxelCount">Voxels: --</span>
+                <span id="memoryUsage">Memory: --</span>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Save Dialog Modal -->
+    <div class="modal" id="saveModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Save Simulation</h2>
+                <button class="btn btn-icon" onclick="closeSaveDialog()"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Name</label>
+                    <input type="text" id="saveName" class="form-control" placeholder="My Simulation">
+                </div>
+                <div class="form-group">
+                    <label>Description</label>
+                    <textarea id="saveDescription" class="form-control" rows="3" placeholder="Optional description..."></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeSaveDialog()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveSimulation()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Load Dialog Modal -->
+    <div class="modal" id="loadModal">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h2>Load Simulation</h2>
+                <button class="btn btn-icon" onclick="closeLoadDialog()"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body">
+                <div class="simulation-list" id="simulationList">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Help Guide Modal -->
+    <div class="modal" id="helpModal">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h2><i class="fas fa-book-open"></i> Help / How to Use</h2>
+                <button class="btn btn-icon" onclick="closeHelpDialog()"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body help-modal-body">
+                <div class="help-section">
+                    <h3>Alloy Comparison</h3>
+                    <p>Use this to choose an alloy before selecting riser/chill strategy.</p>
+                    <p><strong>Shrinkage note:</strong> this app displays <strong>volumetric shrinkage</strong>. WCB shows ~8.3% and CF8 shows ~7.5% here, while handbook values like 2.0% or 2.5% are commonly linear shrinkage references and will not numerically match volumetric values.</p>
+                    <p><strong>Definition:</strong> Volumetric shrinkage is calculated from density change as
+                        <code>volumetric = (1 - density_liquid / density_solid) * 100%</code>.
+                        Equivalent linear shrinkage is only an approximation (for isotropic comparison only).
+                    </p>
+                    <table class="help-table">
+                        <thead>
+                            <tr class="help-preset-row" data-preset="thin-walls">
+                                <th>Alloy</th>
+                                <th>Full Name</th>
+                                <th>Volumetric Shrinkage</th>
+                                <th>Feeding Multiplier</th>
+                                <th>Niyama Threshold</th>
+                                <th>Characteristics</th>
+                            </tr>
+                        </thead>
+                        <tbody id="helpAlloyTableBody">
+                            <tr class="help-preset-row" data-preset="thick-bosses">
+                                <td colspan="6">Loading alloy data...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="help-section">
+                    <h3>Units and Conversions</h3>
+                    <ul>
+                        <li><strong>Volumetric shrinkage (this app):</strong> what the panel and results use.</li>
+                        <li><strong>Linear shrinkage (literature tables):</strong> often reported separately and not directly equal.</li>
+                        <li><strong>WCB example:</strong> density data gives about 8.3% volumetric; this is approximately 2.8% equivalent linear under isotropic approximation.</li>
+                        <li><strong>CF8 example:</strong> density data gives about 7.5% volumetric; this is approximately 2.6% equivalent linear under isotropic approximation.</li>
+                        <li><strong>Important:</strong> these equivalent linear values are only for orientation; your alloy-specific linear spec and density data can still differ.</li>
+                    </ul>
+                    <p><strong>Live Alloy Conversion Table</strong> (from current model data):</p>
+                    <table class="help-table">
+                        <thead>
+                            <tr>
+                                <th>Alloy</th>
+                                <th>Volumetric Shrinkage</th>
+                                <th>Equivalent Linear</th>
+                                <th>How calculated</th>
+                            </tr>
+                        </thead>
+                        <tbody id="helpShrinkageConversionTableBody">
+                            <tr>
+                                <td colspan="4">Loading conversion rows...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="help-section">
+                    <h3>Simulation Settings Guide</h3>
+                    <table class="help-table">
+                        <thead>
+                            <tr class="help-preset-row" data-preset="complex-junctions">
+                                <th>Control</th>
+                                <th>What it does</th>
+                                <th>How to use for good casting checks</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr class="help-preset-row" data-preset="high-risk-alloy">
+                                <td>Alloy</td>
+                                <td>Defines thermal/mechanical material constants used for solidification and risk scoring.</td>
+                                <td>Start with a material baseline closest to your foundry spec. WCB is common, C964 generally gives lower volumetric shrinkage than WCB, CA6NM is a balanced cast-steel option, and CF8 is usually harder to cast than WCB/C958.</td>
+                            </tr>
+                            <tr>
+                                <td>Auto Mesh</td>
+                                <td>Uses ML recommendation for voxel size and mesh resolution.</td>
+                                <td>Enable for fast first pass, then validate with manual settings if hotspot regions move after refinement.</td>
+                            </tr>
+                            <tr>
+                                <td>Voxel Size</td>
+                                <td>Controls geometric discretization.</td>
+                                <td>Smaller voxels capture narrow sections and high curvature defects better, but increase runtime and memory.</td>
+                            </tr>
+                            <tr>
+                                <td>Refinement Level</td>
+                                <td>Controls additional resolution tuning on top of voxel size.</td>
+                                <td>Increase in complex geometry until key risk zones stop changing materially.</td>
+                            </tr>
+                            <tr>
+                                <td>Part Type</td>
+                                <td>Marks geometry as cast, riser, riser post, or chill for feeding/chill physics.</td>
+                                <td>Only one way to properly model feeding behavior is to classify risers/chills correctly.</td>
+                            </tr>
+                            <tr>
+                                <td>Shrinkage / Porosity</td>
+                                <td>Runs shrinkage-risk field plus combined porosity logic.</td>
+                                <td>Primary defect check. Lower high-risk region count/volume is better.</td>
+                            </tr>
+                            <tr>
+                                <td>Hot Spot</td>
+                                <td>Flags voxels with delayed, isolated, late freeze behavior.</td>
+                                <td>Use to catch local solidification traps around ribs, ribs-thick junctions, and enclosed sections.</td>
+                            </tr>
+                            <tr>
+                                <td>Niyama Criterion</td>
+                                <td>Highlights directional solidification risk, especially high thermal gradient/cooling imbalance areas.</td>
+                                <td>Higher Niyama severity means higher risk. Cross-check with shrinkage view in same region.</td>
+                            </tr>
+                            <tr>
+                                <td>Hot Tear Risk</td>
+                                <td>Evaluates local tear risk from BTR-like behavior in late mushy-solid transition.</td>
+                                <td>Keep enabled for thin necks, transitions, and heavy section change locations.</td>
+                            </tr>
+                            <tr>
+                                <td>Sand Burn-In</td>
+                                <td>Predicts where liquid metal tends to pull/scrape against refractory and expose defects.</td>
+                                <td>Use when gating and pouring speed can rub sand marks into critical surfaces.</td>
+                            </tr>
+                            <tr>
+                                <td>Fraction Liquid</td>
+                                <td>Shows liquid fraction over time using simulation snapshots.</td>
+                                <td>Use for sequence review; verify mushy zone evolution and whether risers feed before complete pinch-off.</td>
+                            </tr>
+                            <tr>
+                                <td>Sand Restraint Slider</td>
+                                <td>0 = flexible/collapsible mold behavior, 1 = rigid constraint.</td>
+                                <td>Raise for rigid molds to reduce unrealistic deformation-assisted feeding in the model.</td>
+                            </tr>
+                            <tr>
+                                <td>Model Opacity</td>
+                                <td>Controls base geometry transparency.</td>
+                                <td>Lower opacity when checking interior risk clouds.</td>
+                            </tr>
+                            <tr>
+                                <td>Cross Section</td>
+                                <td>Clips the model for interior inspection along an axis and position.</td>
+                                <td>Use for validating hidden riser feeders, chill paths, and internal thick-light sections.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <p class="help-note" id="helpPresetSummary">Select a preset and click Apply to load a recommended setup for that casting type.</p>
+                </div>
+
+                <div class="help-section">
+                    <h3>Result View Interpretation</h3>
+                    <table class="help-table">
+                        <thead>
+                            <tr>
+                                <th>View</th>
+                                <th>What values mean</th>
+                                <th>How to judge a good casting</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>Model Only</td>
+                                <td>No defect overlay, geometry-only check.</td>
+                                <td>Use to confirm orientation, riser/chill labeling, and regions of concern before defect views.</td>
+                            </tr>
+                            <tr>
+                                <td>Shrinkage/Porosity</td>
+                                <td>Higher value = higher risk probability. The <strong>threshold</strong> shows voxels above that value.</td>
+                                <td>Good target: small, disconnected red/yellow clusters, preferably near non-critical regions and away from casting body.</td>
+                            </tr>
+                            <tr>
+                                <td>Hot Spots</td>
+                                <td>Higher value = more likely hot spot trapping zone; dashboard count uses >0.3 threshold internally.</td>
+                                <td>Good target: no large clusters near junctions and thick cores.</td>
+                            </tr>
+                            <tr>
+                                <td>Niyama Criterion</td>
+                                <td>Model maps computed severity from directional solidification. Lower Niyama number means higher risk, but map uses higher severity values for worse regions.</td>
+                                <td>Good target: high gradient, feed-open paths near risers/chills and no sustained high-severity boundary along thick sections.</td>
+                            </tr>
+                            <tr>
+                                <td>Fraction Liquid</td>
+                                <td>Shows only voxels with fraction liquid above threshold; time slider moves from just poured to near full solid.</td>
+                                <td>Good target: coherent progression from feeders toward heavy sections, and feeder closure only after downstream sections are fed.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="help-section">
+                    <h3>Quick Start by Casting Type</h3>
+                    <table class="help-table">
+                        <thead>
+                            <tr>
+                                <th>Part Type</th>
+                                <th>Start Settings</th>
+                                <th>Validation Order</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>Thin wall / fins</td>
+                                <td>
+                                    Start with <strong>Auto Mesh</strong> ON, enable <strong>Fraction Liquid</strong>.
+                                    Use <strong>20-25%</strong> threshold on shrinkage as baseline.
+                                </td>
+                                <td>
+                                    1) Geometry + manual checks (orientation) <br>
+                                    2) Shrinkage/Porosity + Fraction Liquid <br>
+                                    3) Confirm no late mush trapped near risers/chills.
+                                </td>
+                                <td><button class="btn btn-sm btn-primary" onclick="applyHelpPreset('thin-walls')">Apply</button></td>
+                            </tr>
+                            <tr>
+                                <td>Thick bosses / heavy sections</td>
+                                <td>
+                                    Set <strong>Refinement</strong> higher (3-4), use smaller <strong>Voxel Size</strong>.
+                                    Enable <strong>Hot Spot + Shrinkage/Porosity</strong>.
+                                </td>
+                                <td>
+                                    1) Shrinkage/Porosity (30% then 15-20%) <br>
+                                    2) Hot Spot overlap on top of shrinkage <br>
+                                    3) Add/adjust riser/chill and re-run.
+                                </td>
+                                <td><button class="btn btn-sm btn-primary" onclick="applyHelpPreset('thick-bosses')">Apply</button></td>
+                            </tr>
+                            <tr>
+                                <td>Complex junctions / internal pockets</td>
+                                <td>
+                                    Enable <strong>Cross Section</strong> + lower <strong>Model Opacity</strong>.
+                                    Keep <strong>Fraction Liquid</strong> open for timing.
+                                </td>
+                                <td>
+                                    1) Model + Hot Spot view <br>
+                                    2) Fraction Liquid sweep (0→100%) <br>
+                                    3) Confirm feeding path continuity before solid closure.
+                                </td>
+                                <td><button class="btn btn-sm btn-primary" onclick="applyHelpPreset('complex-junctions')">Apply</button></td>
+                            </tr>
+                            <tr>
+                                <td>Foundry-risk alloy / difficult to cast alloys</td>
+                                <td>
+                                    Start with <strong>CF8 / narrow threshold</strong> settings enabled.
+                                    Use lower riser closure risk threshold (<strong>15-20%</strong> for review).
+                                </td>
+                                <td>
+                                    1) Enable Shrinkage + Niyama <br>
+                                    2) Check overlap regions and local isolation <br>
+                                    3) Use cross section to verify chill or feeder placement.
+                                </td>
+                                <td><button class="btn btn-sm btn-primary" onclick="applyHelpPreset('high-risk-alloy')">Apply</button></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="help-section">
+                    <h3>Workflow to Verify a Good Casting</h3>
+                    <ol>
+                        <li>Enable <strong>Shrinkage/Porosity</strong> first to identify gross risk regions.</li>
+                        <li>Set threshold to 20-30%, then reduce toward 10-15% to inspect only severe zones.</li>
+                        <li>Enable <strong>Hot Spot</strong> and compare overlays. Confirm hotspots and shrink zones overlap in physically expected regions.</li>
+                        <li>Enable <strong>Niyama</strong> and compare with shrink view in the same geometry area.</li>
+                        <li>Check <strong>Fraction Liquid</strong> for timing:
+                            <ul>
+                                <li>Feeders should remain liquid long enough to keep feeding paths open.</li>
+                                <li>High-risk zones should shrink/resolve as the solidification front reaches feeders/chills.</li>
+                            </ul>
+                        </li>
+                        <li>Use cross-section and lower model opacity to inspect feeder and chill effectiveness through walls.</li>
+                        <li>Export screenshot once views are stable and risk clusters are acceptable.</li>
+                    </ol>
+                    <p class="help-note">
+                        The simulator is predictive, not a substitute for foundry process qualification.
+                        Use it as a design filter and compare against gate approvals and physical test data.
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Measurement Result Popup -->
+    <div class="measurement-popup" id="measurementPopup" style="display: none;">
+        <div class="measurement-content">
+            <span class="measurement-value" id="measurementValue">0.000"</span>
+            <button class="btn btn-icon btn-sm" onclick="closeMeasurement()"><i class="fas fa-times"></i></button>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}?v=20241202"></script>
+</body>
+</html>
