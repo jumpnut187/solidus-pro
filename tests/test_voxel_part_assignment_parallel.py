@@ -44,6 +44,37 @@ def _run_assignment(mode: str, workers: int = 2) -> np.ndarray:
 
 
 class PartAssignmentParallelTests(unittest.TestCase):
+    def test_single_cast_uses_fast_path(self) -> None:
+        mesh = AdaptiveVoxelMesh(base_voxel_size=0.1)
+        mesh.voxel_centers = _grid_centers()
+        cast = trimesh.creation.box(extents=[2.2, 2.2, 2.2])
+
+        with patch.object(mesh, "_robust_contains_check", side_effect=AssertionError("fast path skipped")):
+            mesh.assign_part_types([(cast, 0)])
+
+        assert mesh.voxel_part_types is not None
+        self.assertTrue(np.all(np.asarray(mesh.voxel_part_types) == 0))
+
+    def test_auto_mode_does_not_parallelize_medium_candidate_sets(self) -> None:
+        mesh = AdaptiveVoxelMesh(
+            base_voxel_size=0.1,
+            part_assignment_mode="auto",
+            part_assignment_workers=2,
+            part_assignment_batch_size=2_500,
+        )
+
+        self.assertFalse(mesh._should_parallelize_part_assignment(25_000))
+
+    def test_explicit_parallel_mode_still_parallelizes(self) -> None:
+        mesh = AdaptiveVoxelMesh(
+            base_voxel_size=0.1,
+            part_assignment_mode="parallel",
+            part_assignment_workers=2,
+            part_assignment_batch_size=2_500,
+        )
+
+        self.assertTrue(mesh._should_parallelize_part_assignment(25_000))
+
     def test_parallel_mode_matches_legacy_output(self) -> None:
         legacy_types = _run_assignment("legacy", workers=1)
         parallel_types = _run_assignment("parallel", workers=2)

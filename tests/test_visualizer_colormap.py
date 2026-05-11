@@ -1,5 +1,6 @@
 import importlib
 import sys
+import threading
 import types
 import unittest
 
@@ -14,6 +15,22 @@ class _DummyVTKClass:
         def _method(*args, **kwargs):
             return None
         return _method
+
+
+class _ImmediateFuture:
+    def __init__(self, result):
+        self._result = result
+
+    def result(self):
+        return self._result
+
+    def add_done_callback(self, callback):
+        callback(self)
+
+
+class _ImmediateExecutor:
+    def submit(self, fn, *args, **kwargs):
+        return _ImmediateFuture(fn(*args, **kwargs))
 
 
 def _install_visualizer_import_stubs() -> None:
@@ -108,6 +125,74 @@ class VisualizerColormapTests(unittest.TestCase):
         all_mask = self.visualizer.compute_top_percent_mask(values, 1.0)
         np.testing.assert_array_equal(none_mask, np.array([False, False, False]))
         np.testing.assert_array_equal(all_mask, np.array([True, True, True]))
+
+    def _bare_visualizer(self):
+        viz = self.visualizer.CastingVisualizer.__new__(self.visualizer.CastingVisualizer)
+        viz._cache_threshold_levels = [i / 100.0 for i in range(1, 101)]
+        viz._shrinkage_cache = {}
+        viz._shrinkage_cache_built = False
+        viz._shrinkage_cache_lock = threading.Lock()
+        viz._shrinkage_cache_generation = 0
+        viz._pending_shrinkage_thresholds = set()
+        viz._cache_executor = _ImmediateExecutor()
+        viz._hotspot_cache = {}
+        viz._niyama_cache = {}
+        viz._hot_tear_cache = {}
+        viz._sand_burn_in_cache = {}
+        viz.shrinkage_actor = None
+        viz.hotspot_actor = None
+        viz.niyama_actor = None
+        viz.hot_tear_actor = None
+        viz.sand_burn_in_actor = None
+        viz.fraction_liquid_actor = None
+        viz.renderer = _DummyVTKClass()
+        viz.render_window = _DummyVTKClass()
+        return viz
+
+    def test_large_result_arrays_do_not_prebuild_heavy_caches(self) -> None:
+        viz = self._bare_visualizer()
+        voxel_centers = np.zeros((20_001, 3), dtype=np.float32)
+        voxel_sizes = np.ones(20_001, dtype=np.float32)
+        intensities = np.ones(20_001, dtype=np.float32)
+        built_thresholds = []
+
+        def _build(*args):
+            built_thresholds.append(args[-1])
+            return _DummyVTKClass()
+
+        viz._build_hotspot_geometry = _build
+        viz._prebuild_hotspot_cache(voxel_centers, voxel_sizes, intensities, 0.50)
+
+        self.assertEqual(viz._hotspot_cache, {})
+        self.assertEqual(built_thresholds, [])
+
+    def test_small_result_arrays_cache_bounded_nearby_thresholds(self) -> None:
+        viz = self._bare_visualizer()
+        voxel_centers = np.zeros((10, 3), dtype=np.float32)
+        voxel_sizes = np.ones(10, dtype=np.float32)
+        intensities = np.linspace(0.0, 1.0, 10, dtype=np.float32)
+
+        viz._build_hotspot_geometry = lambda *args: self.visualizer.vtk.vtkPolyData()
+        viz._prebuild_hotspot_cache(voxel_centers, voxel_sizes, intensities, 0.50)
+
+        self.assertLessEqual(len(viz._hotspot_cache), viz.MAX_CACHED_THRESHOLD_LEVELS)
+        self.assertEqual(set(viz._hotspot_cache), {0.48, 0.49, 0.51, 0.52})
+
+    def test_switching_modes_clears_stale_cached_polydata(self) -> None:
+        viz = self._bare_visualizer()
+        viz._shrinkage_cache[0.5] = _DummyVTKClass()
+        viz._hotspot_cache[0.5] = _DummyVTKClass()
+        viz._niyama_cache[0.5] = _DummyVTKClass()
+        viz._hot_tear_cache[0.5] = _DummyVTKClass()
+        viz._sand_burn_in_cache[0.5] = _DummyVTKClass()
+
+        viz.clear_result_actors()
+
+        self.assertEqual(viz._shrinkage_cache, {})
+        self.assertEqual(viz._hotspot_cache, {})
+        self.assertEqual(viz._niyama_cache, {})
+        self.assertEqual(viz._hot_tear_cache, {})
+        self.assertEqual(viz._sand_burn_in_cache, {})
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ import numpy as np
 from typing import Tuple, List, Dict, Optional, Union
 import trimesh
 from scipy.spatial import cKDTree
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
 import multiprocessing
 from core.acceleration import (
     accelerator, 
@@ -31,6 +31,7 @@ from core.memory_limits import (
     MemorySeverity,
     get_max_voxels_for_system,
     estimate_voxel_count,
+    estimate_memory_usage_mb,
 )
 from config.hardware_config import hardware
 
@@ -170,6 +171,10 @@ class AdaptiveVoxelMesh:
     - Octree-based spatial queries for large meshes
     - GPU acceleration when available
     """
+
+    AUTO_PART_ASSIGNMENT_MIN_CANDIDATES = 50_000
+    AUTO_PART_ASSIGNMENT_MAX_WORKERS = 4
+    PART_ASSIGNMENT_SUBMIT_MULTIPLIER = 2
     
     @staticmethod
     def preview_voxel_count(
@@ -454,6 +459,22 @@ class AdaptiveVoxelMesh:
             print("\nStep 1: Creating initial uniform grid...")
         
         initial_voxels = self._create_uniform_grid(trimesh_obj, progress_callback)
+
+        actual_voxel_count = len(initial_voxels)
+        if actual_voxel_count > validation.max_allowed_voxels:
+            actual_memory_mb = estimate_memory_usage_mb(actual_voxel_count)
+            logger.error(
+                "Voxel mesh generation blocked after voxelization: "
+                f"actual voxel count {actual_voxel_count:,} exceeds safe limit "
+                f"{validation.max_allowed_voxels:,}"
+            )
+            print(
+                f"\n❌ CANNOT PROCEED: Voxelization produced {actual_voxel_count:,} voxels, "
+                f"exceeding the safe limit of {validation.max_allowed_voxels:,}."
+            )
+            print(f"   Estimated memory for actual voxel count: ~{actual_memory_mb:.0f} MB")
+            print("   Suggestion: Increase voxel size and rerun the simulation.")
+            return False
         
         # Check memory after voxel creation
         can_continue, mem_status = self.memory_monitor.check()
@@ -1493,7 +1514,7 @@ class AdaptiveVoxelMesh:
         """Resolve worker count for part assignment."""
         if self.part_assignment_workers > 0:
             return max(1, self.part_assignment_workers)
-        return max(1, hardware.get_optimal_thread_count('compute'))
+        return max(1, min(hardware.get_optimal_thread_count('compute'), self.AUTO_PART_ASSIGNMENT_MAX_WORKERS))
 
     def _should_parallelize_part_assignment(self, n_candidates: int) -> bool:
         """Decide if this part should use process-based parallel containment checks."""
@@ -1504,8 +1525,11 @@ class AdaptiveVoxelMesh:
             return False
         if self.part_assignment_mode == "parallel":
             return True
-        # auto mode: avoid process overhead for small candidate sets
-        return n_candidates >= (self.part_assignment_batch_size * 2)
+        # auto mode: avoid process overhead and worker data copies for medium jobs
+        return n_candidates >= max(
+            self.AUTO_PART_ASSIGNMENT_MIN_CANDIDATES,
+            self.part_assignment_batch_size * workers * self.PART_ASSIGNMENT_SUBMIT_MULTIPLIER,
+        )
 
     def _run_part_assignment_sequential(
         self,
@@ -1577,7 +1601,10 @@ class AdaptiveVoxelMesh:
                 initargs=(mesh_payload,),
             ) as executor:
                 futures = {}
-                for batch_idx in range(n_batches):
+                next_batch_idx = 0
+                max_pending = max(1, workers * self.PART_ASSIGNMENT_SUBMIT_MULTIPLIER)
+
+                def submit_batch(batch_idx: int) -> None:
                     start = batch_idx * self.part_assignment_batch_size
                     end = min(start + self.part_assignment_batch_size, n_candidates)
                     batch_indices = candidate_indices[start:end]
@@ -1591,17 +1618,28 @@ class AdaptiveVoxelMesh:
                     )
                     futures[future] = batch_idx
 
-                for future in as_completed(futures):
-                    chunk_idx, inside_chunk = future.result()
-                    found_by_batch[chunk_idx] = inside_chunk
-                    inside_count += len(inside_chunk)
-                    completed += 1
-                    pct = int(completed / n_batches * 100)
-                    print(
-                        f"\r    [{part_idx+1}/{total_parts}] Checking {type_name} part... {pct}% ({inside_count:,} inside)",
-                        end="",
-                        flush=True,
-                    )
+                while next_batch_idx < n_batches and len(futures) < max_pending:
+                    submit_batch(next_batch_idx)
+                    next_batch_idx += 1
+
+                while futures:
+                    done, _pending = wait(futures, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        futures.pop(future, None)
+                        chunk_idx, inside_chunk = future.result()
+                        found_by_batch[chunk_idx] = inside_chunk
+                        inside_count += len(inside_chunk)
+                        completed += 1
+                        pct = int(completed / n_batches * 100)
+                        print(
+                            f"\r    [{part_idx+1}/{total_parts}] Checking {type_name} part... {pct}% ({inside_count:,} inside)",
+                            end="",
+                            flush=True,
+                        )
+
+                        if next_batch_idx < n_batches:
+                            submit_batch(next_batch_idx)
+                            next_batch_idx += 1
 
             ordered = [found_by_batch[i] for i in sorted(found_by_batch)]
             if not ordered:

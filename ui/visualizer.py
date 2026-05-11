@@ -24,6 +24,7 @@ import threading
 import time
 import os
 import tempfile
+import sys
 
 # Error logging
 try:
@@ -185,6 +186,11 @@ def compute_top_percent_mask(values: np.ndarray,
     kth_index = n - keep_count
     cutoff = float(np.partition(eligible_values, kth_index)[kth_index])
     return eligible & (arr >= cutoff)
+
+
+def should_use_depth_peeling(platform: str = sys.platform) -> bool:
+    """Depth peeling is unreliable on some Windows OpenGL/VTK driver combinations."""
+    return platform != "win32"
 
 
 class SolidWorksInteractorStyle(vtk.vtkInteractorStyleTrackballCamera):
@@ -622,6 +628,9 @@ class CastingVisualizer(QWidget):
         (0.6, 0.8, 0.8),    # Cyan
         (0.9, 0.7, 0.5),    # Tan
     ]
+
+    MAX_CACHED_THRESHOLD_LEVELS = 4
+    MAX_CACHED_DISPLAY_VOXELS = 20_000
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -705,6 +714,7 @@ class CastingVisualizer(QWidget):
         # Animation export
         self._animation_frames: List[np.ndarray] = []
         self._is_recording = False
+        self._interactor_initialized = False
         
         self._init_ui()
     
@@ -756,9 +766,22 @@ class CastingVisualizer(QWidget):
         # Initialize color bar (hidden by default)
         self._init_color_bar()
         
-        # Initialize interactor
-        self.interactor.Initialize()
-        self.interactor.Start()
+        QTimer.singleShot(0, self._initialize_interactor)
+
+    def _initialize_interactor(self):
+        """Initialize the VTK interactor under Qt's event loop."""
+        if self._interactor_initialized or self.interactor is None:
+            return
+
+        try:
+            self.interactor.Initialize()
+            self._interactor_initialized = True
+        except Exception as exc:
+            logger.exception(f"Failed to initialize VTK interactor: {exc}")
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._initialize_interactor()
     
     def _on_left_button_press(self, obj, event):
         """Handle left mouse button press for measurement picking"""
@@ -1325,12 +1348,63 @@ class CastingVisualizer(QWidget):
             self._pending_shrinkage_thresholds.clear()
         self._shrinkage_cache_built = False
 
+    def _clear_result_caches(self) -> None:
+        """Release cached polydata for all result visualization modes."""
+        self._reset_shrinkage_cache()
+        self._hotspot_cache.clear()
+        self._niyama_cache.clear()
+        self._hot_tear_cache.clear()
+        self._sand_burn_in_cache.clear()
+
     def _get_shrinkage_threshold_levels(self, current_threshold: float) -> List[float]:
         """Return nearby threshold levels that should be pre-built."""
-        cache_range = 0.20
-        min_thresh = max(0.01, current_threshold - cache_range)
-        max_thresh = min(1.0, current_threshold + cache_range)
-        return [t for t in self._cache_threshold_levels if min_thresh <= t <= max_thresh]
+        return self._get_bounded_threshold_levels(current_threshold)
+
+    def _get_bounded_threshold_levels(self, current_threshold: float) -> List[float]:
+        """Return at most a few thresholds nearest to the current slider value."""
+        current_key = round(current_threshold, 2)
+        levels = sorted(
+            (
+                round(t, 2)
+                for t in self._cache_threshold_levels
+                if round(t, 2) != current_key
+            ),
+            key=lambda t: (abs(t - current_threshold), t),
+        )
+        return levels[:self.MAX_CACHED_THRESHOLD_LEVELS]
+
+    def _display_voxel_count(
+        self,
+        values: np.ndarray,
+        threshold: float,
+        base_mask: Optional[np.ndarray] = None,
+    ) -> int:
+        """Count displayed voxels for direct cutoff visualizations."""
+        mask = values >= threshold
+        if base_mask is not None:
+            mask = np.asarray(base_mask, dtype=bool) & mask
+        return int(np.count_nonzero(mask))
+
+    def _should_cache_threshold(
+        self,
+        values: np.ndarray,
+        threshold: float,
+        base_mask: Optional[np.ndarray] = None,
+    ) -> bool:
+        """Skip cached polydata for thresholds that would retain large geometry."""
+        return self._display_voxel_count(values, threshold, base_mask) <= self.MAX_CACHED_DISPLAY_VOXELS
+
+    def _cache_polydata(
+        self,
+        cache: Dict[float, vtk.vtkPolyData],
+        key: float,
+        polydata: Optional[vtk.vtkPolyData],
+    ) -> None:
+        if polydata is None:
+            return
+        cached = vtk.vtkPolyData()
+        cached.DeepCopy(polydata)
+        cache[key] = cached
 
     def _build_shrinkage_cache_entries(
         self,
@@ -1342,17 +1416,18 @@ class CastingVisualizer(QWidget):
         """Build shrinkage cache entries in a worker thread."""
         built_entries: Dict[float, vtk.vtkPolyData] = {}
         for thresh in levels:
+            if not self._should_cache_threshold(shrinkage_intensity, thresh):
+                continue
             polydata = self._build_shrinkage_geometry_fast(
                 voxel_centers,
                 voxel_sizes,
                 shrinkage_intensity,
                 thresh
             )
-            if polydata is None:
-                continue
-            cached = vtk.vtkPolyData()
-            cached.DeepCopy(polydata)
-            built_entries[thresh] = cached
+            if polydata is not None:
+                cached = vtk.vtkPolyData()
+                cached.DeepCopy(polydata)
+                built_entries[thresh] = cached
         return built_entries
     
     def _add_axes(self):
@@ -1436,10 +1511,12 @@ class CastingVisualizer(QWidget):
         property.SetSpecular(0.3)
         property.SetSpecularPower(20)
         
-        # Enable depth peeling for proper transparency rendering
-        self.renderer.SetUseDepthPeeling(True)
-        self.renderer.SetMaximumNumberOfPeels(4)
-        self.renderer.SetOcclusionRatio(0.1)
+        if should_use_depth_peeling():
+            self.renderer.SetUseDepthPeeling(True)
+            self.renderer.SetMaximumNumberOfPeels(4)
+            self.renderer.SetOcclusionRatio(0.1)
+        else:
+            self.renderer.SetUseDepthPeeling(False)
         
         self.renderer.AddActor(self.mesh_actor)
         
@@ -1450,6 +1527,7 @@ class CastingVisualizer(QWidget):
         
         # Reset camera
         self.renderer.ResetCamera()
+        self.renderer.ResetCameraClippingRange()
         self.render_window.Render()
     
     def load_shrinkage(self, voxel_centers: np.ndarray, 
@@ -1473,8 +1551,8 @@ class CastingVisualizer(QWidget):
         # Store data for cache building
         self.current_shrinkage_data = (voxel_centers, voxel_sizes, shrinkage_intensity)
         
-        # Clear old cache when loading new data
-        self._reset_shrinkage_cache()
+        # Clear old result caches when loading new data
+        self._clear_result_caches()
         
         # Build geometry for current threshold using optimized method
         polydata = self._build_shrinkage_geometry_fast(
@@ -1607,6 +1685,7 @@ class CastingVisualizer(QWidget):
             levels_to_cache = [
                 t for t in self._get_shrinkage_threshold_levels(current_threshold)
                 if t not in self._shrinkage_cache and t not in self._pending_shrinkage_thresholds
+                and self._should_cache_threshold(shrinkage_intensity, t)
             ]
             if not levels_to_cache:
                 return
@@ -1645,23 +1724,17 @@ class CastingVisualizer(QWidget):
                                  hotspot_intensity: np.ndarray,
                                  current_threshold: float):
         """Pre-build hotspot geometry cache for nearby threshold levels"""
-        cache_range = 0.20
-        min_thresh = max(0.01, current_threshold - cache_range)
-        max_thresh = min(1.0, current_threshold + cache_range)
-        
         levels_to_cache = [
-            t for t in self._cache_threshold_levels
-            if min_thresh <= t <= max_thresh and t not in self._hotspot_cache
+            t for t in self._get_bounded_threshold_levels(current_threshold)
+            if t not in self._hotspot_cache
+            and self._should_cache_threshold(hotspot_intensity, t)
         ]
         
         for thresh in levels_to_cache:
             polydata = self._build_hotspot_geometry(
                 voxel_centers, voxel_sizes, hotspot_intensity, thresh
             )
-            if polydata is not None:
-                cached = vtk.vtkPolyData()
-                cached.DeepCopy(polydata)
-                self._hotspot_cache[thresh] = cached
+            self._cache_polydata(self._hotspot_cache, thresh, polydata)
     
     def _prebuild_niyama_cache(self, voxel_centers: np.ndarray,
                                 voxel_sizes: np.ndarray,
@@ -1669,23 +1742,17 @@ class CastingVisualizer(QWidget):
                                 defect_risk: np.ndarray,
                                 current_threshold: float):
         """Pre-build Niyama geometry cache for nearby threshold levels"""
-        cache_range = 0.20
-        min_thresh = max(0.01, current_threshold - cache_range)
-        max_thresh = min(1.0, current_threshold + cache_range)
-        
         levels_to_cache = [
-            t for t in self._cache_threshold_levels
-            if min_thresh <= t <= max_thresh and t not in self._niyama_cache
+            t for t in self._get_bounded_threshold_levels(current_threshold)
+            if t not in self._niyama_cache
+            and self._should_cache_threshold(defect_risk, t)
         ]
         
         for thresh in levels_to_cache:
             polydata = self._build_niyama_geometry(
                 voxel_centers, voxel_sizes, niyama_values, defect_risk, thresh
             )
-            if polydata is not None:
-                cached = vtk.vtkPolyData()
-                cached.DeepCopy(polydata)
-                self._niyama_cache[thresh] = cached
+            self._cache_polydata(self._niyama_cache, thresh, polydata)
 
     def load_hotspots(self, voxel_centers: np.ndarray,
                       voxel_sizes: np.ndarray,
@@ -1708,8 +1775,8 @@ class CastingVisualizer(QWidget):
         # Store data for cache building and threshold updates
         self.current_hotspot_data = (voxel_centers, voxel_sizes, hotspot_intensity)
         
-        # Clear old cache when loading new data
-        self._hotspot_cache.clear()
+        # Clear stale result caches when switching modes or loading new data
+        self._clear_result_caches()
         
         # Build geometry for current threshold
         polydata = self._build_hotspot_geometry(
@@ -1844,8 +1911,8 @@ class CastingVisualizer(QWidget):
         # Store data for cache building and threshold updates
         self.current_niyama_data = (voxel_centers, voxel_sizes, niyama_values, defect_risk)
         
-        # Clear old cache when loading new data
-        self._niyama_cache.clear()
+        # Clear stale result caches when switching modes or loading new data
+        self._clear_result_caches()
         
         # Build geometry for current threshold
         polydata = self._build_niyama_geometry(
@@ -1994,6 +2061,7 @@ class CastingVisualizer(QWidget):
         
         # Store data
         self.current_fraction_liquid_data = (voxel_centers, voxel_sizes, fraction_liquid)
+        self._clear_result_caches()
         
         # Build geometry
         polydata = self._build_fraction_liquid_geometry(
@@ -2136,10 +2204,6 @@ class CastingVisualizer(QWidget):
             polydata = self._build_hotspot_geometry(
                 voxel_centers, voxel_sizes, intensities, threshold
             )
-            if polydata is not None:
-                cached = vtk.vtkPolyData()
-                cached.DeepCopy(polydata)
-                self._hotspot_cache[cache_key] = cached
         
         # Remove old actor
         if self.hotspot_actor is not None:
@@ -2188,10 +2252,6 @@ class CastingVisualizer(QWidget):
             polydata = self._build_niyama_geometry(
                 voxel_centers, voxel_sizes, niyama_values, defect_risk, threshold
             )
-            if polydata is not None:
-                cached = vtk.vtkPolyData()
-                cached.DeepCopy(polydata)
-                self._niyama_cache[cache_key] = cached
         
         # Remove old actor
         if self.niyama_actor is not None:
@@ -2246,8 +2306,8 @@ class CastingVisualizer(QWidget):
         # Store data for cache building and threshold updates
         self.current_hot_tear_data = (voxel_centers, voxel_sizes, hot_tear_risk, hot_tear_zones)
         
-        # Clear old cache when loading new data
-        self._hot_tear_cache.clear()
+        # Clear stale result caches when switching modes or loading new data
+        self._clear_result_caches()
         
         # Build geometry for current threshold
         polydata = self._build_hot_tear_geometry(
@@ -2382,22 +2442,18 @@ class CastingVisualizer(QWidget):
     
     def _prebuild_hot_tear_cache(self, voxel_centers, voxel_sizes, hot_tear_risk, hot_tear_zones, current_threshold):
         """Pre-build geometry for nearby threshold levels"""
-        nearby_thresholds = [
-            round(current_threshold + offset, 2)
-            for offset in [-0.1, -0.05, 0.05, 0.1]
-            if 0 <= current_threshold + offset <= 1
-        ]
+        nearby_thresholds = self._get_bounded_threshold_levels(current_threshold)
         
         for thresh in nearby_thresholds:
             cache_key = round(thresh, 2)
-            if cache_key not in self._hot_tear_cache:
+            if (
+                cache_key not in self._hot_tear_cache
+                and self._should_cache_threshold(hot_tear_risk, cache_key, hot_tear_zones)
+            ):
                 polydata = self._build_hot_tear_geometry(
                     voxel_centers, voxel_sizes, hot_tear_risk, hot_tear_zones, thresh
                 )
-                if polydata is not None:
-                    cached = vtk.vtkPolyData()
-                    cached.DeepCopy(polydata)
-                    self._hot_tear_cache[cache_key] = cached
+                self._cache_polydata(self._hot_tear_cache, cache_key, polydata)
     
     def update_hot_tear_threshold(self, threshold: float):
         """Update hot tear visualization threshold"""
@@ -2416,10 +2472,6 @@ class CastingVisualizer(QWidget):
             polydata = self._build_hot_tear_geometry(
                 voxel_centers, voxel_sizes, hot_tear_risk, hot_tear_zones, threshold
             )
-            if polydata is not None:
-                cached = vtk.vtkPolyData()
-                cached.DeepCopy(polydata)
-                self._hot_tear_cache[cache_key] = cached
         
         # Remove old actor
         if self.hot_tear_actor is not None:
@@ -2494,8 +2546,8 @@ class CastingVisualizer(QWidget):
             # Store data for cache building and threshold updates
             self.current_sand_burn_in_data = (voxel_centers, voxel_sizes, sand_burn_in_risk, sand_burn_in_zones)
             
-            # Clear old cache when loading new data
-            self._sand_burn_in_cache.clear()
+            # Clear stale result caches when switching modes or loading new data
+            self._clear_result_caches()
             
             # Build geometry for current threshold
             polydata = self._build_sand_burn_in_geometry(
@@ -2652,22 +2704,18 @@ class CastingVisualizer(QWidget):
     
     def _prebuild_sand_burn_in_cache(self, voxel_centers, voxel_sizes, sand_burn_in_risk, sand_burn_in_zones, current_threshold):
         """Pre-build geometry for nearby threshold levels"""
-        nearby_thresholds = [
-            round(current_threshold + offset, 2)
-            for offset in [-0.1, -0.05, 0.05, 0.1]
-            if 0 <= current_threshold + offset <= 1
-        ]
+        nearby_thresholds = self._get_bounded_threshold_levels(current_threshold)
         
         for thresh in nearby_thresholds:
             cache_key = round(thresh, 2)
-            if cache_key not in self._sand_burn_in_cache:
+            if (
+                cache_key not in self._sand_burn_in_cache
+                and self._should_cache_threshold(sand_burn_in_risk, cache_key, sand_burn_in_zones)
+            ):
                 polydata = self._build_sand_burn_in_geometry(
                     voxel_centers, voxel_sizes, sand_burn_in_risk, sand_burn_in_zones, thresh
                 )
-                if polydata is not None:
-                    cached = vtk.vtkPolyData()
-                    cached.DeepCopy(polydata)
-                    self._sand_burn_in_cache[cache_key] = cached
+                self._cache_polydata(self._sand_burn_in_cache, cache_key, polydata)
     
     def update_sand_burn_in_threshold(self, threshold: float):
         """Update sand burn-in visualization threshold"""
@@ -2687,10 +2735,6 @@ class CastingVisualizer(QWidget):
                 polydata = self._build_sand_burn_in_geometry(
                     voxel_centers, voxel_sizes, sand_burn_in_risk, sand_burn_in_zones, threshold
                 )
-                if polydata is not None:
-                    cached = vtk.vtkPolyData()
-                    cached.DeepCopy(polydata)
-                    self._sand_burn_in_cache[cache_key] = cached
             
             # Remove old actor
             if self.sand_burn_in_actor is not None:
@@ -2802,13 +2846,8 @@ class CastingVisualizer(QWidget):
             self.renderer.RemoveActor(self.fraction_liquid_actor)
             self.fraction_liquid_actor = None
         
-        # Clear all caches
-        self._shrinkage_cache.clear()
-        self._shrinkage_cache_built = False
-        self._hotspot_cache.clear()
-        self._niyama_cache.clear()
-        self._hot_tear_cache.clear()
-        self._sand_burn_in_cache.clear()
+        # Clear all cached result geometry
+        self._clear_result_caches()
         
         # Clear stored data
         self.current_shrinkage_data = None
@@ -2849,6 +2888,8 @@ class CastingVisualizer(QWidget):
         if self.fraction_liquid_actor is not None:
             self.renderer.RemoveActor(self.fraction_liquid_actor)
             self.fraction_liquid_actor = None
+
+        self._clear_result_caches()
         
         self.render_window.Render()
     
@@ -2919,16 +2960,19 @@ class CastingVisualizer(QWidget):
         prop.SetSpecular(0.3)
         prop.SetSpecularPower(20)
         
-        # Enable depth peeling for proper transparency
-        self.renderer.SetUseDepthPeeling(True)
-        self.renderer.SetMaximumNumberOfPeels(4)
-        self.renderer.SetOcclusionRatio(0.1)
+        if should_use_depth_peeling():
+            self.renderer.SetUseDepthPeeling(True)
+            self.renderer.SetMaximumNumberOfPeels(4)
+            self.renderer.SetOcclusionRatio(0.1)
+        else:
+            self.renderer.SetUseDepthPeeling(False)
         
         self.renderer.AddActor(actor)
         self.part_actors[part_id] = actor
         
         # Update bounds
         self._update_model_bounds()
+        self.renderer.ResetCameraClippingRange()
         
         self.render_window.Render()
         return actor
@@ -3020,6 +3064,13 @@ class CastingVisualizer(QWidget):
         
         # Reset camera to show all parts
         self.renderer.ResetCamera()
+        self.renderer.ResetCameraClippingRange()
+        if not self.part_actors and part_manager.get_all_parts():
+            logger.warning("No visible VTK part actors were created from loaded parts.")
+        else:
+            logger.info(
+                f"Loaded {len(self.part_actors)} VTK part actor(s); bounds={self.model_bounds}"
+            )
         self.render_window.Render()
     
     def update_shrinkage_threshold(self, threshold: float):
@@ -3047,12 +3098,6 @@ class CastingVisualizer(QWidget):
             polydata = self._build_shrinkage_geometry_fast(
                 voxel_centers, voxel_sizes, intensities, threshold
             )
-            # Cache it for future use
-            if polydata is not None:
-                cached = vtk.vtkPolyData()
-                cached.DeepCopy(polydata)
-                with self._shrinkage_cache_lock:
-                    self._shrinkage_cache[cache_key] = cached
         
         # Remove old actor
         if self.shrinkage_actor is not None:
