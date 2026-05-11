@@ -176,7 +176,7 @@ class ReportGenerator:
                 headers=["Parameter", "Value", "Unit"],
                 rows=[
                     ["Pouring Temperature", 720, "°C"],
-                    ["Mold Temperature", 200, "°C"],
+                    ["Mold Temperature", 21, "°C"],
                     ["Fill Time", 15, "s"]
                 ]
             )

@@ -85,8 +85,8 @@ class AirGapParams:
 @dataclass
 class ThermalBoundaryParams:
     """Parameters for mold/chill temperatures and heat-transfer coefficients."""
-    mold_temperature: float = 200.0
-    chill_temperature: float = 25.0
+    mold_temperature: float = 21.0
+    chill_temperature: float = 21.0
     htc_cast_interface: float = 500.0
     htc_riser_post: float = 350.0
     htc_riser: float = 220.0

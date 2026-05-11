@@ -73,6 +73,33 @@ except ImportError:
 FRACTION_LIQUID_TIME_SLIDER_MAX = 1000
 
 
+def should_use_console_translucency(platform: str = sys.platform) -> bool:
+    """Windows often fails to show translucent Qt top-level dialogs reliably."""
+    return platform != "win32"
+
+
+def clamp_window_position(
+    preferred_x: int,
+    preferred_y: int,
+    window_width: int,
+    window_height: int,
+    screen_x: int,
+    screen_y: int,
+    screen_width: int,
+    screen_height: int,
+    margin: int = 20,
+) -> tuple[int, int]:
+    """Keep a floating window inside a screen's available geometry."""
+    min_x = screen_x + margin
+    min_y = screen_y + margin
+    max_x = screen_x + max(margin, screen_width - window_width - margin)
+    max_y = screen_y + max(margin, screen_height - window_height - margin)
+    return (
+        max(min_x, min(preferred_x, max_x)),
+        max(min_y, min(preferred_y, max_y)),
+    )
+
+
 # ==================== Parts Dialog ====================
 
 class PartsDialog(DraggableDialog):
@@ -2065,9 +2092,9 @@ class ConsoleWindow(QDialog):
         self.setMinimumSize(600, 400)
         self.resize(700, 500)
         
-        # Enable window transparency
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setWindowOpacity(0.85)  # 85% opacity - can see through slightly
+        if should_use_console_translucency():
+            self.setAttribute(Qt.WA_TranslucentBackground)
+            self.setWindowOpacity(0.85)
         
         # For dragging (optional, window already has title bar)
         self._drag_position = None
@@ -2560,9 +2587,9 @@ class SolidificationParamsDialog(DraggableDialog):
         ("air_gap", "max_slowdown", "Max Air Gap Slowdown", 0.75, 0.1, 0.95, 0.01, 2, "fraction",
          "Maximum slowdown at surface due to air gap (0.75 = 25% slower)."),
         # Thermal Boundary
-        ("thermal_boundary", "mold_temperature", "Mold Temperature", 200.0, 20.0, 500.0, 5.0, 0, "°C",
+        ("thermal_boundary", "mold_temperature", "Mold Temperature", 21.0, 20.0, 500.0, 5.0, 0, "°C",
          "Mold surface boundary condition temperature."),
-        ("thermal_boundary", "chill_temperature", "Chill Temperature", 25.0, 0.0, 100.0, 5.0, 0, "°C",
+        ("thermal_boundary", "chill_temperature", "Chill Temperature", 21.0, 0.0, 100.0, 5.0, 0, "°C",
          "Chill fixed temperature boundary condition."),
         ("thermal_boundary", "htc_cast_interface", "HTC Cast Interface", 500.0, 100.0, 2000.0, 50.0, 0, "W/m²K",
          "Heat-transfer coefficient at cast-mold interface."),
@@ -3250,12 +3277,12 @@ class MainWindow(QMainWindow):
         vis_layout.addWidget(self.threshold_label_title)
         self.threshold_slider = MarkedSlider(Qt.Horizontal)
         self.threshold_slider.setRange(1, 100)
-        self.threshold_slider.setValue(70)
-        self.threshold_slider.setMarkerPosition(70)
+        self.threshold_slider.setValue(30)
+        self.threshold_slider.setMarkerPosition(30)
         self.threshold_slider.valueChanged.connect(self._update_threshold)
         vis_layout.addWidget(self.threshold_slider)
 
-        self.threshold_label = QLabel("70%")
+        self.threshold_label = QLabel("30%")
         vis_layout.addWidget(self.threshold_label)
         
         # Time slider for Fraction Liquid (hidden by default)
@@ -3393,12 +3420,21 @@ class MainWindow(QMainWindow):
             # Position near the main window if first time
             if not self.console_window.pos().x():
                 main_geo = self.geometry()
-                self.console_window.move(
+                screen_geo = QApplication.desktop().availableGeometry(self)
+                x, y = clamp_window_position(
                     main_geo.x() + main_geo.width() + 10,
-                    main_geo.y()
+                    main_geo.y(),
+                    self.console_window.width(),
+                    self.console_window.height(),
+                    screen_geo.x(),
+                    screen_geo.y(),
+                    screen_geo.width(),
+                    screen_geo.height(),
                 )
+                self.console_window.move(x, y)
             self.console_window.show()
             self.console_window.raise_()
+            self.console_window.activateWindow()
     
     def _sync_parts_to_dialog(self):
         """Sync current parts to the parts dialog using the new table format"""
@@ -3538,9 +3574,9 @@ class MainWindow(QMainWindow):
     def _get_recommended_threshold(self, vis_mode, alloy_name):
         """Get recommended threshold value (0-100) based on visualization mode and alloy"""
         if vis_mode == "shrinkage":
-            return 70
+            return 30
         elif vis_mode == "hotspot":
-            return 60  # Top 60% hottest areas
+            return 30  # Top 30% hottest areas
         elif vis_mode == "niyama":
             # Alloy-specific Niyama thresholds
             alloy_default_thresholds = {
@@ -4199,7 +4235,11 @@ class MainWindow(QMainWindow):
     
     def _update_visualization(self):
         """Update the 3D visualization with all parts"""
-        self.visualizer.load_parts_from_manager(self.part_manager)
+        try:
+            self.visualizer.load_parts_from_manager(self.part_manager)
+        except Exception as exc:
+            logger.exception(f"Failed to update 3D visualization: {exc}")
+            self.status_label.setText("Failed to update 3D view. See error log.")
     
     # ==================== Legacy STL Loading (Single Part) ====================
     

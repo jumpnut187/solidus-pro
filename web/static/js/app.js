@@ -827,8 +827,8 @@ async function runSimulation() {
                 max_slowdown: getSp('sp_max_slowdown', 0.75),
             },
             thermal_boundary: {
-                mold_temperature: getSp('sp_mold_temperature', 200.0),
-                chill_temperature: getSp('sp_chill_temperature', 25.0),
+                mold_temperature: getSp('sp_mold_temperature', 21.0),
+                chill_temperature: getSp('sp_chill_temperature', 21.0),
                 htc_cast_interface: getSp('sp_htc_cast_interface', 500.0),
                 htc_riser_post: getSp('sp_htc_riser_post', 350.0),
                 htc_riser: getSp('sp_htc_riser', 220.0),
