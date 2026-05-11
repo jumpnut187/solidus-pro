@@ -24,7 +24,8 @@ from collections import deque
 from scipy.spatial.distance import cdist
 from scipy.spatial import cKDTree
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from core.solidification_params import SolidificationParameters
+from dataclasses import dataclass, field
 from physics.heat_transfer import BoundaryType, HeatTransferModel
 from physics.solidification_physics import SolidificationModel as ThermalSolidificationModel
 from core.acceleration import (
@@ -124,6 +125,9 @@ class AnalysisOptions:
     use_gpu: bool = False           # GPU acceleration (requires cupy or pyopencl)
     use_incremental: bool = False   # Incremental solidification (can be slower for small models)
     solver_mode: str = "thermal_coupled"
+    solidification_params: SolidificationParameters = field(
+        default_factory=SolidificationParameters
+    )
 
 
 SOLVER_MODE_SCHEDULE_LEGACY = "schedule_legacy"
@@ -316,8 +320,8 @@ class SolidificationEngine:
         )
         self._thermal_peak_cooling_rates = np.zeros(n_voxels, dtype=np.float32)
 
-        mold_temperature = 200.0
-        chill_temperature = 25.0
+        mold_temperature = tp.mold_temperature
+        chill_temperature = tp.chill_temperature
         initial_temperatures = np.full(n_voxels, self.alloy.pouring_temp, dtype=np.float64)
         chill_indices = self._get_chill_voxel_indices()
         if len(chill_indices) > 0:
@@ -325,7 +329,9 @@ class SolidificationEngine:
 
         self._thermal_heat_model.set_initial_temperature(initial_temperatures)
         self._thermal_heat_model.set_heat_source(np.zeros(n_voxels, dtype=np.float64))
-        self._configure_thermal_boundaries(mold_temperature=mold_temperature, chill_temperature=chill_temperature)
+        self._configure_thermal_boundaries(
+            mold_temperature=mold_temperature, chill_temperature=chill_temperature
+        )
 
         if len(chill_indices) > 0:
             thermal_model = self._thermal_solidification_model
@@ -364,6 +370,8 @@ class SolidificationEngine:
         if self._thermal_heat_model is None:
             return
 
+        tb = self.analysis_options.solidification_params.thermal_boundary
+
         surface_indices = np.asarray(self.mesh.get_surface_voxel_indices(), dtype=np.int32)
         if surface_indices.size == 0:
             return
@@ -382,21 +390,21 @@ class SolidificationEngine:
             self._thermal_heat_model.add_boundary(
                 cast_surface,
                 BoundaryType.INTERFACE,
-                htc=500.0,
+                htc=tb.htc_cast_interface,
                 T_infinity=mold_temperature,
             )
         if riser_post_surface.size > 0:
             self._thermal_heat_model.add_boundary(
                 riser_post_surface,
                 BoundaryType.INTERFACE,
-                htc=350.0,
+                htc=tb.htc_riser_post,
                 T_infinity=mold_temperature,
             )
         if riser_surface.size > 0:
             self._thermal_heat_model.add_boundary(
                 riser_surface,
                 BoundaryType.INTERFACE,
-                htc=220.0,
+                htc=tb.htc_riser,
                 T_infinity=mold_temperature,
             )
         if chill_indices.size > 0:
@@ -425,51 +433,52 @@ class SolidificationEngine:
         """
         # Get maximum geometric modulus (thickest section)
         max_modulus = np.max(self.mesh.voxel_moduli)  # inches
-        
+
         # Mold constant B for sand casting (seconds per inch²)
         # Calibrated to match MAGMASOFT-scale simulations
         # Steel in green sand: ~200-300 s/in²
         # Steel in dry sand/no-bake: ~250-350 s/in²
-        base_mold_constant = 280.0  # s/in² - baseline for WCB in sand
-        
+        tp = self.analysis_options.solidification_params.timing
+        base_mold_constant = tp.chvorinov_mold_constant  # s/in² - baseline for WCB in sand
+
         # Adjust mold constant for material thermal properties
         # Materials with lower thermal diffusivity solidify slower
         wcb_diffusivity = 45 / (7200 * 600)  # WCB baseline
         diffusivity_ratio = wcb_diffusivity / self.alloy.thermal_diffusivity
-        
+
         # Materials with higher latent heat take longer to solidify
         wcb_latent = 272000  # J/kg
         latent_ratio = self.alloy.latent_heat / wcb_latent
-        
+
         # Combined material factor
         material_factor = np.sqrt(diffusivity_ratio * latent_ratio)
-        
+
         mold_constant = base_mold_constant * material_factor
-        
+
         # Chvorinov's Rule: t = B * M²
         # where M is modulus in inches
         base_solidification_time = mold_constant * (max_modulus ** 2)
-        
+
         # Safety factor for:
-        # 1. Risers (solidify ~1.5-2x longer than casting)
+        # 1. Risers (solidate ~1.5-2x longer than casting)
         # 2. Uncertainty in geometry measurement
         # 3. Exothermic riser effects
         riser_indices = self._get_riser_voxel_indices()
         if len(riser_indices) > 0:
-            safety_factor = 2.5  # Risers need extra time
+            safety_factor = tp.safety_factor_with_risers  # Risers need extra time
         else:
-            safety_factor = 1.5  # No risers, less margin needed
-        
+            safety_factor = tp.safety_factor_no_risers  # No risers, less margin needed
+
         # Calculate max time with bounds
         calculated_time = base_solidification_time * safety_factor
 
         # Enforce reasonable bounds for thermal_coupled; schedule_legacy uses
         # uncapped Chvorinov horizon so large risers stay visibly liquid through
         # their full feed path before snapping solid at the actual endpoint.
-        min_time = 120.0    # At least 2 minutes for any casting
+        min_time = tp.min_simulation_time    # At least 2 minutes for any casting
         solver_mode = self._get_solver_mode()
         if solver_mode == SOLVER_MODE_THERMAL_COUPLED:
-            max_time = 14400.0  # Cap thermal solver at 4 hours
+            max_time = tp.max_simulation_time  # Cap thermal solver at 4 hours
             self.max_time = np.clip(calculated_time, min_time, max_time)
         else:
             self.max_time = max(calculated_time, min_time)
@@ -723,18 +732,18 @@ class SolidificationEngine:
                     q.append(int(nb))
         return distances
 
-    @staticmethod
-    def _average_exothermic_factor_over_duration(duration_s: float) -> float:
-        """Average the existing riser exothermic model over a static schedule interval."""
+    def _average_exothermic_factor_over_duration(self, duration_s: float) -> float:
+        """Average the time-dependent exothermic slowdown factor over a schedule interval."""
+        ep = self.analysis_options.solidification_params.exothermic
         if duration_s <= 0.0:
             return 1.0
 
-        ignition_delay_s = 10.0
-        burn_duration_s = 120.0
-        insulation_only_factor = 0.7
-        full_exothermic_factor = 0.5
+        ignition_delay_s = ep.ignition_delay
+        burn_duration_s = ep.burn_duration
+        insulation_only_factor = ep.insulation_only_factor
+        full_exothermic_factor = ep.full_exothermic_factor
         burnout_start_s = ignition_delay_s + burn_duration_s
-        decay_time_constant = 60.0
+        decay_time_constant = ep.decay_time_constant
 
         ramp_duration = min(duration_s, ignition_delay_s)
         ramp_area = ramp_duration
@@ -757,14 +766,14 @@ class SolidificationEngine:
         average_factor = (ramp_area + burn_area + burnout_area) / duration_s
         return float(np.clip(average_factor, full_exothermic_factor, 1.0))
 
-    @staticmethod
-    def _average_riser_post_factor_over_duration(duration_s: float) -> float:
+    def _average_riser_post_factor_over_duration(self, duration_s: float) -> float:
         """Average the existing riser-post hot-sand slowdown over a static schedule interval."""
+        tp = self.analysis_options.solidification_params.timing
         if duration_s <= 0.0:
             return 1.0
 
-        sand_saturation_time_constant = 30.0
-        max_hot_sand_slowdown = 0.6
+        sand_saturation_time_constant = tp.sand_saturation_time
+        max_hot_sand_slowdown = tp.max_hot_sand_slowdown
         average_factor = (
             max_hot_sand_slowdown
             + (1.0 - max_hot_sand_slowdown)
@@ -782,6 +791,7 @@ class SolidificationEngine:
         if self.mesh.voxel_part_types is None:
             return schedule_slowdown
 
+        fp = self.analysis_options.solidification_params.feeding
         part_types = np.asarray(self.mesh.voxel_part_types, dtype=np.int32)
         riser_indices = np.where(part_types == 1)[0]
         if len(riser_indices) == 0:
@@ -808,10 +818,10 @@ class SolidificationEngine:
         if len(riser_centers) == 0 or len(cast_centers) == 0:
             return schedule_slowdown
 
-        base_feeding_distance = 6.0
+        base_feeding_distance = fp.base_feeding_distance
         material_factor = self.alloy.feeding_distance_multiplier / 3.0
         riser_influence_radius = base_feeding_distance * material_factor
-        min_influence_factor = 0.6
+        min_influence_factor = fp.min_influence_factor
 
         riser_tree = cKDTree(riser_centers)
         distances, _ = riser_tree.query(cast_centers, k=1)
@@ -1166,37 +1176,39 @@ class SolidificationEngine:
 
         # 2. Compute dynamic boost
         # Initial call at t=0
-        max_chill_boost = 3.0
+        cp = self.analysis_options.solidification_params.chill
+        max_chill_boost = cp.max_chill_boost
         voxel_centers = np.ascontiguousarray(self.mesh.voxel_centers, dtype=np.float32)
         voxel_states = np.ascontiguousarray(self.mesh.voxel_states, dtype=np.float32)
-        
+
         if self.mesh.voxel_part_types is not None:
             part_types = np.ascontiguousarray(self.mesh.voxel_part_types, dtype=np.int32)
         else:
             part_types = np.zeros(n_voxels, dtype=np.int32)
-            
+
         self._chill_boost = compute_dynamic_chill_boost_parallel(
             voxel_centers, self._chill_centers, self._chill_thicknesses,
             voxel_states, part_types, self.time, max_chill_boost
         )
-        
+
         return self._chill_boost
 
     def _update_dynamic_chill_boost(self):
         """Update the chill boost array based on current simulation time and progress."""
         if self._chill_centers is None:
             return
-            
+
         n_voxels = len(self.mesh.voxel_centers)
-        max_chill_boost = 3.0
+        cp = self.analysis_options.solidification_params.chill
+        max_chill_boost = cp.max_chill_boost
         voxel_centers = np.ascontiguousarray(self.mesh.voxel_centers, dtype=np.float32)
         voxel_states = np.ascontiguousarray(self.mesh.voxel_states, dtype=np.float32)
-        
+
         if self.mesh.voxel_part_types is not None:
             part_types = np.ascontiguousarray(self.mesh.voxel_part_types, dtype=np.int32)
         else:
             part_types = np.zeros(n_voxels, dtype=np.int32)
-            
+
         self._chill_boost[:] = compute_dynamic_chill_boost_parallel(
             voxel_centers, self._chill_centers, self._chill_thicknesses,
             voxel_states, part_types, self.time, max_chill_boost
@@ -1228,10 +1240,11 @@ class SolidificationEngine:
         surface_mask = np.ascontiguousarray(self.mesh.surface_voxels, dtype=np.bool_)
         
         # Air gap parameters
-        air_gap_time_constant = 60.0  # Gap develops over ~1 minute
-        surface_influence_depth = 0.5  # Effect extends 0.5 inches from surface
-        max_slowdown = 0.75  # Maximum 25% slower at full effect
-        
+        agp = self.analysis_options.solidification_params.air_gap
+        air_gap_time_constant = agp.time_constant
+        surface_influence_depth = agp.surface_influence_depth
+        max_slowdown = agp.max_slowdown
+
         self._air_gap_slowdown[:] = compute_mold_air_gap_effect_parallel(
             voxel_states,
             feeding_distances,
@@ -1269,24 +1282,24 @@ class SolidificationEngine:
         """
         n_voxels = len(self.mesh.voxel_centers)
         riser_slowdown = np.ones(n_voxels, dtype=np.float32)
-        
+
         riser_indices = self._get_riser_voxel_indices()
         if len(riser_indices) == 0:
             return riser_slowdown
-        
+
         riser_centers = self.mesh.voxel_centers[riser_indices]
-        
+
         # Exothermic time-dependent parameters
-        ignition_delay_s = 10.0   # Seconds for sleeve to reach ignition temp
-        burn_duration_s = 120.0   # Duration of active exothermic reaction
-        insulation_only_factor = 0.7  # Post-burnout: just insulation (70% rate = 1.4x longer)
-        
-        # Full exothermic parameters
-        full_exothermic_factor = 0.5  # Active burn: 50% rate (2x longer)
-        
+        ep = self.analysis_options.solidification_params.exothermic
+        ignition_delay_s = ep.ignition_delay
+        burn_duration_s = ep.burn_duration
+        insulation_only_factor = ep.insulation_only_factor
+        full_exothermic_factor = ep.full_exothermic_factor
+        decay_time_constant = ep.decay_time_constant
+
         # Calculate time-dependent exothermic effectiveness
         current_time = self.time
-        
+
         if current_time < ignition_delay_s:
             # Phase 1: Ignition Delay - sleeve hasn't ignited yet
             # Linear ramp from no effect to partial effect
@@ -1298,32 +1311,30 @@ class SolidificationEngine:
         else:
             # Phase 3: Burn-Out - decay from full effect to insulation-only
             time_since_burnout = current_time - (ignition_delay_s + burn_duration_s)
-            decay_time_constant = 60.0  # Decay over ~1 minute
             decay_factor = np.exp(-time_since_burnout / decay_time_constant)
-            
+
             # Blend from full_exothermic_factor back to insulation_only_factor
             exothermic_factor = insulation_only_factor + \
                 (full_exothermic_factor - insulation_only_factor) * decay_factor
-        
+
         # CRITICAL: Feeding distance determines how far risers can feed
-        # This must be large enough to cover the casting geometry
-        # Using material's feeding distance multiplier
-        base_feeding_distance = 6.0  # Base feeding distance in inches
+        fp = self.analysis_options.solidification_params.feeding
+        tp = self.analysis_options.solidification_params.timing
+        base_feeding_distance = fp.base_feeding_distance
         material_factor = self.alloy.feeding_distance_multiplier / 3.0
         riser_influence_radius = base_feeding_distance * material_factor
-        
-        min_influence_factor = 0.6  # At edge of influence, 60% rate (1.7x longer)
-        
+        min_influence_factor = fp.min_influence_factor
+
         # Only print on initial call (time == 0)
         if self.time < self.time_step:
             print(f"  Time-dependent exothermic model active:")
             print(f"    Ignition delay: {ignition_delay_s:.0f}s, Burn duration: {burn_duration_s:.0f}s")
             print(f"  Applying riser thermal influence to {len(riser_indices):,} riser voxels...")
             print(f"  Riser influence radius: {riser_influence_radius:.1f}\" (feeding distance)")
-        
+
         # Apply exothermic effect to riser voxels (time-dependent)
         riser_slowdown[riser_indices] = exothermic_factor
-        
+
         # HOT SAND SATURATION: Apply slowdown to RISER_POST voxels (type 3)
         # The sand around riser posts becomes heat-saturated over time,
         # keeping the post liquid longer than normal casting would solidify.
@@ -1331,17 +1342,17 @@ class SolidificationEngine:
         riser_post_indices = np.where(self.mesh.voxel_part_types == 3)[0]
         if len(riser_post_indices) > 0:
             # Hot sand saturation parameters
-            sand_saturation_time_constant = 30.0  # Sand saturates over ~30s
-            max_hot_sand_slowdown = 0.6  # Hot saturated sand: 60% rate (1.7x longer)
-            
+            sand_saturation_time_constant = tp.sand_saturation_time
+            max_hot_sand_slowdown = tp.max_hot_sand_slowdown
+
             # Effect builds up as sand heats
             sand_saturation_factor = 1.0 - np.exp(-self.time / sand_saturation_time_constant)
-            
+
             # Blend from normal (1.0) toward hot sand slowdown
             post_slowdown = 1.0 - (1.0 - max_hot_sand_slowdown) * sand_saturation_factor
-            
+
             riser_slowdown[riser_post_indices] = post_slowdown
-            
+
             if self.time < self.time_step:
                 print(f"  Hot sand saturation active for {len(riser_post_indices):,} RISER_POST voxels")
         
@@ -1424,19 +1435,20 @@ class SolidificationEngine:
         # The maximum resolved thickness is the safer proxy here: the mean collapses
         # the influence radius for sparse voxelized chills and can erase the intended
         # directional-solidification benefit entirely.
+        cp = self.analysis_options.solidification_params.chill
         if self._chill_thicknesses is not None and len(self._chill_thicknesses) > 0:
             chill_thickness = np.max(self._chill_thicknesses)
         else:
             # Fallback: estimate based on voxel size
-            chill_thickness = self.mesh.base_voxel_size * 5.0  # ~5 voxels deep
-        
-        # Shrinkage reduction zone = 1.5 × chill thickness
+            chill_thickness = self.mesh.base_voxel_size * cp.thickness_fallback_voxels  # ~5 voxels deep
+
+        # Shrinkage reduction zone = multiplier × chill thickness
         # This is slightly larger than the solidification boost zone because
         # the feeding benefit extends beyond the direct cooling zone
-        chill_influence_radius = chill_thickness * 1.5
-        
-        max_reduction = 0.15  # At chill contact, only 15% of calculated shrinkage remains (85% reduction)
-        min_reduction = 1.0  # At edge of influence, no reduction
+        chill_influence_radius = chill_thickness * cp.shrinkage_radius_multiplier
+
+        max_reduction = cp.shrinkage_max_reduction  # At chill contact, only X% of calculated shrinkage remains
+        min_reduction = cp.shrinkage_min_reduction  # At edge of influence, no reduction
         
         print(f"  Chill shrinkage reduction zone: {chill_influence_radius:.2f}\" (1.5 × {chill_thickness:.2f}\" thickness)")
         
@@ -1506,19 +1518,19 @@ class SolidificationEngine:
         # Pellini's rule: feeding_distance = T * sqrt(thickness) where T is material constant
         # For a riser, we use riser diameter as characteristic thickness
         # Typical feeding distances: 4-8 inches for steel risers
-        
-        # Use material's feeding distance multiplier (WCB=3.0, CF8=2.5, C958=4.0)
-        base_feeding_distance = 6.0  # Base feeding distance in inches
+
+        fp = self.analysis_options.solidification_params.feeding
+        base_feeding_distance = fp.base_feeding_distance  # Base feeding distance in inches
         material_factor = self.alloy.feeding_distance_multiplier / 3.0  # Normalize to WCB
         feeding_distance = base_feeding_distance * material_factor
-        
+
         print(f"  Riser feeding distance: {feeding_distance:.1f}\" (material factor: {material_factor:.2f})")
-        
+
         # Reduction parameters
-        # At riser contact: 90% shrinkage reduction (only 10% remains)
+        # At riser contact: 90% shrinkage reduction (only X% remains)
         # At feeding distance edge: no reduction
-        max_reduction = 0.10  # At riser contact, only 10% shrinkage
-        min_reduction = 1.0   # At edge, full shrinkage
+        max_reduction = fp.riser_max_reduction
+        min_reduction = fp.riser_min_reduction
 
         if self.mesh.voxel_part_types is not None:
             part_types = np.asarray(self.mesh.voxel_part_types, dtype=np.int32)
@@ -1536,7 +1548,7 @@ class SolidificationEngine:
 
         if len(target_indices) > 0:
             # Feeder necks still need protection, but not as aggressively as casting.
-            post_contact_reduction = 0.35
+            post_contact_reduction = fp.post_contact_reduction
 
             fed_cast_count = 0
             fed_post_count = 0
@@ -1574,7 +1586,7 @@ class SolidificationEngine:
                 if np.any(feeder_neck_mask):
                     reduction[feeder_neck_mask] = np.maximum(
                         reduction[feeder_neck_mask],
-                        0.70,
+                        fp.disconnected_neck_floor,
                     )
 
                 riser_feeding_reduction[valid_targets] = reduction

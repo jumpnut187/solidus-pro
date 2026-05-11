@@ -271,6 +271,158 @@
                     </div>
                 </div>
 
+                <!-- Solidification Parameters Panel -->
+                <div class="panel">
+                    <div class="panel-header" onclick="togglePanel(this)">
+                        <h3><i class="fas fa-sliders-h"></i> Advanced Parameters</h3>
+                        <i class="fas fa-chevron-down"></i>
+                    </div>
+                    <div class="panel-content">
+                        <details>
+                            <summary class="text-secondary" style="cursor:pointer; font-size:0.85em; margin-bottom:8px;">
+                                Feeding Distance &amp; Shrinkage
+                            </summary>
+                            <div class="form-group">
+                                <label>Base Feeding Distance (inches)</label>
+                                <input type="number" id="sp_base_feeding_distance" value="6.0" min="2" max="24" step="0.1" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>Min Influence Factor</label>
+                                <input type="number" id="sp_min_influence_factor" value="0.6" min="0.01" max="1.0" step="0.01" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>Riser Max Shrinkage Reduction</label>
+                                <input type="number" id="sp_riser_max_reduction" value="0.10" min="0.01" max="0.5" step="0.01" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>Riser Min Shrinkage Reduction</label>
+                                <input type="number" id="sp_riser_min_reduction" value="1.0" min="0.5" max="1.0" step="0.01" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>Feeder Neck Contact Reduction</label>
+                                <input type="number" id="sp_post_contact_reduction" value="0.35" min="0.1" max="0.8" step="0.01" class="form-control">
+                            </div>
+                        </details>
+                        <details>
+                            <summary class="text-secondary" style="cursor:pointer; font-size:0.85em; margin-bottom:8px;">
+                                Chill Parameters
+                            </summary>
+                            <div class="form-group">
+                                <label>Max Chill Boost</label>
+                                <input type="number" id="sp_max_chill_boost" value="3.0" min="1.0" max="10.0" step="0.1" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>Shrinkage Radius Multiplier</label>
+                                <input type="number" id="sp_shrinkage_radius_multiplier" value="1.5" min="0.5" max="5.0" step="0.1" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>Chill Max Shrinkage Reduction</label>
+                                <input type="number" id="sp_shrinkage_max_reduction" value="0.15" min="0.01" max="0.5" step="0.01" class="form-control">
+                            </div>
+                        </details>
+                        <details>
+                            <summary class="text-secondary" style="cursor:pointer; font-size:0.85em; margin-bottom:8px;">
+                                Exothermic Sleeve Timing
+                            </summary>
+                            <div class="form-group">
+                                <label>Ignition Delay (seconds)</label>
+                                <input type="number" id="sp_ignition_delay" value="10.0" min="0" max="60" step="1" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>Burn Duration (seconds)</label>
+                                <input type="number" id="sp_burn_duration" value="120.0" min="30" max="600" step="10" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>Insulation-Only Factor</label>
+                                <input type="number" id="sp_insulation_only_factor" value="0.7" min="0.1" max="1.0" step="0.01" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>Full Exothermic Factor</label>
+                                <input type="number" id="sp_full_exothermic_factor" value="0.5" min="0.1" max="0.9" step="0.01" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>Decay Time Constant (seconds)</label>
+                                <input type="number" id="sp_decay_time_constant" value="60.0" min="10" max="300" step="5" class="form-control">
+                            </div>
+                        </details>
+                        <details>
+                            <summary class="text-secondary" style="cursor:pointer; font-size:0.85em; margin-bottom:8px;">
+                                Air Gap
+                            </summary>
+                            <div class="form-group">
+                                <label>Air Gap Time Constant (seconds)</label>
+                                <input type="number" id="sp_air_gap_time_constant" value="60.0" min="10" max="600" step="10" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>Surface Influence Depth (inches)</label>
+                                <input type="number" id="sp_surface_influence_depth" value="0.5" min="0.1" max="3.0" step="0.1" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>Max Air Gap Slowdown</label>
+                                <input type="number" id="sp_max_slowdown" value="0.75" min="0.1" max="0.95" step="0.01" class="form-control">
+                            </div>
+                        </details>
+                        <details>
+                            <summary class="text-secondary" style="cursor:pointer; font-size:0.85em; margin-bottom:8px;">
+                                Thermal Boundaries
+                            </summary>
+                            <div class="form-group">
+                                <label>Mold Temperature (°C)</label>
+                                <input type="number" id="sp_mold_temperature" value="200.0" min="20" max="500" step="5" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>Chill Temperature (°C)</label>
+                                <input type="number" id="sp_chill_temperature" value="25.0" min="0" max="100" step="5" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>HTC Cast Interface (W/m²K)</label>
+                                <input type="number" id="sp_htc_cast_interface" value="500.0" min="100" max="2000" step="50" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>HTC Riser Post (W/m²K)</label>
+                                <input type="number" id="sp_htc_riser_post" value="350.0" min="100" max="2000" step="50" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>HTC Riser (W/m²K)</label>
+                                <input type="number" id="sp_htc_riser" value="220.0" min="100" max="2000" step="50" class="form-control">
+                            </div>
+                        </details>
+                        <details>
+                            <summary class="text-secondary" style="cursor:pointer; font-size:0.85em; margin-bottom:8px;">
+                                Simulation Timing
+                            </summary>
+                            <div class="form-group">
+                                <label>Chvorinov Mold Constant (s/in²)</label>
+                                <input type="number" id="sp_chvorinov_mold_constant" value="280.0" min="50" max="1000" step="10" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>Safety Factor (with Risers)</label>
+                                <input type="number" id="sp_safety_factor_with_risers" value="2.5" min="1.0" max="10.0" step="0.1" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>Safety Factor (no Risers)</label>
+                                <input type="number" id="sp_safety_factor_no_risers" value="1.5" min="1.0" max="10.0" step="0.1" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>Min Simulation Time (seconds)</label>
+                                <input type="number" id="sp_min_simulation_time" value="120.0" min="10" max="600" step="10" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>Max Simulation Time (seconds)</label>
+                                <input type="number" id="sp_max_simulation_time" value="14400.0" min="600" max="86400" step="600" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>Sand Saturation Time (seconds)</label>
+                                <input type="number" id="sp_sand_saturation_time" value="30.0" min="5" max="300" step="5" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>Max Hot Sand Slowdown</label>
+                                <input type="number" id="sp_max_hot_sand_slowdown" value="0.6" min="0.1" max="0.95" step="0.01" class="form-control">
+                            </div>
+                        </details>
+                    </div>
+                </div>
+
                 <!-- Run Simulation Panel -->
                 <div class="panel">
                     <div class="panel-header">

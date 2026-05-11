@@ -221,6 +221,7 @@ class Settings:
     paths: PathSettings = field(default_factory=PathSettings)
     report: ReportSettings = field(default_factory=ReportSettings)
     plugins: PluginSettings = field(default_factory=PluginSettings)
+    solidification_params: Any = field(default=None)
     
     # Metadata
     _config_files_loaded: List[str] = field(default_factory=list)
@@ -324,46 +325,48 @@ class Settings:
             "report": self.report,
             "plugins": self.plugins,
         }
-        
+
         for section_name, section_data in data.items():
             if section_name in section_mapping and isinstance(section_data, dict):
                 section = section_mapping[section_name]
                 for key, value in section_data.items():
                     if hasattr(section, key):
                         setattr(section, key, value)
+            elif section_name == "solidification" and isinstance(section_data, dict):
+                self.solidification_params = section_data
     
     def _apply_environment_variables(self) -> None:
         """Apply environment variable overrides"""
         env_prefix = "CASTSIM_"
-        
+
         # Map environment variables to settings
         env_mapping = {
             # Mesh settings
             f"{env_prefix}VOXEL_SIZE": ("mesh", "base_voxel_size", float),
             f"{env_prefix}MEMORY_MODE": ("mesh", "memory_mode", str),
-            
+
             # Simulation settings
             f"{env_prefix}DEFAULT_ALLOY": ("simulation", "default_alloy", str),
             f"{env_prefix}USE_GPU": ("simulation", "use_gpu", self._parse_bool),
-            
+
             # Performance settings
             f"{env_prefix}MAX_WORKERS": ("performance", "max_workers", int),
             f"{env_prefix}GPU_BACKEND": ("performance", "gpu_backend", str),
             f"{env_prefix}PART_ASSIGNMENT_MODE": ("performance", "part_assignment_mode", str),
             f"{env_prefix}PART_ASSIGNMENT_WORKERS": ("performance", "part_assignment_workers", int),
             f"{env_prefix}PART_ASSIGNMENT_BATCH_SIZE": ("performance", "part_assignment_batch_size", int),
-            
+
             # UI settings
             f"{env_prefix}THEME": ("ui", "theme", str),
         }
-        
+
         section_mapping = {
             "mesh": self.mesh,
             "simulation": self.simulation,
             "performance": self.performance,
             "ui": self.ui,
         }
-        
+
         for env_var, (section_name, attr_name, converter) in env_mapping.items():
             value = os.environ.get(env_var)
             if value is not None:
@@ -375,6 +378,42 @@ class Settings:
                 except (ValueError, TypeError) as e:
                     # Log warning but don't fail
                     print(f"Warning: Invalid value for {env_var}: {value} ({e})")
+
+        # Solidification params: nested CASTSIM_SOLIDIFICATION__SUBSECTION__KEY=VALUE
+        # e.g. CASTSIM_SOLIDIFICATION__FEEDING__BASE_FEEDING_DISTANCE=8.0
+        solid_params = self.solidification_params
+        if solid_params is None:
+            solid_params = {}
+        if not isinstance(solid_params, dict):
+            solid_params = {}
+
+        import re
+
+        def _set_nested(d, path, value):
+            keys = path.split("__")
+            for k in keys[:-1]:
+                if k not in d:
+                    d[k] = {}
+                d = d[k]
+            d[keys[-1]] = value
+
+        for env_var, env_val in os.environ.items():
+            if env_var.startswith(f"{env_prefix}SOLIDIFICATION__"):
+                key_path = env_var[len(f"{env_prefix}SOLIDIFICATION__"):]
+                # Try float first, then int, then bool, else str
+                for conv in (float, int, lambda v: v.lower() in ("true", "1", "yes", "on")):
+                    try:
+                        converted = conv(env_val)
+                        break
+                    except (ValueError, TypeError):
+                        converted = env_val
+                try:
+                    _set_nested(solid_params, key_path, converted)
+                    self._env_vars_applied.append(env_var)
+                except (ValueError, TypeError) as e:
+                    print(f"Warning: Invalid value for {env_var}: {env_val} ({e})")
+
+        self.solidification_params = solid_params if solid_params else None
     
     @staticmethod
     def _parse_bool(value: str) -> bool:
@@ -480,7 +519,12 @@ class Settings:
         print(f"  Part assignment mode: {self.performance.part_assignment_mode}")
         print(f"  Part assignment workers: {self.performance.part_assignment_workers or 'auto'}")
         print(f"  Part assignment batch size: {self.performance.part_assignment_batch_size}")
-        
+
+        if self.solidification_params:
+            print("\n[Solidification Parameters]")
+            import json
+            print(json.dumps(self.solidification_params, indent=2))
+
         print("=" * 60 + "\n")
 
 

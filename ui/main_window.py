@@ -13,12 +13,12 @@ Enhanced Visualization Features:
 """
 
 from PyQt5.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QComboBox, QSlider, QGroupBox,
     QFileDialog, QProgressBar, QDoubleSpinBox, QCheckBox,
     QMessageBox, QSplitter, QGridLayout, QListWidget, QListWidgetItem,
     QInputDialog, QMenu, QAction, QDialog, QDialogButtonBox, QFrame,
-    QTextEdit, QApplication, QSpinBox, QTabWidget,
+    QTextEdit, QApplication, QSpinBox, QTabWidget, QScrollArea,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QPoint, QObject, QTimer
@@ -51,6 +51,7 @@ from .project_state import build_project_state, load_project_state
 from .workers import MeshSuggestionWorker, SimulationWorker
 from config.hardware_config import hardware
 from core.mesh_ml import MeshRecommendation
+from core.solidification_params import SolidificationParameters
 
 # Import error logger at top level for consistent logging
 try:
@@ -2495,6 +2496,228 @@ class RiserDesignDialog(DraggableDialog):
             self.accept()
 
 
+# ==================== Solidification Parameters Dialog ====================
+
+class SolidificationParamsDialog(DraggableDialog):
+    """
+    Modal dialog for configuring solidification simulation parameters.
+
+    Organized into 6 tab groups:
+      - Feeding: Riser feeding distance and shrinkage reduction near risers
+      - Chills: Chill thermal boost and shrinkage reduction near chills
+      - Exothermic: Exothermic riser sleeve timing and effectiveness
+      - Air Gap: Mold air-gap development and surface influence
+      - Thermal: Mold/chill temperatures and heat-transfer coefficients
+      - Timing: Chvorinov simulation time and safety factors
+
+    Emits params_changed(dict) on Confirm with the full nested dict.
+    """
+
+    params_changed = pyqtSignal(dict)
+
+    # Field definitions: (group_key, field_key, label, default, min, max, step, decimals, unit, tooltip)
+    FIELD_DEFS: list = [
+        # Feeding
+        ("feeding", "base_feeding_distance", "Base Feeding Distance", 6.0, 2.0, 24.0, 0.1, 2, "inches",
+         "Base riser influence radius. Final radius = this × (alloy feeding_multiplier / 3.0)."),
+        ("feeding", "min_influence_factor", "Min Influence Factor", 0.6, 0.01, 1.0, 0.01, 2, "fraction",
+         "At edge of riser influence, solidification is slowed to this fraction of normal rate."),
+        ("feeding", "riser_max_reduction", "Riser Max Shrinkage Reduction", 0.10, 0.01, 0.5, 0.01, 2, "fraction",
+         "At riser contact, only this fraction of calculated shrinkage remains."),
+        ("feeding", "riser_min_reduction", "Riser Min Shrinkage Reduction", 1.0, 0.5, 1.0, 0.01, 2, "fraction",
+         "At edge of feeding distance, full shrinkage (no reduction)."),
+        ("feeding", "post_contact_reduction", "Feeder Neck Contact Reduction", 0.35, 0.1, 0.8, 0.01, 2, "fraction",
+         "Shrinkage reduction at feeder neck contact with casting."),
+        ("feeding", "disconnected_neck_floor", "Disconnected Neck Floor", 0.70, 0.3, 1.0, 0.01, 2, "fraction",
+         "Minimum shrinkage reduction for feeder necks not connected to a riser system."),
+        # Chills
+        ("chill", "max_chill_boost", "Max Chill Boost", 3.0, 1.0, 10.0, 0.1, 1, "multiplier",
+         "Maximum solidification acceleration near chills."),
+        ("chill", "shrinkage_radius_multiplier", "Shrinkage Radius Multiplier", 1.5, 0.5, 5.0, 0.1, 2, "× chill thickness",
+         "Shrinkage reduction zone = chill thickness × this value."),
+        ("chill", "shrinkage_max_reduction", "Chill Max Shrinkage Reduction", 0.15, 0.01, 0.5, 0.01, 2, "fraction",
+         "At chill contact, only this fraction of calculated shrinkage remains."),
+        ("chill", "shrinkage_min_reduction", "Chill Min Shrinkage Reduction", 1.0, 0.5, 1.0, 0.01, 2, "fraction",
+         "At edge of chill influence, full shrinkage (no reduction)."),
+        ("chill", "thickness_fallback_voxels", "Chill Thickness Fallback", 5.0, 1.0, 20.0, 1.0, 0, "voxels",
+         "When no explicit chill thickness is available, estimate as this × voxel_size."),
+        # Exothermic
+        ("exothermic", "ignition_delay", "Ignition Delay", 10.0, 0.0, 60.0, 1.0, 0, "seconds",
+         "Seconds for exothermic sleeve to reach ignition temperature."),
+        ("exothermic", "burn_duration", "Burn Duration", 120.0, 30.0, 600.0, 10.0, 0, "seconds",
+         "Duration of the active exothermic reaction."),
+        ("exothermic", "insulation_only_factor", "Insulation-Only Factor", 0.7, 0.1, 1.0, 0.01, 2, "fraction",
+         "Post-burnout: solidification rate as fraction of normal (0.7 = 1.4× slower)."),
+        ("exothermic", "full_exothermic_factor", "Full Exothermic Factor", 0.5, 0.1, 0.9, 0.01, 2, "fraction",
+         "Active burn: solidification rate as fraction of normal (0.5 = 2× slower)."),
+        ("exothermic", "decay_time_constant", "Decay Time Constant", 60.0, 10.0, 300.0, 5.0, 0, "seconds",
+         "Time constant for exothermic effect decay after burnout."),
+        # Air Gap
+        ("air_gap", "time_constant", "Air Gap Time Constant", 60.0, 10.0, 600.0, 10.0, 0, "seconds",
+         "Time over which the air gap develops."),
+        ("air_gap", "surface_influence_depth", "Surface Influence Depth", 0.5, 0.1, 3.0, 0.1, 2, "inches",
+         "How far the air-gap effect extends from the casting surface."),
+        ("air_gap", "max_slowdown", "Max Air Gap Slowdown", 0.75, 0.1, 0.95, 0.01, 2, "fraction",
+         "Maximum slowdown at surface due to air gap (0.75 = 25% slower)."),
+        # Thermal Boundary
+        ("thermal_boundary", "mold_temperature", "Mold Temperature", 200.0, 20.0, 500.0, 5.0, 0, "°C",
+         "Mold surface boundary condition temperature."),
+        ("thermal_boundary", "chill_temperature", "Chill Temperature", 25.0, 0.0, 100.0, 5.0, 0, "°C",
+         "Chill fixed temperature boundary condition."),
+        ("thermal_boundary", "htc_cast_interface", "HTC Cast Interface", 500.0, 100.0, 2000.0, 50.0, 0, "W/m²K",
+         "Heat-transfer coefficient at cast-mold interface."),
+        ("thermal_boundary", "htc_riser_post", "HTC Riser Post", 350.0, 100.0, 2000.0, 50.0, 0, "W/m²K",
+         "Heat-transfer coefficient at riser-post-mold interface."),
+        ("thermal_boundary", "htc_riser", "HTC Riser", 220.0, 100.0, 2000.0, 50.0, 0, "W/m²K",
+         "Heat-transfer coefficient at riser-mold interface."),
+        # Timing
+        ("timing", "chvorinov_mold_constant", "Chvorinov Mold Constant", 280.0, 50.0, 1000.0, 10.0, 0, "s/in²",
+         "Chvorinov mold constant B (t = B·M²). ~280 s/in² for WCB in sand."),
+        ("timing", "safety_factor_with_risers", "Safety Factor (with Risers)", 2.5, 1.0, 10.0, 0.1, 2, "multiplier",
+         "Time safety factor when risers are present."),
+        ("timing", "safety_factor_no_risers", "Safety Factor (no Risers)", 1.5, 1.0, 10.0, 0.1, 2, "multiplier",
+         "Time safety factor when no risers are present."),
+        ("timing", "min_simulation_time", "Min Simulation Time", 120.0, 10.0, 600.0, 10.0, 0, "seconds",
+         "Minimum simulation time for any casting."),
+        ("timing", "max_simulation_time", "Max Simulation Time", 14400.0, 600.0, 86400.0, 600.0, 0, "seconds",
+         "Maximum simulation time cap (thermal_coupled mode). 14400s = 4 hours."),
+        ("timing", "sand_saturation_time", "Sand Saturation Time", 30.0, 5.0, 300.0, 5.0, 0, "seconds",
+         "Time constant for sand heat saturation around riser posts."),
+        ("timing", "max_hot_sand_slowdown", "Max Hot Sand Slowdown", 0.6, 0.1, 0.95, 0.01, 2, "fraction",
+         "Maximum slowdown from heat-saturated sand (0.6 = 1.7× slower)."),
+    ]
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent, title="Solidification Parameters")
+        self._spinboxes: dict = {}
+        self._original_values: dict = {}
+        self._setup_ui()
+
+    def _setup_ui(self) -> None:
+        self.setWindowTitle("Solidification Parameters")
+        self.setMinimumSize(700, 520)
+
+        # Tab widget
+        self.tab_widget = QTabWidget()
+        self.content_layout.addWidget(self.tab_widget)
+
+        # Group fields by tab
+        groups = {}
+        for fd in self.FIELD_DEFS:
+            grp = fd[0]
+            if grp not in groups:
+                groups[grp] = []
+            groups[grp].append(fd)
+
+        tab_labels = {
+            "feeding": "Feeding",
+            "chill": "Chills",
+            "exothermic": "Exothermic Sleeves",
+            "air_gap": "Air Gap",
+            "thermal_boundary": "Thermal",
+            "timing": "Timing",
+        }
+
+        for grp_key, grp_fields in groups.items():
+            tab = QScrollArea()
+            tab.setWidgetResizable(True)
+            tab.setFrameShape(QFrame.NoFrame)
+            inner = QWidget()
+            vlayout = QVBoxLayout(inner)
+            vlayout.setContentsMargins(6, 6, 6, 6)
+            vlayout.addSpacing(0)
+
+            for fd in grp_fields:
+                (_, field_key, label, default, min_v, max_v, step, decimals, unit, tip) = fd
+                row = self._make_field_row(label, field_key, default, min_v, max_v, step, decimals, unit, tip)
+                vlayout.addLayout(row)
+
+            vlayout.addStretch()
+            tab.setWidget(inner)
+            self.tab_widget.addTab(tab, tab_labels.get(grp_key, grp_key.title()))
+
+        # Button row
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Reset
+        ))
+        button_box.accepted.connect(self._on_confirm)
+        button_box.rejected.connect(self._on_cancel)
+        # Find Reset button and connect it
+        for button in button_box.buttons():
+            if button_box.buttonRole(button) == QDialogButtonBox.ResetRole:
+                button.clicked.connect(self._on_reset)
+                break
+        self.content_layout.addWidget(button_box)
+
+    def _make_field_row(self, label: str, field_key: str, default: float,
+                        min_v: float, max_v: float, step: float,
+                        decimals: int, unit: str, tooltip: str) -> QHBoxLayout:
+        row = QHBoxLayout()
+        lbl = QLabel(label)
+        lbl.setMinimumWidth(220)
+        lbl.setToolTip(tooltip)
+        spin = QDoubleSpinBox()
+        spin.setRange(min_v, max_v)
+        spin.setSingleStep(step)
+        spin.setDecimals(decimals)
+        spin.setSuffix(f" {unit}" if unit else "")
+        spin.setToolTip(tooltip)
+        row.addWidget(lbl)
+        row.addWidget(spin, 1)
+        self._spinboxes[(label, field_key)] = spin  # keyed by (group_label, field_key)
+        return row
+
+    def store_original_values(self) -> None:
+        self._original_values: dict = self.get_options()
+
+    def restore_original_values(self) -> None:
+        if hasattr(self, "_original_values"):
+            self.set_options(self._original_values)
+
+    def apply_values(self) -> None:
+        self.params_changed.emit(self.get_options())
+        self.accept()
+
+    def get_options(self) -> dict:
+        result = {}
+        for (grp_label, field_key), spin in self._spinboxes.items():
+            grp = None
+            for fd in self.FIELD_DEFS:
+                if fd[1] == field_key:
+                    grp = fd[0]
+                    break
+            if grp is None:
+                continue
+            result.setdefault(grp, {})
+            result[grp][field_key] = spin.value()
+        return result
+
+    def set_options(self, options: dict) -> None:
+        if options is None:
+            return
+        for (grp_label, field_key), spin in self._spinboxes.items():
+            grp = None
+            for fd in self.FIELD_DEFS:
+                if fd[1] == field_key:
+                    grp = fd[0]
+                    break
+            if grp is None:
+                continue
+            if grp in options and field_key in options[grp]:
+                spin.setValue(options[grp][field_key])
+
+    def _on_confirm(self) -> None:
+        self.apply_values()
+
+    def _on_cancel(self) -> None:
+        self.restore_original_values()
+        self.reject()
+
+    def _on_reset(self) -> None:
+        defaults = SolidificationParameters().to_dict()
+        self.set_options(defaults)
+
+
 class MainWindow(QMainWindow):
     """Main application window"""
     
@@ -2532,7 +2755,10 @@ class MainWindow(QMainWindow):
             'incremental_solidification': False,
             'use_octree': True
         }
-        
+
+        # Solidification parameters (from SolidificationParameters defaults)
+        self._solidification_params = SolidificationParameters().to_dict()
+
         # Current visualization mode
         self._current_vis_mode = 'shrinkage'  # 'shrinkage', 'hotspot', 'niyama', 'fraction_liquid'
         
@@ -2684,7 +2910,13 @@ class MainWindow(QMainWindow):
         performance_action.setStatusTip("Configure GPU and optimization settings")
         performance_action.triggered.connect(self._open_performance_dialog)
         sim_menu.addAction(performance_action)
-        
+
+        # Solidification Parameters
+        solidification_action = QAction("🔧 Solidification Parameters...", self)
+        solidification_action.setStatusTip("Configure feeding distances, chill reduction, exothermic sleeve timing, and more")
+        solidification_action.triggered.connect(self._open_solidification_params_dialog)
+        sim_menu.addAction(solidification_action)
+
         # ==================== Tools Menu ====================
         tools_menu = menubar.addMenu("&Tools")
         
@@ -2825,7 +3057,11 @@ class MainWindow(QMainWindow):
         # Performance dialog
         self.performance_dialog = PerformanceDialog(self)
         self.performance_dialog.options_changed.connect(self._on_performance_options_confirmed)
-        
+
+        # Solidification parameters dialog
+        self.solidification_dialog = SolidificationParamsDialog(self)
+        self.solidification_dialog.params_changed.connect(self._on_solidification_params_confirmed)
+
         # Console window
         self.console_window = ConsoleWindow(self)
         # Start capturing output immediately so we don't miss anything
@@ -2951,6 +3187,12 @@ class MainWindow(QMainWindow):
         self.performance_summary_label.setStyleSheet("font-size: 10px; color: #888; margin-left: 10px;")
         settings_layout.addWidget(self.performance_summary_label)
         
+        # Solidification Parameters button
+        self.open_solidification_btn = QPushButton("🔧 Solidification Params...")
+        self.open_solidification_btn.setToolTip("Configure feeding distances, chill reduction, exothermic sleeve timing, and more")
+        self.open_solidification_btn.clicked.connect(self._open_solidification_params_dialog)
+        settings_layout.addWidget(self.open_solidification_btn)
+        
         settings_group.setLayout(settings_layout)
         layout.addWidget(settings_group)
         
@@ -3008,12 +3250,12 @@ class MainWindow(QMainWindow):
         vis_layout.addWidget(self.threshold_label_title)
         self.threshold_slider = MarkedSlider(Qt.Horizontal)
         self.threshold_slider.setRange(1, 100)
-        self.threshold_slider.setValue(30)
-        self.threshold_slider.setMarkerPosition(30)
+        self.threshold_slider.setValue(70)
+        self.threshold_slider.setMarkerPosition(70)
         self.threshold_slider.valueChanged.connect(self._update_threshold)
         vis_layout.addWidget(self.threshold_slider)
 
-        self.threshold_label = QLabel("30%")
+        self.threshold_label = QLabel("70%")
         vis_layout.addWidget(self.threshold_label)
         
         # Time slider for Fraction Liquid (hidden by default)
@@ -3111,7 +3353,18 @@ class MainWindow(QMainWindow):
         self.analysis_dialog.center_on_parent()
         self.analysis_dialog.show()
         self.analysis_dialog.raise_()
-    
+
+    def _open_solidification_params_dialog(self):
+        """Open the solidification parameters dialog"""
+        self.solidification_dialog.set_options(self._solidification_params)
+        self.solidification_dialog.center_on_parent()
+        self.solidification_dialog.show()
+        self.solidification_dialog.raise_()
+
+    def _on_solidification_params_confirmed(self, options):
+        """Handle solidification params confirmation from dialog"""
+        self._solidification_params = options
+
     def _open_mesh_dialog(self):
         """Open the mesh parameters dialog"""
         self.mesh_dialog.set_values(
@@ -3285,9 +3538,9 @@ class MainWindow(QMainWindow):
     def _get_recommended_threshold(self, vis_mode, alloy_name):
         """Get recommended threshold value (0-100) based on visualization mode and alloy"""
         if vis_mode == "shrinkage":
-            return 30
+            return 70
         elif vis_mode == "hotspot":
-            return 10  # Top 10% hottest areas
+            return 60  # Top 60% hottest areas
         elif vis_mode == "niyama":
             # Alloy-specific Niyama thresholds
             alloy_default_thresholds = {
@@ -4099,6 +4352,7 @@ class MainWindow(QMainWindow):
             memory_mode=self._current_memory_mode,
             analysis_options=self._get_effective_analysis_options(),
             performance_options=self._performance_options,
+            solidification_params=self._solidification_params,
             mesh_setting_origin=self.mesh_setting_origin,
             current_vis_mode=self._current_vis_mode,
             ui_state=ui_state,
@@ -4210,6 +4464,10 @@ class MainWindow(QMainWindow):
         self._on_analysis_options_confirmed(simulation_state["analysis_options"])
         self.performance_dialog.set_options(simulation_state["performance_options"])
         self._on_performance_options_confirmed(simulation_state["performance_options"])
+        solid_params = simulation_state.get("solidification_params", {})
+        if solid_params:
+            self.solidification_dialog.set_options(solid_params)
+            self._on_solidification_params_confirmed(solid_params)
         self.mesh_setting_origin = simulation_state.get("mesh_setting_origin", "manual")
         self._current_vis_mode = simulation_state.get("current_vis_mode", "shrinkage")
 
@@ -4394,7 +4652,8 @@ class MainWindow(QMainWindow):
             settings_origin=self.mesh_setting_origin,
             part_manager=self.part_manager,  # Pass part manager for type tracking
             analysis_options=self._get_effective_analysis_options(),  # Pass normalized desktop options
-            performance_options=self._performance_options  # Pass performance options
+            performance_options=self._performance_options,  # Pass performance options
+            solidification_params=self._solidification_params  # Pass solidification parameters
         )
         
         self.simulation_worker.progress.connect(self._on_simulation_progress)

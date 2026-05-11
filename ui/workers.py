@@ -30,6 +30,7 @@ class SimulationWorker(QThread):
         part_manager: Any = None,
         analysis_options: Optional[dict] = None,
         performance_options: Optional[dict] = None,
+        solidification_params: Optional[dict] = None,
     ) -> None:
         super().__init__()
         self.stl_loader = stl_loader
@@ -41,6 +42,7 @@ class SimulationWorker(QThread):
         self.part_manager = part_manager
         self.analysis_options = analysis_options or {}
         self.performance_options = performance_options or {}
+        self.solidification_params = solidification_params or {}
         self.voxel_mesh: Any = None
         self.simulation: Any = None
         self._cancel_requested = threading.Event()
@@ -87,6 +89,7 @@ class SimulationWorker(QThread):
                 part_assignment_workers=part_assignment_workers,
                 part_assignment_batch_size=part_assignment_batch_size,
                 show_progress=True,
+                solidification_params=self.solidification_params,
             )
 
             pipeline_start = time.perf_counter()

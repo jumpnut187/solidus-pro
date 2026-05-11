@@ -93,6 +93,7 @@ def execute_simulation_task(
             part_assignment_workers=int(sim_data.get("part_assignment_workers", 0) or 0),
             part_assignment_batch_size=int(sim_data.get("part_assignment_batch_size", 2500) or 2500),
             show_progress=False,
+            solidification_params=sim_data.get("solidification_params"),
         )
 
         def progress_message(message: str) -> None:

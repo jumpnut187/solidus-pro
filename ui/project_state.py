@@ -33,6 +33,7 @@ def build_project_state(
     memory_mode: str,
     analysis_options: Dict[str, Any],
     performance_options: Dict[str, Any],
+    solidification_params: Optional[Dict[str, Any]] = None,
     mesh_setting_origin: str,
     current_vis_mode: str,
     ui_state: Dict[str, Any],
@@ -54,6 +55,8 @@ def build_project_state(
             }
         )
 
+    if solidification_params is None:
+        solidification_params = {}
     payload = {
         "schema_version": PROJECT_SCHEMA_VERSION,
         "saved_at": datetime.now(timezone.utc).isoformat(),
@@ -64,6 +67,7 @@ def build_project_state(
             "memory_mode": memory_mode,
             "analysis_options": dict(analysis_options),
             "performance_options": dict(performance_options),
+            "solidification_params": dict(solidification_params),
             "mesh_setting_origin": mesh_setting_origin,
             "current_vis_mode": current_vis_mode,
         },
@@ -121,6 +125,7 @@ def load_project_state(payload: Dict[str, Any]) -> ProjectState:
             "memory_mode": str(simulation.get("memory_mode", "auto")),
             "analysis_options": dict(simulation.get("analysis_options", {})),
             "performance_options": dict(simulation.get("performance_options", {})),
+            "solidification_params": dict(simulation.get("solidification_params", {})),
             "mesh_setting_origin": str(simulation.get("mesh_setting_origin", "manual")),
             "current_vis_mode": str(simulation.get("current_vis_mode", "shrinkage")),
         },

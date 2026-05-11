@@ -786,6 +786,7 @@ async function runSimulation() {
     state.isSimulating = true;
     
     // Create simulation
+    const getSp = (id, fallback) => parseFloat(document.getElementById(id)?.value) || fallback;
     const simData = {
         name: 'Web Simulation ' + new Date().toLocaleString(),
         alloy: document.getElementById('alloySelect').value,
@@ -799,6 +800,48 @@ async function runSimulation() {
             sand_burn_in: document.getElementById('optSandBurnIn').checked,
             fraction_liquid: document.getElementById('optFractionLiquid').checked,
             sand_restraint_index: (parseInt(document.getElementById('sandRestraintIndex').value, 10) || 50) / 100
+        },
+        solidification_params: {
+            feeding: {
+                base_feeding_distance: getSp('sp_base_feeding_distance', 6.0),
+                min_influence_factor: getSp('sp_min_influence_factor', 0.6),
+                riser_max_reduction: getSp('sp_riser_max_reduction', 0.10),
+                riser_min_reduction: getSp('sp_riser_min_reduction', 1.0),
+                post_contact_reduction: getSp('sp_post_contact_reduction', 0.35),
+            },
+            chill: {
+                max_chill_boost: getSp('sp_max_chill_boost', 3.0),
+                shrinkage_radius_multiplier: getSp('sp_shrinkage_radius_multiplier', 1.5),
+                shrinkage_max_reduction: getSp('sp_shrinkage_max_reduction', 0.15),
+            },
+            exothermic: {
+                ignition_delay: getSp('sp_ignition_delay', 10.0),
+                burn_duration: getSp('sp_burn_duration', 120.0),
+                insulation_only_factor: getSp('sp_insulation_only_factor', 0.7),
+                full_exothermic_factor: getSp('sp_full_exothermic_factor', 0.5),
+                decay_time_constant: getSp('sp_decay_time_constant', 60.0),
+            },
+            air_gap: {
+                time_constant: getSp('sp_air_gap_time_constant', 60.0),
+                surface_influence_depth: getSp('sp_surface_influence_depth', 0.5),
+                max_slowdown: getSp('sp_max_slowdown', 0.75),
+            },
+            thermal_boundary: {
+                mold_temperature: getSp('sp_mold_temperature', 200.0),
+                chill_temperature: getSp('sp_chill_temperature', 25.0),
+                htc_cast_interface: getSp('sp_htc_cast_interface', 500.0),
+                htc_riser_post: getSp('sp_htc_riser_post', 350.0),
+                htc_riser: getSp('sp_htc_riser', 220.0),
+            },
+            timing: {
+                chvorinov_mold_constant: getSp('sp_chvorinov_mold_constant', 280.0),
+                safety_factor_with_risers: getSp('sp_safety_factor_with_risers', 2.5),
+                safety_factor_no_risers: getSp('sp_safety_factor_no_risers', 1.5),
+                min_simulation_time: getSp('sp_min_simulation_time', 120.0),
+                max_simulation_time: getSp('sp_max_simulation_time', 14400.0),
+                sand_saturation_time: getSp('sp_sand_saturation_time', 30.0),
+                max_hot_sand_slowdown: getSp('sp_max_hot_sand_slowdown', 0.6),
+            },
         }
     };
     

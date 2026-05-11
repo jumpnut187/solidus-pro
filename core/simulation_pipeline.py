@@ -72,6 +72,7 @@ class PipelineInputs:
         part_assignment_batch_size: int = 2500,
         max_voxels_for_visualization: int = 50_000,
         show_progress: bool = False,
+        solidification_params: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.alloy_name = alloy_name
         self.voxel_size = voxel_size
@@ -86,6 +87,7 @@ class PipelineInputs:
         self.part_assignment_batch_size = part_assignment_batch_size
         self.max_voxels_for_visualization = max_voxels_for_visualization
         self.show_progress = show_progress
+        self.solidification_params = solidification_params
 
 
 class PipelineResult:
@@ -171,10 +173,13 @@ def create_analysis_options(
     *,
     use_gpu: bool,
     use_incremental: bool,
+    solidification_params: Optional[Dict[str, Any]] = None,
 ) -> AnalysisOptions:
     """
     Convert dictionary options from UI/web into AnalysisOptions.
     """
+    from core.solidification_params import SolidificationParameters
+
     option_map = options or {}
     analysis_options = AnalysisOptions()
     analysis_options.shrinkage = bool(option_map.get("shrinkage", True))
@@ -197,6 +202,10 @@ def create_analysis_options(
     if solver_mode not in VALID_SOLVER_MODES:
         solver_mode = SOLVER_MODE_THERMAL_COUPLED
     analysis_options.solver_mode = solver_mode
+    if solidification_params is not None:
+        analysis_options.solidification_params = SolidificationParameters.from_dict(
+            solidification_params
+        )
     return analysis_options
 
 
@@ -366,6 +375,7 @@ def run_pipeline(
         inputs.analysis_options,
         use_gpu=inputs.use_gpu,
         use_incremental=inputs.use_incremental,
+        solidification_params=inputs.solidification_params,
     )
     default_solver_mode = _get_default_solver_mode_override()
     if default_solver_mode is not None:
