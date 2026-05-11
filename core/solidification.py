@@ -899,13 +899,79 @@ class SolidificationEngine:
                 1.0,
             )
 
-        # Hold feeders latest in connected systems.
+        # Per-voxel feeder timing spread: replace blanket 0.97/0.92 multipliers
+        # with spatial factors so fraction-liquid playback shows a genuine
+        # solidification path instead of a single jump.
         if np.any(active_mask):
             active_peak = float(np.max(completion_times[active_mask]))
-            if np.any(riser_mask):
-                completion_times[riser_mask] = np.maximum(completion_times[riser_mask], active_peak * 0.97)
+            post_min = active_peak * 0.84
+            post_max = active_peak * 0.92
+            riser_min = max(post_max + self.time_step, active_peak * 0.92)
+            riser_max = active_peak
+
+            moduli = np.asarray(self.mesh.voxel_moduli, dtype=np.float32)
             if np.any(riser_post_mask):
-                completion_times[riser_post_mask] = np.maximum(completion_times[riser_post_mask], active_peak * 0.92)
+                post_distance = riser_distance[riser_post_mask]
+                max_dist = max(float(np.max(post_distance[post_distance < np.inf])), 1.0)
+                near_riser = np.clip(1.0 - post_distance / max_dist, 0.0, 1.0)
+                modulus_post = moduli[riser_post_mask]
+                modulus_range = (
+                    np.max(modulus_post) - np.min(modulus_post)
+                    if np.max(modulus_post) > np.min(modulus_post)
+                    else 1.0
+                )
+                modulus_factor = np.clip(
+                    (modulus_post - np.min(modulus_post)) / max(modulus_range, 1e-6),
+                    0.0,
+                    1.0,
+                )
+                post_lateness = 0.80 * near_riser + 0.20 * modulus_factor
+                post_completion = post_min + post_lateness * (post_max - post_min)
+                completion_times[riser_post_mask] = np.maximum(
+                    completion_times[riser_post_mask], post_completion
+                )
+
+            if np.any(riser_mask):
+                components = self._group_risers_by_component()
+                comp_ids = np.full(n_voxels, -1, dtype=np.int32)
+                for cid, riser_ids in enumerate(components):
+                    comp_ids[riser_ids] = cid
+
+                riser_comp_ids = comp_ids[riser_mask]
+                unique_comps = np.unique(riser_comp_ids)
+                z_min_arr = np.zeros(len(unique_comps), dtype=np.float32)
+                z_max_arr = np.zeros(len(unique_comps), dtype=np.float32)
+                for k, cid in enumerate(unique_comps):
+                    riser_centers_comp = self.mesh.voxel_centers[riser_mask][riser_comp_ids == cid]
+                    z_min_arr[k] = np.min(riser_centers_comp[:, 2])
+                    z_max_arr[k] = np.max(riser_centers_comp[:, 2])
+
+                riser_heights = self.mesh.voxel_centers[riser_mask][:, 2]
+                cidx = np.searchsorted(unique_comps, riser_comp_ids)
+                z_min_local = z_min_arr[cidx]
+                z_max_local = z_max_arr[cidx]
+                z_range_local = np.maximum(z_max_local - z_min_local, 1e-6)
+                height_factor = np.clip(
+                    (riser_heights - z_min_local) / z_range_local,
+                    0.0,
+                    1.0,
+                )
+                modulus_riser = moduli[riser_mask]
+                modulus_range_riser = (
+                    np.max(modulus_riser) - np.min(modulus_riser)
+                    if np.max(modulus_riser) > np.min(modulus_riser)
+                    else 1.0
+                )
+                modulus_factor_riser = np.clip(
+                    (modulus_riser - np.min(modulus_riser)) / max(modulus_range_riser, 1e-6),
+                    0.0,
+                    1.0,
+                )
+                riser_lateness = 0.65 * modulus_factor_riser + 0.35 * height_factor
+                riser_completion = riser_min + riser_lateness * (riser_max - riser_min)
+                completion_times[riser_mask] = np.maximum(
+                    completion_times[riser_mask], riser_completion
+                )
 
         superheat = max(float(self.alloy.pouring_temp - self.alloy.liquidus_temp), 1.0)
         freezing_range = max(float(self.alloy.liquidus_temp - self.alloy.solidus_temp), 1.0)

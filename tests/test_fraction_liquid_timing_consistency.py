@@ -233,5 +233,105 @@ class LargeModulusScheduleRegressionTests(unittest.TestCase):
         )
 
 
+class FeederTimingSpreadTests(unittest.TestCase):
+    def test_riser_and_riser_post_have_meaningful_spread(self) -> None:
+        engine = _run_pipeline_with_patched_memory("sample_stl_files/block_2inch.stl")
+        part_types = engine.mesh.voxel_part_types
+        self.assertIsNotNone(part_types)
+        assert part_types is not None
+
+        post_mask = part_types == 3
+        riser_mask = part_types == 1
+
+        if not np.any(post_mask) and not np.any(riser_mask):
+            self.skipTest("No RISER_POST or RISER voxels in this scenario")
+
+        end_times = np.asarray(engine.solidification_end_times, dtype=np.float32)
+
+        if np.any(post_mask):
+            post_end_times = end_times[post_mask]
+            post_spread = float(np.max(post_end_times) - np.min(post_end_times))
+            self.assertGreater(
+                post_spread,
+                1.0,
+                msg=(
+                    f"RISER_POST voxels must have meaningful completion-time spread, "
+                    f"got {post_spread:.2f}s"
+                ),
+            )
+
+        if np.any(riser_mask):
+            riser_end_times = end_times[riser_mask]
+            riser_spread = float(np.max(riser_end_times) - np.min(riser_end_times))
+            self.assertGreater(
+                riser_spread,
+                1.0,
+                msg=(
+                    f"RISER voxels must have meaningful completion-time spread, "
+                    f"got {riser_spread:.2f}s"
+                ),
+            )
+
+    def test_fraction_liquid_has_partial_visibility_frame_for_post_and_riser(self) -> None:
+        engine = _run_pipeline_with_patched_memory(
+            "sample_stl_files/block_2inch.stl",
+            analysis_options={"fraction_liquid": True, "shrinkage": True, "hotspot": True},
+        )
+        part_types = engine.mesh.voxel_part_types
+        self.assertIsNotNone(part_types)
+        assert part_types is not None
+
+        post_mask = part_types == 3
+        riser_mask = part_types == 1
+
+        if not np.any(post_mask) and not np.any(riser_mask):
+            self.skipTest("No RISER_POST or RISER voxels in this scenario")
+
+        history = getattr(engine, "fraction_liquid_history", None)
+        times = getattr(engine, "fraction_liquid_times", None)
+        self.assertIsNotNone(history)
+        self.assertIsNotNone(times)
+        assert history is not None and times is not None
+
+        snapshots = np.asarray(history, dtype=np.float32)
+        times_arr = np.asarray(times, dtype=np.float32)
+
+        if np.any(post_mask):
+            post_has_partial = False
+            for snap, t in zip(snapshots, times_arr):
+                post_vals = snap[post_mask]
+                has_solid = np.any(post_vals < 1.0)
+                has_liquid = np.any(post_vals > 0.0)
+                if has_solid and has_liquid:
+                    post_has_partial = True
+                    break
+            self.assertTrue(
+                post_has_partial,
+                msg=(
+                    f"RISER_POST must have at least one partial-visibility frame "
+                    f"(some liquid, some solid), but fraction-liquid playback shows "
+                    f"only all-liquid or all-solid for all {len(times_arr)} frames"
+                ),
+            )
+
+        if np.any(riser_mask):
+            riser_has_partial = False
+            for snap, t in zip(snapshots, times_arr):
+                riser_vals = snap[riser_mask]
+                has_solid = np.any(riser_vals < 1.0)
+                has_liquid = np.any(riser_vals > 0.0)
+                if has_solid and has_liquid:
+                    riser_has_partial = True
+                    break
+            self.assertTrue(
+                riser_has_partial,
+                msg=(
+                    f"RISER must have at least one partial-visibility frame "
+                    f"(some liquid, some solid), but fraction-liquid playback shows "
+                    f"only all-liquid or all-solid for all {len(times_arr)} frames"
+                ),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

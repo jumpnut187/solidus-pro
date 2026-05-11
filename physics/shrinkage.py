@@ -249,7 +249,7 @@ class ShrinkageModel:
             List of arrays, each containing indices of an isolated region
         """
         # Identify liquid voxels
-        is_liquid = fraction_solid < 0.5
+        is_liquid = fraction_solid < 0.3
         
         # Flood fill from feeders through liquid
         connected_to_feeder = np.zeros(self.n_voxels, dtype=bool)
@@ -387,7 +387,7 @@ class ShrinkageModel:
         predictions = []
         
         for region in isolated_regions:
-            if len(region) < 5:  # Too small to be significant
+            if len(region) < 2:  # Too small to be significant
                 continue
             
             # Calculate severity based on region size and location
@@ -403,7 +403,7 @@ class ShrinkageModel:
             severity = min(1.0, len(region) / 100 + avg_feeding_dist / 0.1)
             
             # Volume fraction of shrinkage
-            vol_fraction = self.volumetric_shrinkage * 0.8  # Not all shrinkage forms porosity
+            vol_fraction = self.volumetric_shrinkage * 0.1  # Not all shrinkage forms porosity
             
             predictions.append(ShrinkagePrediction(
                 indices=region,
@@ -603,7 +603,7 @@ if NUMBA_AVAILABLE:
         fraction_solid: FloatArray,
         neighbors: IntArray,
         feeder_indices: IntArray,
-        liquid_threshold: float = 0.5
+        liquid_threshold: float = 0.3
     ) -> BoolArray:
         """
         Fast isolated liquid detection using Numba.
