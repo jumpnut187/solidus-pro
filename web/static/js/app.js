@@ -1,6 +1,6 @@
 /**
  * Casting Solidification Simulator - Web Application
- * Three.js based 3D visualization with Flask backend
+ * Babylon.js based 3D visualization with Flask backend
  */
 
 // ============================================
@@ -16,11 +16,12 @@ const state = {
     // Materials
     materials: [],
     
-    // Three.js
+    // Babylon.js
+    canvas: null,
+    engine: null,
     scene: null,
     camera: null,
-    renderer: null,
-    controls: null,
+    glowLayer: null,
     
     // Meshes
     partMeshes: {},
@@ -36,6 +37,8 @@ const state = {
     // Results
     hasResults: false,
     resultData: null,
+    activeResultMode: 'model',
+    resultRequestSeq: 0,
     
     // Simulation state
     isSimulating: false,
@@ -55,14 +58,13 @@ const state = {
 // ============================================
 
 document.addEventListener('DOMContentLoaded', () => {
-    initThreeJS();
+    initBabylonJS();
     loadMaterials();
     updateMaterialInfo();
     updateSandRestraintLabel();
     toggleAutoMesh();  // Initialize auto mesh state
     initDragAndDrop();
     initCleanupHandlers();
-    animate();
 });
 
 // Cleanup running simulations when browser closes or refreshes
@@ -167,80 +169,109 @@ async function handleDroppedFiles(files) {
     }
 }
 
-function initThreeJS() {
+function initBabylonJS() {
     const container = document.getElementById('viewport3d');
-    const width = container.clientWidth;
-    const height = container.clientHeight;
-    
-    // Scene
-    state.scene = new THREE.Scene();
-    state.scene.background = new THREE.Color(0x0a0a12);
-    
-    // Camera - Z is up
-    state.camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 10000);
-    state.camera.position.set(50, -50, 50);
-    state.camera.up.set(0, 0, 1);  // Z-axis up
-    
-    // Renderer
-    state.renderer = new THREE.WebGLRenderer({ antialias: true });
-    state.renderer.setSize(width, height);
-    state.renderer.setPixelRatio(window.devicePixelRatio);
-    state.renderer.localClippingEnabled = true;
-    container.appendChild(state.renderer.domElement);
-    
-    // Controls (OrbitControls) - Z is up
-    state.controls = new THREE.OrbitControls(state.camera, state.renderer.domElement);
-    state.controls.enableDamping = true;
-    state.controls.dampingFactor = 0.05;
-    state.controls.screenSpacePanning = true;
-    state.controls.minDistance = 1;
-    state.controls.maxDistance = 1000;
-    
-    // Lights
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
-    state.scene.add(ambientLight);
-    
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-    directionalLight.position.set(50, -50, 100);
-    state.scene.add(directionalLight);
-    
-    const directionalLight2 = new THREE.DirectionalLight(0xffffff, 0.4);
-    directionalLight2.position.set(-50, 50, -100);
-    state.scene.add(directionalLight2);
-    
-    // Grid - XY plane (Z up)
-    state.gridHelper = new THREE.GridHelper(100, 100, 0x444444, 0x222222);
-    state.gridHelper.rotation.x = Math.PI / 2;  // Rotate grid to XY plane
-    state.scene.add(state.gridHelper);
-    
-    // Axes - Z is up (red=X, green=Y, blue=Z)
-    state.axesHelper = new THREE.AxesHelper(20);
-    state.scene.add(state.axesHelper);
-    
-    // Clipping plane for cross-section
-    state.clippingPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
-    
-    // Resize handler
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    canvas.style.display = 'block';
+    container.appendChild(canvas);
+
+    state.canvas = canvas;
+    state.engine = new BABYLON.Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
+    state.scene = new BABYLON.Scene(state.engine);
+    state.scene.clearColor = new BABYLON.Color4(0.04, 0.04, 0.07, 1.0);
+    state.scene.useRightHandedSystem = false;
+    state.scene.clipPlane = null;
+
+    state.camera = new BABYLON.ArcRotateCamera(
+        'camera',
+        BABYLON.Tools.ToRadians(-45),
+        BABYLON.Tools.ToRadians(55),
+        90,
+        BABYLON.Vector3.Zero(),
+        state.scene
+    );
+    state.camera.upVector = new BABYLON.Vector3(0, 0, 1);
+    state.camera.minZ = 0.01;
+    state.camera.maxZ = 10000;
+    state.camera.lowerRadiusLimit = 1;
+    state.camera.upperRadiusLimit = 1000;
+    state.camera.wheelDeltaPercentage = 0.01;
+    state.camera.attachControl(canvas, true);
+
+    const hemispheric = new BABYLON.HemisphericLight('ambient', new BABYLON.Vector3(0, 0, 1), state.scene);
+    hemispheric.intensity = 0.55;
+    const key = new BABYLON.DirectionalLight('key', new BABYLON.Vector3(-0.5, 0.5, -1), state.scene);
+    key.intensity = 0.9;
+    const fill = new BABYLON.DirectionalLight('fill', new BABYLON.Vector3(0.7, -0.4, 0.7), state.scene);
+    fill.intensity = 0.35;
+
+    state.glowLayer = new BABYLON.GlowLayer('resultGlow', state.scene);
+    state.glowLayer.intensity = 0.55;
+
+    state.gridHelper = createGridHelper(100, 100);
+
+    state.axesHelper = createAxesHelper(20);
+    state.clippingPlane = new BABYLON.Plane(0, 0, -1, 0);
+
+    state.engine.runRenderLoop(() => {
+        state.scene.render();
+    });
+
     window.addEventListener('resize', onWindowResize);
-    
-    // Click handler for measurement
-    state.renderer.domElement.addEventListener('click', onViewportClick);
+    canvas.addEventListener('pointerdown', onViewportClick);
 }
 
 function animate() {
-    requestAnimationFrame(animate);
-    state.controls.update();
-    state.renderer.render(state.scene, state.camera);
+    // Babylon owns the render loop.
 }
 
 function onWindowResize() {
-    const container = document.getElementById('viewport3d');
-    const width = container.clientWidth;
-    const height = container.clientHeight;
-    
-    state.camera.aspect = width / height;
-    state.camera.updateProjectionMatrix();
-    state.renderer.setSize(width, height);
+    if (state.engine) {
+        state.engine.resize();
+    }
+}
+
+function createAxesHelper(size) {
+    const axes = new BABYLON.TransformNode('axes', state.scene);
+    const axisSpecs = [
+        { name: 'x', end: new BABYLON.Vector3(size, 0, 0), color: new BABYLON.Color3(1, 0.15, 0.1) },
+        { name: 'y', end: new BABYLON.Vector3(0, size, 0), color: new BABYLON.Color3(0.1, 0.85, 0.2) },
+        { name: 'z', end: new BABYLON.Vector3(0, 0, size), color: new BABYLON.Color3(0.15, 0.35, 1) }
+    ];
+    for (const spec of axisSpecs) {
+        const line = BABYLON.MeshBuilder.CreateLines(`axis-${spec.name}`, {
+            points: [BABYLON.Vector3.Zero(), spec.end],
+            colors: [new BABYLON.Color4(spec.color.r, spec.color.g, spec.color.b, 1), new BABYLON.Color4(spec.color.r, spec.color.g, spec.color.b, 1)]
+        }, state.scene);
+        line.parent = axes;
+    }
+    return axes;
+}
+
+function createGridHelper(size, divisions) {
+    const grid = new BABYLON.TransformNode('grid', state.scene);
+    const half = size / 2;
+    const step = size / divisions;
+    const minor = new BABYLON.Color4(0.22, 0.22, 0.28, 0.55);
+    const major = new BABYLON.Color4(0.38, 0.38, 0.45, 0.8);
+
+    for (let i = 0; i <= divisions; i++) {
+        const offset = -half + i * step;
+        const color = i % 10 === 0 ? major : minor;
+        const xLine = BABYLON.MeshBuilder.CreateLines(`grid-x-${i}`, {
+            points: [new BABYLON.Vector3(-half, offset, 0), new BABYLON.Vector3(half, offset, 0)],
+            colors: [color, color]
+        }, state.scene);
+        const yLine = BABYLON.MeshBuilder.CreateLines(`grid-y-${i}`, {
+            points: [new BABYLON.Vector3(offset, -half, 0), new BABYLON.Vector3(offset, half, 0)],
+            colors: [color, color]
+        }, state.scene);
+        xLine.parent = grid;
+        yLine.parent = grid;
+    }
+    return grid;
 }
 
 // ============================================
@@ -369,7 +400,7 @@ async function handleFileUpload(event) {
 function clearAll() {
     // Clear all parts from scene
     for (const mesh of Object.values(state.partMeshes)) {
-        state.scene.remove(mesh);
+        disposeBabylonMesh(mesh);
     }
     state.partMeshes = {};
     state.parts = [];
@@ -391,21 +422,21 @@ function clearAll() {
 }
 
 function clearResults() {
+    if (flDebounceTimer) {
+        clearTimeout(flDebounceTimer);
+        flDebounceTimer = null;
+    }
+    stopFLAnimation();
+
     // Clear result meshes from scene and dispose GPU resources
     for (const mesh of Object.values(state.resultMeshes)) {
-        state.scene.remove(mesh);
-        if (mesh.geometry) mesh.geometry.dispose();
-        if (mesh.material) {
-            if (Array.isArray(mesh.material)) {
-                mesh.material.forEach(m => m.dispose());
-            } else {
-                mesh.material.dispose();
-            }
-        }
+        disposeBabylonMesh(mesh);
     }
     state.resultMeshes = {};
     state.resultData = null;
     state.hasResults = false;
+    state.activeResultMode = 'model';
+    state.resultRequestSeq += 1;
     
     // Hide results panel
     document.getElementById('resultsPanel').style.display = 'none';
@@ -414,59 +445,52 @@ function clearResults() {
 
 function addPartMesh(part) {
     const meshData = part.meshData;
-    
-    // Create geometry from vertices and faces
-    const geometry = new THREE.BufferGeometry();
-    
-    // Vertices
-    const vertices = new Float32Array(meshData.vertices);
-    geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
-    
-    // Faces (indices)
-    const indices = new Uint32Array(meshData.faces);
-    geometry.setIndex(new THREE.BufferAttribute(indices, 1));
-    
-    // Compute normals
-    geometry.computeVertexNormals();
-    
-    // Get color based on part type
+
     const colors = {
-        cast: 0xb0bec5,   // Grey-blue
-        riser: 0xf59e0b,  // Orange
-        chill: 0x3b82f6   // Blue
+        cast: new BABYLON.Color3(0.69, 0.75, 0.77),
+        riser: new BABYLON.Color3(0.96, 0.62, 0.04),
+        riser_post: new BABYLON.Color3(0.93, 0.48, 0.16),
+        chill: new BABYLON.Color3(0.23, 0.51, 0.96)
     };
-    
-    // Material - transparent to see defects inside
-    const material = new THREE.MeshPhongMaterial({
-        color: colors[part.type] || colors.cast,
-        transparent: true,
-        opacity: 0.35,
-        side: THREE.DoubleSide,
-        shininess: 50,
-        depthWrite: false  // Don't write to depth buffer so defects show through
-    });
-    
-    // Create mesh
-    const mesh = new THREE.Mesh(geometry, material);
+
+    const mesh = new BABYLON.Mesh(`part-${part.id}`, state.scene);
+    const vertexData = new BABYLON.VertexData();
+    vertexData.positions = meshData.vertices;
+    vertexData.indices = meshData.faces;
+    const normals = [];
+    BABYLON.VertexData.ComputeNormals(vertexData.positions, vertexData.indices, normals);
+    vertexData.normals = normals;
+    vertexData.applyToMesh(mesh);
+
+    const material = new BABYLON.StandardMaterial(`part-material-${part.id}`, state.scene);
+    material.diffuseColor = colors[part.type] || colors.cast;
+    material.specularColor = new BABYLON.Color3(0.35, 0.35, 0.35);
+    material.alpha = 0.35;
+    material.backFaceCulling = false;
+    material.disableDepthWrite = true;
+    mesh.material = material;
+
+    mesh.userData = mesh.userData || {};
     mesh.userData.partId = part.id;
-    mesh.renderOrder = 0;  // Render model first (but with depthWrite false)
-    
-    // Apply transforms
-    mesh.position.set(part.position.x, part.position.y, part.position.z);
-    mesh.scale.setScalar(part.scale);
-    
-    // Add to scene
-    state.scene.add(mesh);
+    mesh.position = new BABYLON.Vector3(part.position.x, part.position.y, part.position.z);
+    mesh.scaling = new BABYLON.Vector3(part.scale, part.scale, part.scale);
+
     state.partMeshes[part.id] = mesh;
-    
-    // Create wireframe
-    const wireframe = new THREE.LineSegments(
-        new THREE.EdgesGeometry(geometry),
-        new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.1 })
-    );
-    mesh.add(wireframe);
-    mesh.userData.wireframe = wireframe;
-    wireframe.visible = state.showWireframe;
+    setMeshWireframe(mesh, state.showWireframe);
+}
+
+function disposeBabylonMesh(mesh) {
+    if (!mesh) return;
+    if (mesh.material) {
+        mesh.material.dispose();
+    }
+    mesh.dispose();
+}
+
+function setMeshWireframe(mesh, enabled) {
+    if (mesh && mesh.material) {
+        mesh.material.wireframe = enabled;
+    }
 }
 
 // ============================================
@@ -541,9 +565,9 @@ function selectPart(partId) {
     // Highlight mesh
     for (const [id, mesh] of Object.entries(state.partMeshes)) {
         if (id === partId) {
-            mesh.material.emissive = new THREE.Color(0x333333);
+            mesh.material.emissiveColor = new BABYLON.Color3(0.2, 0.2, 0.2);
         } else {
-            mesh.material.emissive = new THREE.Color(0x000000);
+            mesh.material.emissiveColor = BABYLON.Color3.Black();
         }
     }
 }
@@ -567,12 +591,17 @@ function updateSelectedPart() {
     // Update mesh
     const mesh = state.partMeshes[part.id];
     if (mesh) {
-        mesh.position.set(part.position.x, part.position.y, part.position.z);
-        mesh.scale.setScalar(part.scale);
+        mesh.position = new BABYLON.Vector3(part.position.x, part.position.y, part.position.z);
+        mesh.scaling = new BABYLON.Vector3(part.scale, part.scale, part.scale);
         
         // Update color based on type
-        const colors = { cast: 0xb0bec5, riser: 0xf59e0b, chill: 0x3b82f6 };
-        mesh.material.color.setHex(colors[part.type]);
+        const colors = {
+            cast: new BABYLON.Color3(0.69, 0.75, 0.77),
+            riser: new BABYLON.Color3(0.96, 0.62, 0.04),
+            riser_post: new BABYLON.Color3(0.93, 0.48, 0.16),
+            chill: new BABYLON.Color3(0.23, 0.51, 0.96)
+        };
+        mesh.material.diffuseColor = colors[part.type] || colors.cast;
     }
     
     updatePartsList();
@@ -586,7 +615,7 @@ function deleteSelectedPart() {
     // Remove mesh from scene
     const mesh = state.partMeshes[partId];
     if (mesh) {
-        state.scene.remove(mesh);
+        disposeBabylonMesh(mesh);
         delete state.partMeshes[partId];
     }
     
@@ -970,6 +999,10 @@ async function loadResults() {
         updateResultStats();
         
         // Visualize results
+        const resultDisplay = document.getElementById('resultDisplay');
+        if (resultDisplay) {
+            resultDisplay.value = 'shrinkage';
+        }
         visualizeResults('shrinkage');
         
     } catch (error) {
@@ -1019,113 +1052,99 @@ function updateResultStats() {
     container.innerHTML = html;
 }
 
-function visualizeResults(type) {
-    if (!state.resultData || !state.resultData.visualization) {
-        console.log('No visualization data available');
+async function visualizeResults(type) {
+    if (!state.resultData) {
+        console.log('No result data available');
         return;
     }
-    
-    const vis = state.resultData.visualization;
-    
-    // Hide all cached meshes first
-    for (const [key, mesh] of Object.entries(state.resultMeshes)) {
-        mesh.visible = false;
-    }
-    
-    if (type === 'model') return;
-    
-    // Check cache
-    const cacheKey = 'result_' + type;
-    if (state.resultMeshes[cacheKey]) {
-        state.resultMeshes[cacheKey].visible = true;
-        return;
-    }
-    
-    const centers = vis.centers;
-    const sizes = vis.sizes;
-    let values;
-    
-    switch (type) {
-        case 'shrinkage':
-            values = vis.shrinkage;
-            break;
-        case 'hotspot':
-            values = vis.hotspot;
-            break;
-        case 'niyama':
-            values = vis.niyama;
-            break;
-        default:
-            return;
-    }
-    
-    if (!centers || !values) {
-        console.log('Missing centers or values:', { centers: !!centers, values: !!values });
-        return;
-    }
-    
-    console.log('Visualization data:', { 
-        centersLen: centers.length, 
-        valuesLen: values.length,
-        sizesLen: sizes ? sizes.length : 0,
-        maxValue: Math.max(...values),
-        minValue: Math.min(...values)
-    });
-    
-    const threshold = document.getElementById('threshold').value / 100;
-    const cutoff = threshold;
 
-    // Count voxels in selected top percentage
-    let count = 0;
-    for (let i = 0; i < values.length; i++) {
-        if (values[i] >= cutoff) count++;
+    state.activeResultMode = type;
+    const requestSeq = ++state.resultRequestSeq;
+
+    for (const [key, mesh] of Object.entries(state.resultMeshes)) {
+        mesh.setEnabled(false);
     }
-    
-    console.log('Min-threshold voxel filter', { type, threshold, cutoff, count });
-    
-    if (count === 0) {
-        document.getElementById('voxelCount').textContent = 'Voxels: 0 (try lower threshold)';
+
+    if (type === 'model') return;
+
+    const threshold = document.getElementById('threshold').value / 100;
+    const cacheKey = `result_${type}_${threshold.toFixed(3)}`;
+    if (state.resultMeshes[cacheKey]) {
+        state.resultMeshes[cacheKey].setEnabled(true);
         return;
     }
-    
-    // Create geometry for each defect voxel as individual cubes
-    const defectGroup = new THREE.Group();
-    
-    for (let i = 0; i < values.length; i++) {
-        if (values[i] < cutoff) continue;
-        
-        const center = centers[i];
-        const size = (sizes && sizes[i]) ? sizes[i] : 0.1;
-        const value = values[i];
-        
-        // Create cube for this defect
-        const geometry = new THREE.BoxGeometry(size * 1.5, size * 1.5, size * 1.5);
-        
-        // Color based on value (red = high, yellow = low)
-        const hue = (1 - value) * 0.15;  // 0 (red) to 0.15 (orange/yellow)
-        const color = new THREE.Color();
-        color.setHSL(hue, 1, 0.5);
-        
-        const material = new THREE.MeshPhongMaterial({
-            color: color,
-            transparent: false,
-            side: THREE.DoubleSide,
-            depthWrite: true,
-            depthTest: true
-        });
-        
-        const cube = new THREE.Mesh(geometry, material);
-        cube.position.set(center[0], center[1], center[2]);
-        cube.renderOrder = 1;
-        defectGroup.add(cube);
+
+    const surface = await fetchResultSurface(type, threshold, 0);
+    if (requestSeq !== state.resultRequestSeq || state.activeResultMode !== type) {
+        return;
     }
-    
-    defectGroup.renderOrder = 1;
-    state.scene.add(defectGroup);
-    state.resultMeshes[cacheKey] = defectGroup;
-    
-    document.getElementById('voxelCount').textContent = 'Defects: ' + count.toLocaleString();
-    console.log('Added', count, 'defect cubes to scene');
+    if (!surface || surface.empty) {
+        document.getElementById('voxelCount').textContent = 'Surface: 0 (try lower threshold)';
+        return;
+    }
+
+    const mesh = createResultSurfaceMesh(surface);
+    state.resultMeshes[cacheKey] = mesh;
+    document.getElementById('voxelCount').textContent = 'Surface: ' + surface.active_count.toLocaleString();
+}
+
+async function fetchResultSurface(mode, threshold, timePercent) {
+    if (!state.simulationId) return null;
+    const params = new URLSearchParams({
+        mode,
+        threshold: threshold.toFixed(4),
+        time_percent: String(Math.round(timePercent))
+    });
+    const response = await fetch(`/api/simulations/${state.simulationId}/surface?${params.toString()}`);
+    const payload = await response.json();
+    if (!response.ok) {
+        console.error('Surface request failed:', payload);
+        return null;
+    }
+    return payload;
+}
+
+function createResultSurfaceMesh(surface) {
+    const mesh = new BABYLON.Mesh(`surface-${surface.mode}`, state.scene);
+    const vertexData = new BABYLON.VertexData();
+    vertexData.positions = surface.positions;
+    vertexData.indices = surface.indices;
+    vertexData.normals = surface.normals && surface.normals.length ? surface.normals : [];
+    if (!vertexData.normals.length) {
+        const normals = [];
+        BABYLON.VertexData.ComputeNormals(vertexData.positions, vertexData.indices, normals);
+        vertexData.normals = normals;
+    }
+    vertexData.applyToMesh(mesh);
+
+    const material = new BABYLON.StandardMaterial(`surface-material-${surface.mode}-${Date.now()}`, state.scene);
+    material.backFaceCulling = false;
+    material.specularPower = 32;
+    material.alpha = surface.mode === 'fraction_liquid' ? 0.92 : 0.86;
+
+    if (surface.mode === 'fraction_liquid') {
+        material.diffuseColor = new BABYLON.Color3(1.0, 0.28, 0.02);
+        material.emissiveColor = new BABYLON.Color3(1.0, 0.36, 0.03);
+        material.specularColor = new BABYLON.Color3(1.0, 0.68, 0.18);
+    } else if (surface.mode === 'hotspot') {
+        material.diffuseColor = new BABYLON.Color3(1.0, 0.47, 0.02);
+        material.emissiveColor = new BABYLON.Color3(0.22, 0.06, 0.0);
+    } else if (surface.mode === 'niyama') {
+        material.diffuseColor = new BABYLON.Color3(0.74, 0.18, 1.0);
+        material.emissiveColor = new BABYLON.Color3(0.08, 0.02, 0.16);
+    } else {
+        material.diffuseColor = new BABYLON.Color3(1.0, 0.08, 0.02);
+        material.emissiveColor = new BABYLON.Color3(0.18, 0.02, 0.0);
+    }
+
+    mesh.material = material;
+    mesh.renderingGroupId = 1;
+    applyCurrentClipPlane(mesh);
+    return mesh;
+}
+
+function animateLavaMaterials() {
+    // Fraction-liquid glow is intentionally static.
 }
 
 function computeTopPercentCutoff(values, topFraction) {
@@ -1151,6 +1170,8 @@ function computeTopPercentCutoff(values, topFraction) {
 
 function updateResultDisplay() {
     const type = document.getElementById('resultDisplay').value;
+    state.activeResultMode = type;
+    state.resultRequestSeq += 1;
     
     // Show/hide fraction liquid controls and threshold controls
     const flControls = document.getElementById('fractionLiquidControls');
@@ -1161,6 +1182,11 @@ function updateResultDisplay() {
         thresholdControls.style.display = 'none';
         visualizeFractionLiquid();
     } else {
+        if (flDebounceTimer) {
+            clearTimeout(flDebounceTimer);
+            flDebounceTimer = null;
+        }
+        stopFLAnimation();
         flControls.style.display = 'none';
         thresholdControls.style.display = 'block';
         visualizeResults(type);
@@ -1373,163 +1399,49 @@ function updateFractionLiquid() {
     visualizeFractionLiquid();
 }
 
-function visualizeFractionLiquid() {
-    if (!state.resultData || !state.resultData.visualization) {
+async function visualizeFractionLiquid() {
+    if (!state.resultData) {
         console.log('No result data for fraction liquid');
         return;
     }
-    
-    const vis = state.resultData.visualization;
-    const centers = vis.centers;
-    const sizes = vis.sizes;
-    
-    // Get time slider value (0-100) - support both old and new IDs
-    const timeSlider = document.getElementById('flTimeSlider') || document.getElementById('flSlider');
-    const thresholdSlider = document.getElementById('flThresholdSlider');
-    
-    // Default values if sliders not found
-    const timeValue = timeSlider ? parseInt(timeSlider.value) : 0;
-    const thresholdValue = thresholdSlider ? parseInt(thresholdSlider.value) : 1;
-    const threshold = thresholdValue / 100.0;  // 0.01 to 1.0
-    
-    console.log('FL visualization: time=' + timeValue + '%, threshold=' + thresholdValue + '%');
-    
-    const targetTime = getFractionLiquidPlaybackTime(vis, timeValue);
-
-    // Get fraction liquid data - use history for time-accurate animation
-    let fractionLiquid = null;
-    let usingHistory = false;
-    
-    if (vis.fraction_liquid_history && vis.fraction_liquid_history.length > 0) {
-        usingHistory = true;
-        fractionLiquid = getFractionLiquidSnapshotAtTime(
-            vis,
-            targetTime !== null ? targetTime : timeValue
-        );
-        console.log('Using time-accurate FL history at', targetTime !== null ? targetTime : timeValue);
-    } else if (vis.fraction_liquid) {
-        // Use final state - time slider will simulate progression
-        fractionLiquid = vis.fraction_liquid;
-        console.log('Using final fraction_liquid state, length=' + fractionLiquid.length);
-    } else if (vis.solidification_times) {
-        // Fallback: convert solidification times to fraction liquid
-        const maxTime = Math.max(...vis.solidification_times);
-        if (maxTime > 0) {
-            fractionLiquid = vis.solidification_times.map(t => 1.0 - (t / maxTime));
-        }
-        console.log('Using solidification_times fallback');
-    }
-    
-    if (!centers || !fractionLiquid) {
-        console.log('No fraction liquid data available');
-        console.log('vis keys:', Object.keys(vis));
+    if (state.activeResultMode !== 'fraction_liquid') {
         return;
     }
-    
-    // Single cache key for fraction liquid - reuse same mesh
-    const cacheKey = 'fl_current';
-    
-    // Hide other result meshes
+
+    const timeSlider = document.getElementById('flTimeSlider') || document.getElementById('flSlider');
+    const thresholdSlider = document.getElementById('flThresholdSlider');
+    const timeValue = timeSlider ? parseInt(timeSlider.value) : 0;
+    const thresholdValue = thresholdSlider ? parseInt(thresholdSlider.value) : 1;
+    const threshold = thresholdValue / 100.0;
+    const timeBucket = Math.round(timeValue / 2) * 2;
+    const cacheKey = `fl_${threshold.toFixed(3)}_${timeBucket}`;
+    const requestSeq = ++state.resultRequestSeq;
+
     for (const [key, mesh] of Object.entries(state.resultMeshes)) {
-        if (!key.startsWith('fl_')) {
-            mesh.visible = false;
-        }
+        mesh.setEnabled(key === cacheKey);
     }
-    
-    // Remove old fraction liquid mesh to free memory
+
     if (state.resultMeshes[cacheKey]) {
-        state.scene.remove(state.resultMeshes[cacheKey]);
-        if (state.resultMeshes[cacheKey].geometry) state.resultMeshes[cacheKey].geometry.dispose();
-        if (state.resultMeshes[cacheKey].material) state.resultMeshes[cacheKey].material.dispose();
-        delete state.resultMeshes[cacheKey];
-    }
-    
-    // Find liquid voxels
-    // Time slider: 0% = just poured (show all liquid), 100% = fully solid (show nothing)
-    // Threshold slider: only show voxels with fraction liquid > threshold
-    const liquidIndices = [];
-    const timeFactor = timeValue / 100.0;  // 0.0 to 1.0
-    
-    for (let i = 0; i < fractionLiquid.length; i++) {
-        const fl = fractionLiquid[i];
-        
-        // If using history, time is already factored in - just use threshold
-        // If using final state, simulate time by requiring higher fl for later times
-        let effectiveThreshold = threshold;
-        if (!usingHistory) {
-            // Simulate time: at time=0 show all liquid > threshold
-            // At time=100, show only voxels with fl > 1.0 (none)
-            effectiveThreshold = threshold + timeFactor * (1.0 - threshold);
+        const countEl = document.getElementById('voxelCount');
+        if (countEl) {
+            countEl.textContent = 'Liquid: cached';
         }
-        
-        if (fl > effectiveThreshold) {
-            liquidIndices.push(i);
-        }
+        return;
     }
-    
-    console.log('Liquid voxels found:', liquidIndices.length, 'of', fractionLiquid.length);
-    
+
+    const surface = await fetchResultSurface('fraction_liquid', threshold, timeValue);
+    if (requestSeq !== state.resultRequestSeq || state.activeResultMode !== 'fraction_liquid') {
+        return;
+    }
     const voxelCountEl = document.getElementById('voxelCount');
-    if (liquidIndices.length === 0) {
+    if (!surface || surface.empty) {
         if (voxelCountEl) voxelCountEl.textContent = 'Liquid: 0';
         return;
     }
-    
-    // Use instanced mesh for performance
-    const baseSize = (sizes && sizes[0]) ? sizes[0] : 0.1;
-    const geometry = new THREE.BoxGeometry(baseSize * 1.5, baseSize * 1.5, baseSize * 1.5);
-    
-    const material = new THREE.MeshPhongMaterial({
-        vertexColors: true,
-        emissive: new THREE.Color(0.3, 0.1, 0.0),
-        emissiveIntensity: 0.3,
-        transparent: false,
-        side: THREE.DoubleSide,
-        depthWrite: true
-    });
-    
-    const instancedMesh = new THREE.InstancedMesh(geometry, material, liquidIndices.length);
-    const dummy = new THREE.Object3D();
-    const colors = new Float32Array(liquidIndices.length * 3);
-    
-    for (let j = 0; j < liquidIndices.length; j++) {
-        const i = liquidIndices[j];
-        const center = centers[i];
-        const fl = fractionLiquid[i];
-        
-        dummy.position.set(center[0], center[1], center[2]);
-        dummy.updateMatrix();
-        instancedMesh.setMatrixAt(j, dummy.matrix);
-        
-        // Lava color: yellow (hot) -> orange -> red (cooling)
-        let r, g, b;
-        if (fl > 0.7) {
-            r = 1.0;
-            g = 0.6 + (fl - 0.7) * 1.33;
-            b = (fl - 0.7) * 0.67;
-        } else if (fl > 0.3) {
-            r = 1.0;
-            g = (fl - 0.3) * 1.5;
-            b = 0;
-        } else {
-            r = 0.4 + fl * 2.0;
-            g = fl * 0.3;
-            b = 0;
-        }
-        
-        colors[j * 3] = r;
-        colors[j * 3 + 1] = g;
-        colors[j * 3 + 2] = b;
-    }
-    
-    instancedMesh.instanceMatrix.needsUpdate = true;
-    geometry.setAttribute('color', new THREE.InstancedBufferAttribute(colors, 3));
-    
-    instancedMesh.renderOrder = 1;
-    state.scene.add(instancedMesh);
-    state.resultMeshes[cacheKey] = instancedMesh;
-    
-    if (voxelCountEl) voxelCountEl.textContent = 'Liquid: ' + liquidIndices.length.toLocaleString();
+
+    const mesh = createResultSurfaceMesh(surface);
+    state.resultMeshes[cacheKey] = mesh;
+    if (voxelCountEl) voxelCountEl.textContent = 'Liquid: ' + surface.active_count.toLocaleString();
 }
 
 function updateThreshold() {
@@ -1537,15 +1449,11 @@ function updateThreshold() {
     document.getElementById('thresholdValue').textContent = value + '%';
     
     const type = document.getElementById('resultDisplay').value;
-    
-    // Threshold changed - need to rebuild visualization (clear cache for this type)
-    const cacheKey = 'result_' + type;
-    if (state.resultMeshes[cacheKey]) {
-        state.scene.remove(state.resultMeshes[cacheKey]);
-        delete state.resultMeshes[cacheKey];
+    if (type === 'fraction_liquid') {
+        visualizeFractionLiquid();
+    } else {
+        visualizeResults(type);
     }
-    
-    visualizeResults(type);
 }
 
 // ============================================
@@ -1553,11 +1461,10 @@ function updateThreshold() {
 // ============================================
 
 function resetCamera() {
-    state.camera.position.set(50, -50, 50);
-    state.camera.up.set(0, 0, 1);
-    state.camera.lookAt(0, 0, 0);
-    state.controls.target.set(0, 0, 0);
-    state.controls.update();
+    state.camera.setTarget(BABYLON.Vector3.Zero());
+    state.camera.alpha = BABYLON.Tools.ToRadians(-45);
+    state.camera.beta = BABYLON.Tools.ToRadians(55);
+    state.camera.radius = 90;
 }
 
 function setView(view) {
@@ -1566,23 +1473,24 @@ function setView(view) {
     // Z is up coordinate system
     switch (view) {
         case 'front':
-            state.camera.position.set(0, -distance, 0);
+            state.camera.alpha = BABYLON.Tools.ToRadians(-90);
+            state.camera.beta = BABYLON.Tools.ToRadians(90);
             break;
         case 'top':
-            state.camera.position.set(0, 0, distance);
+            state.camera.alpha = BABYLON.Tools.ToRadians(-90);
+            state.camera.beta = BABYLON.Tools.ToRadians(1);
             break;
         case 'side':
-            state.camera.position.set(distance, 0, 0);
+            state.camera.alpha = BABYLON.Tools.ToRadians(0);
+            state.camera.beta = BABYLON.Tools.ToRadians(90);
             break;
         case 'iso':
-            state.camera.position.set(distance * 0.7, -distance * 0.7, distance * 0.7);
+            state.camera.alpha = BABYLON.Tools.ToRadians(-45);
+            state.camera.beta = BABYLON.Tools.ToRadians(55);
             break;
     }
-    
-    state.camera.up.set(0, 0, 1);
-    state.camera.lookAt(0, 0, 0);
-    state.controls.target.set(0, 0, 0);
-    state.controls.update();
+    state.camera.radius = distance;
+    state.camera.setTarget(BABYLON.Vector3.Zero());
 }
 
 function fitCameraToModel() {
@@ -1612,24 +1520,17 @@ function fitCameraToModel() {
     const distance = size * 2;
     
     // Z is up - position camera to look at model from front-ish angle
-    state.camera.position.set(
-        centerX + distance * 0.7,
-        centerY - distance * 0.7,
-        centerZ + distance * 0.5
-    );
-    state.camera.up.set(0, 0, 1);
-    state.camera.lookAt(centerX, centerY, centerZ);
-    state.controls.target.set(centerX, centerY, centerZ);
-    state.controls.update();
+    state.camera.setTarget(new BABYLON.Vector3(centerX, centerY, centerZ));
+    state.camera.radius = Math.max(distance, 1);
+    state.camera.alpha = BABYLON.Tools.ToRadians(-45);
+    state.camera.beta = BABYLON.Tools.ToRadians(55);
 }
 
 function toggleWireframe() {
     state.showWireframe = !state.showWireframe;
     
     for (const mesh of Object.values(state.partMeshes)) {
-        if (mesh.userData.wireframe) {
-            mesh.userData.wireframe.visible = state.showWireframe;
-        }
+        setMeshWireframe(mesh, state.showWireframe);
     }
 }
 
@@ -1637,7 +1538,7 @@ function toggleModelVisibility() {
     const show = document.getElementById('showModel').checked;
     
     for (const mesh of Object.values(state.partMeshes)) {
-        mesh.visible = show;
+        mesh.setEnabled(show);
     }
 }
 
@@ -1652,7 +1553,7 @@ function toggleGrid(fromCheckbox = false) {
     const show = checkbox ? checkbox.checked : true;
     
     if (state.gridHelper) {
-        state.gridHelper.visible = show;
+        state.gridHelper.setEnabled(show);
         console.log('Grid visibility:', show);
     } else {
         console.log('Grid helper not found');
@@ -1667,10 +1568,10 @@ function toggleAxes(fromCheckbox = false) {
         checkbox.checked = !checkbox.checked;
     }
     
-    const show = checkbox ? checkbox.checked : !state.axesHelper?.visible;
+    const show = checkbox ? checkbox.checked : !state.axesHelper?.isEnabled();
     
     if (state.axesHelper) {
-        state.axesHelper.visible = show;
+        state.axesHelper.setEnabled(show);
     }
 }
 
@@ -1679,9 +1580,8 @@ function updateModelOpacity() {
     document.getElementById('opacityValue').textContent = Math.round(opacity * 100) + '%';
     
     for (const mesh of Object.values(state.partMeshes)) {
-        mesh.material.opacity = opacity;
-        // When model is very transparent, allow depth writing for defects
-        mesh.material.depthWrite = opacity > 0.5;
+        mesh.material.alpha = opacity;
+        mesh.material.disableDepthWrite = opacity <= 0.5;
     }
 }
 
@@ -1689,7 +1589,11 @@ function updateColorMap() {
     // Color maps would be applied to result visualization
     const type = document.getElementById('resultDisplay').value;
     if (state.hasResults) {
-        visualizeResults(type);
+        if (type === 'fraction_liquid') {
+            visualizeFractionLiquid();
+        } else {
+            visualizeResults(type);
+        }
     }
 }
 
@@ -1709,13 +1613,7 @@ function toggleCrossSection() {
     if (state.crossSectionEnabled) {
         updateCrossSection();
     } else {
-        // Remove clipping from all meshes
-        for (const mesh of Object.values(state.partMeshes)) {
-            mesh.material.clippingPlanes = [];
-        }
-        for (const mesh of Object.values(state.resultMeshes)) {
-            mesh.material.clippingPlanes = [];
-        }
+        state.scene.clipPlane = null;
     }
 }
 
@@ -1728,39 +1626,45 @@ function updateCrossSection() {
     document.getElementById('crossSectionValue').textContent = Math.round(pos * 100) + '%';
     
     // Calculate plane position based on model bounds
-    let planeNormal, planeConstant;
+    let plane;
     
     if (state.parts.length > 0 && state.parts[0].meshData) {
         const bounds = state.parts[0].meshData.bounds;
         
         switch (axis) {
             case 'x':
-                planeNormal = new THREE.Vector3(-1, 0, 0);
-                planeConstant = bounds.x[0] + (bounds.x[1] - bounds.x[0]) * pos;
+                plane = BABYLON.Plane.FromPositionAndNormal(
+                    new BABYLON.Vector3(bounds.x[0] + (bounds.x[1] - bounds.x[0]) * pos, 0, 0),
+                    new BABYLON.Vector3(-1, 0, 0)
+                );
                 break;
             case 'y':
-                planeNormal = new THREE.Vector3(0, -1, 0);
-                planeConstant = bounds.y[0] + (bounds.y[1] - bounds.y[0]) * pos;
+                plane = BABYLON.Plane.FromPositionAndNormal(
+                    new BABYLON.Vector3(0, bounds.y[0] + (bounds.y[1] - bounds.y[0]) * pos, 0),
+                    new BABYLON.Vector3(0, -1, 0)
+                );
                 break;
             case 'z':
-                planeNormal = new THREE.Vector3(0, 0, -1);
-                planeConstant = bounds.z[0] + (bounds.z[1] - bounds.z[0]) * pos;
+                plane = BABYLON.Plane.FromPositionAndNormal(
+                    new BABYLON.Vector3(0, 0, bounds.z[0] + (bounds.z[1] - bounds.z[0]) * pos),
+                    new BABYLON.Vector3(0, 0, -1)
+                );
                 break;
         }
     } else {
-        planeNormal = new THREE.Vector3(0, 0, -1);
-        planeConstant = pos * 20 - 10;
+        plane = BABYLON.Plane.FromPositionAndNormal(
+            new BABYLON.Vector3(0, 0, pos * 20 - 10),
+            new BABYLON.Vector3(0, 0, -1)
+        );
     }
-    
-    state.clippingPlane.normal.copy(planeNormal);
-    state.clippingPlane.constant = planeConstant;
-    
-    // Apply to all meshes
-    for (const mesh of Object.values(state.partMeshes)) {
-        mesh.material.clippingPlanes = [state.clippingPlane];
-    }
-    for (const mesh of Object.values(state.resultMeshes)) {
-        mesh.material.clippingPlanes = [state.clippingPlane];
+
+    state.clippingPlane = plane;
+    state.scene.clipPlane = plane;
+}
+
+function applyCurrentClipPlane(mesh) {
+    if (state.crossSectionEnabled && state.clippingPlane) {
+        state.scene.clipPlane = state.clippingPlane;
     }
 }
 
@@ -1785,43 +1689,30 @@ function startMeasurement() {
 
 function onViewportClick(event) {
     if (!state.measureMode) return;
-    
-    const rect = state.renderer.domElement.getBoundingClientRect();
-    const mouse = new THREE.Vector2(
-        ((event.clientX - rect.left) / rect.width) * 2 - 1,
-        -((event.clientY - rect.top) / rect.height) * 2 + 1
-    );
-    
-    const raycaster = new THREE.Raycaster();
-    raycaster.setFromCamera(mouse, state.camera);
-    
-    const meshes = Object.values(state.partMeshes);
-    const intersects = raycaster.intersectObjects(meshes);
-    
-    if (intersects.length > 0) {
-        const point = intersects[0].point;
-        state.measurePoints.push(point.clone());
+
+    const pick = state.scene.pick(state.scene.pointerX, state.scene.pointerY, (mesh) => {
+        return Object.values(state.partMeshes).includes(mesh);
+    });
+
+    if (pick && pick.hit && pick.pickedPoint) {
+        const point = pick.pickedPoint.clone();
+        state.measurePoints.push(point);
         
-        // Add marker
-        const markerGeometry = new THREE.SphereGeometry(0.2, 16, 16);
-        const markerMaterial = new THREE.MeshBasicMaterial({ 
-            color: state.measurePoints.length === 1 ? 0x00ff00 : 0xff0000 
-        });
-        const marker = new THREE.Mesh(markerGeometry, markerMaterial);
-        marker.position.copy(point);
-        state.scene.add(marker);
+        const marker = BABYLON.MeshBuilder.CreateSphere('measure-marker', { diameter: 0.35, segments: 16 }, state.scene);
+        marker.position = point;
+        const markerMaterial = new BABYLON.StandardMaterial('measure-marker-material', state.scene);
+        markerMaterial.diffuseColor = state.measurePoints.length === 1 ? new BABYLON.Color3(0, 1, 0) : new BABYLON.Color3(1, 0, 0);
+        marker.material = markerMaterial;
+        state.measureMarkers = state.measureMarkers || [];
+        state.measureMarkers.push(marker);
         
         if (state.measurePoints.length === 2) {
-            // Calculate distance
-            const distance = state.measurePoints[0].distanceTo(state.measurePoints[1]);
+            const distance = BABYLON.Vector3.Distance(state.measurePoints[0], state.measurePoints[1]);
+            state.measureLine = BABYLON.MeshBuilder.CreateLines('measure-line', {
+                points: state.measurePoints,
+                colors: [new BABYLON.Color4(1, 1, 0, 1), new BABYLON.Color4(1, 1, 0, 1)]
+            }, state.scene);
             
-            // Draw line
-            const lineGeometry = new THREE.BufferGeometry().setFromPoints(state.measurePoints);
-            const lineMaterial = new THREE.LineBasicMaterial({ color: 0xffff00, linewidth: 2 });
-            state.measureLine = new THREE.Line(lineGeometry, lineMaterial);
-            state.scene.add(state.measureLine);
-            
-            // Show result
             document.getElementById('measurementValue').textContent = distance.toFixed(3) + '"';
             document.getElementById('measurementPopup').style.display = 'block';
             
@@ -1837,11 +1728,15 @@ function closeMeasurement() {
     
     // Clear measurement visuals
     if (state.measureLine) {
-        state.scene.remove(state.measureLine);
+        state.measureLine.dispose();
         state.measureLine = null;
     }
-    
-    // Clear markers (simplified - would need to track them)
+    if (state.measureMarkers) {
+        for (const marker of state.measureMarkers) {
+            disposeBabylonMesh(marker);
+        }
+        state.measureMarkers = [];
+    }
     state.measurePoints = [];
 }
 
@@ -1850,13 +1745,12 @@ function closeMeasurement() {
 // ============================================
 
 function takeScreenshot() {
-    state.renderer.render(state.scene, state.camera);
-    const dataUrl = state.renderer.domElement.toDataURL('image/png');
-    
-    const link = document.createElement('a');
-    link.download = 'casting_screenshot_' + Date.now() + '.png';
-    link.href = dataUrl;
-    link.click();
+    BABYLON.Tools.CreateScreenshotUsingRenderTarget(state.engine, state.camera, { precision: 1.0 }, (dataUrl) => {
+        const link = document.createElement('a');
+        link.download = 'casting_screenshot_' + Date.now() + '.png';
+        link.href = dataUrl;
+        link.click();
+    });
 }
 
 // ============================================
@@ -2364,7 +2258,7 @@ async function loadSimulationById(simId) {
         
         // Clear current state
         for (const mesh of Object.values(state.partMeshes)) {
-            state.scene.remove(mesh);
+            disposeBabylonMesh(mesh);
         }
         state.partMeshes = {};
         state.parts = [];
@@ -2406,28 +2300,9 @@ async function loadSimulationById(simId) {
                 meshData: null
             };
             
-            // Try to load mesh from file
+            // Try to load mesh from the upload route.
             try {
-                const loader = new THREE.STLLoader();
-                loader.load(partData.filepath, (geometry) => {
-                    // Create mesh from geometry
-                    geometry.computeVertexNormals();
-                    
-                    const colors = { cast: 0xb0bec5, riser: 0xf59e0b, chill: 0x3b82f6 };
-                    const material = new THREE.MeshPhongMaterial({
-                        color: colors[part.type],
-                        transparent: true,
-                        opacity: 0.7,
-                        side: THREE.DoubleSide
-                    });
-                    
-                    const mesh = new THREE.Mesh(geometry, material);
-                    mesh.position.set(part.position.x, part.position.y, part.position.z);
-                    mesh.scale.setScalar(part.scale);
-                    
-                    state.scene.add(mesh);
-                    state.partMeshes[part.id] = mesh;
-                });
+                await loadSavedPartMesh(part);
             } catch (e) {
                 console.error('Failed to load part mesh:', e);
             }
@@ -2451,6 +2326,48 @@ async function loadSimulationById(simId) {
     }
 }
 
+async function loadSavedPartMesh(part) {
+    const filename = String(part.filepath).split('/').pop();
+    if (!filename) return;
+
+    const url = `/uploads/${encodeURIComponent(filename)}`;
+    const result = await BABYLON.SceneLoader.ImportMeshAsync('', '', url, state.scene);
+    const meshes = result.meshes.filter(mesh => mesh.getTotalVertices && mesh.getTotalVertices() > 0);
+    if (!meshes.length) return;
+
+    const mesh = meshes.length === 1 ? meshes[0] : BABYLON.Mesh.MergeMeshes(meshes, true, true, undefined, false, true);
+    if (!mesh) return;
+
+    const colors = {
+        cast: new BABYLON.Color3(0.69, 0.75, 0.77),
+        riser: new BABYLON.Color3(0.96, 0.62, 0.04),
+        riser_post: new BABYLON.Color3(0.93, 0.48, 0.16),
+        chill: new BABYLON.Color3(0.23, 0.51, 0.96)
+    };
+    const material = new BABYLON.StandardMaterial(`part-material-${part.id}`, state.scene);
+    material.diffuseColor = colors[part.type] || colors.cast;
+    material.alpha = 0.35;
+    material.backFaceCulling = false;
+    material.disableDepthWrite = true;
+    mesh.material = material;
+    mesh.name = `part-${part.id}`;
+    mesh.position = new BABYLON.Vector3(part.position.x, part.position.y, part.position.z);
+    mesh.scaling = new BABYLON.Vector3(part.scale, part.scale, part.scale);
+    mesh.userData = { partId: part.id };
+    state.partMeshes[part.id] = mesh;
+
+    const info = mesh.getBoundingInfo();
+    const min = info.boundingBox.minimumWorld;
+    const max = info.boundingBox.maximumWorld;
+    part.meshData = {
+        bounds: {
+            x: [min.x, max.x],
+            y: [min.y, max.y],
+            z: [min.z, max.z]
+        }
+    };
+}
+
 // ============================================
 // UI Utilities
 // ============================================
@@ -2472,9 +2389,13 @@ function updateModelInfo() {
     
     const part = state.parts[0];
     if (part.meshData) {
-        const v = part.meshData.vertex_count.toLocaleString();
-        const f = part.meshData.face_count.toLocaleString();
-        document.getElementById('modelInfo').textContent = `${state.parts.length} part(s) | ${v} vertices | ${f} faces`;
+        if (Number.isFinite(part.meshData.vertex_count) && Number.isFinite(part.meshData.face_count)) {
+            const v = part.meshData.vertex_count.toLocaleString();
+            const f = part.meshData.face_count.toLocaleString();
+            document.getElementById('modelInfo').textContent = `${state.parts.length} part(s) | ${v} vertices | ${f} faces`;
+        } else {
+            document.getElementById('modelInfo').textContent = `${state.parts.length} part(s) loaded`;
+        }
     }
 }
 
@@ -2484,9 +2405,9 @@ function toggleDarkMode() {
     // Update 3D scene background
     if (state.scene) {
         if (document.body.classList.contains('light-mode')) {
-            state.scene.background = new THREE.Color(0xf0f0f5);
+            state.scene.clearColor = new BABYLON.Color4(0.94, 0.94, 0.96, 1);
         } else {
-            state.scene.background = new THREE.Color(0x0a0a12);
+            state.scene.clearColor = new BABYLON.Color4(0.04, 0.04, 0.07, 1);
         }
     }
     

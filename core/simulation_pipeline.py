@@ -248,6 +248,10 @@ def build_visualization_payload(
         "centers": voxel_centers[indices].tolist(),
         "sizes": voxel_sizes[indices].tolist() if voxel_sizes is not None else [0.1] * len(indices),
     }
+    if voxel_mesh.surface_voxels is not None:
+        surface_voxels = np.asarray(voxel_mesh.surface_voxels, dtype=bool)
+        if len(surface_voxels) == n_voxels:
+            visualization_data["surface_voxels"] = surface_voxels[indices].tolist()
 
     if engine.shrinkage_probability is not None:
         shrinkage = np.asarray(engine.shrinkage_probability)
