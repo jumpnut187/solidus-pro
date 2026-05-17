@@ -10,7 +10,7 @@ import numpy as np
 from core.memory_limits import MemorySeverity, MemoryValidationResult
 from core.materials import get_alloy
 from core.part_manager import PartManager, PartType
-from core.solidification import AnalysisOptions, SolidificationEngine
+from core.solidification import AnalysisOptions, SOLVER_MODE_SCHEDULE_LEGACY, SolidificationEngine
 from core.simulation_pipeline import PipelineInputs, build_part_manager_from_parts, run_pipeline
 
 
@@ -183,6 +183,105 @@ class ScenarioRegressionTests(unittest.TestCase):
         surface_indices = engine.mesh.get_surface_voxel_indices()
         self.assertGreater(len(surface_indices), 0)
         self.assertTrue(np.all(first_snapshot[surface_indices] < 1.0))
+
+    def test_full_contact_chill_boosts_adjacent_cast_face(self) -> None:
+        centers = []
+        part_types = []
+        for z_value, part_type in ((0.0, 2), (1.0, 0), (2.0, 0)):
+            for x_value in range(3):
+                for y_value in range(3):
+                    centers.append([float(x_value), float(y_value), z_value])
+                    part_types.append(part_type)
+
+        centers_array = np.asarray(centers, dtype=np.float32)
+        part_types_array = np.asarray(part_types, dtype=np.int32)
+        mesh = SimpleNamespace(
+            voxel_centers=centers_array,
+            voxel_part_types=part_types_array,
+            surface_voxels=part_types_array == 2,
+            voxel_states=np.zeros(len(centers_array), dtype=np.float32),
+            voxel_neighbors=np.full((len(centers_array), 26), -1, dtype=np.int32),
+            base_voxel_size=1.0,
+        )
+        engine = SolidificationEngine(mesh, get_alloy("WCB"), AnalysisOptions())
+
+        chill_boost = engine._calculate_chill_influence()
+
+        contact_face = (part_types_array == 0) & np.isclose(centers_array[:, 2], 1.0)
+        upper_face = (part_types_array == 0) & np.isclose(centers_array[:, 2], 2.0)
+
+        self.assertTrue(np.all(chill_boost[contact_face] > 1.0))
+        self.assertTrue(np.allclose(chill_boost[upper_face], 1.0))
+
+    def test_schedule_progresses_away_from_full_contact_chill(self) -> None:
+        centers = []
+        part_types = []
+        for z_value, part_type in ((0.0, 2), (1.0, 0), (2.0, 0), (3.0, 0), (4.0, 1), (5.0, 1)):
+            for x_value in range(3):
+                for y_value in range(3):
+                    if part_type == 1 and (x_value, y_value) != (1, 1):
+                        continue
+                    centers.append([float(x_value), float(y_value), z_value])
+                    part_types.append(part_type)
+
+        centers_array = np.asarray(centers, dtype=np.float32)
+        part_types_array = np.asarray(part_types, dtype=np.int32)
+        n_voxels = len(centers_array)
+        neighbors = np.full((n_voxels, 26), -1, dtype=np.int32)
+        for idx, center in enumerate(centers_array):
+            distances = np.linalg.norm(centers_array - center, axis=1)
+            adjacent = [
+                neighbor_idx
+                for neighbor_idx, distance in sorted(
+                    enumerate(distances),
+                    key=lambda item: item[1],
+                )
+                if neighbor_idx != idx and distance <= 1.01
+            ]
+            neighbors[idx, : len(adjacent[:26])] = adjacent[:26]
+
+        mesh = SimpleNamespace(
+            voxel_centers=centers_array,
+            voxel_part_types=part_types_array,
+            surface_voxels=np.ones(n_voxels, dtype=bool),
+            voxel_states=np.zeros(n_voxels, dtype=np.float32),
+            voxel_neighbors=neighbors,
+            voxel_moduli=np.where(part_types_array == 2, 0.0, 1.0).astype(np.float32),
+            base_voxel_size=1.0,
+        )
+        options = AnalysisOptions(
+            shrinkage=False,
+            hotspot=False,
+            fraction_liquid=True,
+            solver_mode=SOLVER_MODE_SCHEDULE_LEGACY,
+        )
+        engine = SolidificationEngine(mesh, get_alloy("WCB"), options)
+        engine.max_time = 1000.0
+        engine.solidification_start_times = np.zeros(n_voxels, dtype=np.float32)
+        engine.solidification_end_times = np.zeros(n_voxels, dtype=np.float32)
+        engine.local_solidification_time = np.zeros(n_voxels, dtype=np.float32)
+        engine.solidification_times = np.zeros(n_voxels, dtype=np.float32)
+
+        chill_boost = engine._calculate_chill_influence()
+        engine._initialize_solidification_schedule(chill_boost, np.ones(n_voxels, dtype=np.float32))
+
+        lower_cast = (part_types_array == 0) & np.isclose(centers_array[:, 2], 1.0)
+        middle_cast = (part_types_array == 0) & np.isclose(centers_array[:, 2], 2.0)
+        upper_cast = (part_types_array == 0) & np.isclose(centers_array[:, 2], 3.0)
+        riser = part_types_array == 1
+
+        self.assertLess(
+            float(np.max(engine.solidification_end_times[lower_cast])),
+            float(np.min(engine.solidification_end_times[middle_cast])),
+        )
+        self.assertLess(
+            float(np.max(engine.solidification_end_times[middle_cast])),
+            float(np.min(engine.solidification_end_times[upper_cast])),
+        )
+        self.assertLess(
+            float(np.max(engine.solidification_end_times[upper_cast])),
+            float(np.min(engine.solidification_end_times[riser])),
+        )
 
     def test_thicker_sections_solidify_slower_than_thin_sections(self) -> None:
         thin_engine = _run_pipeline_with_patched_memory(

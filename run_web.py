@@ -9,11 +9,9 @@ import subprocess
 import os
 from pathlib import Path
 
-# Minimum Python version
 MIN_PYTHON = (3, 9)
 
 def check_python_version():
-    """Verify Python version meets minimum requirements"""
     if sys.version_info < MIN_PYTHON:
         print(f"❌ Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+ required")
         print(f"   Current: Python {sys.version_info.major}.{sys.version_info.minor}")
@@ -22,7 +20,6 @@ def check_python_version():
     return True
 
 def check_dependencies():
-    """Check if required packages are installed"""
     required = {
         'flask': 'Flask',
         'flask_cors': 'Flask-CORS',
@@ -47,7 +44,6 @@ def check_dependencies():
     return missing
 
 def install_dependencies(missing):
-    """Offer to install missing dependencies"""
     if not missing:
         return True
     
@@ -57,7 +53,6 @@ def install_dependencies(missing):
     if response != 'y':
         return False
     
-    # Install packages
     pip_packages = {
         'Flask': 'flask',
         'Flask-CORS': 'flask-cors',
@@ -82,7 +77,6 @@ def main():
     print("  CASTING SOLIDIFICATION SIMULATOR - WEB VERSION")
     print("="*60 + "\n")
     
-    # Check Python version
     if not check_python_version():
         sys.exit(1)
     
@@ -98,21 +92,21 @@ def main():
     print("Starting web server...")
     print("-"*60 + "\n")
     
-    # Change to project root directory
     project_dir = Path(__file__).parent
     os.chdir(project_dir)
     
-    # Add to path and start Flask app
     sys.path.insert(0, str(project_dir))
-    from web.app import app
+    from web.app_factory import create_app
     
-    print("\n" + "="*60)
-    print("  SERVER RUNNING")
-    print("  Open http://localhost:5050 in your browser")
-    print("  Press Ctrl+C to stop")
-    print("="*60 + "\n")
-    
-    app.run(debug=False, host='0.0.0.0', port=5050, threaded=True)
+    port = int(os.environ.get("CASTSIM_WEB_PORT", "5050"))
+    app = create_app()
+    print("=" * 60)
+    print("  SOLIDUS REACT/BABYLON WEB APPLICATION")
+    print(f"  API: http://localhost:{port}/api/health")
+    print(f"  Database: {app.config['DATABASE']}")
+    print(f"  Uploads: {app.config['UPLOAD_FOLDER']}")
+    print("=" * 60)
+    app.run(debug=False, host="0.0.0.0", port=port, threaded=True)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

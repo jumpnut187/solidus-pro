@@ -180,6 +180,7 @@ class SolidificationEngine:
         # Dynamic chill logic data
         self._chill_centers: Optional[np.ndarray] = None
         self._chill_thicknesses: Optional[np.ndarray] = None
+        self._chill_influence_thicknesses: Optional[np.ndarray] = None
         self._chill_surface_centers: Optional[np.ndarray] = None
         self._chill_boost: Optional[np.ndarray] = None
         
@@ -320,8 +321,9 @@ class SolidificationEngine:
         )
         self._thermal_peak_cooling_rates = np.zeros(n_voxels, dtype=np.float32)
 
-        mold_temperature = tp.mold_temperature
-        chill_temperature = tp.chill_temperature
+        boundary_params = self.analysis_options.solidification_params.thermal_boundary
+        mold_temperature = boundary_params.mold_temperature
+        chill_temperature = boundary_params.chill_temperature
         initial_temperatures = np.full(n_voxels, self.alloy.pouring_temp, dtype=np.float64)
         chill_indices = self._get_chill_voxel_indices()
         if len(chill_indices) > 0:
@@ -732,6 +734,33 @@ class SolidificationEngine:
                     q.append(int(nb))
         return distances
 
+    def _compute_graph_distance_to_chill(self, active_mask: np.ndarray) -> np.ndarray:
+        """Compute shortest topological distance from each active voxel to any chill voxel."""
+        n_voxels = len(self.mesh.voxel_centers)
+        distances = np.full(n_voxels, np.inf, dtype=np.float32)
+        chill_indices = self._get_chill_voxel_indices()
+        if len(chill_indices) == 0:
+            return distances
+
+        q: deque[int] = deque()
+        traversable = active_mask.copy()
+        traversable[chill_indices] = True
+        for idx in chill_indices:
+            distances[idx] = 0.0
+            q.append(int(idx))
+
+        neighbors = np.asarray(self.mesh.voxel_neighbors, dtype=np.int32)
+        while q:
+            current = q.popleft()
+            next_distance = distances[current] + 1.0
+            for nb in neighbors[current]:
+                if nb < 0 or not traversable[nb]:
+                    continue
+                if next_distance < distances[nb]:
+                    distances[nb] = next_distance
+                    q.append(int(nb))
+        return distances
+
     def _average_exothermic_factor_over_duration(self, duration_s: float) -> float:
         """Average the time-dependent exothermic slowdown factor over a schedule interval."""
         ep = self.analysis_options.solidification_params.exothermic
@@ -897,6 +926,29 @@ class SolidificationEngine:
                 toward_riser[connected],
                 0.0,
                 1.0,
+            )
+
+        # Enforce directional progression away from chills.  The raw chill boost
+        # makes nearby voxels faster, but without a distance-ordered cap the
+        # schedule can still visually collapse downward toward a riser/post.
+        chill_distance = self._compute_graph_distance_to_chill(active_mask)
+        chilled_cast = cast_mask & np.isfinite(chill_distance)
+        if np.any(chilled_cast):
+            cast_peak = max(float(np.max(completion_times[cast_mask])), self.time_step)
+            min_chill_dist = float(np.min(chill_distance[chilled_cast]))
+            max_chill_dist = float(np.max(chill_distance[chilled_cast]))
+            chill_span = max(max_chill_dist - min_chill_dist, 1.0)
+            away_from_chill = np.clip(
+                (chill_distance[chilled_cast] - min_chill_dist) / chill_span,
+                0.0,
+                1.0,
+            )
+            chill_wave_completion = cast_peak * (
+                0.04 + 0.68 * np.power(away_from_chill, 1.35)
+            )
+            completion_times[chilled_cast] = np.minimum(
+                completion_times[chilled_cast],
+                np.maximum(chill_wave_completion.astype(np.float32), self.time_step),
             )
 
         # Per-voxel feeder timing spread: replace blanket 0.97/0.92 multipliers
@@ -1196,7 +1248,61 @@ class SolidificationEngine:
         return voxel_to_centerline
     
 
-    
+    def _calculate_chill_influence_thicknesses(
+        self,
+        chill_indices: np.ndarray,
+        raw_thicknesses: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Convert raw chill EDT thickness into the radius used for casting influence.
+
+        Raw EDT is zero on chill surface voxels. For contact-face chills, the nearest
+        chill voxel to the casting is usually a surface voxel, so using raw EDT
+        directly removes the chill effect exactly where it should be strongest.
+        """
+        raw = np.asarray(raw_thicknesses, dtype=np.float32)
+        if raw.size == 0:
+            return raw
+
+        base_voxel_size = max(float(getattr(self.mesh, "base_voxel_size", 0.0)), 1e-6)
+        component_floor = max(float(np.max(raw)) if np.any(raw > 0.0) else 0.0, base_voxel_size)
+        effective = np.maximum(raw, component_floor).astype(np.float32, copy=True)
+
+        neighbors = getattr(self.mesh, "voxel_neighbors", None)
+        if neighbors is not None and len(chill_indices) == len(raw):
+            chill_indices_arr = np.asarray(chill_indices, dtype=np.int64)
+            local_by_global = {int(global_idx): local_idx for local_idx, global_idx in enumerate(chill_indices_arr)}
+            visited = np.zeros(len(chill_indices_arr), dtype=bool)
+
+            for start_local in range(len(chill_indices_arr)):
+                if visited[start_local]:
+                    continue
+
+                stack = [start_local]
+                component: List[int] = []
+                visited[start_local] = True
+
+                while stack:
+                    local_idx = stack.pop()
+                    component.append(local_idx)
+                    global_idx = int(chill_indices_arr[local_idx])
+                    for neighbor_idx in np.asarray(neighbors[global_idx], dtype=np.int64):
+                        if neighbor_idx < 0:
+                            continue
+                        neighbor_local = local_by_global.get(int(neighbor_idx))
+                        if neighbor_local is not None and not visited[neighbor_local]:
+                            visited[neighbor_local] = True
+                            stack.append(neighbor_local)
+
+                component_arr = np.asarray(component, dtype=np.int64)
+                component_max = float(np.max(raw[component_arr])) if component_arr.size else 0.0
+                component_radius = max(component_max, base_voxel_size)
+                effective[component_arr] = np.maximum(raw[component_arr], component_radius)
+
+        # Add one voxel pitch so touching cast/chill voxel centers fall inside the
+        # influence radius even when the contact voxel itself has zero raw EDT.
+        return (effective + base_voxel_size).astype(np.float32, copy=False)
+
     def _calculate_chill_influence(self) -> np.ndarray:
         """
         Calculate chill influence on each voxel using spatially-varying thickness
@@ -1233,12 +1339,18 @@ class SolidificationEngine:
             self._chill_thicknesses = compute_chill_internal_thickness_parallel(
                 self._chill_centers, self._chill_surface_centers
             )
+            self._chill_influence_thicknesses = self._calculate_chill_influence_thicknesses(
+                chill_indices,
+                self._chill_thicknesses,
+            )
             
             # Limit thickness sanity check
             max_t = np.max(self._chill_thicknesses)
             avg_t = np.mean(self._chill_thicknesses)
+            max_influence_t = np.max(self._chill_influence_thicknesses)
             print(f"    Total chill voxels: {len(chill_indices):,}")
             print(f"    Varying thickness: max={max_t:.2f}\", avg={avg_t:.2f}\"")
+            print(f"    Effective influence radius: max={max_influence_t:.2f}\"")
 
         # 2. Compute dynamic boost
         # Initial call at t=0
@@ -1252,8 +1364,18 @@ class SolidificationEngine:
         else:
             part_types = np.zeros(n_voxels, dtype=np.int32)
 
+        if self._chill_influence_thicknesses is None:
+            if self._chill_thicknesses is None:
+                return np.ones(n_voxels, dtype=np.float32)
+            self._chill_influence_thicknesses = self._calculate_chill_influence_thicknesses(
+                chill_indices,
+                self._chill_thicknesses,
+            )
+        if self._chill_centers is None or self._chill_influence_thicknesses is None:
+            return np.ones(n_voxels, dtype=np.float32)
+
         self._chill_boost = compute_dynamic_chill_boost_parallel(
-            voxel_centers, self._chill_centers, self._chill_thicknesses,
+            voxel_centers, self._chill_centers, self._chill_influence_thicknesses,
             voxel_states, part_types, self.time, max_chill_boost
         )
 
@@ -1263,6 +1385,14 @@ class SolidificationEngine:
         """Update the chill boost array based on current simulation time and progress."""
         if self._chill_centers is None:
             return
+        if self._chill_influence_thicknesses is None:
+            chill_indices = self._get_chill_voxel_indices()
+            if self._chill_thicknesses is None or len(chill_indices) == 0:
+                return
+            self._chill_influence_thicknesses = self._calculate_chill_influence_thicknesses(
+                chill_indices,
+                self._chill_thicknesses,
+            )
 
         n_voxels = len(self.mesh.voxel_centers)
         cp = self.analysis_options.solidification_params.chill
@@ -1276,7 +1406,7 @@ class SolidificationEngine:
             part_types = np.zeros(n_voxels, dtype=np.int32)
 
         self._chill_boost[:] = compute_dynamic_chill_boost_parallel(
-            voxel_centers, self._chill_centers, self._chill_thicknesses,
+            voxel_centers, self._chill_centers, self._chill_influence_thicknesses,
             voxel_states, part_types, self.time, max_chill_boost
         )
     
