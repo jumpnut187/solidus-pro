@@ -56,6 +56,7 @@ from core.memory_manager import create_managed_array, get_memory_manager
 from config.hardware_config import hardware
 from core.solidification_loop import (
     DEFAULT_SCHEDULE_CURVE_EXPONENT,
+    NIYAMA_EVAL_FRACTION_SOLID,
     compute_schedule_fraction_solid,
     run_time_integration,
 )
@@ -192,6 +193,14 @@ class SolidificationEngine:
         self._thermal_latest_temperatures: Optional[np.ndarray] = None
         self._thermal_latest_gradients: Optional[np.ndarray] = None
         self._thermal_voxel_size_m: Optional[float] = None
+        self._thermal_niyama_sampled: Optional[np.ndarray] = None
+        self._thermal_niyama_gradient_at_eval: Optional[np.ndarray] = None
+        self._thermal_niyama_cooling_rate_at_eval: Optional[np.ndarray] = None
+        self._thermal_niyama_temperature_at_eval: Optional[np.ndarray] = None
+        self._thermal_niyama_time_at_eval: Optional[np.ndarray] = None
+        self._thermal_niyama_values_at_eval: Optional[np.ndarray] = None
+        self._thermal_niyama_quality: Optional[np.ndarray] = None
+        self.niyama_eval_fraction_solid = NIYAMA_EVAL_FRACTION_SOLID
 
         self.time_step = 0.1  # seconds
         self.max_time = None  # Will be calculated dynamically based on geometry
@@ -218,6 +227,10 @@ class SolidificationEngine:
         # Niyama Criterion results
         self.niyama_values = None       # Niyama number at each voxel
         self.niyama_defect_risk = None  # Boolean mask of defect-prone voxels
+        self.niyama_risk = None         # 0-1 Niyama-only risk field
+        self.combined_feed_risk = None  # 0-1 Niyama + feeding/isolation risk field
+        self.niyama_quality = None      # 0 none, 1 limited stencil, 2 least-squares stencil
+        self.niyama_metadata = None
         self.thermal_gradients = None   # Thermal gradient magnitude (°C/mm)
         self.cooling_rates = None       # Cooling rate (°C/s)
         
@@ -320,6 +333,13 @@ class SolidificationEngine:
             alloy=self.alloy,
         )
         self._thermal_peak_cooling_rates = np.zeros(n_voxels, dtype=np.float32)
+        self._thermal_niyama_sampled = np.zeros(n_voxels, dtype=bool)
+        self._thermal_niyama_gradient_at_eval = np.zeros(n_voxels, dtype=np.float32)
+        self._thermal_niyama_cooling_rate_at_eval = np.zeros(n_voxels, dtype=np.float32)
+        self._thermal_niyama_temperature_at_eval = np.zeros(n_voxels, dtype=np.float32)
+        self._thermal_niyama_time_at_eval = np.zeros(n_voxels, dtype=np.float32)
+        self._thermal_niyama_values_at_eval = np.full(n_voxels, np.inf, dtype=np.float32)
+        self._thermal_niyama_quality = np.zeros(n_voxels, dtype=np.int8)
 
         boundary_params = self.analysis_options.solidification_params.thermal_boundary
         mold_temperature = boundary_params.mold_temperature
@@ -1658,26 +1678,28 @@ class SolidificationEngine:
             cast_mask = np.ones(n_voxels, dtype=bool)
         
         cast_indices = np.where(cast_mask)[0]
-        
+
+        distances = np.empty(0, dtype=np.float64)
         if len(cast_indices) > 0:
             cast_centers = self.mesh.voxel_centers[cast_indices]
-            
-            # Query distances for all cast voxels to nearest chill; distances beyond the
-            # influence radius are not needed and are returned as inf.
+
+            query_start = time.perf_counter()
             distances, _ = chill_tree.query(
                 cast_centers,
                 k=1,
                 distance_upper_bound=chill_influence_radius,
+                workers=-1,
             )
-            
-        # Apply reduction with smooth falloff (quadratic for smoother transition)
-        within_radius = distances < chill_influence_radius
-        if np.any(within_radius):
-            normalized_dist = distances[within_radius] / chill_influence_radius
-            # Use quadratic falloff for smoother gradient
-            reduction = max_reduction + (min_reduction - max_reduction) * (normalized_dist * np.sqrt(normalized_dist))
-            chill_reduction[cast_indices[within_radius]] = reduction
-        
+            self.stage_timings["chill_shrinkage_query"] = (
+                self.stage_timings.get("chill_shrinkage_query", 0.0) + time.perf_counter() - query_start
+            )
+
+            within_radius = distances < chill_influence_radius
+            if np.any(within_radius):
+                normalized_dist = distances[within_radius] / chill_influence_radius
+                reduction = max_reduction + (min_reduction - max_reduction) * (normalized_dist * np.sqrt(normalized_dist))
+                chill_reduction[cast_indices[within_radius]] = reduction
+
         return chill_reduction
     
     def _calculate_riser_feeding_reduction(self) -> np.ndarray:
@@ -2689,20 +2711,37 @@ class SolidificationEngine:
         # Calculate chill proximity reduction factor
         # Voxels near chills get REDUCED shrinkage because directional solidification
         # ensures they solidify while liquid feed metal is still available
+        stage_start = time.perf_counter()
         chill_reduction = self._calculate_chill_shrinkage_reduction()
-        
+        stage_timings["shrinkage_chill_reduction"] = (
+            stage_timings.get("shrinkage_chill_reduction", 0.0) + time.perf_counter() - stage_start
+        )
+
         # Calculate riser feeding reduction factor
         # Voxels within feeding distance of a riser get REDUCED shrinkage because
         # the riser feeds them liquid metal to compensate for shrinkage
+        if len(riser_indices) > 0:
+            print("  Tracing feeding paths from risers...")
+        stage_start = time.perf_counter()
         self._ensure_feeding_path_result(self.feeding_fraction_solid)
+        stage_timings["shrinkage_feeding_path_analysis"] = (
+            stage_timings.get("shrinkage_feeding_path_analysis", 0.0) + time.perf_counter() - stage_start
+        )
+        if self.feeding_path_result is not None:
+            blocked = int(np.sum(self.feeding_path_result.blocked_voxels))
+            print(f"  Feeding path tracing complete: {blocked:,} blocked voxels")
         riser_feeding_reduction = self._calculate_riser_feeding_reduction()
-        
+
         # NEW: Calculate feeding effectiveness based on ferro-static pressure
         # vs interdendritic pressure drop (Darcy's Law)
         # This implements the physics from Info.md:
         # - P_ferro = ρgh (driving force) must overcome ΔP = μLv/K (friction)
         # - When P_ferro < ΔP, feeding is blocked and porosity forms
+        stage_start = time.perf_counter()
         feeding_effectiveness = self._calculate_feeding_effectiveness()
+        stage_timings["shrinkage_feeding_effectiveness"] = (
+            stage_timings.get("shrinkage_feeding_effectiveness", 0.0) + time.perf_counter() - stage_start
+        )
         
         # INTEGRATION: Use feeding path blocked data when available
         # The feeding path analysis traces actual connectivity from risers
@@ -3281,6 +3320,9 @@ class SolidificationEngine:
         self.niyama_values = np.zeros(n_voxels, dtype=np.float32)
         self.thermal_gradients = np.zeros(n_voxels, dtype=np.float32)
         self.cooling_rates = np.zeros(n_voxels, dtype=np.float32)
+        self.niyama_risk = np.zeros(n_voxels, dtype=np.float32)
+        self.combined_feed_risk = np.zeros(n_voxels, dtype=np.float32)
+        self.niyama_quality = np.zeros(n_voxels, dtype=np.int8)
         
         # Get alloy name for threshold
         alloy_key = self.alloy.name.split()[0]  # Extract 'WCB', 'CF8', or 'C958'
@@ -3292,25 +3334,22 @@ class SolidificationEngine:
 
         if (
             solver_mode == SOLVER_MODE_THERMAL_COUPLED
-            and self._thermal_latest_temperatures is not None
-            and self._thermal_voxel_size_m is not None
+            and self._thermal_niyama_values_at_eval is not None
+            and self._thermal_niyama_sampled is not None
         ):
-            if self._thermal_heat_model is not None:
-                gradients_m = self._thermal_heat_model.temperature_field.get_gradient_magnitude(
-                    np.asarray(self.mesh.voxel_neighbors, dtype=np.int32),
-                    self._thermal_voxel_size_m,
-                )
-            else:
-                gradients_m = np.zeros(n_voxels, dtype=np.float32)
-            self.thermal_gradients = (gradients_m / 1000.0).astype(np.float32)
-            if self._thermal_peak_cooling_rates is not None:
-                self.cooling_rates = np.maximum(
-                    np.asarray(self._thermal_peak_cooling_rates, dtype=np.float32),
-                    0.01,
-                ).astype(np.float32)
-            else:
-                self.cooling_rates = np.full(n_voxels, 0.01, dtype=np.float32)
+            sampled = np.asarray(self._thermal_niyama_sampled, dtype=bool)
+            values = np.asarray(self._thermal_niyama_values_at_eval, dtype=np.float32)
+            gradients = np.asarray(self._thermal_niyama_gradient_at_eval, dtype=np.float32)
+            rates = np.asarray(self._thermal_niyama_cooling_rate_at_eval, dtype=np.float32)
+            quality = np.asarray(self._thermal_niyama_quality, dtype=np.int8)
+
+            self.niyama_values = np.where(sampled, values, np.inf).astype(np.float32)
+            self.thermal_gradients = np.where(sampled, gradients, 0.0).astype(np.float32)
+            self.cooling_rates = np.where(sampled, np.maximum(rates, 1e-6), 0.0).astype(np.float32)
+            self.niyama_quality = quality.copy()
             directional_extraction_factor = np.ones(n_voxels, dtype=np.float32)
+            niyama_source = "thermal_history"
+            threshold_status = "literature_default" if alloy_key == "WCB" else "estimated_default"
         else:
             # ===== THERMAL GRADIENT CALCULATION =====
             surface_distances = self.surface_distances if self.surface_distances is not None else self.feeding_distances
@@ -3336,6 +3375,11 @@ class SolidificationEngine:
                 1.0
             )
             self.cooling_rates = (temp_range * time_factor + min_cooling_rate_value).astype(np.float32)
+            safe_cooling_rates = np.maximum(self.cooling_rates, 1e-10)
+            self.niyama_values = (self.thermal_gradients / np.sqrt(safe_cooling_rates)).astype(np.float32)
+            self.niyama_quality = np.where(self.niyama_values > 0.0, 1, 0).astype(np.int8)
+            niyama_source = "schedule_legacy_approximate"
+            threshold_status = "approximate_engine_units"
         
         # Do not apply additional alloy k/cp multipliers here. The simplified
         # solidification loop already bakes alloy thermal response into the
@@ -3343,7 +3387,7 @@ class SolidificationEngine:
         # heat scaling here double-counts material effects.
         
         # ===== NIYAMA NUMBER CALCULATION =====
-        # Niyama = G / sqrt(R)
+        # Niyama = G / sqrt(R), with G in C/mm and R in C/s.
         # 
         # High Niyama: High gradient, low cooling rate → good directional solidification
         # Low Niyama: Low gradient, high cooling rate → poor directional solidification
@@ -3352,18 +3396,20 @@ class SolidificationEngine:
         # - Hot spots: Interior regions that solidify last (by time)
         # - Niyama: Regions with steep thermal gradients BUT fast cooling
         #   (e.g., thick sections near chills may have HIGH gradient but VERY HIGH cooling)
-        
-        # Protect against sqrt of negative or zero
-        safe_cooling_rates = np.maximum(self.cooling_rates, 1e-10)
-        self.niyama_values = (self.thermal_gradients / np.sqrt(safe_cooling_rates)).astype(np.float32)
-        
-        # ===== ENHANCED DEFECT RISK WITH ISOLATION =====
+        # ===== RAW NIYAMA RISK AND COMBINED FEEDING RISK =====
+        finite_niyama = np.isfinite(self.niyama_values)
+        self.niyama_risk = np.zeros(n_voxels, dtype=np.float32)
+        self.niyama_risk[finite_niyama] = np.clip(
+            1.0 - (self.niyama_values[finite_niyama] / max(niyama_threshold, 1e-6)),
+            0.0,
+            1.0,
+        ).astype(np.float32)
+
         directional_factor = np.ones(n_voxels, dtype=np.float32)
         chill_reduction = np.ones(n_voxels, dtype=np.float32)
         if self._chill_centers is not None:
             chill_reduction = self._calculate_chill_shrinkage_reduction()
             directional_factor = 1.0 + np.clip(1.0 - chill_reduction, 0.0, 0.75)
-        effective_niyama = self.niyama_values * directional_factor
 
         # Get isolation scores from hot spot analysis
         isolation_score = self._calculate_isolation_score()
@@ -3373,53 +3419,77 @@ class SolidificationEngine:
             isolation_relief = 1.0 - 0.7 * np.clip(1.0 - chill_reduction, 0.0, 1.0)
             isolation_score = isolation_score * np.clip(isolation_relief, 0.25, 1.0)
         
-        # Identify defect risk zones:
-        # 1. Standard Niyama threshold
-        basic_niyama_risk = effective_niyama < niyama_threshold
+        # Identify defect risk zones from raw Niyama only.
+        basic_niyama_risk = finite_niyama & (self.niyama_values < niyama_threshold)
 
-        # 2. Enhanced: voxels with moderate Niyama BUT high isolation
-        #    These are "feeding path blocked" defects - isolated liquid pools
-        moderate_niyama_risk = effective_niyama < (niyama_threshold * 1.5)
+        # Combined feed risk remains available separately for porosity/feed-path views.
+        moderate_niyama_risk = finite_niyama & (self.niyama_values < (niyama_threshold * 1.5))
         high_isolation = isolation_score > 0.4
         isolation_enhanced_risk = moderate_niyama_risk & high_isolation
         
-        # Combine both risk criteria
-        self.niyama_defect_risk = basic_niyama_risk | isolation_enhanced_risk
+        self.niyama_defect_risk = basic_niyama_risk.copy()
+        effective_niyama = self.niyama_values * directional_factor
+        directional_niyama_risk = np.zeros(n_voxels, dtype=np.float32)
+        directional_niyama_risk[finite_niyama] = np.clip(
+            1.0 - (effective_niyama[finite_niyama] / max(niyama_threshold, 1e-6)),
+            0.0,
+            1.0,
+        ).astype(np.float32)
+        self.combined_feed_risk = np.maximum(
+            directional_niyama_risk,
+            isolation_score * 0.7,
+        ).astype(np.float32)
         
         # Exclude surface voxels (they're always fine - high gradient)
         surface_indices = self.mesh.get_surface_voxel_indices()
         self.niyama_defect_risk[surface_indices] = False
+        self.niyama_risk[surface_indices] = 0.0
+        self.combined_feed_risk[surface_indices] = 0.0
         
         # Exclude chills
         chill_indices = self._get_chill_voxel_indices()
         self.niyama_defect_risk[chill_indices] = False
+        self.niyama_risk[chill_indices] = 0.0
+        self.combined_feed_risk[chill_indices] = 0.0
         
-        # Create a combined defect severity score for visualization
-        severity_from_niyama = np.clip(1.0 - (effective_niyama / niyama_threshold), 0, 1)
-        severity_from_isolation = isolation_score
-        
-        # Combined severity for visualization
-        self.niyama_severity = np.maximum(
-            severity_from_niyama,
-            severity_from_isolation * 0.7
-        ).astype(np.float32)
+        # Backward-compatible alias used by existing shrinkage/porosity code.
+        self.niyama_severity = self.combined_feed_risk.astype(np.float32)
         
         # Count defect risk voxels
         self.niyama_defect_count = np.sum(self.niyama_defect_risk)
         isolation_enhanced_count = np.sum(isolation_enhanced_risk & ~basic_niyama_risk)
+        self.niyama_metadata = {
+            "source": niyama_source,
+            "units": "(C*s)^0.5/mm",
+            "gradient_units": "C/mm",
+            "cooling_rate_units": "C/s",
+            "eval_fraction_solid": float(self.niyama_eval_fraction_solid),
+            "eval_temperature_c": float(
+                self.alloy.solidus_temp
+                + (1.0 - self.niyama_eval_fraction_solid) * temp_range
+            ),
+            "threshold": niyama_threshold,
+            "threshold_status": threshold_status,
+        }
         
         print(f"  Niyama threshold for {alloy_key}: {niyama_threshold:.2f}")
-        print(f"  Niyama value range: {np.min(self.niyama_values):.3f} - {np.max(self.niyama_values):.3f}")
-        print(f"  Mean Niyama: {np.mean(self.niyama_values):.3f}")
+        valid_niyama = self.niyama_values[finite_niyama]
+        if len(valid_niyama) > 0:
+            print(f"  Niyama value range: {np.min(valid_niyama):.3f} - {np.max(valid_niyama):.3f}")
+            print(f"  Mean Niyama: {np.mean(valid_niyama):.3f}")
+        else:
+            print("  Niyama value range: no sampled cast voxels")
+            print("  Mean Niyama: no sampled cast voxels")
         print(
             f"  Directional-solidification factor range: "
             f"{np.min(directional_factor):.2f} - {np.max(directional_factor):.2f}"
         )
         print(f"  Basic defect risk (Ny < {niyama_threshold}): {np.sum(basic_niyama_risk):,}")
-        print(f"  Additional risk from isolation: {isolation_enhanced_count:,}")
-        print(f"  Total defect risk voxels: {self.niyama_defect_count:,}")
+        print(f"  Combined feed-risk voxels added by isolation: {isolation_enhanced_count:,}")
+        print(f"  Raw Niyama defect risk voxels: {self.niyama_defect_count:,}")
         print(f"  Thermal gradient range: {np.min(self.thermal_gradients):.2f} - {np.max(self.thermal_gradients):.2f} C/mm")
         print(f"  Cooling rate range: {np.min(self.cooling_rates):.2f} - {np.max(self.cooling_rates):.2f} C/s")
+        print(f"  Niyama source: {niyama_source}")
         print("  Material scaling: alloy threshold only (no extra k/cp multiplier)")
 
     def _analyze_btr_history(
@@ -3469,7 +3539,23 @@ class SolidificationEngine:
         return in_btr, constrained_in_btr, solid_neighbor_fraction
 
     def _get_sand_restraint_index(self) -> float:
-        """Return the clamped mold restraint index used by hot tear and crack models."""
+        """Return the clamped mold restraint index used by hot tear and crack models.
+        
+        Uses hot_tear.mold_restraint_index if explicitly set (not default 0.5),
+        otherwise falls back to the legacy sand_restraint_index for backwards
+        compatibility. This ensures setting sand_restraint_index=0.1 changes the
+        effective restraint used by both hot tear and crack analysis.
+        """
+        ht = self.analysis_options.solidification_params.hot_tear
+        mold_restraint = getattr(ht, 'mold_restraint_index', 0.5)
+        default_mold_restraint = 0.5
+        
+        if mold_restraint != default_mold_restraint:
+            try:
+                return float(np.clip(float(mold_restraint), 0.0, 1.0))
+            except (TypeError, ValueError):
+                pass
+        
         raw_value = getattr(self.analysis_options, "sand_restraint_index", 0.5)
         try:
             return float(np.clip(float(raw_value), 0.0, 1.0))
@@ -3495,288 +3581,238 @@ class SolidificationEngine:
     
     def _calculate_hot_tear_risk(self):
         """
-        Calculate hot tear susceptibility zones with mechanical constraint model.
-        
-        Hot tears (also called "hot cracks" or "hot shortness") form during
-        the final stages of solidification when the alloy is in the Brittle
-        Temperature Range (BTR). In this range:
-        
-        1. Dendrites have formed a rigid network (high fraction solid, ~0.85-0.99)
-        2. Remaining liquid films between dendrites have very low strength
-        3. Tensile stress from differential thermal contraction opens cracks
-        4. Unlike shrinkage porosity, hot tears are MECHANICAL failures
-        
-        === ENHANCED MECHANICAL CONSTRAINT MODEL ===
-        
-        The key physics that the original model missed:
-        
-        1. THIN SECTIONS SOLIDIFY FIRST
-           - Low modulus regions (thin walls, fins) solidify before thick sections
-           - Once solid, they become RIGID and begin thermal contraction
-        
-        2. MECHANICAL CONSTRAINT PROPAGATION
-           - Solid thin sections are connected to still-mushy thick sections
-           - As thin sections contract, they PULL on the mushy zones
-           - The mushy zone cannot flow to accommodate (too much solid fraction)
-        
-        3. ACCUMULATED STRAIN ALONG SOLID PATHS
-           - Strain = α × ΔT × L_solid_path
-           - Longer solid paths = more accumulated contraction = more strain on mush
-           - T-junctions and L-junctions are critical locations
-        
-        4. BTR VULNERABILITY WINDOW
-           - Voxels are only vulnerable while in the BTR (85-99% solid)
-           - Before BTR: liquid can flow to heal cracks
-           - After BTR: solid has ductility to deform plastically
-        
-        Hot Tear Risk Factors (updated weights):
-        - Mechanical constraint strain from solid neighbors (40%)
-        - Accumulated strain along solid paths (25%)
-        - Geometric stress concentrators (20%)
-        - Differential cooling rate strain (15%)
+        Calculate hot tear susceptibility using the physically-grounded multi-factor model.
+
+        Hot tears form in the Brittle Temperature Range (BTR) when tensile strain
+        exceeds the alloy's ductility. This implementation follows the plan:
+        1. Build cast/exclude masks
+        2. BTR exposure from fraction-solid history
+        3. Mechanical strain from constrained solid neighbors
+        4. Stress concentration from geometry
+        5. Restraint field from mold/core parameters
+        6. Healing relief from feeding path
+        7. Material/process factor
+        8. Final risk formula with debug components
         """
         n_voxels = len(self.mesh.voxel_centers)
-        
-        # Initialize result arrays
+        hot_tear_params = self.analysis_options.solidification_params.hot_tear
+
         self.hot_tear_risk = np.zeros(n_voxels, dtype=np.float32)
         self.strain_rate = np.zeros(n_voxels, dtype=np.float32)
         self.btr_mask = np.zeros(n_voxels, dtype=bool)
-        
-        # Material properties for hot tearing
+
         hts = self.alloy.hot_tear_susceptibility
+        solid_expansion = getattr(self.alloy, 'solid_thermal_expansion', 1.2e-5)
+        btr_critical_strain = getattr(self.alloy, 'btr_critical_strain', 0.008)
+        healing_factor = getattr(self.alloy, 'hot_tear_healing_factor', 0.55)
         btr_start = self.alloy.btr_fraction_solid_start
         btr_end = self.alloy.btr_fraction_solid_end
-        temp_range = self.alloy.liquidus_temp - self.alloy.solidus_temp
-        thermal_expansion = self.alloy.thermal_expansion
-        
-        print(f"  Hot tear susceptibility (HTS): {hts:.2f}")
-        print(f"  BTR range: {btr_start:.0%} to {btr_end:.0%} solid")
-        print(f"  Thermal expansion: {thermal_expansion:.2e} 1/K")
+        temp_range = float(self.alloy.liquidus_temp - self.alloy.solidus_temp)
+
+        print(f"  Hot tear susceptibility: {hts:.2f}")
+        print(f"  BTR: {btr_start:.0%} to {btr_end:.0%} solid")
+        print(f"  Solid thermal expansion: {solid_expansion:.2e} 1/K")
+        print(f"  BTR critical strain: {btr_critical_strain:.4f}")
+        print(f"  Healing factor: {healing_factor:.2f}")
         print(f"  Freezing range: {temp_range:.1f} °C")
-        
-        # Prepare arrays for JIT functions
-        neighbor_matrix = self.mesh.voxel_neighbors
-        neighbor_matrix_int = np.ascontiguousarray(neighbor_matrix, dtype=np.int64)
+
+        part_types = np.asarray(self.mesh.voxel_part_types, dtype=np.int32) if self.mesh.voxel_part_types is not None else np.zeros(n_voxels, dtype=np.int32)
+
+        cast_mask = (part_types == 0) | (part_types == 4)
+        if not np.any(cast_mask):
+            cast_mask = np.ones(n_voxels, dtype=bool)
+
+        surface_indices = self.mesh.get_surface_voxel_indices()
+        surface_mask = np.zeros(n_voxels, dtype=bool)
+        surface_mask[surface_indices] = True
+
+        exclude_mask = np.zeros(n_voxels, dtype=bool)
+        exclude_mask |= part_types == 1
+        exclude_mask |= part_types == 3
+        exclude_mask |= part_types == 2
+        exclude_mask |= part_types == 4
+        exclude_mask |= surface_mask
+
+        analysis_mask = cast_mask & ~exclude_mask
+
+        neighbors = np.ascontiguousarray(self.mesh.voxel_neighbors, dtype=np.int64)
         voxel_moduli = np.ascontiguousarray(self.mesh.voxel_moduli, dtype=np.float32)
         solidification_times = np.ascontiguousarray(self.solidification_times, dtype=np.float32)
         voxel_centers = np.ascontiguousarray(self.mesh.voxel_centers, dtype=np.float32)
-        
-        # ===== 1. MECHANICAL CONSTRAINT STRAIN (NEW) =====
-        # Strain from already-solidified neighbors pulling on mushy voxels
-        print(f"  Computing mechanical constraint strain (JIT-parallel)...")
-        constraint_strain = compute_constraint_strain_parallel(
+
+        print(f"  Analyzing {np.sum(analysis_mask):,} voxels for hot tear risk")
+
+        history_btr_mask, history_constrained, history_constraint_fraction = self._analyze_btr_history(
+            btr_start, btr_end, self.alloy.critical_fraction_solid
+        )
+        self.btr_mask = history_btr_mask.copy()
+        self.btr_mask[~analysis_mask] = False
+
+        btr_exposure = np.zeros(n_voxels, dtype=np.float32)
+        btr_exposure[history_btr_mask] = 1.0
+
+        max_solid_time = np.max(solidification_times) if np.max(solidification_times) > 0 else 1.0
+        normalized_time = solidification_times / max_solid_time
+
+        has_history = np.any(history_btr_mask)
+        if not has_history:
+            btr_time_start = 0.20
+            btr_time_end = 0.85
+            time_in_btr = (normalized_time >= btr_time_start) & (normalized_time <= btr_time_end)
+            btr_exposure[analysis_mask & time_in_btr] = 1.0
+
+        mechanical_strain = compute_constraint_strain_parallel(
             solidification_times,
             voxel_moduli,
-            neighbor_matrix_int,
-            thermal_expansion,
-            temp_range
+            neighbors,
+            np.float32(solid_expansion),
+            np.float32(temp_range),
         )
-        
-        # Normalize constraint strain
-        max_constraint = np.max(constraint_strain)
-        if max_constraint > 0:
-            normalized_constraint = constraint_strain / max_constraint
-        else:
-            normalized_constraint = constraint_strain
-        
-        print(f"    Constraint strain range: {np.min(constraint_strain):.2e} - {max_constraint:.2e}")
-        
-        # ===== 2. SOLID PATH ACCUMULATED STRAIN (NEW) =====
-        # Strain accumulated along connected solid paths to mushy zones
-        print(f"  Computing solid path strain (JIT-parallel)...")
-        max_path_length = np.max(self.feeding_distances) * 2.0  # Max path = 2x max feeding distance
+
+        strain_index = np.clip(
+            mechanical_strain / max(float(btr_critical_strain), 1e-6),
+            0.0,
+            1.0,
+        )
+
+        modulus_variance = compute_modulus_variance_parallel(voxel_moduli, neighbors)
+
+        voxel_size = float(getattr(self.mesh, "base_voxel_size", 0.5))
+        search_depth = int(getattr(hot_tear_params, "solid_path_search_depth", 8))
+        max_path_length = max(voxel_size * search_depth, voxel_size)
         path_strain = compute_solid_path_strain_parallel(
             solidification_times,
             voxel_centers,
-            neighbor_matrix_int,
-            thermal_expansion,
-            temp_range,
-            max(max_path_length, 1.0)
-        )
-        
-        # Normalize path strain
-        max_path_strain = np.max(path_strain)
-        if max_path_strain > 0:
-            normalized_path_strain = path_strain / max_path_strain
-        else:
-            normalized_path_strain = path_strain
-        
-        print(f"    Path strain range: {np.min(path_strain):.2e} - {max_path_strain:.2e}")
-        
-        # ===== 3. IDENTIFY MUSHY ZONE UNDER CONSTRAINT (NEW) =====
-        # Find voxels that were in BTR while constrained by solid neighbors
-        print(f"  Identifying constrained mushy zones (JIT-parallel)...")
-        # Convert BTR fraction solid to normalized time fractions
-        # BTR start ~0.85 solid corresponds to ~0.3 normalized time (early-mid solidification)
-        # BTR end ~0.99 solid corresponds to ~0.85 normalized time (late solidification)
-        btr_time_start = 0.25  # Conservative: include voxels that might have been in BTR
-        btr_time_end = 0.90
-        
-        mushy_constrained = identify_mushy_zone_voxels_parallel(
-            solidification_times,
-            voxel_moduli,
-            neighbor_matrix_int,
-            btr_time_start,
-            btr_time_end
+            neighbors,
+            np.float32(solid_expansion),
+            np.float32(temp_range),
+            np.float32(max_path_length),
         )
 
-        history_btr_mask, history_constrained, history_constraint_fraction = self._analyze_btr_history(
-            btr_start,
-            btr_end,
-            self.alloy.critical_fraction_solid,
-        )
-        mushy_constrained = mushy_constrained | history_constrained
+        section_change = np.abs(modulus_variance) / (np.max(modulus_variance) + 1e-6)
 
-        print(f"    Mushy-constrained voxels: {np.sum(mushy_constrained):,}")
-        print(f"    History BTR voxels: {np.sum(history_btr_mask):,}")
-        
-        # ===== 4. DIFFERENTIAL COOLING STRAIN (ORIGINAL) =====
-        # Strain rate from cooling rate differential with neighbors
-        if self.thermal_gradients is None or self.cooling_rates is None:
-            # Estimate cooling rates from solidification times
-            time_factor = np.where(
-                self.solidification_times > 0,
-                1.0 / np.maximum(self.solidification_times, 0.1),
-                1.0
-            )
-            self.cooling_rates = (temp_range * time_factor + 0.01).astype(np.float32)
-        
-        cooling_rates = np.ascontiguousarray(self.cooling_rates, dtype=np.float32)
-        
-        print(f"  Computing differential cooling strain (JIT-parallel)...")
-        self.strain_rate = compute_strain_rate_parallel(
-            cooling_rates,
-            neighbor_matrix_int,
-            thermal_expansion
+        stress_concentration = np.ones(n_voxels, dtype=np.float32)
+        max_var = np.max(modulus_variance) if np.max(modulus_variance) > 0 else 1.0
+        norm_variance = modulus_variance / max_var
+        max_path = np.max(path_strain) if np.max(path_strain) > 0 else 1.0
+        stress_concentration = np.clip(
+            1.0 + 0.3 * norm_variance + 0.15 * section_change + 0.10 * (path_strain / max_path),
+            0.75, 1.75
         )
-        
-        # Normalize differential strain
-        max_diff_strain = np.max(self.strain_rate)
-        if max_diff_strain > 0:
-            normalized_diff_strain = self.strain_rate / max_diff_strain
-        else:
-            normalized_diff_strain = self.strain_rate
-        
-        # ===== 5. GEOMETRIC STRESS CONCENTRATORS (ORIGINAL) =====
-        # Section changes where thin meets thick - amplifies strain
-        print(f"  Computing geometric stress concentrators (JIT-parallel)...")
-        modulus_variance = compute_modulus_variance_parallel(voxel_moduli, neighbor_matrix_int)
-        
-        max_variance = np.max(modulus_variance)
-        if max_variance > 0:
-            normalized_variance = modulus_variance / max_variance
-        else:
-            normalized_variance = modulus_variance
-        
-        # ===== 6. BTR MASK (ENHANCED) =====
-        # Combine multiple criteria for BTR vulnerability
-        max_solid_time = np.max(self.solidification_times)
-        if max_solid_time > 0:
-            normalized_time = self.solidification_times / max_solid_time
-        else:
-            normalized_time = np.zeros(n_voxels)
-        
-        # Traditional mid-solidification criterion
-        mid_solidification = (normalized_time > 0.2) & (normalized_time < 0.9)
-        
-        # Near-surface interior voxels
-        surface_indices = self.mesh.get_surface_voxel_indices()
-        surface_mask = np.zeros(n_voxels, dtype=np.bool_)
-        surface_mask[surface_indices] = True
-        
-        feeding_distances = np.ascontiguousarray(
+
+        surface_distances = np.ascontiguousarray(
             self.surface_distances if self.surface_distances is not None else self.feeding_distances,
             dtype=np.float32,
         )
-        near_surface_interior = compute_near_surface_interior_parallel(
-            feeding_distances, surface_mask, 0.5
-        )
-        
-        # Enhanced BTR mask: combines multiple vulnerability indicators
-        # 1. Mushy zone under mechanical constraint (primary)
-        # 2. Mid-solidification AND near surface or high strain (secondary)
-        # 3. High constraint strain even if other criteria not met
-        self.btr_mask = (
-            history_btr_mask |
-            mushy_constrained |
-            (mid_solidification & (near_surface_interior | (normalized_diff_strain > 0.3))) |
-            (np.maximum(normalized_constraint, history_constraint_fraction) > 0.5)
-        )
-        
-        # ===== 7. HOT TEAR RISK CALCULATION (ENHANCED) =====
-        # Updated component weights emphasizing mechanical constraint
-        w_constraint = 0.40   # Mechanical constraint from solid neighbors (NEW - primary)
-        w_path = 0.25         # Accumulated strain along solid paths (NEW)
-        w_geometry = 0.20     # Section change stress concentration
-        w_diff = 0.15         # Differential cooling rate strain (reduced)
-        
-        # Combine all strain components
-        combined_strain = (
-            w_constraint * normalized_constraint +
-            w_path * normalized_path_strain +
-            w_geometry * normalized_variance +
-            w_diff * normalized_diff_strain
-        )
-        combined_strain = np.maximum(combined_strain, history_constraint_fraction * 0.6)
 
-        # Mold restraint from sand strength/collapse behavior.
-        # Neutral at 0.5, higher values increase near-surface restraint in BTR.
-        sand_restraint_index = self._get_sand_restraint_index()
-        restraint_offset = sand_restraint_index - 0.5
-        surface_restraint_weight = self._compute_surface_restraint_weight()
-        btr_restraint_mask = self.btr_mask.astype(np.float32)
-        hot_tear_multiplier = np.clip(
-            1.0 + 0.8 * restraint_offset * surface_restraint_weight * btr_restraint_mask,
-            0.7,
-            1.3,
+        restraint_index = np.zeros(n_voxels, dtype=np.float32)
+
+        mold_restraint_value = getattr(hot_tear_params, 'mold_restraint_index', 0.5)
+        mold_is_default = (mold_restraint_value == 0.5)
+        fallback_value = getattr(self.analysis_options, 'sand_restraint_index', 0.5)
+        mold_restraint = float(mold_restraint_value) if not mold_is_default else float(fallback_value)
+        friction_value = getattr(hot_tear_params, 'metal_mold_friction_index', 0.5)
+        friction_is_default = (friction_value == 0.5)
+        friction = float(friction_value) if not friction_is_default else float(fallback_value)
+        core_restraint = float(getattr(hot_tear_params, 'core_restraint_index', 0.0))
+        restraint_depth = max(0.1, float(getattr(hot_tear_params, 'surface_restraint_depth_inches', 0.5)))
+
+        if surface_distances is not None:
+            surface_weight = np.clip(1.0 - surface_distances / restraint_depth, 0.0, 1.0)
+        else:
+            surface_weight = np.zeros(n_voxels, dtype=np.float32)
+
+        restraint_index = surface_weight * (0.6 * mold_restraint + 0.4 * friction)
+
+        global_restraint = 0.25 * (0.6 * mold_restraint + 0.4 * friction)
+        restraint_index = np.maximum(restraint_index, global_restraint)
+
+        core_voxels = (part_types == 4)
+        if np.any(core_voxels):
+            core_centers = voxel_centers[core_voxels]
+            if len(core_centers) > 0:
+                kdtree = cKDTree(core_centers)
+                distances, _ = kdtree.query(voxel_centers)
+                core_weight = np.clip(1.0 - distances / restraint_depth, 0.0, 1.0)
+                restraint_index = np.maximum(restraint_index, core_restraint * core_weight)
+        elif core_restraint > 0:
+            restraint_index = np.maximum(restraint_index, core_restraint * 0.2)
+
+        restraint_multiplier = np.clip(0.6 + 0.8 * restraint_index, 0.4, 1.4)
+
+        feeding_result = self._ensure_feeding_path_result(self.feeding_fraction_solid)
+
+        healing_capacity = np.zeros(n_voxels, dtype=np.float32)
+        if feeding_result is not None:
+            healing_capacity = np.maximum(
+                healing_capacity,
+                np.asarray(feeding_result.feeding_quality, dtype=np.float32),
+            )
+        history_open_fraction = getattr(self, 'feeding_open_fraction', None)
+        if history_open_fraction is not None:
+            healing_capacity = np.maximum(
+                healing_capacity,
+                np.asarray(history_open_fraction, dtype=np.float32),
+            )
+        healing_capacity *= healing_factor
+
+        healing_relief = float(getattr(hot_tear_params, 'healing_relief_strength', 0.65))
+        healing_penalty = 1.0 - healing_relief * np.clip(healing_capacity, 0.0, 1.0)
+
+        material_factor = float(hts)
+        freezing_range = float(self.alloy.liquidus_temp - self.alloy.solidus_temp)
+        btr_width = btr_end - btr_start
+
+        material_factor *= (1.0 + 0.3 * (btr_width / 0.15))
+
+        impurity_index = float(getattr(hot_tear_params, 'low_melting_impurity_index', 0.0))
+        material_factor *= (1.0 + 0.4 * impurity_index)
+
+        superheat = float(self.alloy.pouring_temp - self.alloy.liquidus_temp)
+        material_factor *= (1.0 + 0.1 * (superheat / 200.0))
+
+        material_factor = np.clip(material_factor, 0.1, 1.5)
+
+        risk = (
+            material_factor
+            * btr_exposure
+            * strain_index
+            * restraint_multiplier
+            * stress_concentration
+            * healing_penalty
         )
-        combined_strain = combined_strain * hot_tear_multiplier
-        
-        # BTR weight: risk is MUCH higher for voxels in BTR/mushy-constrained state
-        # Full risk in BTR, reduced but non-zero outside (may still have been vulnerable)
-        btr_weight = np.where(self.btr_mask, 1.0, 0.15)
-        
-        # Apply material susceptibility and BTR weighting
-        self.hot_tear_risk = np.clip(hts * combined_strain * btr_weight, 0.0, 1.0).astype(np.float32)
-        
-        # ===== 8. IDENTIFY HOT TEAR ZONES =====
-        # Adaptive threshold based on material susceptibility
-        # Higher threshold for low-susceptibility alloys, lower for high-susceptibility
-        risk_threshold = 0.12 * (1.0 - hts * 0.5)  # ~0.12 for WCB, ~0.08 for CF8
-        
-        self.hot_tear_zones = self.hot_tear_risk > risk_threshold
-        
-        # Exclude surface voxels (free surface can't have hot tears - no constraint)
-        surface_indices_set = set(surface_indices)
-        self.hot_tear_zones[list(surface_indices_set)] = False
-        
-        # Exclude chills and risers (external parts)
-        chill_indices = self._get_chill_voxel_indices()
-        self.hot_tear_zones[chill_indices] = False
-        
-        riser_indices = self._get_riser_voxel_indices()
-        self.hot_tear_zones[riser_indices] = False
-        
-        # Count hot tear risk zones
+
+        self.hot_tear_risk = np.clip(risk, 0.0, 1.0).astype(np.float32)
+        self.hot_tear_risk[~analysis_mask] = 0.0
+
+        configured_threshold = float(getattr(hot_tear_params, 'hot_tear_zone_threshold', 0.0))
+        threshold = configured_threshold if configured_threshold > 0 else 0.12 * (1.0 - hts * 0.5)
+        self.hot_tear_zones = self.hot_tear_risk >= threshold
+        self.hot_tear_zones[exclude_mask] = False
+        self.hot_tear_zones[~analysis_mask] = False
+
+        self.hot_tear_components = {
+            "btr_exposure": btr_exposure,
+            "mechanical_strain": mechanical_strain,
+            "strain_index": strain_index,
+            "restraint_index": restraint_index,
+            "stress_concentration": stress_concentration,
+            "healing_capacity": healing_capacity,
+            "material_factor": material_factor,
+            "healing_penalty": healing_penalty,
+        }
+
         self.hot_tear_count = np.sum(self.hot_tear_zones)
-        
-        # Store additional results for visualization/debugging
-        self.constraint_strain = constraint_strain
-        self.path_strain = path_strain
-        self.mushy_constrained = mushy_constrained
-        
-        # Print summary
+
         print(f"  === Hot Tear Analysis Summary ===")
-        print(f"  Strain rate range: {np.min(self.strain_rate):.2e} - {np.max(self.strain_rate):.2e} 1/s")
-        print(f"  Voxels in BTR mask: {np.sum(self.btr_mask):,}")
-        print(f"  Mushy-constrained voxels: {np.sum(mushy_constrained):,}")
-        print(
-            "  Sand restraint index: "
-            f"{sand_restraint_index:.2f} (hot-tear multiplier range: "
-            f"{np.min(hot_tear_multiplier):.3f} - {np.max(hot_tear_multiplier):.3f})"
-        )
-        print(f"  Hot tear risk threshold: {risk_threshold:.3f}")
-        print(f"  Hot tear risk range: {np.min(self.hot_tear_risk):.3f} - {np.max(self.hot_tear_risk):.3f}")
+        print(f"  BTR exposure voxels: {np.sum(btr_exposure > 0):,}")
+        print(f"  Strain index range: {np.min(strain_index):.4f} - {np.max(strain_index):.4f}")
+        print(f"  Restraint multiplier: {np.min(restraint_multiplier):.3f} - {np.max(restraint_multiplier):.3f}")
+        print(f"  Stress concentration: {np.min(stress_concentration):.3f} - {np.max(stress_concentration):.3f}")
+        print(f"  Healing capacity: {np.mean(healing_capacity):.3f}, penalty: {np.mean(healing_penalty):.3f}")
+        print(f"  Material factor: {material_factor:.3f}")
+        print(f"  Hot tear threshold: {threshold:.3f}")
+        print(f"  Risk range: {np.min(self.hot_tear_risk):.4f} - {np.max(self.hot_tear_risk):.4f}")
         print(f"  Hot tear zone voxels: {self.hot_tear_count:,}")
     
     def _calculate_sand_burn_in(self):
@@ -4568,10 +4604,16 @@ class SolidificationEngine:
         # Niyama results
         if self.analysis_options.niyama:
             alloy_key = self.alloy.name.split()[0]
-            results['niyama_threshold'] = NIYAMA_THRESHOLDS.get(alloy_key, 1.0)
+            results['niyama_threshold'] = float(
+                getattr(self.alloy, "niyama_threshold", NIYAMA_THRESHOLDS.get(alloy_key, 1.0))
+            )
             results['niyama_defect_count'] = self.niyama_defect_count
             results['niyama_values'] = self.niyama_values
+            results['niyama_risk'] = self.niyama_risk
             results['niyama_defect_risk'] = self.niyama_defect_risk
+            results['combined_feed_risk'] = self.combined_feed_risk
+            results['niyama_quality'] = self.niyama_quality
+            results['niyama_metadata'] = self.niyama_metadata
             results['thermal_gradients'] = self.thermal_gradients
             results['cooling_rates'] = self.cooling_rates
         

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, cast
 import json
 import os
 
@@ -17,7 +17,7 @@ from core.stl_loader import STLLoader
 from core.surface_extraction import build_surface_payload, normalize_surface_request
 
 
-BASIC_SURFACE_MODES = {"shrinkage", "hotspot", "niyama", "fraction_liquid"}
+BASIC_SURFACE_MODES = {"shrinkage", "hotspot", "niyama", "niyama_raw", "combined_feed_risk", "fraction_liquid"}
 ADVANCED_SURFACE_MODES = {
     "hot_tear",
     "sand_burn_in",
@@ -81,6 +81,7 @@ def build_part_manager(parts_data: list[Dict[str, Any]]) -> PartManager:
         "riser": PartType.RISER,
         "riser_post": PartType.RISER_POST,
         "chill": PartType.CHILL,
+        "core": PartType.CORE,
     }
     for part_data in parts_data:
         filepath = str(part_data.get("filepath", ""))
@@ -125,6 +126,9 @@ def build_fork_artifact(result: PipelineResult) -> Dict[str, Any]:
         "hot_tear": getattr(engine, "hot_tear_risk", None),
         "sand_burn_in": getattr(engine, "sand_burn_in_risk", None),
         "feeding_quality": _invert(getattr(engine, "feeding_quality", None)),
+        "niyama_raw": getattr(engine, "niyama_values", None),
+        "niyama_risk": getattr(engine, "niyama_risk", None),
+        "combined_feed_risk": getattr(engine, "combined_feed_risk", None),
         "thermal_stress": _normalize(getattr(engine, "effective_stress", None)),
         "distortion": _normalize(getattr(engine, "distortion_magnitude", None)),
         "crack_susceptibility": getattr(engine, "crack_susceptibility", None),
@@ -138,10 +142,14 @@ def build_fork_artifact(result: PipelineResult) -> Dict[str, Any]:
         arr = np.asarray(values, dtype=np.float32)
         if len(arr) != len(source_centers):
             continue
-        visualization[key] = arr[indices].tolist()
+        payload_arr = np.where(np.isfinite(arr), arr, 0.0).astype(np.float32)
+        visualization[key] = payload_arr[indices].tolist()
         raw_ranges[key] = _range_payload(arr)
 
     summary = dict(result.result_data)
+    niyama_metadata = getattr(engine, "niyama_metadata", None)
+    if isinstance(niyama_metadata, dict):
+        summary["niyama_metadata"] = dict(niyama_metadata)
     summary["available_modes"] = sorted(
         mode for mode in SURFACE_MODES if mode in visualization or mode in {"shrinkage", "hotspot", "niyama", "fraction_liquid"}
     )
@@ -155,7 +163,7 @@ def build_fork_artifact(result: PipelineResult) -> Dict[str, Any]:
 
 def read_artifact(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as handle:
-        return json.load(handle)
+        return cast(Dict[str, Any], json.load(handle))
 
 
 def write_artifact(path: Path, artifact: Dict[str, Any]) -> None:
@@ -230,13 +238,13 @@ def build_fork_surface_payload(
         raise ValueError(f"Unsupported surface mode: {mode}")
     if normalized_mode == "fraction_liquid":
         return build_voxel_glyph_payload(visualization, normalized_mode, max(threshold, 0.01), time_percent, max_voxels=12_000)
-    if normalized_mode in {"shrinkage", "hotspot", "niyama"}:
+    if normalized_mode in {"shrinkage", "hotspot", "niyama", "niyama_raw", "combined_feed_risk"}:
         return build_voxel_glyph_payload(visualization, normalized_mode, threshold, time_percent, max_voxels=8_000)
     if normalized_mode in BASIC_SURFACE_MODES:
-        return build_surface_payload(
+        return cast(Dict[str, Any], build_surface_payload(
             visualization,
             normalize_surface_request(normalized_mode, threshold, time_percent),
-        )
+        ))
     return build_voxel_glyph_payload(visualization, normalized_mode, threshold, time_percent)
 
 

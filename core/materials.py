@@ -53,6 +53,18 @@ class AlloyProperties:
     # C958 ~0.20 (low - excellent ductility, good feeding)
     hot_tear_susceptibility: float = 0.30
     
+    # Solid-state thermal expansion for mechanical strain calculation (1/K)
+    # Different from liquid thermal expansion used for convection
+    solid_thermal_expansion: float = 1.2e-5
+    
+    # Critical strain for BTR ductility (dimensionless)
+    # Strain above this in the BTR leads to hot tear formation
+    btr_critical_strain: float = 0.008
+    
+    # Healing factor for hot tear risk reduction via feeding (0-1)
+    # Higher values mean better feeding reduces hot tear risk more
+    hot_tear_healing_factor: float = 0.55
+    
     # Brittle Temperature Range (BTR) fraction solid bounds
     # Range where alloy has minimum ductility (semi-solid "mush")
     # Hot tears form in this range when tensile strain exceeds ductility
@@ -308,6 +320,9 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         niyama_threshold=1.0,  # Standard steel threshold
         # Hot tear properties - carbon steel is moderate susceptibility
         hot_tear_susceptibility=0.30,  # Moderate - narrow freezing range helps
+        solid_thermal_expansion=1.2e-5,  # 1/K solid-state thermal expansion
+        btr_critical_strain=0.008,  # Critical strain for BTR ductility
+        hot_tear_healing_factor=0.55,  # Healing factor for feeding relief
         btr_fraction_solid_start=0.90,  # BTR starts at 90% solid
         btr_fraction_solid_end=0.98,    # BTR ends at 98% solid
         # Feeding/permeability properties
@@ -337,6 +352,9 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         niyama_threshold=0.7,  # Lower threshold due to poor conductivity
         # Hot tear properties - stainless is HIGHLY susceptible
         hot_tear_susceptibility=0.65,  # High - wide freezing range, low ductility at BTR
+        solid_thermal_expansion=1.7e-5,  # 1/K solid-state thermal expansion
+        btr_critical_strain=0.004,  # Lower critical strain - more susceptible
+        hot_tear_healing_factor=0.35,  # Poor healing - lower feeding effectiveness
         btr_fraction_solid_start=0.85,  # Earlier onset due to alloy segregation
         btr_fraction_solid_end=0.99,    # Extended BTR due to wide freezing range
         # Feeding/permeability properties - stainless has narrower feeding window
@@ -366,6 +384,9 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         niyama_threshold=1.2,  # Higher threshold (better feeding)
         # Hot tear properties - bronze has LOW susceptibility
         hot_tear_susceptibility=0.20,  # Low - excellent ductility, narrow freezing range
+        solid_thermal_expansion=1.8e-5,  # 1/K solid-state thermal expansion
+        btr_critical_strain=0.012,  # Higher critical strain - more ductile
+        hot_tear_healing_factor=0.75,  # Excellent healing due to good feeding
         btr_fraction_solid_start=0.92,  # Later onset - more ductile at high fs
         btr_fraction_solid_end=0.97,    # Shorter BTR - regains ductility quickly
         # Feeding/permeability properties - bronze has excellent feeding
@@ -395,6 +416,9 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         niyama_threshold=1.1,  # Good feeding and lower defect susceptibility
         # Hot tear properties - copper-nickel has moderate susceptibility
         hot_tear_susceptibility=0.28,  # Moderate susceptibility
+        solid_thermal_expansion=1.6e-5,  # 1/K solid-state thermal expansion
+        btr_critical_strain=0.007,  # Moderate critical strain
+        hot_tear_healing_factor=0.50,  # Moderate healing effectiveness
         btr_fraction_solid_start=0.89,  # Later onset due to good ductility
         btr_fraction_solid_end=0.97,    # Regains ductility more quickly
         # Feeding/permeability properties
@@ -424,6 +448,9 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         niyama_threshold=0.95,
         # Hot tear properties - medium susceptibility
         hot_tear_susceptibility=0.38,
+        solid_thermal_expansion=1.3e-5,  # 1/K solid-state thermal expansion
+        btr_critical_strain=0.006,  # Moderate critical strain
+        hot_tear_healing_factor=0.45,  # Moderate healing effectiveness
         btr_fraction_solid_start=0.87,
         btr_fraction_solid_end=0.98,
         # Feeding/permeability properties
@@ -453,6 +480,9 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         niyama_threshold=0.85,  # Moderate threshold
         # Hot tear properties - nickel alloys are moderate for hot tear
         hot_tear_susceptibility=0.42,
+        solid_thermal_expansion=1.4e-5,  # 1/K solid-state thermal expansion
+        btr_critical_strain=0.005,  # Lower critical strain for Ni-based
+        hot_tear_healing_factor=0.40,  # Moderate healing effectiveness
         btr_fraction_solid_start=0.86,  # Wider/earlier BTR than mild steel
         btr_fraction_solid_end=0.98,
         # Feeding/permeability properties
@@ -482,6 +512,9 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         niyama_threshold=0.9,  # Conservative threshold
         # Hot tear properties - high-alloy materials often higher susceptibility
         hot_tear_susceptibility=0.58,
+        solid_thermal_expansion=1.5e-5,  # 1/K solid-state thermal expansion
+        btr_critical_strain=0.004,  # Low critical strain - high susceptibility
+        hot_tear_healing_factor=0.30,  # Poor healing due to restricted feeding
         btr_fraction_solid_start=0.84,  # Earlier onset with wider BTR
         btr_fraction_solid_end=0.99,
         # Feeding/permeability properties

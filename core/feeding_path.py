@@ -240,6 +240,106 @@ def trace_paths_batch(
     return path_length, path_permeability, feeding_source
 
 
+@jit(nopython=True, cache=True)
+def trace_paths_from_risers_batch(
+    riser_voxel_indices: np.ndarray,
+    fraction_solid: np.ndarray,
+    neighbors: np.ndarray,
+    permeability: np.ndarray,
+    voxel_centers: np.ndarray,
+    permeability_threshold: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    n_voxels = len(fraction_solid)
+    path_length = np.full(n_voxels, -1.0, dtype=np.float32)
+    path_permeability = np.zeros(n_voxels, dtype=np.float64)
+    feeding_source = np.full(n_voxels, -1, dtype=np.int32)
+
+    sorted_risers = np.sort(riser_voxel_indices)
+    for riser_idx in sorted_risers:
+        path_length[riser_idx] = 0.0
+        path_permeability[riser_idx] = 1.0
+        feeding_source[riser_idx] = riser_idx
+
+    visited = np.zeros(n_voxels, dtype=np.bool_)
+    frontier = np.zeros(n_voxels, dtype=np.int64)
+    frontier_size = 0
+
+    for riser_idx in sorted_risers:
+        frontier[frontier_size] = riser_idx
+        frontier_size += 1
+        visited[riser_idx] = True
+
+    max_neighbors = neighbors.shape[1]
+    c_epsilon = 1e-6
+
+    while frontier_size > 0:
+        min_idx = 0
+        min_dist = path_length[frontier[0]]
+        for i in range(1, frontier_size):
+            if path_length[frontier[i]] < min_dist:
+                min_dist = path_length[frontier[i]]
+                min_idx = i
+
+        current = frontier[min_idx]
+        frontier[min_idx] = frontier[frontier_size - 1]
+        frontier_size -= 1
+
+        visited[current] = True
+
+        current_dist = path_length[current]
+        current_source = feeding_source[current]
+        current_min_perm = path_permeability[current]
+
+        if current_dist < 0.0:
+            continue
+
+        for j in range(max_neighbors):
+            neighbor = neighbors[current, j]
+            if neighbor < 0:
+                continue
+            if visited[neighbor]:
+                continue
+
+            if fraction_solid[neighbor] >= 0.99:
+                continue
+
+            neighbor_perm = permeability[neighbor]
+            if neighbor_perm < permeability_threshold:
+                continue
+
+            dx = voxel_centers[neighbor, 0] - voxel_centers[current, 0]
+            dy = voxel_centers[neighbor, 1] - voxel_centers[current, 1]
+            dz = voxel_centers[neighbor, 2] - voxel_centers[current, 2]
+            step_dist = np.sqrt(dx * dx + dy * dy + dz * dz)
+
+            new_dist = current_dist + step_dist
+            new_min_perm = min(current_min_perm, neighbor_perm)
+
+            old_dist = path_length[neighbor]
+
+            if old_dist < 0.0:
+                path_length[neighbor] = new_dist
+                path_permeability[neighbor] = new_min_perm
+                feeding_source[neighbor] = current_source
+                frontier[frontier_size] = neighbor
+                frontier_size += 1
+            else:
+                update = new_dist < old_dist - c_epsilon
+                if not update:
+                    tie_condition = abs(new_dist - old_dist) <= c_epsilon
+                    source_condition = current_source < feeding_source[neighbor]
+                    update = tie_condition and source_condition
+
+                if update:
+                    path_length[neighbor] = new_dist
+                    path_permeability[neighbor] = new_min_perm
+                    feeding_source[neighbor] = current_source
+                    frontier[frontier_size] = neighbor
+                    frontier_size += 1
+
+    return path_length, path_permeability, feeding_source
+
+
 class FeedingPathAnalyzer:
     """
     Analyzes feeding paths from risers to casting voxels.
@@ -298,14 +398,20 @@ class FeedingPathAnalyzer:
             self.dendrite_arm_spacing,
         )
 
-        path_length, path_permeability, feeding_source = trace_paths_batch(
-            riser_mask,
-            fraction_solid,
-            neighbors,
-            permeability,
-            voxel_centers,
-            self.permeability_threshold,
-        )
+        riser_voxel_indices = np.where(riser_mask)[0]
+        if len(riser_voxel_indices) > 0:
+            path_length, path_permeability, feeding_source = trace_paths_from_risers_batch(
+                np.ascontiguousarray(riser_voxel_indices, dtype=np.int64),
+                np.ascontiguousarray(fraction_solid, dtype=np.float64),
+                np.ascontiguousarray(neighbors, dtype=np.int32),
+                permeability,
+                np.ascontiguousarray(voxel_centers, dtype=np.float64),
+                self.permeability_threshold,
+            )
+        else:
+            path_length = np.full(n_voxels, -1.0, dtype=np.float32)
+            path_permeability = np.zeros(n_voxels, dtype=np.float64)
+            feeding_source = np.full(n_voxels, -1, dtype=np.int32)
 
         max_feeding_dist = 10.0  # inches - typical max feeding distance
         feeding_quality = np.zeros(n_voxels, dtype=np.float32)

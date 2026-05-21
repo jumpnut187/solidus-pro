@@ -72,6 +72,10 @@ except ImportError:
 
 FRACTION_LIQUID_TIME_SLIDER_MAX = 1000
 
+FRACTION_LIQUID_PLAYBACK_INTERVAL_MS = 90
+FRACTION_LIQUID_PLAYBACK_BASE_STEP = 10
+FRACTION_LIQUID_PLAYBACK_SPEEDS = (0.5, 1.0, 2.0, 4.0)
+
 
 def should_use_console_translucency(platform: str = sys.platform) -> bool:
     """Windows often fails to show translucent Qt top-level dialogs reliably."""
@@ -119,7 +123,7 @@ class PartsDialog(DraggableDialog):
     open_top_changed = pyqtSignal(str, bool)  # (part_id, is_open_top)
     
     # Part type options
-    PART_TYPE_OPTIONS = ["Cast", "Riser", "Riser Post", "Chill"]
+    PART_TYPE_OPTIONS = ["Cast", "Riser", "Riser Post", "Chill", "Core"]
     
     def __init__(self, parent=None):
         super().__init__(parent, "Parts Manager")
@@ -434,7 +438,8 @@ class PartsDialog(DraggableDialog):
             "cast": "Cast",
             "riser": "Riser", 
             "riser_post": "Riser Post",
-            "chill": "Chill"
+            "chill": "Chill",
+            "core": "Core"
         }
         
         for part_data in parts_data:
@@ -2611,7 +2616,24 @@ class SolidificationParamsDialog(DraggableDialog):
         ("timing", "sand_saturation_time", "Sand Saturation Time", 30.0, 5.0, 300.0, 5.0, 0, "seconds",
          "Time constant for sand heat saturation around riser posts."),
         ("timing", "max_hot_sand_slowdown", "Max Hot Sand Slowdown", 0.6, 0.1, 0.95, 0.01, 2, "fraction",
-         "Maximum slowdown from heat-saturated sand (0.6 = 1.7× slower)."),
+         "Maximum slowdown from heat-saturated sand (0.6 = 1.7x slower)."),
+        # Hot Tear
+        ("hot_tear", "mold_restraint_index", "Mold Restraint Index", 0.5, 0.0, 1.0, 0.01, 2, "fraction",
+         "Mold restraint level at casting surface (0.0=free, 1.0=fully restrained)."),
+        ("hot_tear", "metal_mold_friction_index", "Metal/Mold Friction", 0.5, 0.0, 1.0, 0.01, 2, "fraction",
+         "Friction coefficient at metal-mold interface."),
+        ("hot_tear", "core_restraint_index", "Core Restraint Index", 0.0, 0.0, 1.0, 0.01, 2, "fraction",
+         "Core restraint level at core voxels (0.0=no restraint, 1.0=fully restrained)."),
+        ("hot_tear", "low_melting_impurity_index", "Impurity Index", 0.0, 0.0, 1.0, 0.01, 2, "fraction",
+         "Low-melting impurity level affecting hot tear susceptibility."),
+        ("hot_tear", "hot_tear_zone_threshold", "Hot Tear Threshold", 0.0, 0.0, 1.0, 0.01, 2, "fraction",
+         "Threshold for hot tear zone detection (0.0 = adaptive based on alloy)."),
+        ("hot_tear", "healing_relief_strength", "Healing Relief Strength", 0.65, 0.0, 1.0, 0.01, 2, "fraction",
+         "Feeding healing effectiveness at reducing hot tear risk."),
+        ("hot_tear", "surface_restraint_depth_inches", "Surface Restraint Depth", 0.5, 0.1, 3.0, 0.1, 2, "inches",
+         "Depth from surface where mold restraint applies."),
+        ("hot_tear", "solid_path_search_depth", "Solid Path Search Depth", 8, 2, 20, 1, 0, "voxels",
+         "Search depth for solidification path strain calculation."),
     ]
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -2643,6 +2665,7 @@ class SolidificationParamsDialog(DraggableDialog):
             "air_gap": "Air Gap",
             "thermal_boundary": "Thermal",
             "timing": "Timing",
+            "hot_tear": "Hot Tear",
         }
 
         for grp_key, grp_fields in groups.items():
@@ -2789,6 +2812,13 @@ class MainWindow(QMainWindow):
         # Current visualization mode
         self._current_vis_mode = 'shrinkage'  # 'shrinkage', 'hotspot', 'niyama', 'fraction_liquid'
         
+        # Fraction liquid playback state
+        self._fraction_liquid_playback_timer = QTimer()
+        self._fraction_liquid_playback_timer.setInterval(FRACTION_LIQUID_PLAYBACK_INTERVAL_MS)
+        self._fraction_liquid_playback_timer.timeout.connect(self._on_fraction_liquid_playback_tick)
+        self._is_playing_fraction_liquid = False
+        self._fraction_liquid_playback_speed = 1.0
+
         # Progress tracking
         self.slice_start_times = []
         self.last_slice_index = 0
@@ -3310,6 +3340,30 @@ class MainWindow(QMainWindow):
         )
         self.time_slider.valueChanged.connect(self._update_time_slider)
         time_slider_layout.addWidget(self.time_slider)
+
+        playback_controls_layout = QHBoxLayout()
+        playback_controls_layout.setSpacing(6)
+
+        self.fraction_liquid_play_pause_btn = QPushButton("▶ Play")
+        self.fraction_liquid_play_pause_btn.setToolTip("Play/Pause fraction liquid animation")
+        self.fraction_liquid_play_pause_btn.clicked.connect(self._toggle_fraction_liquid_playback)
+        self.fraction_liquid_play_pause_btn.setEnabled(False)
+        playback_controls_layout.addWidget(self.fraction_liquid_play_pause_btn)
+
+        playback_controls_layout.addWidget(QLabel("Speed:"))
+        self.fraction_liquid_speed_combo = QComboBox()
+        for speed in FRACTION_LIQUID_PLAYBACK_SPEEDS:
+            self.fraction_liquid_speed_combo.addItem(f"{speed}x", speed)
+        self.fraction_liquid_speed_combo.setCurrentIndex(
+            self.fraction_liquid_speed_combo.findData(1.0)
+        )
+        self.fraction_liquid_speed_combo.setToolTip("Playback speed for fraction liquid animation")
+        self.fraction_liquid_speed_combo.currentIndexChanged.connect(self._on_fraction_liquid_speed_changed)
+        playback_controls_layout.addWidget(self.fraction_liquid_speed_combo)
+
+        playback_controls_layout.addStretch()
+        time_slider_layout.addLayout(playback_controls_layout)
+
         self.time_label = QLabel("0.0s (Liquid)")
         time_slider_layout.addWidget(self.time_label)
         self.time_slider_widget.setLayout(time_slider_layout)
@@ -3498,7 +3552,8 @@ class MainWindow(QMainWindow):
             "Cast": PartType.CAST, 
             "Riser": PartType.RISER, 
             "Riser Post": PartType.RISER_POST, 
-            "Chill": PartType.CHILL
+            "Chill": PartType.CHILL,
+            "Core": PartType.CORE,
         }
         
         # Apply all part type changes
@@ -3622,6 +3677,77 @@ class MainWindow(QMainWindow):
             return scaled
         return max(0, min(value, FRACTION_LIQUID_TIME_SLIDER_MAX))
 
+    def _toggle_fraction_liquid_playback(self) -> None:
+        """Toggle play/pause state of fraction liquid playback."""
+        if self._is_playing_fraction_liquid:
+            self._stop_fraction_liquid_playback()
+        else:
+            self._start_fraction_liquid_playback()
+
+    def _start_fraction_liquid_playback(self) -> None:
+        """Start fraction liquid playback."""
+        if self.simulation_worker is None or self.simulation_worker.simulation is None:
+            return
+        sim = self.simulation_worker.simulation
+        if not sim.fraction_liquid_times:
+            return
+
+        self._is_playing_fraction_liquid = True
+        self.fraction_liquid_play_pause_btn.setText("⏸ Pause")
+
+        effective_interval = int(FRACTION_LIQUID_PLAYBACK_INTERVAL_MS / self._fraction_liquid_playback_speed)
+        self._fraction_liquid_playback_timer.setInterval(effective_interval)
+        self._fraction_liquid_playback_timer.start()
+
+    def _stop_fraction_liquid_playback(self) -> None:
+        """Stop fraction liquid playback."""
+        self._is_playing_fraction_liquid = False
+        self.fraction_liquid_play_pause_btn.setText("▶ Play")
+        self._fraction_liquid_playback_timer.stop()
+
+    def _on_fraction_liquid_playback_tick(self) -> None:
+        """Advance the fraction liquid slider by one playback step."""
+        current = self.time_slider.value()
+        step = FRACTION_LIQUID_PLAYBACK_BASE_STEP
+        new_value = self._advance_fraction_liquid_slider_value(current, step, FRACTION_LIQUID_TIME_SLIDER_MAX)
+        self.time_slider.setValue(new_value)
+
+    @staticmethod
+    def _advance_fraction_liquid_slider_value(current: int, step: int, max_value: int) -> int:
+        """Advance slider value with looping.
+
+        The final frame (at max_value) is displayed before the slider wraps to 0.
+        This means advance is only clamped to 0 when next_value > max_value.
+        """
+        next_val = current + step
+        if next_val > max_value:
+            return 0
+        return next_val
+
+    def _on_fraction_liquid_speed_changed(self, index: int) -> None:
+        """Handle speed combo change."""
+        speed_data = self.fraction_liquid_speed_combo.currentData()
+        if speed_data is not None:
+            self._fraction_liquid_playback_speed = float(speed_data)
+        else:
+            self._fraction_liquid_playback_speed = 1.0
+
+        if self._is_playing_fraction_liquid:
+            self._stop_fraction_liquid_playback()
+            self._start_fraction_liquid_playback()
+
+    def _sync_fraction_liquid_playback_controls(self) -> None:
+        """Enable/disable playback controls based on mode and data readiness."""
+        is_fl = self._current_vis_mode == "fraction_liquid"
+        has_data = (
+            self.simulation_worker is not None
+            and self.simulation_worker.simulation is not None
+            and bool(self.simulation_worker.simulation.fraction_liquid_times)
+        )
+        enabled = bool(is_fl and has_data)
+        self.fraction_liquid_play_pause_btn.setEnabled(enabled)
+        self.fraction_liquid_speed_combo.setEnabled(enabled)
+
     def _on_result_type_changed(self, result_type):
         """Handle result type selection change"""
         print(f"DEBUG: Result type changed to: {result_type}")
@@ -3729,6 +3855,9 @@ class MainWindow(QMainWindow):
         # Update visualization with current results
         if self.current_results is not None:
             self._update_results_visualization()
+
+        self._stop_fraction_liquid_playback()
+        self._sync_fraction_liquid_playback_controls()
     
     @staticmethod
     def _get_fraction_liquid_state_label(fraction_liquid) -> str:
@@ -4382,6 +4511,7 @@ class MainWindow(QMainWindow):
             "result_type": result_type,
             "threshold": int(self.threshold_slider.value()),
             "time_slider": int(self.time_slider.value()),
+            "fraction_liquid_playback_speed": self._fraction_liquid_playback_speed,
             "splitter_sizes": list(self.main_splitter.sizes()) if hasattr(self, "main_splitter") else [],
         }
         return build_project_state(
@@ -4455,6 +4585,7 @@ class MainWindow(QMainWindow):
             "riser": PartType.RISER,
             "riser_post": PartType.RISER_POST,
             "chill": PartType.CHILL,
+            "core": PartType.CORE,
         }
 
         self.current_results = None
@@ -4519,6 +4650,24 @@ class MainWindow(QMainWindow):
         self.time_slider.setValue(
             self._coerce_fraction_liquid_slider_value(int(ui_state.get("time_slider", 0)))
         )
+
+        try:
+            saved_speed = float(ui_state.get("fraction_liquid_playback_speed", 1.0))
+            if saved_speed in FRACTION_LIQUID_PLAYBACK_SPEEDS:
+                self._fraction_liquid_playback_speed = saved_speed
+                idx = self.fraction_liquid_speed_combo.findData(saved_speed)
+                if idx >= 0:
+                    self.fraction_liquid_speed_combo.setCurrentIndex(idx)
+            else:
+                self._fraction_liquid_playback_speed = 1.0
+                default_idx = self.fraction_liquid_speed_combo.findData(1.0)
+                if default_idx >= 0:
+                    self.fraction_liquid_speed_combo.setCurrentIndex(default_idx)
+        except (TypeError, ValueError):
+            self._fraction_liquid_playback_speed = 1.0
+            default_idx = self.fraction_liquid_speed_combo.findData(1.0)
+            if default_idx >= 0:
+                self.fraction_liquid_speed_combo.setCurrentIndex(default_idx)
 
         result_type = str(ui_state.get("result_type", "Shrinkage/Porosity"))
         combo_index = self.result_type_combo.findText(result_type)
@@ -4646,7 +4795,10 @@ class MainWindow(QMainWindow):
         
         # Disable controls
         self._set_simulation_running(True)
-        
+
+        # Stop any active fraction liquid playback
+        self._stop_fraction_liquid_playback()
+
         # Update status with memory info
         self.status_label.setText(f"Starting simulation ({validation.estimated_voxels:,} estimated voxels)...")
         
@@ -5005,11 +5157,11 @@ class MainWindow(QMainWindow):
         from core.solidification import NIYAMA_THRESHOLDS
         niyama_threshold = NIYAMA_THRESHOLDS.get(alloy_key, 1.0)
         
-        # Check if we have the enhanced niyama_severity (includes isolation)
-        if hasattr(simulation, 'niyama_severity') and simulation.niyama_severity is not None:
-            # Use combined severity (Niyama + isolation) for better visualization
-            risk_intensity = simulation.niyama_severity.astype(np.float32)
-            print("  Using enhanced Niyama visualization (includes isolation detection)")
+        # Use Niyama-only risk for the Niyama view. Feeding/isolation blending is
+        # exposed separately as combined feed risk in export/web payloads.
+        if hasattr(simulation, 'niyama_risk') and simulation.niyama_risk is not None:
+            risk_intensity = simulation.niyama_risk.astype(np.float32)
+            print("  Using Niyama-only risk visualization")
         else:
             # Fallback: Convert Niyama values to risk intensity (0-1)
             max_niyama = max(np.max(simulation.niyama_values), niyama_threshold * 2)
@@ -5887,4 +6039,5 @@ class MainWindow(QMainWindow):
                 self._cancel_simulation()
             event.ignore()
             return
+        self._stop_fraction_liquid_playback()
         super().closeEvent(event)

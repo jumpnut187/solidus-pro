@@ -33,11 +33,13 @@ class PartType(Enum):
     - RISER: Feeder/riser with exothermic effect - slows cooling, not counted as defect
     - RISER_POST: Riser post/neck connecting riser to casting - behaves like riser but can be distinguished
     - CHILL: External chill - accelerates cooling, promotes directional solidification
+    - CORE: Sand core - internal cavity form, excluded from defect analysis
     """
     CAST = "cast"
     RISER = "riser"
     RISER_POST = "riser_post"
     CHILL = "chill"
+    CORE = "core"
     
     def __str__(self):
         return self.value.replace('_', ' ').title()
@@ -49,6 +51,7 @@ PART_TYPE_COLORS = {
     PartType.RISER: (0.9, 0.6, 0.2),    # Orange (exothermic sleeve color)
     PartType.RISER_POST: (0.8, 0.5, 0.3),  # Darker orange (riser neck/post)
     PartType.CHILL: (0.3, 0.3, 0.5),    # Dark blue-grey (cold metal appearance)
+    PartType.CORE: (0.6, 0.5, 0.4),     # Brownish (sand core appearance)
 }
 
 
@@ -60,6 +63,7 @@ PART_TYPE_KEYWORDS = {
     PartType.RISER_POST: ['riser_post', 'riser post', 'post', 'neck'],  # Check before RISER
     PartType.RISER: ['feeder', 'riser', 'bridge', 'pad'],
     PartType.CHILL: ['chill'],
+    PartType.CORE: ['core', 'sand_core', 'sand core'],
 }
 
 
@@ -72,6 +76,7 @@ def infer_part_type_from_filename(filename: str) -> PartType:
     - RISER_POST: 'riser_post', 'riser post', 'post', 'neck'
     - RISER: 'feeder', 'riser', 'bridge', 'pad'
     - CHILL: 'chill'
+    - CORE: 'core', 'sand_core', 'sand core'
     
     Args:
         filename: The filename (with or without path/extension)
@@ -81,6 +86,11 @@ def infer_part_type_from_filename(filename: str) -> PartType:
     """
     # Get just the filename without path, convert to lowercase
     base_name = os.path.splitext(os.path.basename(filename))[0].lower()
+    
+    # Check for core first (most specific for internal cavities)
+    for keyword in PART_TYPE_KEYWORDS[PartType.CORE]:
+        if keyword in base_name:
+            return PartType.CORE
     
     # Check for chill first (most specific)
     for keyword in PART_TYPE_KEYWORDS[PartType.CHILL]:
@@ -383,13 +393,14 @@ class PartManager:
         Returns:
             List of tuples (transformed_mesh, part_type_int) where:
             - transformed_mesh: The part's transformed trimesh
-            - part_type_int: 0=CAST, 1=RISER, 2=CHILL, 3=RISER_POST
+            - part_type_int: 0=CAST, 1=RISER, 2=CHILL, 3=RISER_POST, 4=CORE
         """
         type_map = {
             PartType.CAST: 0, 
             PartType.RISER: 1, 
             PartType.CHILL: 2,
-            PartType.RISER_POST: 3  # Distinct type for hot sand saturation effect
+            PartType.RISER_POST: 3,  # Distinct type for hot sand saturation effect
+            PartType.CORE: 4  # Sand core - excluded from defect analysis
         }
         result = []
         

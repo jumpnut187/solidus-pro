@@ -18,6 +18,7 @@ except ImportError:
 ProgressCallback = Optional[Callable[[int, int, str], None]]
 DEFAULT_SCHEDULE_CURVE_EXPONENT = 2.0
 THERMAL_COUPLED_SOLVER_MODE = "thermal_coupled"
+NIYAMA_EVAL_FRACTION_SOLID = 0.90
 
 
 def _resolve_solidification_thread_target() -> int:
@@ -69,6 +70,102 @@ def _configure_numba_threads_for_solidification(engine: Any, *, show_progress: b
             f"Numba thread pool configured {active_threads}/{logical_cores} "
             f"(physical cores: {physical_cores})"
         )
+
+
+def _least_squares_gradients_c_per_mm(
+    *,
+    centers_in: np.ndarray,
+    temperatures: np.ndarray,
+    neighbors: np.ndarray,
+    target_indices: np.ndarray,
+    cast_mask: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return local temperature-gradient magnitudes and quality flags."""
+    gradients = np.zeros(len(target_indices), dtype=np.float32)
+    quality = np.zeros(len(target_indices), dtype=np.int8)
+
+    for out_i, voxel_i in enumerate(target_indices):
+        if not cast_mask[voxel_i]:
+            continue
+
+        neighbor_indices = neighbors[voxel_i]
+        in_bounds = (neighbor_indices >= 0) & (neighbor_indices < len(centers_in))
+        candidate_neighbors = neighbor_indices[in_bounds]
+        valid_neighbors = candidate_neighbors[cast_mask[candidate_neighbors]]
+        if len(valid_neighbors) == 0:
+            continue
+
+        offsets_mm = (centers_in[valid_neighbors] - centers_in[voxel_i]) * 25.4
+        valid = np.linalg.norm(offsets_mm, axis=1) > 1e-9
+        offsets_mm = offsets_mm[valid]
+        valid_neighbors = valid_neighbors[valid]
+        if len(valid_neighbors) == 0:
+            continue
+
+        delta_t = temperatures[valid_neighbors] - temperatures[voxel_i]
+        try:
+            grad_vec, _, rank, _ = np.linalg.lstsq(offsets_mm, delta_t, rcond=None)
+            gradients[out_i] = float(np.linalg.norm(grad_vec))
+            quality[out_i] = 2 if rank >= 3 and len(valid_neighbors) >= 4 else 1
+        except np.linalg.LinAlgError:
+            slopes = np.abs(delta_t) / np.maximum(np.linalg.norm(offsets_mm, axis=1), 1e-9)
+            gradients[out_i] = float(np.max(slopes)) if len(slopes) else 0.0
+            quality[out_i] = 1
+
+    return gradients, quality
+
+
+def _capture_niyama_history_step(
+    engine: Any,
+    *,
+    previous_states: np.ndarray,
+    current_states: np.ndarray,
+    previous_temperatures: np.ndarray,
+    temperatures: np.ndarray,
+    cooling_rate_step: np.ndarray,
+) -> None:
+    """Sample raw Niyama inputs once when each cast voxel reaches late solidification."""
+    sampled = getattr(engine, "_thermal_niyama_sampled", None)
+    if sampled is None:
+        return
+
+    eval_fs = float(getattr(engine, "niyama_eval_fraction_solid", NIYAMA_EVAL_FRACTION_SOLID))
+    crossed = (~sampled) & (previous_states < eval_fs) & (current_states >= eval_fs)
+    part_types = getattr(engine.mesh, "voxel_part_types", None)
+    if part_types is not None and len(part_types) == len(crossed):
+        cast_mask = np.asarray(part_types, dtype=np.int32) == 0
+        crossed &= cast_mask
+    else:
+        cast_mask = np.ones(len(crossed), dtype=bool)
+
+    target_indices = np.flatnonzero(crossed).astype(np.int64)
+    if len(target_indices) == 0:
+        return
+
+    denom = np.maximum(current_states[target_indices] - previous_states[target_indices], 1e-9)
+    step_fraction = np.clip((eval_fs - previous_states[target_indices]) / denom, 0.0, 1.0)
+    eval_temperatures = previous_temperatures[target_indices] + (
+        temperatures[target_indices] - previous_temperatures[target_indices]
+    ) * step_fraction
+    eval_times = (engine.time - engine.time_step) + engine.time_step * step_fraction
+
+    gradients, quality = _least_squares_gradients_c_per_mm(
+        centers_in=np.asarray(engine.mesh.voxel_centers, dtype=np.float64),
+        temperatures=np.asarray(temperatures, dtype=np.float64),
+        neighbors=np.asarray(engine.mesh.voxel_neighbors, dtype=np.int32),
+        target_indices=target_indices,
+        cast_mask=cast_mask,
+    )
+    rates = np.maximum(np.asarray(cooling_rate_step[target_indices], dtype=np.float32), 1e-6)
+    niyama = gradients / np.sqrt(rates)
+
+    engine._thermal_niyama_gradient_at_eval[target_indices] = gradients
+    engine._thermal_niyama_cooling_rate_at_eval[target_indices] = rates
+    engine._thermal_niyama_temperature_at_eval[target_indices] = eval_temperatures.astype(np.float32)
+    engine._thermal_niyama_time_at_eval[target_indices] = eval_times.astype(np.float32)
+    engine._thermal_niyama_values_at_eval[target_indices] = niyama.astype(np.float32)
+    engine._thermal_niyama_quality[target_indices] = quality
+    sampled[target_indices] = True
 
 
 def _run_front_based_integration(
@@ -522,6 +619,15 @@ def _run_thermal_coupled_integration(
                 cooling_rate_step.astype(np.float32),
             )
             engine.cooling_rates = np.asarray(engine._thermal_peak_cooling_rates, dtype=np.float32).copy()
+
+        _capture_niyama_history_step(
+            engine,
+            previous_states=previous_states,
+            current_states=current_states,
+            previous_temperatures=previous_temperatures,
+            temperatures=temperatures,
+            cooling_rate_step=cooling_rate_step,
+        )
 
         engine._thermal_latest_temperatures = temperatures.astype(np.float32, copy=True)
         if getattr(engine, "_thermal_heat_model", None) is not None and getattr(engine, "_thermal_voxel_size_m", None):

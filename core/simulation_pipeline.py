@@ -128,6 +128,7 @@ def build_part_manager_from_parts(parts_data: Sequence[Dict[str, Any]]) -> PartM
         "riser": PartType.RISER,
         "riser_post": PartType.RISER_POST,
         "chill": PartType.CHILL,
+        "core": PartType.CORE,
     }
 
     for part_data in parts_data:
@@ -271,9 +272,25 @@ def build_visualization_payload(
             "count": int(np.sum(hotspot > 0.5)),
         }
 
-    if engine.niyama_defect_risk is not None:
-        niyama = np.asarray(engine.niyama_defect_risk).astype(float)
-        visualization_data["niyama"] = niyama[indices].tolist()
+    if engine.niyama_values is not None:
+        niyama_values = np.asarray(engine.niyama_values, dtype=np.float32)
+        if len(niyama_values) == n_voxels:
+            niyama_raw = np.where(np.isfinite(niyama_values), niyama_values, 0.0).astype(np.float32)
+            visualization_data["niyama_raw"] = niyama_raw[indices].tolist()
+    if getattr(engine, "niyama_risk", None) is not None:
+        niyama_risk = np.asarray(engine.niyama_risk, dtype=np.float32)
+        if len(niyama_risk) == n_voxels:
+            visualization_data["niyama"] = niyama_risk[indices].tolist()
+            visualization_data["niyama_risk"] = niyama_risk[indices].tolist()
+            result_data["niyama_stats"] = {
+                "max_risk": float(np.max(niyama_risk)),
+                "mean_risk": float(np.mean(niyama_risk)),
+                "affected_count": int(np.sum(niyama_risk > 0.0)),
+            }
+    if getattr(engine, "combined_feed_risk", None) is not None:
+        combined_feed_risk = np.asarray(engine.combined_feed_risk, dtype=np.float32)
+        if len(combined_feed_risk) == n_voxels:
+            visualization_data["combined_feed_risk"] = combined_feed_risk[indices].tolist()
 
     if voxel_mesh.voxel_states is not None:
         fraction_liquid = 1.0 - np.asarray(voxel_mesh.voxel_states).astype(float)
@@ -387,6 +404,7 @@ def run_pipeline(
     elif (
         analysis_options.solver_mode == SOLVER_MODE_THERMAL_COUPLED
         and _should_use_legacy_solver_default(inputs.analysis_options)
+        and not analysis_options.niyama
         and (
             analysis_options.fraction_liquid
             or analysis_options.hot_tear

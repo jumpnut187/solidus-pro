@@ -241,6 +241,7 @@ export function App() {
                   <option value="riser">Riser</option>
                   <option value="riser_post">Riser Post</option>
                   <option value="chill">Chill</option>
+                  <option value="core">Core</option>
                 </select>
               </label>
               <label>X<input type="number" value={selectedPart.position_x} step="0.1" onChange={(e) => void updateSelectedPart({ position_x: Number(e.target.value) })} /></label>
@@ -281,6 +282,46 @@ export function App() {
             <input type="range" min="0" max="1" step="0.05" value={Number(settings.analysis_options.sand_restraint_index)}
               onChange={(e) => setAnalysis('sand_restraint_index', Number(e.target.value))} />
           </label>
+        </Panel>
+
+        <Panel title="Hot Tear Parameters">
+          {(() => {
+            const hotTearParams = settings.solidification_params.hot_tear ?? {};
+            return <>
+          <label>Mold Restraint {(Number(hotTearParams.mold_restraint_index) || 0).toFixed(2)}
+            <input type="range" min="0" max="1" step="0.05" value={Number(hotTearParams.mold_restraint_index)}
+              onChange={(e) => setSolidification('hot_tear', 'mold_restraint_index', Number(e.target.value))} />
+          </label>
+          <label>Metal/Mold Friction {(Number(hotTearParams.metal_mold_friction_index) || 0).toFixed(2)}
+            <input type="range" min="0" max="1" step="0.05" value={Number(hotTearParams.metal_mold_friction_index)}
+              onChange={(e) => setSolidification('hot_tear', 'metal_mold_friction_index', Number(e.target.value))} />
+          </label>
+          <label>Core Restraint {(Number(hotTearParams.core_restraint_index) || 0).toFixed(2)}
+            <input type="range" min="0" max="1" step="0.05" value={Number(hotTearParams.core_restraint_index)}
+              onChange={(e) => setSolidification('hot_tear', 'core_restraint_index', Number(e.target.value))} />
+          </label>
+          <label>Impurity Index {(Number(hotTearParams.low_melting_impurity_index) || 0).toFixed(2)}
+            <input type="range" min="0" max="1" step="0.05" value={Number(hotTearParams.low_melting_impurity_index)}
+              onChange={(e) => setSolidification('hot_tear', 'low_melting_impurity_index', Number(e.target.value))} />
+          </label>
+          <label>Threshold {Number(hotTearParams.hot_tear_zone_threshold).toFixed(2)} (0=adaptive)
+            <input type="range" min="0" max="1" step="0.05" value={Number(hotTearParams.hot_tear_zone_threshold)}
+              onChange={(e) => setSolidification('hot_tear', 'hot_tear_zone_threshold', Number(e.target.value))} />
+          </label>
+          <label>Healing Relief {(Number(hotTearParams.healing_relief_strength) || 0).toFixed(2)}
+            <input type="range" min="0" max="1" step="0.05" value={Number(hotTearParams.healing_relief_strength)}
+              onChange={(e) => setSolidification('hot_tear', 'healing_relief_strength', Number(e.target.value))} />
+          </label>
+          <label>Surface Depth {Number(hotTearParams.surface_restraint_depth_inches).toFixed(2)} in
+            <input type="range" min="0.1" max="3" step="0.1" value={Number(hotTearParams.surface_restraint_depth_inches)}
+              onChange={(e) => setSolidification('hot_tear', 'surface_restraint_depth_inches', Number(e.target.value))} />
+          </label>
+          <label>Path Search Depth {Number(hotTearParams.solid_path_search_depth)}
+            <input type="range" min="2" max="20" step="1" value={Number(hotTearParams.solid_path_search_depth)}
+              onChange={(e) => setSolidification('hot_tear', 'solid_path_search_depth', Number(e.target.value))} />
+          </label>
+            </>;
+          })()}
         </Panel>
 
         <Panel title="Mesh and Performance">
@@ -413,6 +454,19 @@ export function App() {
   function setPerformance(key: string, value: boolean | number | string) {
     setSettings({ ...settings, performance_options: { ...settings.performance_options, [key]: value } });
   }
+
+  function setSolidification(group: string, key: string, value: number) {
+    setSettings({
+      ...settings,
+      solidification_params: {
+        ...settings.solidification_params,
+        [group]: {
+          ...(settings.solidification_params[group] ?? {}),
+          [key]: value
+        }
+      }
+    });
+  }
 }
 
 function Panel({ title, icon, children }: { title: string; icon?: ReactNode; children: ReactNode }) {
@@ -442,7 +496,7 @@ function countActiveResults(
   }
   const field = resultFields.fields[resultMode];
   if (!field) return null;
-  const cutoff = threshold / 100;
+  const cutoff = resultMode === 'niyama_raw' ? 0.01 : threshold / 100;
   return field.values.reduce((count, value) => count + (Number.isFinite(value) && value >= cutoff ? 1 : 0), 0);
 }
 

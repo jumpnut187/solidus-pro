@@ -6,6 +6,7 @@ import numpy as np
 
 from ui.main_window import MainWindow
 from ui.main_window import FRACTION_LIQUID_TIME_SLIDER_MAX
+from ui.main_window import FRACTION_LIQUID_PLAYBACK_SPEEDS
 
 
 class FractionLiquidStateLabelTests(unittest.TestCase):
@@ -82,6 +83,93 @@ class FractionLiquidStateLabelTests(unittest.TestCase):
         )
 
         self.assertEqual(20.0, mapped)
+
+
+class FractionLiquidPlaybackTests(unittest.TestCase):
+    """Tests for fraction liquid playback helper methods."""
+
+    def test_advance_normal_advance(self) -> None:
+        result = MainWindow._advance_fraction_liquid_slider_value(50, 10, 1000)
+        self.assertEqual(60, result)
+
+    def test_advance_at_zero_wraps(self) -> None:
+        result = MainWindow._advance_fraction_liquid_slider_value(0, 10, 1000)
+        self.assertEqual(10, result)
+
+    def test_advance_reaches_max_then_wraps_next_tick(self) -> None:
+        result = MainWindow._advance_fraction_liquid_slider_value(990, 10, 1000)
+        self.assertEqual(1000, result)
+        next_result = MainWindow._advance_fraction_liquid_slider_value(1000, 10, 1000)
+        self.assertEqual(0, next_result)
+
+    def test_advance_exceeds_max_wraps_immediately(self) -> None:
+        result = MainWindow._advance_fraction_liquid_slider_value(995, 10, 1000)
+        self.assertEqual(0, result)
+
+    def test_advance_at_max_wraps_next_tick(self) -> None:
+        result = MainWindow._advance_fraction_liquid_slider_value(1000, 10, 1000)
+        self.assertEqual(0, result)
+
+    def test_playback_speeds_constant_contains_expected_values(self) -> None:
+        self.assertIn(0.5, FRACTION_LIQUID_PLAYBACK_SPEEDS)
+        self.assertIn(1.0, FRACTION_LIQUID_PLAYBACK_SPEEDS)
+        self.assertIn(2.0, FRACTION_LIQUID_PLAYBACK_SPEEDS)
+        self.assertIn(4.0, FRACTION_LIQUID_PLAYBACK_SPEEDS)
+
+    def test_speed_handler_invalid_data_sets_1(self) -> None:
+        mw = MainWindow.__new__(MainWindow)
+        mw._fraction_liquid_playback_speed = 2.0
+        mw._is_playing_fraction_liquid = False
+        mw.fraction_liquid_speed_combo = _FakeCombo(None)
+        mw._stop_fraction_liquid_playback = _nop
+        mw._start_fraction_liquid_playback = _nop
+        mw._on_fraction_liquid_speed_changed(0)
+        self.assertEqual(1.0, mw._fraction_liquid_playback_speed)
+
+    def test_speed_handler_valid_data_updates_speed(self) -> None:
+        mw = MainWindow.__new__(MainWindow)
+        mw._fraction_liquid_playback_speed = 1.0
+        mw._is_playing_fraction_liquid = False
+        mw.fraction_liquid_speed_combo = _FakeCombo(2.0)
+        mw._stop_fraction_liquid_playback = _nop
+        mw._start_fraction_liquid_playback = _nop
+        mw._on_fraction_liquid_speed_changed(0)
+        self.assertEqual(2.0, mw._fraction_liquid_playback_speed)
+
+    def test_speed_handler_while_playing_triggers_stop_start(self) -> None:
+        mw = MainWindow.__new__(MainWindow)
+        mw._fraction_liquid_playback_speed = 1.0
+        mw._is_playing_fraction_liquid = True
+        mw.fraction_liquid_speed_combo = _FakeCombo(4.0)
+        stop_called = False
+        start_called = False
+
+        def stub_stop():
+            nonlocal stop_called
+            stop_called = True
+
+        def stub_start():
+            nonlocal start_called
+            start_called = True
+
+        mw._stop_fraction_liquid_playback = stub_stop
+        mw._start_fraction_liquid_playback = stub_start
+        mw._on_fraction_liquid_speed_changed(0)
+
+        self.assertTrue(stop_called)
+        self.assertTrue(start_called)
+
+
+class _FakeCombo:
+    def __init__(self, data):
+        self._data = data
+
+    def currentData(self):
+        return self._data
+
+
+def _nop():
+    pass
 
 
 if __name__ == "__main__":

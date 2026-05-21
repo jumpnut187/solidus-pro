@@ -52,7 +52,7 @@ def _run_pipeline_with_patched_memory(
     options = {
         "shrinkage": True,
         "hotspot": True,
-        "niyama": True,
+        "niyama": False,
         "fraction_liquid": True,
         "hot_tear": False,
     }
@@ -149,6 +149,15 @@ class FractionLiquidTimingConsistencyTests(unittest.TestCase):
             env={"CASTSIM_DEFAULT_SOLVER_MODE": "thermal_coupled"},
         )
         self.assertEqual(engine._get_solver_mode(), SOLVER_MODE_THERMAL_COUPLED)
+
+    def test_niyama_enabled_uses_thermal_solver_default(self) -> None:
+        engine = _run_pipeline_with_patched_memory(
+            "sample_stl_files/block_2inch.stl",
+            analysis_options={"niyama": True},
+            env={},
+        )
+        self.assertEqual(engine._get_solver_mode(), SOLVER_MODE_THERMAL_COUPLED)
+        self.assertEqual(engine.niyama_metadata["source"], "thermal_history")
 
 
 class LargeModulusScheduleRegressionTests(unittest.TestCase):

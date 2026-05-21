@@ -1,4 +1,4 @@
-export type PartType = 'cast' | 'riser' | 'riser_post' | 'chill';
+export type PartType = 'cast' | 'riser' | 'riser_post' | 'chill' | 'core';
 
 export type MeshData = {
   vertices: number[];

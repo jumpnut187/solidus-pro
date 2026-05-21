@@ -66,6 +66,16 @@ export const solidificationDefaults = {
     max_simulation_time: 14400,
     sand_saturation_time: 30,
     max_hot_sand_slowdown: 0.6
+  },
+  hot_tear: {
+    mold_restraint_index: 0.5,
+    metal_mold_friction_index: 0.5,
+    core_restraint_index: 0.0,
+    low_melting_impurity_index: 0.0,
+    hot_tear_zone_threshold: 0.0,
+    healing_relief_strength: 0.65,
+    surface_restraint_depth_inches: 0.5,
+    solid_path_search_depth: 8
   }
 };
 
@@ -85,7 +95,9 @@ export function defaultSettings(): ProjectSettings {
 export const resultModes = [
   { id: 'shrinkage', label: 'Shrinkage / Porosity', color: '#ff3f24' },
   { id: 'hotspot', label: 'Hot Spots', color: '#ff9f1c' },
+  { id: 'niyama_raw', label: 'Raw Niyama', color: '#38bdf8' },
   { id: 'niyama', label: 'Niyama Risk', color: '#b85cff' },
+  { id: 'combined_feed_risk', label: 'Combined Feed Risk', color: '#f43f5e' },
   { id: 'fraction_liquid', label: 'Fraction Liquid', color: '#ff5c1f' },
   { id: 'hot_tear', label: 'Hot Tear Risk', color: '#20d3ff' },
   { id: 'sand_burn_in', label: 'Sand Burn-In', color: '#c08142' },
@@ -96,4 +108,3 @@ export const resultModes = [
   { id: 'sdas', label: 'SDAS', color: '#facc15' },
   { id: 'predicted_uts', label: 'Low UTS', color: '#ef4444' }
 ];
-

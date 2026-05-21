@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from core.solidification_loop import run_time_integration
+from core.solidification_loop import _least_squares_gradients_c_per_mm, run_time_integration
 from physics.solidification_physics import SolidificationModel
 
 
@@ -98,6 +98,39 @@ class _DummyEngine:
 
 
 class ThermalCoupledIntegrationTests(unittest.TestCase):
+    def test_niyama_gradient_uses_voxel_offsets_in_mm(self) -> None:
+        centers = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        offsets_mm = centers * 25.4
+        temperatures = 100.0 + 2.0 * offsets_mm[:, 0] + 3.0 * offsets_mm[:, 1] + 4.0 * offsets_mm[:, 2]
+        neighbors = np.array(
+            [
+                [1, 2, 3],
+                [0, -1, -1],
+                [0, -1, -1],
+                [0, -1, -1],
+            ],
+            dtype=np.int32,
+        )
+
+        gradients, quality = _least_squares_gradients_c_per_mm(
+            centers_in=centers,
+            temperatures=temperatures,
+            neighbors=neighbors,
+            target_indices=np.array([0], dtype=np.int64),
+            cast_mask=np.ones(4, dtype=bool),
+        )
+
+        self.assertEqual(int(quality[0]), 1)
+        self.assertAlmostEqual(float(gradients[0]), float(np.sqrt(2.0**2 + 3.0**2 + 4.0**2)), places=5)
+
     def test_thermal_mode_populates_derived_state_and_history(self) -> None:
         engine = _DummyEngine()
 

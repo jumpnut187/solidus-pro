@@ -39,13 +39,16 @@ const partColors: Record<string, Color3> = {
   cast: new Color3(0.62, 0.71, 0.74),
   riser: new Color3(1.0, 0.56, 0.12),
   riser_post: new Color3(0.92, 0.38, 0.12),
-  chill: new Color3(0.18, 0.44, 0.92)
+  chill: new Color3(0.18, 0.44, 0.92),
+  core: new Color3(0.65, 0.45, 0.25)
 };
 
 const resultColors: Record<string, Color3> = {
   shrinkage: new Color3(1, 0.1, 0.04),
   hotspot: new Color3(1, 0.45, 0.02),
+  niyama_raw: new Color3(0.15, 0.75, 1),
   niyama: new Color3(0.72, 0.24, 1),
+  combined_feed_risk: new Color3(1, 0.08, 0.28),
   fraction_liquid: new Color3(1, 0.23, 0.02),
   hot_tear: new Color3(0.05, 0.78, 1),
   sand_burn_in: new Color3(0.74, 0.42, 0.18),
@@ -337,7 +340,7 @@ function deriveActiveVoxels(
   if (!resultFields || resultFields.empty || !resultFields.centers.length) return null;
   const values = valuesForMode(resultFields, resultMode, timePercent);
   if (!values.length) return null;
-  const cutoff = resultMode === 'fraction_liquid' ? 0.01 : threshold / 100;
+  const cutoff = resultMode === 'fraction_liquid' || resultMode === 'niyama_raw' ? 0.01 : threshold / 100;
   const active: Array<{ index: number; value: number }> = [];
   for (let i = 0; i < values.length; i += 1) {
     const value = values[i] ?? 0;

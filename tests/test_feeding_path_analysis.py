@@ -72,6 +72,129 @@ class FeedingPathAnalysisTests(unittest.TestCase):
         self.assertEqual(result.feeding_source[2], -1)
         self.assertAlmostEqual(result.fed_fraction, 1.0 / 3.0, places=6)
 
+    def test_multi_source_uses_nearest_riser(self) -> None:
+        centers = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+                [4.0, 0.0, 0.0],
+            ],
+            dtype=np.float64,
+        )
+        neighbors = np.array(
+            [
+                [1, -1, -1, -1, -1, -1],
+                [0, 2, -1, -1, -1, -1],
+                [1, 3, -1, -1, -1, -1],
+                [2, 4, -1, -1, -1, -1],
+                [3, -1, -1, -1, -1, -1],
+            ],
+            dtype=np.int32,
+        )
+        mesh = _StubMesh(centers, neighbors)
+        analyzer = FeedingPathAnalyzer(mesh, None)
+
+        riser_indices = np.array([0, 4], dtype=np.int64)
+        fraction_solid = np.array([0.5, 0.5, 0.5, 0.5, 0.5], dtype=np.float32)
+
+        result = analyzer.analyze(
+            riser_indices,
+            fraction_solid,
+            show_progress=False,
+        )
+
+        self.assertAlmostEqual(result.path_length[0], 0.0, places=6)
+        self.assertAlmostEqual(result.path_length[1], 1.0, places=6)
+        self.assertAlmostEqual(result.path_length[2], 2.0, places=6)
+        self.assertAlmostEqual(result.path_length[3], 1.0, places=6)
+        self.assertAlmostEqual(result.path_length[4], 0.0, places=6)
+        self.assertEqual(result.feeding_source[0], 0)
+        self.assertEqual(result.feeding_source[1], 0)
+        self.assertEqual(result.feeding_source[2], 0)
+        self.assertEqual(result.feeding_source[3], 4)
+        self.assertEqual(result.feeding_source[4], 4)
+
+    def test_blocked_middle_prevents_downstream_feed(self) -> None:
+        centers = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+            ],
+            dtype=np.float64,
+        )
+        neighbors = np.array(
+            [
+                [1, -1, -1, -1, -1, -1],
+                [0, 2, -1, -1, -1, -1],
+                [1, 3, -1, -1, -1, -1],
+                [2, -1, -1, -1, -1, -1],
+            ],
+            dtype=np.int32,
+        )
+        mesh = _StubMesh(centers, neighbors)
+        analyzer = FeedingPathAnalyzer(mesh, None)
+
+        riser_indices = np.array([0], dtype=np.int64)
+        fraction_solid = np.array([0.5, 0.5, 0.995, 0.5], dtype=np.float32)
+
+        result = analyzer.analyze(
+            riser_indices,
+            fraction_solid,
+            show_progress=False,
+        )
+
+        self.assertAlmostEqual(result.path_length[0], 0.0, places=6)
+        self.assertAlmostEqual(result.path_length[1], 1.0, places=6)
+        self.assertAlmostEqual(result.path_length[2], -1.0, places=6)
+        self.assertAlmostEqual(result.path_length[3], -1.0, places=6)
+        self.assertFalse(bool(result.blocked_voxels[0]))
+        self.assertFalse(bool(result.blocked_voxels[1]))
+        self.assertFalse(bool(result.blocked_voxels[2]))
+        self.assertTrue(bool(result.blocked_voxels[3]))
+
+    def test_branch_path_lengths_are_shortest(self) -> None:
+        centers = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [2.0, 1.0, 0.0],
+                [2.0, 2.0, 0.0],
+            ],
+            dtype=np.float64,
+        )
+        neighbors = np.array(
+            [
+                [1, -1, -1, -1, -1, -1],
+                [0, 2, -1, -1, -1, -1],
+                [1, 3, -1, -1, -1, -1],
+                [2, 4, -1, -1, -1, -1],
+                [3, -1, -1, -1, -1, -1],
+            ],
+            dtype=np.int32,
+        )
+        mesh = _StubMesh(centers, neighbors)
+        analyzer = FeedingPathAnalyzer(mesh, None)
+
+        riser_indices = np.array([0], dtype=np.int64)
+        fraction_solid = np.array([0.5, 0.5, 0.5, 0.5, 0.5], dtype=np.float32)
+
+        result = analyzer.analyze(
+            riser_indices,
+            fraction_solid,
+            show_progress=False,
+        )
+
+        self.assertAlmostEqual(result.path_length[0], 0.0, places=6)
+        self.assertAlmostEqual(result.path_length[1], 1.0, places=6)
+        self.assertAlmostEqual(result.path_length[2], 2.0, places=6)
+        self.assertAlmostEqual(result.path_length[3], 3.0, places=6)
+        self.assertAlmostEqual(result.path_length[4], 4.0, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()

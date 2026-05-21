@@ -105,6 +105,19 @@ class TimingParams:
 
 
 @dataclass
+class HotTearParams:
+    """Parameters for hot tear risk analysis."""
+    mold_restraint_index: float = 0.5
+    metal_mold_friction_index: float = 0.5
+    core_restraint_index: float = 0.0
+    low_melting_impurity_index: float = 0.0
+    hot_tear_zone_threshold: float = 0.0
+    healing_relief_strength: float = 0.65
+    surface_restraint_depth_inches: float = 0.5
+    solid_path_search_depth: int = 8
+
+
+@dataclass
 class SolidificationParameters:
     """
     Top-level container for all tunable solidification simulation parameters.
@@ -116,6 +129,7 @@ class SolidificationParameters:
         air_gap: Mold air-gap development parameters.
         thermal_boundary: Mold/chill temperatures and HTC values.
         timing: Chvorinov time calculation and simulation time bounds.
+        hot_tear: Hot tear risk analysis parameters.
     """
     feeding: FeedingParams = field(default_factory=FeedingParams)
     chill: ChillParams = field(default_factory=ChillParams)
@@ -123,6 +137,7 @@ class SolidificationParameters:
     air_gap: AirGapParams = field(default_factory=AirGapParams)
     thermal_boundary: ThermalBoundaryParams = field(default_factory=ThermalBoundaryParams)
     timing: TimingParams = field(default_factory=TimingParams)
+    hot_tear: HotTearParams = field(default_factory=HotTearParams)
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]]) -> SolidificationParameters:
@@ -206,5 +221,15 @@ class SolidificationParameters:
                 'max_simulation_time': self.timing.max_simulation_time,
                 'sand_saturation_time': self.timing.sand_saturation_time,
                 'max_hot_sand_slowdown': self.timing.max_hot_sand_slowdown,
+            },
+            'hot_tear': {
+                'mold_restraint_index': self.hot_tear.mold_restraint_index,
+                'metal_mold_friction_index': self.hot_tear.metal_mold_friction_index,
+                'core_restraint_index': self.hot_tear.core_restraint_index,
+                'low_melting_impurity_index': self.hot_tear.low_melting_impurity_index,
+                'hot_tear_zone_threshold': self.hot_tear.hot_tear_zone_threshold,
+                'healing_relief_strength': self.hot_tear.healing_relief_strength,
+                'surface_restraint_depth_inches': self.hot_tear.surface_restraint_depth_inches,
+                'solid_path_search_depth': self.hot_tear.solid_path_search_depth,
             },
         }
