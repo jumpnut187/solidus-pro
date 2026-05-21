@@ -159,7 +159,7 @@ class MaterialProperties:
     
     @property
     def volumetric_shrinkage(self) -> float:
-        """Volumetric shrinkage percentage"""
+        """Density-derived volume loss from liquid volume, as a percentage."""
         return (1 - (self.density_liquid / self.density_solid)) * 100
 
 

@@ -5,6 +5,10 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from core.acceleration import (
+    update_solidification_with_feeding_connectivity,
+    update_solidification_with_part_types_parallel,
+)
 from core.feeding_path import FeedingPathAnalyzer
 from core.materials import get_alloy
 from core.microstructure import (
@@ -118,6 +122,36 @@ class LatentHeatRegressionTests(unittest.TestCase):
 
 
 class FeedingEffectivenessRegressionTests(unittest.TestCase):
+    def test_ferrostatic_pressure_uses_traced_riser_component_head(self) -> None:
+        alloy = get_alloy("WCB")
+        dummy = SimpleNamespace()
+        dummy.alloy = alloy
+        dummy.mesh = SimpleNamespace(
+            voxel_centers=np.array(
+                [
+                    [0.0, 0.0, 0.0],
+                    [0.0, 0.0, 2.0],
+                    [4.0, 0.0, 10.0],
+                ],
+                dtype=np.float32,
+            )
+        )
+        dummy.feeding_path_result = SimpleNamespace(
+            feeding_source=np.array([1, 1, 2], dtype=np.int32)
+        )
+        dummy._get_riser_voxel_indices = lambda: np.array([1, 2], dtype=np.int64)
+        dummy._group_risers_by_component = lambda: [
+            np.array([1], dtype=np.int64),
+            np.array([2], dtype=np.int64),
+        ]
+
+        pressure = SolidificationEngine._calculate_ferrostatic_pressure(dummy)
+
+        expected_low_riser_head = alloy.density_liquid * 9.81 * (2.0 * 0.0254)
+        expected_global_head = alloy.density_liquid * 9.81 * (10.0 * 0.0254)
+        self.assertAlmostEqual(float(pressure[0]), expected_low_riser_head, delta=1.0)
+        self.assertLess(float(pressure[0]), expected_global_head * 0.25)
+
     def test_history_aware_feeding_path_uses_freezeoff_cutoff(self) -> None:
         alloy = get_alloy("WCB")
 
@@ -294,6 +328,105 @@ class FeedingEffectivenessRegressionTests(unittest.TestCase):
         effectiveness = SolidificationEngine._calculate_feeding_effectiveness(dummy)
 
         self.assertEqual(effectiveness[0], 1.0)
+
+
+class VerticalSolidificationRegressionTests(unittest.TestCase):
+    def test_part_type_update_freezes_lower_voxels_faster(self) -> None:
+        states = np.array([0.2, 0.2, 1.0], dtype=np.float32)
+        neighbors = np.array(
+            [
+                [2, -1],
+                [2, -1],
+                [-1, -1],
+            ],
+            dtype=np.int32,
+        )
+        moduli = np.ones(3, dtype=np.float32)
+        heights = np.array([0.0, 1.0, 0.5], dtype=np.float32)
+        chill_boost = np.ones(3, dtype=np.float32)
+        riser_slowdown = np.ones(3, dtype=np.float32)
+
+        updated = update_solidification_with_part_types_parallel(
+            states,
+            neighbors,
+            moduli,
+            heights,
+            chill_boost,
+            riser_slowdown,
+            1.0,
+            np.float32(1.0),
+        )
+
+        self.assertGreater(float(updated[0] - states[0]), float(updated[1] - states[1]))
+
+    def test_feeding_connectivity_update_freezes_lower_voxels_faster(self) -> None:
+        states = np.array([0.2, 0.2, 1.0], dtype=np.float32)
+        neighbors = np.array(
+            [
+                [2, -1],
+                [2, -1],
+                [-1, -1],
+            ],
+            dtype=np.int32,
+        )
+        moduli = np.ones(3, dtype=np.float32)
+        heights = np.array([0.0, 1.0, 0.5], dtype=np.float32)
+        chill_boost = np.ones(3, dtype=np.float32)
+        riser_slowdown = np.ones(3, dtype=np.float32)
+        part_types = np.zeros(3, dtype=np.int32)
+
+        updated = update_solidification_with_feeding_connectivity(
+            states,
+            neighbors,
+            moduli,
+            heights,
+            chill_boost,
+            riser_slowdown,
+            part_types,
+            1.0,
+            np.float32(1.0),
+        )
+
+        self.assertGreater(float(updated[0] - states[0]), float(updated[1] - states[1]))
+
+    def test_riser_pipe_modifier_concentrates_shrinkage_upward(self) -> None:
+        dummy = SimpleNamespace()
+        dummy.mesh = SimpleNamespace(
+            voxel_centers=np.array(
+                [
+                    [0.0, 0.0, 0.0],
+                    [0.0, 0.0, 2.0],
+                ],
+                dtype=np.float32,
+            ),
+            voxel_moduli=np.array([1.0, 1.0], dtype=np.float32),
+        )
+        dummy.solidification_times = np.array([100.0, 100.0], dtype=np.float32)
+        dummy.hotspot_intensity = np.zeros(2, dtype=np.float32)
+        dummy._group_risers_by_component = lambda: [np.array([0, 1], dtype=np.int64)]
+        valid_indices = np.array([0, 1], dtype=np.int64)
+        normalized_heights = np.array([0.0, 1.0], dtype=np.float32)
+        local_section_size = np.array([1.0, 1.0], dtype=np.float32)
+        riser_mask = np.array([True, True], dtype=bool)
+        riser_post_mask = np.array([False, False], dtype=bool)
+
+        base_risk, *_rest = SolidificationEngine._compute_shrinkage_base_risk(
+            dummy,
+            valid_indices,
+            normalized_heights,
+            local_section_size,
+            riser_mask,
+            riser_post_mask,
+        )
+        modifier = SolidificationEngine._compute_riser_pipe_modifier(
+            dummy,
+            valid_indices,
+            riser_mask[valid_indices],
+            {0: (0.0, 0.0, 1.0, 0.0, 2.0), 1: (0.0, 0.0, 1.0, 0.0, 2.0)},
+        )
+
+        final_risk = base_risk * modifier
+        self.assertGreater(float(final_risk[1]), float(final_risk[0]))
 
 
 class PorosityRegressionTests(unittest.TestCase):

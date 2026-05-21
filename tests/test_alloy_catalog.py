@@ -35,6 +35,12 @@ class AlloyCatalogTests(unittest.TestCase):
             self.assertGreaterEqual(alloy.hot_tear_susceptibility, 0)
             self.assertLessEqual(alloy.hot_tear_susceptibility, 1)
 
+    def test_volumetric_shrinkage_is_density_derived(self) -> None:
+        for code in get_all_alloy_names():
+            alloy = get_alloy(code)
+            expected = (1.0 - (alloy.density_liquid / alloy.density_solid)) * 100.0
+            self.assertAlmostEqual(alloy.volumetric_shrinkage, expected, places=6)
+
     def test_niyama_thresholds_cover_added_alloys(self) -> None:
         for code in self.added_alloys:
             self.assertIn(code, NIYAMA_THRESHOLDS)

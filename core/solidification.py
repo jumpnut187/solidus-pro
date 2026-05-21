@@ -1845,6 +1845,7 @@ class SolidificationEngine:
             Array of ferro-static pressures in Pa
         """
         voxel_heights = self.mesh.voxel_centers[:, 2]
+        n_voxels = len(voxel_heights)
 
         riser_indices = self._get_riser_voxel_indices()
 
@@ -1853,11 +1854,46 @@ class SolidificationEngine:
         else:
             max_riser_height = float(np.max(voxel_heights))
 
+        head_heights = np.full(n_voxels, max_riser_height, dtype=np.float32)
+        feeding_result = getattr(self, "feeding_path_result", None)
+        feeding_source = getattr(feeding_result, "feeding_source", None)
+        if feeding_source is not None and len(feeding_source) == n_voxels and len(riser_indices) > 0:
+            source_top_heights = np.full(n_voxels, np.nan, dtype=np.float32)
+            riser_groups = self._group_risers_by_component()
+            for riser_group in riser_groups:
+                group_indices = np.asarray(riser_group, dtype=np.int64)
+                group_indices = group_indices[
+                    (group_indices >= 0) & (group_indices < n_voxels)
+                ]
+                if len(group_indices) == 0:
+                    continue
+                group_top = float(np.max(voxel_heights[group_indices]))
+                source_top_heights[group_indices] = group_top
+
+            missing_riser_tops = np.asarray(riser_indices, dtype=np.int64)
+            missing_riser_tops = missing_riser_tops[
+                (missing_riser_tops >= 0) & (missing_riser_tops < n_voxels)
+            ]
+            missing_riser_tops = missing_riser_tops[
+                np.isnan(source_top_heights[missing_riser_tops])
+            ]
+            source_top_heights[missing_riser_tops] = voxel_heights[missing_riser_tops]
+
+            source_indices = np.asarray(feeding_source, dtype=np.int64)
+            valid_source = (
+                (source_indices >= 0)
+                & (source_indices < n_voxels)
+                & np.isfinite(source_top_heights[np.clip(source_indices, 0, n_voxels - 1)])
+            )
+            if np.any(valid_source):
+                safe_sources = np.clip(source_indices[valid_source], 0, n_voxels - 1)
+                head_heights[valid_source] = source_top_heights[safe_sources]
+
         g = 9.81  # m/s²
         inches_to_meters = 0.0254
 
         height_diff_meters = np.maximum(
-            0.0, (max_riser_height - voxel_heights) * inches_to_meters
+            0.0, (head_heights - voxel_heights) * inches_to_meters
         )
         ferrostatic_pressure = (
             self.alloy.density_liquid * g * height_diff_meters
@@ -2037,14 +2073,13 @@ class SolidificationEngine:
         feeding_effectiveness = np.ones(n_voxels, dtype=np.float32)
         darcy_margin = np.ones(n_voxels, dtype=np.float32)
 
-        ferrostatic_pressure = self._calculate_ferrostatic_pressure()
-
         critical_fs = self.alloy.critical_fraction_solid
         transient_fraction_solid = getattr(self, "feeding_fraction_solid", None)
         connected_feeder_mask = self._get_connected_feeder_mask()
         feeding_path_result = self._ensure_feeding_path_result(
             transient_fraction_solid
         ) if transient_fraction_solid is not None else None
+        ferrostatic_pressure = self._calculate_ferrostatic_pressure()
         effective_feeding_distances = SolidificationEngine._get_effective_feeding_distance_field(
             self,
             transient_fraction_solid,

@@ -133,9 +133,11 @@ class AlloyProperties:
     
     @property
     def volumetric_shrinkage(self) -> float:
-        """Volumetric shrinkage percentage (volume loss during solidification)"""
+        """Density-derived volume loss from liquid volume, as a percentage."""
         # Volume decreases as density increases: V_solid/V_liquid = ρ_liquid/ρ_solid
         # Shrinkage = (V_liquid - V_solid)/V_liquid = 1 - (ρ_liquid/ρ_solid)
+        # ``linear_shrinkage`` is catalog metadata; this density relation is the
+        # authoritative value used by the solver for volumetric compensation.
         return (1 - (self.density_liquid / self.density_solid)) * 100
     
     @property

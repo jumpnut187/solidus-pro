@@ -573,11 +573,11 @@ class GPUComputeManager:
             float modulus_effect = 1.0f / (1.0f + modulus * 0.5f);
             
             // Height effect (lower = faster due to gravity/density)
-            float height_effect = 1.0f - height * 0.3f;
+            float height_effect = 1.0f + (1.0f - height) * 0.3f;
             
             // Combined rate with chill boost and riser slowdown
             float rate = neighbor_influence * modulus_effect * height_effect * 
-                        material_factor * time_step * chill / riser;
+                        material_factor * time_step * chill * riser;
             
             new_states[i] = fmin(state + rate, 1.0f);
         }
