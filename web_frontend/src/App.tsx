@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { BabylonViewport } from './components/BabylonViewport';
+import { PartsManagerDialog } from './components/PartsManagerDialog';
 import { api, type MaterialInfo, type ProjectPart, type ResultFieldsPayload } from './lib/api';
 import { defaultSettings, resultModes } from './lib/defaults';
 
@@ -39,6 +40,7 @@ export function App() {
   const [resultFields, setResultFields] = useState<ResultFieldsPayload | null>(null);
   const [meshEstimate, setMeshEstimate] = useState<string>('No mesh estimate');
   const [cameraCommand, setCameraCommand] = useState<string | null>(null);
+  const [showPartsDialog, setShowPartsDialog] = useState(false);
 
   const selectedPart = parts.find((part) => part.id === selectedPartId) ?? null;
   const material = materials.find((item) => item.name === settings.alloy);
@@ -119,6 +121,95 @@ export function App() {
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Unable to update part');
     }
+  }
+
+  async function removePart(partId: string) {
+    if (!projectId) return;
+    setParts((current) => current.filter((p) => p.id !== partId));
+    if (selectedPartId === partId) setSelectedPartId(null);
+    try {
+      await api.deletePart(projectId, partId);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Unable to remove part');
+    }
+  }
+
+  async function clearAllParts() {
+    if (!projectId) return;
+    const ids = parts.map((p) => p.id);
+    setParts([]);
+    setSelectedPartId(null);
+    for (const id of ids) {
+      try {
+        await api.deletePart(projectId, id);
+      } catch {
+        // ignore individual failures
+      }
+    }
+  }
+
+  async function duplicatePart(partId: string) {
+    if (!projectId) return;
+    const part = parts.find((p) => p.id === partId);
+    if (!part) return;
+    try {
+      const response = await api.addPart(projectId, {
+        name: `${part.name} (copy)`,
+        part_type: part.part_type,
+        filepath: part.filepath,
+        position_x: part.position_x,
+        position_y: part.position_y,
+        position_z: part.position_z,
+        rotation_x: part.rotation_x,
+        rotation_y: part.rotation_y,
+        rotation_z: part.rotation_z,
+        scale: part.scale,
+        visible: part.visible,
+        is_open_top: part.is_open_top,
+        meshData: part.meshData
+      });
+      setParts((current) => [...current, { ...response.part, meshData: part.meshData }]);
+      setSelectedPartId(response.part.id);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Unable to duplicate part');
+    }
+  }
+
+  function arrangeGrid() {
+    if (!parts.length || !projectId) return;
+    const count = parts.length;
+    const cols = Math.ceil(Math.sqrt(count));
+    const spacing = Math.max(
+      5,
+      parts.reduce((max, p) => Math.max(max, p.meshData?.bounds?.x[1] ?? 0, p.meshData?.bounds?.y[1] ?? 0), 0) * 2
+    );
+    const updates: Promise<unknown>[] = [];
+    parts.forEach((part, index) => {
+      const row = Math.floor(index / cols);
+      const col = index % cols;
+      const x = (col - (cols - 1) / 2) * spacing;
+      const y = (row - (Math.ceil(count / cols) - 1) / 2) * spacing;
+      const patch = { ...part, position_x: x, position_y: y };
+      setParts((current) => current.map((p) => (p.id === part.id ? patch : p)));
+      updates.push(api.updatePart(projectId, patch));
+    });
+    Promise.all(updates).catch(() => {});
+  }
+
+  function arrangeLine() {
+    if (!parts.length || !projectId) return;
+    const spacing = Math.max(
+      5,
+      parts.reduce((max, p) => Math.max(max, p.meshData?.bounds?.x[1] ?? 0, p.meshData?.bounds?.y[1] ?? 0), 0) * 2.5
+    );
+    const updates: Promise<unknown>[] = [];
+    parts.forEach((part, index) => {
+      const x = (index - (parts.length - 1) / 2) * spacing;
+      const patch = { ...part, position_x: x, position_y: 0 };
+      setParts((current) => current.map((p) => (p.id === part.id ? patch : p)));
+      updates.push(api.updatePart(projectId, patch));
+    });
+    Promise.all(updates).catch(() => {});
   }
 
   async function updateMeshPreview() {
@@ -220,38 +311,14 @@ export function App() {
             <span>{parts.filter((p) => p.part_type === 'riser_post').length} Post</span>
             <span>{parts.filter((p) => p.part_type === 'chill').length} Chill</span>
           </div>
-          <div className="parts-list">
-            {parts.map((part) => (
-              <button key={part.id} className={part.id === selectedPartId ? 'part-row active' : 'part-row'} onClick={() => setSelectedPartId(part.id)}>
-                <Box size={16} />
-                <span>{part.name}</span>
-                <em>{part.part_type.replace('_', ' ')}</em>
-              </button>
-            ))}
-          </div>
-        </Panel>
-
-        <Panel title="Selected Part">
-          {selectedPart ? (
-            <div className="form-grid">
-              <label>Name<input value={selectedPart.name} onChange={(e) => void updateSelectedPart({ name: e.target.value })} /></label>
-              <label>Type
-                <select value={selectedPart.part_type} onChange={(e) => void updateSelectedPart({ part_type: e.target.value as ProjectPart['part_type'] })}>
-                  <option value="cast">Cast</option>
-                  <option value="riser">Riser</option>
-                  <option value="riser_post">Riser Post</option>
-                  <option value="chill">Chill</option>
-                  <option value="core">Core</option>
-                </select>
-              </label>
-              <label>X<input type="number" value={selectedPart.position_x} step="0.1" onChange={(e) => void updateSelectedPart({ position_x: Number(e.target.value) })} /></label>
-              <label>Y<input type="number" value={selectedPart.position_y} step="0.1" onChange={(e) => void updateSelectedPart({ position_y: Number(e.target.value) })} /></label>
-              <label>Z<input type="number" value={selectedPart.position_z} step="0.1" onChange={(e) => void updateSelectedPart({ position_z: Number(e.target.value) })} /></label>
-              <label>Scale<input type="number" min="0.05" value={selectedPart.scale} step="0.05" onChange={(e) => void updateSelectedPart({ scale: Number(e.target.value) })} /></label>
-              <label className="check"><input type="checkbox" checked={selectedPart.is_open_top} onChange={(e) => void updateSelectedPart({ is_open_top: e.target.checked })} /> Open top riser</label>
-              <label className="check"><input type="checkbox" checked={selectedPart.visible} onChange={(e) => void updateSelectedPart({ visible: e.target.checked })} /> Visible</label>
-            </div>
-          ) : <p className="muted">Select a part to edit transforms and casting role.</p>}
+          <button
+            className="run-button"
+            disabled={!parts.length}
+            onClick={() => setShowPartsDialog(true)}
+            style={{ marginTop: 8 }}
+          >
+            <Box size={16} /> Open Parts Manager...
+          </button>
         </Panel>
 
         <Panel title="Material">
@@ -380,6 +447,7 @@ export function App() {
           theme={theme}
           cameraCommand={cameraCommand}
           onCameraHandled={() => setCameraCommand(null)}
+          onPartSelected={(id) => setSelectedPartId(id)}
         />
         <section className="result-console">
           <label>Result
@@ -444,6 +512,22 @@ export function App() {
           </div>
         </section>
       </main>
+
+      {showPartsDialog && (
+        <PartsManagerDialog
+          parts={parts}
+          selectedPartId={selectedPartId}
+          onSelectPart={(id) => setSelectedPartId(id)}
+          onUpdatePart={(patch) => void updateSelectedPart(patch)}
+          onAddParts={(files) => void handleFiles(files)}
+          onRemovePart={(id) => void removePart(id)}
+          onClearAll={() => void clearAllParts()}
+          onDuplicatePart={(id) => void duplicatePart(id)}
+          onArrangeGrid={arrangeGrid}
+          onArrangeLine={arrangeLine}
+          onClose={() => setShowPartsDialog(false)}
+        />
+      )}
     </div>
   );
 
@@ -470,10 +554,13 @@ export function App() {
 }
 
 function Panel({ title, icon, children }: { title: string; icon?: ReactNode; children: ReactNode }) {
+  const [collapsed, setCollapsed] = useState(false);
   return (
     <section className="panel">
-      <div className="panel-title">{icon}<span>{title}</span><ChevronDown size={15} /></div>
-      <div className="panel-body">{children}</div>
+      <div className="panel-title" onClick={() => setCollapsed((c) => !c)} style={{ cursor: 'pointer' }}>
+        {icon}<span>{title}</span><ChevronDown size={15} style={{ transform: collapsed ? 'rotate(-90deg)' : 'rotate(0deg)', transition: 'transform 0.2s ease' }} />
+      </div>
+      {!collapsed && <div className="panel-body">{children}</div>}
     </section>
   );
 }

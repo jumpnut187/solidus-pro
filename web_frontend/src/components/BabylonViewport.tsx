@@ -13,6 +13,7 @@ import {
   MeshBuilder,
   PBRMaterial,
   ParticleSystem,
+  PointerEventTypes,
   Quaternion,
   Scene,
   StandardMaterial,
@@ -33,6 +34,7 @@ type Props = {
   theme: 'dark' | 'light';
   cameraCommand: string | null;
   onCameraHandled: () => void;
+  onPartSelected?: (partId: string | null) => void;
 };
 
 const partColors: Record<string, Color3> = {
@@ -80,7 +82,8 @@ export function BabylonViewport({
   showModel,
   theme,
   cameraCommand,
-  onCameraHandled
+  onCameraHandled,
+  onPartSelected
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sceneRef = useRef<Scene | null>(null);
@@ -89,6 +92,8 @@ export function BabylonViewport({
   const partMeshesRef = useRef<Map<string, Mesh>>(new Map());
   const resultMeshRef = useRef<Mesh | null>(null);
   const particleRef = useRef<ParticleSystem | null>(null);
+  const onPartSelectedRef = useRef(onPartSelected);
+  onPartSelectedRef.current = onPartSelected;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -96,7 +101,7 @@ export function BabylonViewport({
     const engine = new Engine(canvas, true, { antialias: true, stencil: true, preserveDrawingBuffer: true });
     const scene = new Scene(engine);
     scene.clearColor = new Color4(0.015, 0.019, 0.023, 1);
-    scene.useRightHandedSystem = false;
+    scene.useRightHandedSystem = true;
     scene.imageProcessingConfiguration.contrast = 1.35;
     scene.imageProcessingConfiguration.exposure = 1.1;
 
@@ -135,6 +140,19 @@ export function BabylonViewport({
       MeshBuilder.CreateLines(`axis-${index}`, { points: [start, end], colors: [color, color] }, scene);
     });
 
+    const pointerObserver = scene.onPointerObservable.add((pointerInfo) => {
+      if (pointerInfo.type === PointerEventTypes.POINTERUP) {
+        const pickResult = scene.pick(scene.pointerX, scene.pointerY);
+        if (pickResult.hit && pickResult.pickedMesh) {
+          const meshName = pickResult.pickedMesh.name;
+          if (meshName.startsWith('part-')) {
+            const partId = meshName.slice(5);
+            onPartSelectedRef.current?.(partId);
+          }
+        }
+      }
+    });
+
     engine.runRenderLoop(() => scene.render());
     const resize = () => engine.resize();
     window.addEventListener('resize', resize);
@@ -146,6 +164,7 @@ export function BabylonViewport({
 
     return () => {
       window.removeEventListener('resize', resize);
+      scene.onPointerObservable.remove(pointerObserver);
       engine.dispose();
       scene.dispose();
       sceneRef.current = null;

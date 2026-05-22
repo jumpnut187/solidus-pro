@@ -493,3 +493,288 @@ button:disabled {
     grid-column: span 2;
   }
 }
+
+.draggable-dialog {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--panel-strong);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(28px);
+  overflow: hidden;
+}
+
+.dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 60%);
+  cursor: grab;
+  user-select: none;
+}
+
+.dialog-header:active {
+  cursor: grabbing;
+}
+
+.dialog-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: color-mix(in srgb, var(--text), var(--accent-2) 18%);
+  font-weight: 750;
+  font-size: 14px;
+  letter-spacing: 0.02em;
+}
+
+.dialog-close {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--input);
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.dialog-close:hover {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger), transparent 88%);
+}
+
+.dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  overflow: hidden;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.dialog-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dialog-toolbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 7px 11px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--input);
+  color: var(--text);
+  font-weight: 700;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.dialog-toolbtn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--input), white 8%);
+}
+
+.dialog-toolbtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.dialog-iconbtn {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.dialog-iconbtn:hover {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger), transparent 88%);
+}
+
+.dialog-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+}
+
+.dialog-section-title {
+  color: color-mix(in srgb, var(--text), var(--accent-2) 18%);
+  font-weight: 750;
+  font-size: 13px;
+}
+
+.dialog-form {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.dialog-form label:first-child {
+  grid-column: span 3;
+}
+
+.dialog-form label:nth-child(2) {
+  grid-column: span 1;
+}
+
+.dialog-form .check {
+  grid-column: span 3;
+  grid-template-columns: 18px 1fr;
+  align-items: center;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.parts-table-wrap {
+  flex: 1 1 auto;
+  min-height: 80px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+}
+
+.parts-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.parts-table thead th {
+  position: sticky;
+  top: 0;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-strong);
+  color: var(--muted);
+  font-weight: 700;
+  font-size: 11px;
+  text-align: left;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.parts-table tbody tr {
+  cursor: pointer;
+  transition: background 0.1s ease;
+}
+
+.parts-table tbody tr:hover {
+  background: color-mix(in srgb, var(--accent-2), transparent 94%);
+}
+
+.parts-table tbody tr.selected {
+  background: color-mix(in srgb, var(--accent), transparent 84%);
+}
+
+.parts-table tbody td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+
+.parts-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.parts-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--muted);
+}
+
+.parts-empty svg {
+  margin-bottom: 8px;
+  opacity: 0.6;
+}
+
+.parts-empty span {
+  display: block;
+  font-size: 12px;
+}
+
+.part-name-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.part-name-cell svg {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.parts-table select {
+  min-height: 28px;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+
+.parts-table input[type="checkbox"] {
+  width: 16px;
+  min-height: 16px;
+  accent-color: var(--accent);
+}
+
+.dialog-resize-handle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 18px;
+  height: 18px;
+  cursor: nwse-resize;
+  background: transparent;
+  z-index: 10;
+}
+
+.dialog-resize-handle::after {
+  content: '';
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 10px;
+  height: 10px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  border-radius: 0 0 3px 0;
+  opacity: 0.5;
+  transition: opacity 0.15s ease;
+}
+
+.dialog-resize-handle:hover::after {
+  opacity: 1;
+  border-color: var(--accent);
+}
+
+.dialog-footer {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
