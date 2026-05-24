@@ -285,12 +285,27 @@ def build_visualization_payload(
         feed_modulus = np.asarray(local_modulus, dtype=np.float32)
         if len(feed_modulus) == n_voxels:
             feed_modulus_in = np.where(np.isfinite(feed_modulus), feed_modulus, 0.0).astype(np.float32)
+            # Feed modulus is only meaningful for cast metal; exclude chills.
+            part_types = getattr(voxel_mesh, "voxel_part_types", None)
+            if part_types is not None and len(part_types) == n_voxels:
+                chill_mask = np.asarray(part_types, dtype=np.int32) == 2
+                if np.any(chill_mask):
+                    feed_modulus_in = feed_modulus_in.copy()
+                    feed_modulus_in[chill_mask] = 0.0
             visualization_data["feed_modulus"] = feed_modulus_in[indices].tolist()
-            result_data["feed_modulus_stats"] = {
-                "min_in": float(np.min(feed_modulus_in)),
-                "max_in": float(np.max(feed_modulus_in)),
-                "mean_in": float(np.mean(feed_modulus_in)),
-            }
+            non_zero = feed_modulus_in[feed_modulus_in > 0.0]
+            if non_zero.size > 0:
+                result_data["feed_modulus_stats"] = {
+                    "min_in": float(np.min(non_zero)),
+                    "max_in": float(np.max(non_zero)),
+                    "mean_in": float(np.mean(non_zero)),
+                }
+            else:
+                result_data["feed_modulus_stats"] = {
+                    "min_in": 0.0,
+                    "max_in": 0.0,
+                    "mean_in": 0.0,
+                }
 
     if engine.hotspot_intensity is not None:
         hotspot = np.asarray(engine.hotspot_intensity)

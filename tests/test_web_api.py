@@ -155,6 +155,45 @@ class WebApiPayloadTests(unittest.TestCase):
         self.assertIn("feed_modulus", fields["modes"])
         self.assertAlmostEqual(summary["feed_modulus_stats"]["max_in"], 1.0, places=5)
 
+    def test_feed_modulus_excludes_chill_voxels(self) -> None:
+        engine = SimpleNamespace(
+            shrinkage_probability=None,
+            hotspot_intensity=None,
+            niyama_values=None,
+            niyama_risk=None,
+            combined_feed_risk=None,
+            solidification_times=None,
+            fraction_liquid_history=[],
+            local_modulus=np.array([0.25, 0.5, 1.0], dtype=np.float32),
+        )
+        voxel_mesh = SimpleNamespace(
+            voxel_centers=np.array(
+                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+                dtype=np.float32,
+            ),
+            voxel_sizes=np.ones(3, dtype=np.float32),
+            surface_voxels=None,
+            voxel_states=None,
+            voxel_part_types=np.array([0, 2, 0], dtype=np.int32),  # 0=CAST, 2=CHILL
+            voxel_moduli=np.array([0.1, 0.1, 0.1], dtype=np.float32),
+        )
+
+        summary, visualization = build_visualization_payload(
+            engine,
+            voxel_mesh,
+            total_volume=3.0,
+            bounds=np.array([[0.0, 2.0], [0.0, 0.0], [0.0, 0.0]], dtype=np.float32),
+            max_voxels=10,
+        )
+        fields = build_result_fields_payload(visualization, max_points=10)
+
+        # Chill voxel (index 1) must report 0.0 feed modulus.
+        np.testing.assert_allclose(visualization["feed_modulus"], [0.25, 0.0, 1.0])
+        np.testing.assert_allclose(fields["fields"]["feed_modulus"]["values"], [0.25, 0.0, 1.0])
+        # Stats should only reflect non-chill voxels.
+        self.assertAlmostEqual(summary["feed_modulus_stats"]["min_in"], 0.25, places=5)
+        self.assertAlmostEqual(summary["feed_modulus_stats"]["max_in"], 1.0, places=5)
+
 
 class WebApiTests(unittest.TestCase):
     def setUp(self) -> None:

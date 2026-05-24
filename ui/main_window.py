@@ -5176,7 +5176,15 @@ class MainWindow(QMainWindow):
             print("No feed modulus data available")
             return
 
-        finite = feed_modulus_in[np.isfinite(feed_modulus_in)]
+        # Feed modulus is only meaningful for cast metal; exclude chills.
+        part_types = getattr(voxel_mesh, "voxel_part_types", None)
+        if part_types is not None and len(part_types) == len(feed_modulus_in):
+            chill_mask = np.asarray(part_types, dtype=np.int32) == 2
+            if np.any(chill_mask):
+                feed_modulus_in = feed_modulus_in.copy()
+                feed_modulus_in[chill_mask] = 0.0
+
+        finite = feed_modulus_in[np.isfinite(feed_modulus_in) & (feed_modulus_in > 0.0)]
         if finite.size == 0:
             print("No feed modulus data available")
             return

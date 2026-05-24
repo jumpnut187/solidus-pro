@@ -145,6 +145,7 @@ def build_fork_artifact(result: PipelineResult) -> Dict[str, Any]:
         "predicted_uts": _invert(_normalize(getattr(engine, "predicted_uts", None))),
     }
     raw_ranges: Dict[str, Dict[str, float]] = {}
+    part_types = getattr(mesh, "voxel_part_types", None)
     for key, values in field_specs.items():
         if values is None:
             continue
@@ -152,6 +153,12 @@ def build_fork_artifact(result: PipelineResult) -> Dict[str, Any]:
         if len(arr) != len(source_centers):
             continue
         payload_arr = np.where(np.isfinite(arr), arr, 0.0).astype(np.float32)
+        # Feed modulus is only meaningful for cast metal; exclude chills.
+        if key == "feed_modulus" and part_types is not None and len(part_types) == len(source_centers):
+            chill_mask = np.asarray(part_types, dtype=np.int32) == 2
+            if np.any(chill_mask):
+                payload_arr = payload_arr.copy()
+                payload_arr[chill_mask] = 0.0
         visualization[key] = payload_arr[indices].tolist()
         raw_ranges[key] = _range_payload(arr)
 
