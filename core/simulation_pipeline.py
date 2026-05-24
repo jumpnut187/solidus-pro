@@ -255,13 +255,42 @@ def build_visualization_payload(
             visualization_data["surface_voxels"] = surface_voxels[indices].tolist()
 
     if engine.shrinkage_probability is not None:
-        shrinkage = np.asarray(engine.shrinkage_probability)
+        display_fn = getattr(engine, "get_shrinkage_display_intensity", None)
+        if callable(display_fn):
+            shrinkage = np.asarray(display_fn(), dtype=np.float32)
+        else:
+            shrinkage = np.asarray(engine.shrinkage_probability, dtype=np.float32)
+            porosity = getattr(engine, "porosity_probability", None)
+            if porosity is not None:
+                porosity_arr = np.asarray(porosity, dtype=np.float32)
+                if len(porosity_arr) == len(shrinkage):
+                    shrinkage = np.maximum(shrinkage, porosity_arr).astype(np.float32)
+        if len(shrinkage) != n_voxels:
+            shrinkage = np.asarray(engine.shrinkage_probability, dtype=np.float32)
         visualization_data["shrinkage"] = shrinkage[indices].tolist()
+        result_data["shrink_scalar"] = float(getattr(engine, "shrink_scalar", 1.0))
+        result_data["shrink_scalar_formula"] = str(
+            getattr(engine, "shrink_scalar_formula", "adjusted_risk = clamp(raw_risk / shrink_scalar, 0, 1)")
+        )
         result_data["shrinkage_stats"] = {
             "max": float(np.max(shrinkage)),
             "mean": float(np.mean(shrinkage)),
             "affected_count": int(np.sum(shrinkage > 0.05)),
         }
+
+    local_modulus = getattr(engine, "local_modulus", None)
+    if local_modulus is None:
+        local_modulus = getattr(voxel_mesh, "voxel_moduli", None)
+    if local_modulus is not None:
+        feed_modulus = np.asarray(local_modulus, dtype=np.float32)
+        if len(feed_modulus) == n_voxels:
+            feed_modulus_in = np.where(np.isfinite(feed_modulus), feed_modulus, 0.0).astype(np.float32)
+            visualization_data["feed_modulus"] = feed_modulus_in[indices].tolist()
+            result_data["feed_modulus_stats"] = {
+                "min_in": float(np.min(feed_modulus_in)),
+                "max_in": float(np.max(feed_modulus_in)),
+                "mean_in": float(np.mean(feed_modulus_in)),
+            }
 
     if engine.hotspot_intensity is not None:
         hotspot = np.asarray(engine.hotspot_intensity)

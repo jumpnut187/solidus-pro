@@ -5,6 +5,7 @@ import unittest
 
 import numpy as np
 
+from core.solidification_params import SolidificationParameters
 from core.solidification import SolidificationEngine
 from ui.main_window import MainWindow
 
@@ -57,6 +58,48 @@ class ShrinkageDisplayIntensityTests(unittest.TestCase):
 
         porosity = np.asarray(engine.porosity_probability, dtype=np.float32)
         self.assertLess(float(porosity[0]), float(porosity[1]))
+
+    def test_shrink_scalar_above_one_lowers_public_probabilities(self) -> None:
+        engine = SolidificationEngine.__new__(SolidificationEngine)
+        raw_shrinkage = np.array([0.2, 0.8], dtype=np.float32)
+        raw_porosity = np.array([0.4, 0.9], dtype=np.float32)
+        engine.shrinkage_risk = raw_shrinkage.copy()
+        engine.shrinkage_probability = engine.shrinkage_risk
+        engine.porosity_risk = raw_porosity.copy()
+        engine.porosity_probability = engine.porosity_risk
+        engine.analysis_options = SimpleNamespace(
+            solidification_params=SolidificationParameters.from_dict(
+                {"feeding": {"shrink_scalar": 2.0}}
+            )
+        )
+
+        engine._apply_shrink_scalar()
+
+        np.testing.assert_allclose(engine.shrinkage_risk, raw_shrinkage)
+        np.testing.assert_allclose(engine.porosity_risk, raw_porosity)
+        np.testing.assert_allclose(engine.shrinkage_probability, [0.1, 0.4])
+        np.testing.assert_allclose(engine.porosity_probability, [0.2, 0.45])
+        self.assertEqual(
+            engine.shrink_scalar_formula,
+            "adjusted_risk = clamp(raw_risk / shrink_scalar, 0, 1)",
+        )
+
+    def test_shrink_scalar_below_one_raises_public_probabilities_with_clipping(self) -> None:
+        engine = SolidificationEngine.__new__(SolidificationEngine)
+        engine.shrinkage_risk = np.array([0.2, 0.8], dtype=np.float32)
+        engine.shrinkage_probability = engine.shrinkage_risk
+        engine.porosity_risk = np.array([0.4, 0.9], dtype=np.float32)
+        engine.porosity_probability = engine.porosity_risk
+        engine.analysis_options = SimpleNamespace(
+            solidification_params=SolidificationParameters.from_dict(
+                {"feeding": {"shrink_scalar": 0.5}}
+            )
+        )
+
+        engine._apply_shrink_scalar()
+
+        np.testing.assert_allclose(engine.shrinkage_probability, [0.4, 1.0])
+        np.testing.assert_allclose(engine.porosity_probability, [0.8, 1.0])
 
     def test_shrinkage_threshold_auto_lowers_to_show_real_low_risk(self) -> None:
         intensities = np.array([0.0, 0.02, 0.12, 0.05], dtype=np.float32)

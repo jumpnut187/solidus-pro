@@ -365,4 +365,4 @@ def _load_artifact(project_id: str) -> Dict[str, Any] | None:
     artifact_path = repo.get_artifact_path(database_path(), project_id)
     if artifact_path is None or not Path(artifact_path).exists():
         return None
-    return read_artifact(artifact_path)
+    return cast(Dict[str, Any], read_artifact(artifact_path))

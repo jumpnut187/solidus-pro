@@ -27,6 +27,7 @@ import json
 import sys
 import os
 import time
+import gc
 from typing import Optional
 from datetime import datetime
 
@@ -52,6 +53,7 @@ from .workers import MeshSuggestionWorker, SimulationWorker
 from config.hardware_config import hardware
 from core.mesh_ml import MeshRecommendation
 from core.solidification_params import SolidificationParameters
+from core.memory_manager import reset_memory_manager
 
 # Import error logger at top level for consistent logging
 try:
@@ -2562,6 +2564,8 @@ class SolidificationParamsDialog(DraggableDialog):
          "Shrinkage reduction at feeder neck contact with casting."),
         ("feeding", "disconnected_neck_floor", "Disconnected Neck Floor", 0.70, 0.3, 1.0, 0.01, 2, "fraction",
          "Minimum shrinkage reduction for feeder necks not connected to a riser system."),
+        ("feeding", "shrink_scalar", "Shrink Scalar", 1.0, 0.25, 4.0, 0.05, 2, "",
+         "Global Shrinkage/Porosity calibration. Values above 1 reduce displayed risk; values below 1 increase it."),
         # Chills
         ("chill", "max_chill_boost", "Max Chill Boost", 3.0, 1.0, 10.0, 0.1, 1, "multiplier",
          "Maximum solidification acceleration near chills."),
@@ -3297,13 +3301,13 @@ class MainWindow(QMainWindow):
         # Result type selector
         vis_layout.addWidget(QLabel("Result Type:"))
         self.result_type_combo = QComboBox()
-        self.result_type_combo.addItems(["Shrinkage/Porosity", "Hot Spots", "Niyama Criterion", "Fraction Liquid"])
+        self.result_type_combo.addItems(["Shrinkage/Porosity", "Feed Modulus", "Hot Spots", "Niyama Criterion", "Fraction Liquid"])
         self.result_type_combo.currentTextChanged.connect(self._on_result_type_changed)
         self.result_type_combo.setEnabled(False)  # Enable after simulation
         vis_layout.addWidget(self.result_type_combo)
         
         # Threshold/intensity slider
-        self.threshold_label_title = QLabel("Threshold:")
+        self.threshold_label_title = QLabel("X-Ray Level %:")
         vis_layout.addWidget(self.threshold_label_title)
         self.threshold_slider = MarkedSlider(Qt.Horizontal)
         self.threshold_slider.setRange(1, 100)
@@ -3753,6 +3757,7 @@ class MainWindow(QMainWindow):
         print(f"DEBUG: Result type changed to: {result_type}")
         self._current_vis_mode = {
             "Shrinkage/Porosity": "shrinkage",
+            "Feed Modulus": "feed_modulus",
             "Hot Spots": "hotspot",
             "Niyama Criterion": "niyama",
             "Hot Tear Risk": "hot_tear",
@@ -3819,6 +3824,11 @@ class MainWindow(QMainWindow):
             self.threshold_slider.setMarkerPosition(rec_threshold)
             self.threshold_label_title.setText("Min Burn-In Risk %:")
             
+        elif self._current_vis_mode == "feed_modulus":
+            self.threshold_slider.setValue(1)
+            self.threshold_slider.setMarkerPosition(1)
+            self.threshold_label_title.setText("Feed Modulus Range %:")
+            self.visualizer.set_colormap('feedmod')
         elif self._current_vis_mode in ("feeding_quality", "thermal_stress", "distortion", 
                                          "crack_susceptibility", "sdas", "predicted_uts"):
             # Advanced analysis modes
@@ -3843,7 +3853,7 @@ class MainWindow(QMainWindow):
             
             # Update threshold label based on result type
             labels = {
-                "shrinkage": "Min Risk %:",
+                "shrinkage": "X-Ray Level %:",
                 "hotspot": "Min Intensity %:",
             }
             self.threshold_label_title.setText(labels.get(self._current_vis_mode, "Threshold:"))
@@ -4710,6 +4720,32 @@ class MainWindow(QMainWindow):
             self.alloy_info_label.setText(info)
         except:
             self.alloy_info_label.setText("")
+
+    def _purge_previous_simulation_memory(self) -> None:
+        """Release prior simulation memory while preserving loaded parts."""
+        previous_worker = self.simulation_worker
+        if previous_worker is not None and previous_worker.isRunning():
+            return
+
+        self.current_results = None
+
+        if hasattr(self, "result_type_combo"):
+            self.result_type_combo.setEnabled(False)
+
+        if hasattr(self, "visualizer"):
+            self.visualizer.clear_visualization()
+
+        if previous_worker is not None:
+            previous_worker.simulation = None
+            previous_worker.voxel_mesh = None
+            self.simulation_worker = None
+
+        try:
+            reset_memory_manager()
+        except Exception as exc:
+            logger.warning("Failed to reset simulation memory manager", context={"error": str(exc)})
+
+        gc.collect()
     
     def _run_simulation(self):
         """Run solidification simulation"""
@@ -4802,10 +4838,8 @@ class MainWindow(QMainWindow):
         # Update status with memory info
         self.status_label.setText(f"Starting simulation ({validation.estimated_voxels:,} estimated voxels)...")
         
-        # Clear previous results
-        self.current_results = None
-        self.result_type_combo.setEnabled(False)
-        self.visualizer.clear_visualization()
+        # Clear previous simulation outputs without removing loaded parts.
+        self._purge_previous_simulation_memory()
         
         # Show combined mesh (includes all parts: casting, risers, chills)
         combined_mesh = self.part_manager.get_combined_mesh()
@@ -4970,6 +5004,9 @@ class MainWindow(QMainWindow):
         available_types = []
         if self._analysis_options.get('shrinkage', False):
             available_types.append("Shrinkage/Porosity")
+        if self.simulation_worker is not None and self.simulation_worker.simulation is not None:
+            if getattr(self.simulation_worker.simulation, "local_modulus", None) is not None:
+                available_types.append("Feed Modulus")
         if self._analysis_options.get('hotspot', False):
             available_types.append("Hot Spots")
         if self._analysis_options.get('niyama', False):
@@ -5007,6 +5044,7 @@ class MainWindow(QMainWindow):
         if available_types:
             self._current_vis_mode = {
                 "Shrinkage/Porosity": "shrinkage",
+                "Feed Modulus": "feed_modulus",
                 "Hot Spots": "hotspot",
                 "Niyama Criterion": "niyama",
                 "Hot Tear Risk": "hot_tear",
@@ -5037,6 +5075,8 @@ class MainWindow(QMainWindow):
         
         if self._current_vis_mode == 'shrinkage':
             self._visualize_shrinkage(simulation, voxel_mesh, threshold)
+        elif self._current_vis_mode == 'feed_modulus':
+            self._visualize_feed_modulus(simulation, voxel_mesh, threshold)
         elif self._current_vis_mode == 'hotspot':
             self._visualize_hotspots(simulation, voxel_mesh, threshold)
         elif self._current_vis_mode == 'niyama':
@@ -5120,6 +5160,41 @@ class MainWindow(QMainWindow):
             voxel_mesh.voxel_centers,
             voxel_mesh.voxel_sizes,
             intensities
+        )
+
+    def _visualize_feed_modulus(self, simulation, voxel_mesh, threshold):
+        """Visualize local feed modulus in inches."""
+        local_modulus = getattr(simulation, "local_modulus", None)
+        if local_modulus is None:
+            local_modulus = getattr(voxel_mesh, "voxel_moduli", None)
+        if local_modulus is None:
+            print("No feed modulus data available")
+            return
+
+        feed_modulus_in = np.asarray(local_modulus, dtype=np.float32)
+        if len(feed_modulus_in) != len(voxel_mesh.voxel_centers):
+            print("No feed modulus data available")
+            return
+
+        finite = feed_modulus_in[np.isfinite(feed_modulus_in)]
+        if finite.size == 0:
+            print("No feed modulus data available")
+            return
+
+        min_in = float(np.min(finite))
+        max_in = float(np.max(finite))
+        threshold_in = min_in + (float(threshold) * max(max_in - min_in, 0.0))
+        self.visualizer.update_legend("Feed Modulus", min_in, max_in, "in")
+        self.visualizer.load_shrinkage(
+            voxel_mesh.voxel_centers,
+            voxel_mesh.voxel_sizes,
+            np.where(np.isfinite(feed_modulus_in), feed_modulus_in, 0.0).astype(np.float32),
+            threshold_in,
+        )
+        self.visualizer.current_shrinkage_data = (
+            voxel_mesh.voxel_centers,
+            voxel_mesh.voxel_sizes,
+            np.where(np.isfinite(feed_modulus_in), feed_modulus_in, 0.0).astype(np.float32),
         )
     
     def _visualize_hotspots(self, simulation, voxel_mesh, threshold):
@@ -5480,6 +5555,17 @@ class MainWindow(QMainWindow):
             if hasattr(self.visualizer, 'current_shrinkage_data') and \
                self.visualizer.current_shrinkage_data is not None:
                 self.visualizer.update_shrinkage_threshold(threshold)
+        elif mode == 'feed_modulus':
+            if hasattr(self.visualizer, 'current_shrinkage_data') and \
+               self.visualizer.current_shrinkage_data is not None:
+                _, _, feed_modulus_in = self.visualizer.current_shrinkage_data
+                finite = np.asarray(feed_modulus_in, dtype=np.float32)
+                finite = finite[np.isfinite(finite)]
+                if finite.size > 0:
+                    min_in = float(np.min(finite))
+                    max_in = float(np.max(finite))
+                    threshold_in = min_in + (threshold * max(max_in - min_in, 0.0))
+                    self.visualizer.update_shrinkage_threshold(threshold_in)
         elif mode == 'hotspot':
             if hasattr(self.visualizer, 'current_hotspot_data') and \
                self.visualizer.current_hotspot_data is not None:

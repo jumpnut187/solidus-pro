@@ -351,6 +351,20 @@ export function App() {
           </label>
         </Panel>
 
+        <Panel title="Shrinkage Parameters">
+          {(() => {
+            const feedingParams = settings.solidification_params.feeding ?? {};
+            const rawShrinkScalar = Number(feedingParams.shrink_scalar ?? 1);
+            const shrinkScalar = Math.min(4, Math.max(0.25, Number.isFinite(rawShrinkScalar) ? rawShrinkScalar : 1));
+            return (
+              <label>Shrink Scalar {shrinkScalar.toFixed(2)}
+                <input type="range" min="0.25" max="4" step="0.05" value={shrinkScalar}
+                  onChange={(e) => setSolidification('feeding', 'shrink_scalar', Number(e.target.value))} />
+              </label>
+            );
+          })()}
+        </Panel>
+
         <Panel title="Hot Tear Parameters">
           {(() => {
             const hotTearParams = settings.solidification_params.hot_tear ?? {};
@@ -467,7 +481,7 @@ export function App() {
             </select>
           </label>
           {resultMode !== 'fraction_liquid' ? (
-            <label>Threshold {threshold}%
+            <label>{resultMode === 'shrinkage' ? 'X-Ray Level' : resultMode === 'feed_modulus' ? 'Feed Modulus Range' : 'Threshold'} {threshold}%
               <input type="range" min="1" max="100" value={threshold} disabled={!resultsReady} onChange={(e) => setThreshold(Number(e.target.value))} />
             </label>
           ) : (
@@ -583,8 +597,19 @@ function countActiveResults(
   }
   const field = resultFields.fields[resultMode];
   if (!field) return null;
-  const cutoff = resultMode === 'niyama_raw' ? 0.01 : threshold / 100;
+  const cutoff = thresholdForResultMode(resultFields, resultMode, threshold);
   return field.values.reduce((count, value) => count + (Number.isFinite(value) && value >= cutoff ? 1 : 0), 0);
+}
+
+function thresholdForResultMode(resultFields: ResultFieldsPayload, resultMode: string, threshold: number): number {
+  if (resultMode === 'niyama_raw') return 0.01;
+  const fraction = Math.min(1, Math.max(0, threshold / 100));
+  if (resultMode === 'feed_modulus') {
+    const field = resultFields.fields.feed_modulus;
+    if (!field) return 0;
+    return field.min + ((field.max - field.min) * fraction);
+  }
+  return fraction;
 }
 
 function fractionLiquidValues(resultFields: ResultFieldsPayload, timePercent: number): number[] {

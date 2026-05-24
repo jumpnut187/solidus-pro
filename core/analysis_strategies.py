@@ -63,6 +63,11 @@ def run_post_analyses(engine: Any, *, show_progress: bool) -> None:
         stage_start = time.perf_counter()
         engine._calculate_porosity()
         _record("analysis_porosity", stage_start)
+        apply_shrink_scalar = getattr(engine, "_apply_shrink_scalar", None)
+        if callable(apply_shrink_scalar):
+            stage_start = time.perf_counter()
+            apply_shrink_scalar()
+            _record("analysis_shrink_scalar", stage_start)
 
     if engine.analysis_options.hot_tear:
         if show_progress:

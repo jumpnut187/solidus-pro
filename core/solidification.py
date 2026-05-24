@@ -24,7 +24,12 @@ from collections import deque
 from scipy.spatial.distance import cdist
 from scipy.spatial import cKDTree
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from core.solidification_params import SolidificationParameters
+from core.solidification_params import (
+    SHRINK_SCALAR_DEFAULT,
+    SHRINK_SCALAR_MAX,
+    SHRINK_SCALAR_MIN,
+    SolidificationParameters,
+)
 from dataclasses import dataclass, field
 from physics.heat_transfer import BoundaryType, HeatTransferModel
 from physics.solidification_physics import SolidificationModel as ThermalSolidificationModel
@@ -62,6 +67,9 @@ from core.solidification_loop import (
 )
 from core.analysis_strategies import run_post_analyses
 from core.shrinkage_parallel import compute_shrinkage_chunk
+
+
+SHRINK_SCALAR_FORMULA = "adjusted_risk = clamp(raw_risk / shrink_scalar, 0, 1)"
 
 # Import error logger
 try:
@@ -220,6 +228,11 @@ class SolidificationEngine:
         self.shrinkage_probability = None
         self.porosity_risk = None
         self.porosity_probability = None
+        self.raw_shrinkage_probability = None
+        self.raw_porosity_probability = None
+        self.shrink_scalar = SHRINK_SCALAR_DEFAULT
+        self.shrink_scalar_formula = SHRINK_SCALAR_FORMULA
+        self.shrink_scalar_applied = False
         
         # Hot Spot results
         self.hotspot_intensity = None  # 0-1, higher = more severe hot spot
@@ -3185,6 +3198,65 @@ class SolidificationEngine:
             f"blockage mean={np.mean(blockage_severity):.2f}, "
             f"Darcy mean={np.mean(darcy_severity):.2f}"
         )
+
+    def _get_shrink_scalar(self) -> float:
+        params = getattr(self.analysis_options, "solidification_params", None)
+        feeding = getattr(params, "feeding", None)
+        raw_value = getattr(feeding, "shrink_scalar", SHRINK_SCALAR_DEFAULT)
+        try:
+            scalar = float(raw_value)
+        except (TypeError, ValueError):
+            scalar = SHRINK_SCALAR_DEFAULT
+        if scalar != scalar:
+            scalar = SHRINK_SCALAR_DEFAULT
+        return float(np.clip(scalar, SHRINK_SCALAR_MIN, SHRINK_SCALAR_MAX))
+
+    def _apply_shrink_scalar(self) -> None:
+        """
+        Apply the global shrink calibration to public probability arrays.
+
+        Raw engine risk arrays remain available as ``shrinkage_risk`` and
+        ``porosity_risk``. Existing UI and export paths consume the adjusted
+        ``shrinkage_probability`` and ``porosity_probability`` arrays.
+        """
+        scalar = self._get_shrink_scalar()
+        self.shrink_scalar = scalar
+        self.shrink_scalar_formula = SHRINK_SCALAR_FORMULA
+
+        shrinkage_raw = getattr(self, "shrinkage_risk", None)
+        if shrinkage_raw is None:
+            shrinkage_raw = getattr(self, "shrinkage_probability", None)
+        if shrinkage_raw is not None:
+            shrinkage_arr = np.asarray(shrinkage_raw, dtype=np.float32)
+            self.shrinkage_risk = shrinkage_raw
+            self.raw_shrinkage_probability = shrinkage_raw
+            if scalar == SHRINK_SCALAR_DEFAULT:
+                self.shrinkage_probability = shrinkage_raw
+            else:
+                self.shrinkage_probability = np.clip(
+                    shrinkage_arr / scalar,
+                    0.0,
+                    1.0,
+                ).astype(np.float32)
+
+        porosity_raw = getattr(self, "porosity_risk", None)
+        if porosity_raw is None:
+            porosity_raw = getattr(self, "porosity_probability", None)
+        if porosity_raw is not None:
+            porosity_arr = np.asarray(porosity_raw, dtype=np.float32)
+            self.porosity_risk = porosity_raw
+            self.raw_porosity_probability = porosity_raw
+            if scalar == SHRINK_SCALAR_DEFAULT:
+                self.porosity_probability = porosity_raw
+            else:
+                self.porosity_probability = np.clip(
+                    porosity_arr / scalar,
+                    0.0,
+                    1.0,
+                ).astype(np.float32)
+
+        self.shrink_scalar_applied = True
+        print(f"  Shrink scalar: {scalar:.2f} ({SHRINK_SCALAR_FORMULA})")
     
     def _calculate_hotspots(self):
         """
@@ -4622,14 +4694,29 @@ class SolidificationEngine:
         
         # Shrinkage results
         if self.analysis_options.shrinkage:
+            shrink_scalar = getattr(self, 'shrink_scalar', None)
+            if shrink_scalar is None:
+                shrink_scalar = self._get_shrink_scalar()
             results['affected_voxels'] = self.affected_voxel_count
             results['shrinkage_volume'] = self.total_shrinkage_volume
             results['shrinkage_percentage'] = (self.affected_voxel_count / 
                                                len(self.mesh.voxel_centers) * 100)
+            results['shrink_scalar'] = float(shrink_scalar)
+            results['shrink_scalar_formula'] = getattr(self, 'shrink_scalar_formula', SHRINK_SCALAR_FORMULA)
             results['shrinkage_risk'] = self.shrinkage_risk
             results['porosity_risk'] = self.porosity_risk
             results['shrinkage_data'] = self.shrinkage_probability
             results['porosity_data'] = self.porosity_probability
+            results['shrinkage_raw_data'] = (
+                self.raw_shrinkage_probability
+                if self.raw_shrinkage_probability is not None
+                else self.shrinkage_risk
+            )
+            results['porosity_raw_data'] = (
+                self.raw_porosity_probability
+                if self.raw_porosity_probability is not None
+                else self.porosity_risk
+            )
         
         # Hot spot results
         if self.analysis_options.hotspot:

@@ -30,7 +30,8 @@ export const solidificationDefaults = {
     riser_max_reduction: 0.1,
     riser_min_reduction: 1,
     post_contact_reduction: 0.35,
-    disconnected_neck_floor: 0.7
+    disconnected_neck_floor: 0.7,
+    shrink_scalar: 1
   },
   chill: {
     max_chill_boost: 3,
@@ -94,6 +95,7 @@ export function defaultSettings(): ProjectSettings {
 
 export const resultModes = [
   { id: 'shrinkage', label: 'Shrinkage / Porosity', color: '#ff3f24' },
+  { id: 'feed_modulus', label: 'Feed Modulus', color: '#ffd21a' },
   { id: 'hotspot', label: 'Hot Spots', color: '#ff9f1c' },
   { id: 'niyama_raw', label: 'Raw Niyama', color: '#38bdf8' },
   { id: 'niyama', label: 'Niyama Risk', color: '#b85cff' },

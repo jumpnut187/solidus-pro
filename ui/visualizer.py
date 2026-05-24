@@ -79,6 +79,12 @@ COLOR_MAPS = {
         'name': 'Niyama Criterion',
         'colors': [(0.0, (0, 0, 255)), (0.33, (0, 255, 255)), (0.66, (255, 255, 0)), (1.0, (255, 0, 0))],
         'description': 'Blue-Cyan-Yellow-Red gradient for Niyama defect risk'
+    },
+    'feedmod': {
+        'name': 'Feed Modulus',
+        'colors': [(0.0, (0, 210, 230)), (0.25, (0, 70, 230)), (0.50, (210, 0, 120)),
+                   (0.68, (255, 45, 0)), (0.84, (255, 210, 0)), (1.0, (246, 242, 208))],
+        'description': 'MAGMA-style feed modulus scale in inches'
     }
 }
 

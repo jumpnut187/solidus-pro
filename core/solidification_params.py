@@ -43,6 +43,21 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Union
 
 
+SHRINK_SCALAR_MIN = 0.25
+SHRINK_SCALAR_MAX = 4.0
+SHRINK_SCALAR_DEFAULT = 1.0
+
+
+def _clamp_float(value: Any, minimum: float, maximum: float, default: float) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        numeric = default
+    if numeric != numeric:
+        numeric = default
+    return max(minimum, min(maximum, numeric))
+
+
 @dataclass
 class FeedingParams:
     """Parameters for riser feeding distance and shrinkage reduction near risers."""
@@ -52,6 +67,15 @@ class FeedingParams:
     riser_min_reduction: float = 1.0
     post_contact_reduction: float = 0.35
     disconnected_neck_floor: float = 0.70
+    shrink_scalar: float = SHRINK_SCALAR_DEFAULT
+
+    def __post_init__(self) -> None:
+        self.shrink_scalar = _clamp_float(
+            self.shrink_scalar,
+            SHRINK_SCALAR_MIN,
+            SHRINK_SCALAR_MAX,
+            SHRINK_SCALAR_DEFAULT,
+        )
 
 
 @dataclass
@@ -155,11 +179,12 @@ class SolidificationParameters:
             return cls()
 
         def merge_into_dataclass(obj: Any, updates: Dict[str, Any]) -> None:
-            for key, value in updates.items():
+            for raw_key, value in updates.items():
+                key = raw_key.lower() if isinstance(raw_key, str) else raw_key
                 if not hasattr(obj, key):
                     continue
                 current = getattr(obj, key)
-                if isinstance(value, dict) and isinstance(current, field.__class__ if False else object):
+                if isinstance(value, dict):
                     if hasattr(current, '__dataclass_fields__'):
                         merge_into_dataclass(current, value)
                     else:
@@ -169,7 +194,16 @@ class SolidificationParameters:
 
         instance = cls()
         merge_into_dataclass(instance, data)
+        instance._clamp_values()
         return instance
+
+    def _clamp_values(self) -> None:
+        self.feeding.shrink_scalar = _clamp_float(
+            self.feeding.shrink_scalar,
+            SHRINK_SCALAR_MIN,
+            SHRINK_SCALAR_MAX,
+            SHRINK_SCALAR_DEFAULT,
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -178,6 +212,7 @@ class SolidificationParameters:
         Returns:
             Dict matching the from_dict() expected input format.
         """
+        self._clamp_values()
         return {
             'feeding': {
                 'base_feeding_distance': self.feeding.base_feeding_distance,
@@ -186,6 +221,7 @@ class SolidificationParameters:
                 'riser_min_reduction': self.feeding.riser_min_reduction,
                 'post_contact_reduction': self.feeding.post_contact_reduction,
                 'disconnected_neck_floor': self.feeding.disconnected_neck_floor,
+                'shrink_scalar': self.feeding.shrink_scalar,
             },
             'chill': {
                 'max_chill_boost': self.chill.max_chill_boost,

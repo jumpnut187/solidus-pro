@@ -17,7 +17,15 @@ from core.stl_loader import STLLoader
 from core.surface_extraction import build_surface_payload, normalize_surface_request
 
 
-BASIC_SURFACE_MODES = {"shrinkage", "hotspot", "niyama", "niyama_raw", "combined_feed_risk", "fraction_liquid"}
+BASIC_SURFACE_MODES = {
+    "shrinkage",
+    "hotspot",
+    "feed_modulus",
+    "niyama",
+    "niyama_raw",
+    "combined_feed_risk",
+    "fraction_liquid",
+}
 ADVANCED_SURFACE_MODES = {
     "hot_tear",
     "sand_burn_in",
@@ -123,6 +131,7 @@ def build_fork_artifact(result: PipelineResult) -> Dict[str, Any]:
         visualization["part_types"] = np.asarray(mesh.voxel_part_types, dtype=np.int32)[indices].tolist()
 
     field_specs = {
+        "feed_modulus": getattr(engine, "local_modulus", None),
         "hot_tear": getattr(engine, "hot_tear_risk", None),
         "sand_burn_in": getattr(engine, "sand_burn_in_risk", None),
         "feeding_quality": _invert(getattr(engine, "feeding_quality", None)),
@@ -238,7 +247,7 @@ def build_fork_surface_payload(
         raise ValueError(f"Unsupported surface mode: {mode}")
     if normalized_mode == "fraction_liquid":
         return build_voxel_glyph_payload(visualization, normalized_mode, max(threshold, 0.01), time_percent, max_voxels=12_000)
-    if normalized_mode in {"shrinkage", "hotspot", "niyama", "niyama_raw", "combined_feed_risk"}:
+    if normalized_mode in {"shrinkage", "hotspot", "feed_modulus", "niyama", "niyama_raw", "combined_feed_risk"}:
         return build_voxel_glyph_payload(visualization, normalized_mode, threshold, time_percent, max_voxels=8_000)
     if normalized_mode in BASIC_SURFACE_MODES:
         return cast(Dict[str, Any], build_surface_payload(

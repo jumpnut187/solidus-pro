@@ -47,6 +47,7 @@ const partColors: Record<string, Color3> = {
 
 const resultColors: Record<string, Color3> = {
   shrinkage: new Color3(1, 0.1, 0.04),
+  feed_modulus: new Color3(1, 0.82, 0.1),
   hotspot: new Color3(1, 0.45, 0.02),
   niyama_raw: new Color3(0.15, 0.75, 1),
   niyama: new Color3(0.72, 0.24, 1),
@@ -359,7 +360,7 @@ function deriveActiveVoxels(
   if (!resultFields || resultFields.empty || !resultFields.centers.length) return null;
   const values = valuesForMode(resultFields, resultMode, timePercent);
   if (!values.length) return null;
-  const cutoff = resultMode === 'fraction_liquid' || resultMode === 'niyama_raw' ? 0.01 : threshold / 100;
+  const cutoff = thresholdForMode(resultFields, resultMode, threshold);
   const active: Array<{ index: number; value: number }> = [];
   for (let i = 0; i < values.length; i += 1) {
     const value = values[i] ?? 0;
@@ -415,6 +416,17 @@ function valuesForMode(
   const progress = Math.min(1, Math.max(0, timePercent / 100));
   const frontWidth = resultFields.solidification.front_width || 0.075;
   return resultFields.solidification.normalized_times.map((time) => Math.max(0, Math.min(1, (time - progress) / frontWidth)));
+}
+
+function thresholdForMode(resultFields: ResultFieldsPayload, resultMode: string, threshold: number): number {
+  if (resultMode === 'fraction_liquid' || resultMode === 'niyama_raw') return 0.01;
+  const fraction = Math.min(1, Math.max(0, threshold / 100));
+  if (resultMode === 'feed_modulus') {
+    const field = resultFields.fields.feed_modulus;
+    if (!field) return 0;
+    return field.min + ((field.max - field.min) * fraction);
+  }
+  return fraction;
 }
 
 function interpolateFractionLiquidFrame(frames: number[][], framePercents: number[], timePercent: number): number[] {

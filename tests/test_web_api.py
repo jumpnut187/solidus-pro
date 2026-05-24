@@ -5,10 +5,13 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
+import numpy as np
 import trimesh
 from flask import Flask
 
+from core.simulation_pipeline import build_visualization_payload
 from web.services.simulation_queue import SimulationQueueManager
 from web import repository as repo
 from web.payloads import build_fork_surface_payload, build_result_fields_payload, build_volume_payload
@@ -75,6 +78,82 @@ class WebApiPayloadTests(unittest.TestCase):
         self.assertEqual(len(payload["solidification"]["normalized_times"]), 64)
         self.assertEqual(len(payload["fraction_liquid"]["frames"]), 2)
         self.assertEqual(len(payload["fraction_liquid"]["frames"][0]), 64)
+
+    def test_shrinkage_mode_uses_combined_adjusted_risk(self) -> None:
+        shrinkage = np.array([0.1, 0.8, 0.0], dtype=np.float32)
+        porosity = np.array([0.7, 0.2, 0.4], dtype=np.float32)
+        engine = SimpleNamespace(
+            shrinkage_probability=shrinkage,
+            porosity_probability=porosity,
+            shrink_scalar=2.0,
+            shrink_scalar_formula="adjusted_risk = clamp(raw_risk / shrink_scalar, 0, 1)",
+            hotspot_intensity=None,
+            niyama_values=None,
+            niyama_risk=None,
+            combined_feed_risk=None,
+            solidification_times=None,
+            fraction_liquid_history=[],
+        )
+        engine.get_shrinkage_display_intensity = lambda: np.maximum(shrinkage, porosity)
+        voxel_mesh = SimpleNamespace(
+            voxel_centers=np.array(
+                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+                dtype=np.float32,
+            ),
+            voxel_sizes=np.ones(3, dtype=np.float32),
+            surface_voxels=None,
+            voxel_states=None,
+        )
+
+        summary, visualization = build_visualization_payload(
+            engine,
+            voxel_mesh,
+            total_volume=3.0,
+            bounds=np.array([[0.0, 2.0], [0.0, 0.0], [0.0, 0.0]], dtype=np.float32),
+            max_voxels=10,
+        )
+        fields = build_result_fields_payload(visualization, max_points=10)
+
+        np.testing.assert_allclose(visualization["shrinkage"], [0.7, 0.8, 0.4])
+        np.testing.assert_allclose(fields["fields"]["shrinkage"]["values"], [0.7, 0.8, 0.4])
+        self.assertEqual(summary["shrink_scalar"], 2.0)
+        self.assertEqual(summary["shrinkage_stats"]["affected_count"], 3)
+
+    def test_feed_modulus_mode_uses_local_modulus_in_inches(self) -> None:
+        engine = SimpleNamespace(
+            shrinkage_probability=None,
+            hotspot_intensity=None,
+            niyama_values=None,
+            niyama_risk=None,
+            combined_feed_risk=None,
+            solidification_times=None,
+            fraction_liquid_history=[],
+            local_modulus=np.array([0.25, 0.5, 1.0], dtype=np.float32),
+        )
+        voxel_mesh = SimpleNamespace(
+            voxel_centers=np.array(
+                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+                dtype=np.float32,
+            ),
+            voxel_sizes=np.ones(3, dtype=np.float32),
+            surface_voxels=None,
+            voxel_states=None,
+            voxel_moduli=np.array([0.1, 0.1, 0.1], dtype=np.float32),
+        )
+
+        summary, visualization = build_visualization_payload(
+            engine,
+            voxel_mesh,
+            total_volume=3.0,
+            bounds=np.array([[0.0, 2.0], [0.0, 0.0], [0.0, 0.0]], dtype=np.float32),
+            max_voxels=10,
+        )
+        fields = build_result_fields_payload(visualization, max_points=10)
+
+        np.testing.assert_allclose(visualization["feed_modulus"], [0.25, 0.5, 1.0])
+        np.testing.assert_allclose(fields["fields"]["feed_modulus"]["values"], [0.25, 0.5, 1.0])
+        self.assertIn("feed_modulus", fields["modes"])
+        self.assertAlmostEqual(summary["feed_modulus_stats"]["max_in"], 1.0, places=5)
 
 
 class WebApiTests(unittest.TestCase):
