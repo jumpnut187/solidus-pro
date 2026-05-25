@@ -1219,13 +1219,17 @@ class VisualizationDialog(DraggableDialog):
     
     colormap_changed = pyqtSignal(str)
     color_scale_changed = pyqtSignal(float, float)
-    cross_section_changed = pyqtSignal(str, bool, float)  # axis, enabled, position
+    cross_section_changed = pyqtSignal(str, bool, float, int)  # axis, enabled, position, direction
     show_legend_changed = pyqtSignal(bool)
     
     def __init__(self, parent=None):
         super().__init__(parent, "Visualization Settings")
         self.setMinimumWidth(400)
         self.setMinimumHeight(500)
+        # Direction state per axis: +1 (default) or -1 (flipped)
+        self.x_direction = 1
+        self.y_direction = 1
+        self.z_direction = 1
         self._setup_ui()
         self._original_values = {}
     
@@ -1240,7 +1244,7 @@ class VisualizationDialog(DraggableDialog):
         
         cs_info = QLabel(
             "Cross-section views let you see inside the model.\n"
-            "Enable a cutting plane and drag the slider to move it."
+            "Enable a cutting plane, then drag the slider or click-hold the blue plane to move it."
         )
         cs_info.setStyleSheet("font-size: 10px; color: #888;")
         cs_info.setWordWrap(True)
@@ -1266,9 +1270,14 @@ class VisualizationDialog(DraggableDialog):
         x_slider_layout.addWidget(self.x_pos_label)
         x_layout.addLayout(x_slider_layout)
         
+        self.x_flip_check = QCheckBox("Flip Direction")
+        self.x_flip_check.setChecked(False)
+        self.x_flip_check.stateChanged.connect(lambda s: self._on_direction_changed('X', s))
+        x_layout.addWidget(self.x_flip_check)
+
         x_group.setLayout(x_layout)
         cs_layout.addWidget(x_group)
-        
+
         # Y-axis plane
         y_group = QGroupBox("Y Cutting Plane")
         y_layout = QVBoxLayout()
@@ -1289,9 +1298,14 @@ class VisualizationDialog(DraggableDialog):
         y_slider_layout.addWidget(self.y_pos_label)
         y_layout.addLayout(y_slider_layout)
         
+        self.y_flip_check = QCheckBox("Flip Direction")
+        self.y_flip_check.setChecked(False)
+        self.y_flip_check.stateChanged.connect(lambda s: self._on_direction_changed('Y', s))
+        y_layout.addWidget(self.y_flip_check)
+
         y_group.setLayout(y_layout)
         cs_layout.addWidget(y_group)
-        
+
         # Z-axis plane
         z_group = QGroupBox("Z Cutting Plane")
         z_layout = QVBoxLayout()
@@ -1312,9 +1326,14 @@ class VisualizationDialog(DraggableDialog):
         z_slider_layout.addWidget(self.z_pos_label)
         z_layout.addLayout(z_slider_layout)
         
+        self.z_flip_check = QCheckBox("Flip Direction")
+        self.z_flip_check.setChecked(False)
+        self.z_flip_check.stateChanged.connect(lambda s: self._on_direction_changed('Z', s))
+        z_layout.addWidget(self.z_flip_check)
+
         z_group.setLayout(z_layout)
         cs_layout.addWidget(z_group)
-        
+
         cs_layout.addStretch()
         cross_section_tab.setLayout(cs_layout)
         tabs.addTab(cross_section_tab, "Cross-Section")
@@ -1415,28 +1434,42 @@ class VisualizationDialog(DraggableDialog):
     def _on_plane_toggle(self, axis: str, state: int):
         """Handle plane enable/disable"""
         enabled = state == Qt.Checked
-        
+
         # Enable/disable slider
         slider = getattr(self, f"{axis.lower()}_plane_slider")
         slider.setEnabled(enabled)
-        
-        # Emit signal
+
+        # Emit signal with current direction
         position = slider.value() / 1000.0
-        self.cross_section_changed.emit(axis, enabled, position)
+        direction = getattr(self, f"{axis.lower()}_direction")
+        self.cross_section_changed.emit(axis, enabled, position, direction)
     
     def _on_plane_position(self, axis: str, value: int):
         """Handle plane position change"""
         position = value / 1000.0  # 0-1 range
-        
+
         # Update label
         label = getattr(self, f"{axis.lower()}_pos_label")
         label.setText(f"{int(position * 100)}%")
-        
+
         # Emit signal if enabled
         check = getattr(self, f"{axis.lower()}_plane_check")
         if check.isChecked():
-            self.cross_section_changed.emit(axis, True, position)
+            direction = getattr(self, f"{axis.lower()}_direction")
+            self.cross_section_changed.emit(axis, True, position, direction)
     
+    def _on_direction_changed(self, axis: str, state: int):
+        """Handle flip direction change"""
+        direction = -1 if state == Qt.Checked else 1
+        setattr(self, f"{axis.lower()}_direction", direction)
+
+        # Re-emit with new direction if plane is currently enabled
+        check = getattr(self, f"{axis.lower()}_plane_check")
+        slider = getattr(self, f"{axis.lower()}_plane_slider")
+        if check.isChecked():
+            position = slider.value() / 1000.0
+            self.cross_section_changed.emit(axis, True, position, direction)
+
     def _on_colormap_changed(self, index: int):
         """Handle colormap selection change"""
         key = self.colormap_combo.currentData()
@@ -3141,6 +3174,7 @@ class MainWindow(QMainWindow):
         self.visualization_dialog.colormap_changed.connect(self._on_colormap_changed)
         self.visualization_dialog.color_scale_changed.connect(self._on_color_scale_changed)
         self.visualization_dialog.cross_section_changed.connect(self._on_cross_section_changed)
+        self.visualizer.cross_section_position_changed.connect(self._on_cross_section_position_changed)
         self.visualization_dialog.show_legend_changed.connect(self._on_legend_toggle)
         
         # Measurement dialog
@@ -3829,6 +3863,7 @@ class MainWindow(QMainWindow):
             self.threshold_slider.setMarkerPosition(1)
             self.threshold_label_title.setText("Feed Modulus Range %:")
             self.visualizer.set_colormap('feedmod')
+            self.visualizer.enable_feed_modulus_leader(True)
         elif self._current_vis_mode in ("feeding_quality", "thermal_stress", "distortion", 
                                          "crack_susceptibility", "sdas", "predicted_uts"):
             # Advanced analysis modes
@@ -3859,6 +3894,7 @@ class MainWindow(QMainWindow):
             self.threshold_label_title.setText(labels.get(self._current_vis_mode, "Threshold:"))
             # Reset colormap to default for non-Niyama modes
             self.visualizer.set_colormap('red_gradient')
+            self.visualizer.enable_feed_modulus_leader(False)
 
 
         
@@ -4086,11 +4122,11 @@ class MainWindow(QMainWindow):
         self.mesh_suggestion_worker = MeshSuggestionWorker(self.stl_loader)
         self.mesh_suggestion_worker.result_ready.connect(self._on_ml_recommendation)
         self.mesh_suggestion_worker.error.connect(self._on_ml_error)
+        self.mesh_suggestion_worker.finished.connect(self._on_mesh_worker_finished)
         self.mesh_suggestion_worker.start()
 
     def _on_ml_recommendation(self, recommendation: MeshRecommendation):
         """Handle ML mesh recommendation result."""
-        self.mesh_suggestion_worker = None
         self._applying_ml_suggestion = True
         try:
             self.mesh_dialog.voxel_size_spin.setValue(recommendation.base_voxel_size)
@@ -4114,10 +4150,14 @@ class MainWindow(QMainWindow):
 
     def _on_ml_error(self, message: str):
         """Handle ML recommendation errors."""
-        self.mesh_suggestion_worker = None
         self.mesh_dialog.ml_status_label.setText(f"Recommendation failed: {message}")
         self.mesh_dialog.apply_ml_button.setEnabled(True)
-    
+
+    def _on_mesh_worker_finished(self):
+        """Clean up mesh suggestion worker after thread has fully finished."""
+        if self.mesh_suggestion_worker is not None:
+            self.mesh_suggestion_worker = None
+
     def _show_hardware_info(self):
         """Display hardware info in status"""
         gpu_manager = GPUComputeManager()
@@ -5685,16 +5725,25 @@ class MainWindow(QMainWindow):
         if self.current_results is not None:
             self._update_results_visualization()
     
-    def _on_cross_section_changed(self, axis: str, enabled: bool, position: float):
+    def _on_cross_section_changed(self, axis: str, enabled: bool, position: float, direction: int = 1):
         """Handle cross-section plane change"""
         if enabled:
             # Convert normalized position (0-1) to actual position
             min_pos, max_pos = self.visualizer.get_cross_section_range(axis)
             actual_pos = min_pos + position * (max_pos - min_pos)
-            self.visualizer.enable_cross_section(axis, actual_pos)
+            self.visualizer.enable_cross_section(axis, actual_pos, direction=direction)
         else:
             self.visualizer.disable_cross_section(axis)
     
+    def _on_cross_section_position_changed(self, axis: str, normalized: float):
+        """Sync dialog slider when plane is dragged in 3D view"""
+        slider = getattr(self.visualization_dialog, f"{axis.lower()}_plane_slider")
+        label = getattr(self.visualization_dialog, f"{axis.lower()}_pos_label")
+        slider.blockSignals(True)
+        slider.setValue(int(normalized * 1000))
+        slider.blockSignals(False)
+        label.setText(f"{int(normalized * 100)}%")
+
     def _on_legend_toggle(self, show: bool):
         """Handle legend show/hide toggle"""
         title = "Intensity"

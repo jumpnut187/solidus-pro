@@ -33,6 +33,11 @@ class _ImmediateExecutor:
         return _ImmediateFuture(fn(*args, **kwargs))
 
 
+class _DummySignal:
+    def emit(self, *args, **kwargs):
+        return None
+
+
 def _install_visualizer_import_stubs() -> None:
     vtk_module = types.ModuleType("vtk")
     vtk_module.VTK_FLOAT = 1
@@ -59,6 +64,7 @@ def _install_visualizer_import_stubs() -> None:
     qtwidgets_module.QVBoxLayout = _DummyVTKClass
     qtcore_module = types.ModuleType("PyQt5.QtCore")
     qtcore_module.QTimer = _DummyVTKClass
+    qtcore_module.pyqtSignal = lambda *args, **kwargs: _DummySignal()
 
     sys.modules.setdefault("vtk", vtk_module)
     sys.modules.setdefault("vtk.util", vtk_util_module)

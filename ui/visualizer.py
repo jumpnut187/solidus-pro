@@ -17,7 +17,7 @@ import vtk
 from vtk.util import numpy_support
 from vtk.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 from PyQt5.QtWidgets import QWidget, QVBoxLayout
-from PyQt5.QtCore import QTimer
+from PyQt5.QtCore import QTimer, pyqtSignal
 from typing import Optional, Dict, List, Tuple, Callable, Set
 from concurrent.futures import ThreadPoolExecutor
 import threading
@@ -274,7 +274,8 @@ class CrossSectionPlane:
         self.enabled = False
         self.position = 0.0  # Position along the axis
         self.bounds = None  # Model bounds
-        
+        self.direction = 1  # +1 or -1: which side of the plane to keep
+
         # Create implicit plane for clipping
         self.plane = vtk.vtkPlane()
         self._update_plane_orientation()
@@ -290,15 +291,25 @@ class CrossSectionPlane:
         self.clippers: Dict[vtk.vtkActor, vtk.vtkClipPolyData] = {}
     
     def _update_plane_orientation(self):
-        """Set plane normal based on axis"""
+        """Set plane normal based on axis and direction"""
+        d = self.direction
         if self.axis == 'X':
-            self.plane.SetNormal(1, 0, 0)
+            self.plane.SetNormal(d, 0, 0)
         elif self.axis == 'Y':
-            self.plane.SetNormal(0, 1, 0)
+            self.plane.SetNormal(0, d, 0)
         else:  # Z
-            self.plane.SetNormal(0, 0, 1)
-        
+            self.plane.SetNormal(0, 0, d)
+
         self.plane.SetOrigin(0, 0, 0)
+
+    def set_direction(self, direction: int):
+        """Set clipping direction (+1 keeps negative side, -1 keeps positive side)"""
+        if direction not in (-1, 1):
+            return
+        self.direction = direction
+        self._update_plane_orientation()
+        # Re-apply current position so origin updates with new normal
+        self.set_position(self.position)
     
     def _setup_visual_plane(self):
         """Create visual representation of the cutting plane"""
@@ -608,6 +619,178 @@ class MeasurementTool:
         return total_volume
 
 
+# ==================== Feed Modulus Leader Tool ====================
+
+class FeedModulusLeaderTool:
+    """Tool for displaying feed modulus values at clicked points with L-shaped leader + arrow flag"""
+
+    def __init__(self, renderer: vtk.vtkRenderer):
+        self.renderer = renderer
+        self._leader_actors: List[vtk.vtkActor] = []
+        self._text_actor: Optional[vtk.vtkFollower] = None
+        self._cone_actor: Optional[vtk.vtkActor] = None
+
+    def clear(self):
+        """Remove all leader actors from the renderer"""
+        for actor in self._leader_actors:
+            self.renderer.RemoveActor(actor)
+        self._leader_actors.clear()
+        if self._text_actor:
+            self.renderer.RemoveActor(self._text_actor)
+            self._text_actor = None
+        if self._cone_actor:
+            self.renderer.RemoveActor(self._cone_actor)
+            self._cone_actor = None
+
+    def is_empty(self) -> bool:
+        """Return True if no leader is currently displayed"""
+        return len(self._leader_actors) == 0 and self._text_actor is None
+
+    def show_leader(self, world_pos: Tuple[float, float, float], value: float,
+                    model_bounds: Optional[Tuple[float, float, float, float, float, float]] = None):
+        """
+        Display an L-shaped leader with arrow and flag showing feed modulus value.
+
+        Args:
+            world_pos: Picked world position (should be near the voxel center)
+            value: Feed modulus value to display
+            model_bounds: Optional model bounds (xmin,xmax,ymin,ymax,zmin,zmax) for scaling
+        """
+        self.clear()
+
+        diagonal = 1.0
+        if model_bounds:
+            dx = model_bounds[1] - model_bounds[0]
+            dy = model_bounds[3] - model_bounds[2]
+            dz = model_bounds[5] - model_bounds[4]
+            diagonal = np.sqrt(dx*dx + dy*dy + dz*dz)
+
+        offset = diagonal * 0.12
+
+        cx = (model_bounds[0] + model_bounds[1]) / 2 if model_bounds else 0.0
+        cy = (model_bounds[2] + model_bounds[3]) / 2 if model_bounds else 0.0
+        cz = (model_bounds[4] + model_bounds[5]) / 2 if model_bounds else 0.0
+
+        direction = np.array(world_pos) - np.array([cx, cy, cz])
+        norm = np.linalg.norm(direction)
+        if norm > 1e-6:
+            direction = direction / norm
+        else:
+            direction = np.array([1.0, 0.0, 0.0])
+
+        camera = self.renderer.GetActiveCamera()
+        view_up = camera.GetViewUp()
+        view_up_arr = np.array(view_up)
+
+        perp = np.cross(direction, view_up_arr)
+        norm_perp = np.linalg.norm(perp)
+        if norm_perp > 1e-6:
+            perp = perp / norm_perp
+        else:
+            perp = np.array([0.0, 0.0, 1.0])
+
+        elbow = np.array(world_pos) + direction * offset
+        text_base = elbow + perp * offset * 1.2
+
+        elbow_tuple = tuple(elbow)
+        text_tuple = tuple(text_base)
+        world_tuple = tuple(world_pos)
+
+        line_pts = vtk.vtkPoints()
+        line_pts.InsertNextPoint(*world_tuple)
+        line_pts.InsertNextPoint(*elbow_tuple)
+        line_pts.InsertNextPoint(*text_tuple)
+
+        line_cell = vtk.vtkPolyLine()
+        line_cell.GetPointIds().SetNumberOfIds(3)
+        line_cell.GetPointIds().SetId(0, 0)
+        line_cell.GetPointIds().SetId(1, 1)
+        line_cell.GetPointIds().SetId(2, 2)
+
+        line_cells = vtk.vtkCellArray()
+        line_cells.InsertNextCell(line_cell)
+
+        line_pd = vtk.vtkPolyData()
+        line_pd.SetPoints(line_pts)
+        line_pd.SetLines(line_cells)
+
+        line_mapper = vtk.vtkPolyDataMapper()
+        line_mapper.SetInputData(line_pd)
+
+        line_actor = vtk.vtkActor()
+        line_actor.SetMapper(line_mapper)
+        line_actor.GetProperty().SetColor(1.0, 1.0, 0.0)
+        line_actor.GetProperty().SetLineWidth(2.0)
+
+        self.renderer.AddActor(line_actor)
+        self._leader_actors.append(line_actor)
+
+        arrow_dir = (np.array(elbow_tuple) - np.array(world_tuple))
+        arrow_norm = np.linalg.norm(arrow_dir)
+        if arrow_norm > 1e-6:
+            arrow_dir = arrow_dir / arrow_norm
+
+        cone_src = vtk.vtkConeSource()
+        cone_height = offset * 0.35
+        cone_radius = offset * 0.15
+        cone_src.SetHeight(cone_height)
+        cone_src.SetRadius(cone_radius)
+        cone_src.SetResolution(16)
+
+        cone_transform = vtk.vtkTransform()
+        cone_transform.Translate(*world_tuple)
+
+        basis_x = arrow_dir
+        if abs(basis_x[1]) < 0.9:
+            basis_y = np.array([0.0, 1.0, 0.0])
+        else:
+            basis_y = np.array([1.0, 0.0, 0.0])
+        basis_z = np.cross(basis_x, basis_y)
+        basis_z = basis_z / np.linalg.norm(basis_z)
+        basis_y = np.cross(basis_z, basis_x)
+        basis_y = basis_y / np.linalg.norm(basis_y)
+
+        matrix = vtk.vtkMatrix4x4()
+        for i in range(3):
+            matrix.SetElement(i, 0, basis_x[i])
+            matrix.SetElement(i, 1, basis_y[i])
+            matrix.SetElement(i, 2, basis_z[i])
+            matrix.SetElement(i, 3, world_tuple[i])
+
+        cone_transform.SetMatrix(matrix)
+        cone_transform.RotateWXYZ(90, 0, 1, 0)
+
+        transform_filter = vtk.vtkTransformPolyDataFilter()
+        transform_filter.SetInputConnection(cone_src.GetOutputPort())
+        transform_filter.SetTransform(cone_transform)
+        transform_filter.Update()
+
+        cone_mapper = vtk.vtkPolyDataMapper()
+        cone_mapper.SetInputConnection(transform_filter.GetOutputPort())
+
+        self._cone_actor = vtk.vtkActor()
+        self._cone_actor.SetMapper(cone_mapper)
+        self._cone_actor.GetProperty().SetColor(1.0, 1.0, 0.0)
+        self.renderer.AddActor(self._cone_actor)
+
+        text = vtk.vtkVectorText()
+        text.SetText(f"FM: {value:.2f} in")
+
+        text_mapper = vtk.vtkPolyDataMapper()
+        text_mapper.SetInputConnection(text.GetOutputPort())
+
+        text_scale = offset * 0.375
+        self._text_actor = vtk.vtkFollower()
+        self._text_actor.SetMapper(text_mapper)
+        self._text_actor.SetPosition(*text_tuple)
+        self._text_actor.SetScale(text_scale, text_scale, text_scale)
+        self._text_actor.GetProperty().SetColor(1.0, 1.0, 0.8)
+        self._text_actor.GetProperty().SetOpacity(0.95)
+        self._text_actor.SetCamera(camera)
+
+        self.renderer.AddActor(self._text_actor)
+
+
 class CastingVisualizer(QWidget):
     """
     VTK-based 3D visualization for casting simulation
@@ -637,6 +820,8 @@ class CastingVisualizer(QWidget):
 
     MAX_CACHED_THRESHOLD_LEVELS = 4
     MAX_CACHED_DISPLAY_VOXELS = 20_000
+
+    cross_section_position_changed = pyqtSignal(str, float)  # axis, normalized_position
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -713,10 +898,21 @@ class CastingVisualizer(QWidget):
         # Cross-section planes
         self.cross_section_planes: Dict[str, CrossSectionPlane] = {}
         self._cross_section_enabled = False
-        
+
+        # Cross-section plane drag state
+        self._drag_plane_axis: Optional[str] = None
+        self._drag_initial_position: float = 0.0
+        self._drag_initial_display_z: float = 0.0
+        self._plane_picker = vtk.vtkCellPicker()
+        self._plane_picker.SetTolerance(0.02)
+
         # Measurement tool
         self.measurement_tool = None
-        
+
+        # Feed modulus leader tool
+        self.feed_modulus_leader = None
+        self._feed_modulus_leader_enabled = False
+
         # Animation export
         self._animation_frames: List[np.ndarray] = []
         self._is_recording = False
@@ -765,10 +961,15 @@ class CastingVisualizer(QWidget):
         
         # Initialize measurement tool
         self.measurement_tool = MeasurementTool(self.renderer, self.interactor)
-        
-        # Add click handler for measurement tool
-        self.interactor.AddObserver("LeftButtonPressEvent", self._on_left_button_press)
-        
+
+        # Initialize feed modulus leader tool
+        self.feed_modulus_leader = FeedModulusLeaderTool(self.renderer)
+
+        # Add click handler for measurement tool and plane dragging
+        self.interactor.AddObserver("LeftButtonPressEvent", self._on_left_button_press, 1.0)
+        self.interactor.AddObserver("LeftButtonReleaseEvent", self._on_left_button_release, 1.0)
+        self.interactor.AddObserver("MouseMoveEvent", self._on_mouse_move, 1.0)
+
         # Initialize color bar (hidden by default)
         self._init_color_bar()
         
@@ -790,19 +991,160 @@ class CastingVisualizer(QWidget):
         self._initialize_interactor()
     
     def _on_left_button_press(self, obj, event):
-        """Handle left mouse button press for measurement picking"""
+        """Handle left mouse button press for measurement picking or plane dragging"""
         # Only handle if measurement mode is enabled
         if self.measurement_tool and self.measurement_tool.enabled:
             # Get click position
             click_pos = self.interactor.GetEventPosition()
             x, y = click_pos[0], click_pos[1]
-            
+
             # Pick point on the model
             point = self.measurement_tool.pick_point(x, y)
             if point:
                 self.measurement_tool.add_point(point)
                 self.render_window.Render()
+            return
+
+        # Try to pick an enabled cross-section plane actor
+        click_pos = self.interactor.GetEventPosition()
+        x, y = click_pos[0], click_pos[1]
+        self._drag_plane_axis = None
+        self._plane_picker.InitializePickList()
+        for plane in self.cross_section_planes.values():
+            if plane.enabled:
+                self._plane_picker.AddPickList(plane.plane_actor)
+        self._plane_picker.SetPickFromList(True)
+        self._plane_picker.Pick(x, y, 0, self.renderer)
+        picked_actor = self._plane_picker.GetActor()
+
+        for axis, plane in self.cross_section_planes.items():
+            if plane.enabled and picked_actor == plane.plane_actor:
+                try:
+                    self.interactor.GetInteractorStyle().SetAbortFlag(1)
+                except AttributeError:
+                    pass
+                self._drag_plane_axis = axis
+                self._drag_initial_position = plane.position
+
+                # Cache display-Z depth so dragging stays in screen space
+                pick_pos = self._plane_picker.GetPickPosition()
+                renderer = self.renderer
+                window = self.render_window
+                display_point = [0.0, 0.0, 0.0]
+                vtk.vtkInteractorObserver.ComputeWorldToDisplay(
+                    renderer, pick_pos[0], pick_pos[1], pick_pos[2], display_point
+                )
+                self._drag_initial_display_z = display_point[2]
+                return
+
+        # Feed modulus leader tool: pick on result voxels
+        if self._feed_modulus_leader_enabled and self.current_shrinkage_data is not None:
+            click_pos = self.interactor.GetEventPosition()
+            x, y = click_pos[0], click_pos[1]
+
+            if self.shrinkage_actor is None:
+                return
+
+            picker = vtk.vtkCellPicker()
+            picker.AddPickList(self.shrinkage_actor)
+            picker.SetPickFromList(True)
+            picker.SetTolerance(0.01)
+            picker.Pick(x, y, 0, self.renderer)
+
+            if picker.GetCellId() >= 0:
+                pick_pos = picker.GetPickPosition()
+                voxel_centers, voxel_sizes, values = self.current_shrinkage_data
+
+                finite_mask = np.isfinite(values) & (values > 0.0)
+                if not np.any(finite_mask):
+                    self.feed_modulus_leader.clear()
+                    self.render_window.Render()
+                    return
+
+                finite_centers = voxel_centers[finite_mask]
+                finite_values = values[finite_mask]
+
+                dists = np.linalg.norm(finite_centers - np.array(pick_pos), axis=1)
+                nearest_idx = np.argmin(dists)
+                value = float(finite_values[nearest_idx])
+                nearest_center = finite_centers[nearest_idx]
+
+                self.feed_modulus_leader.show_leader(
+                    tuple(pick_pos), value, self.model_bounds
+                )
+                self.render_window.Render()
+                try:
+                    self.interactor.GetInteractorStyle().SetAbortFlag(1)
+                except AttributeError:
+                    pass
+            else:
+                self.feed_modulus_leader.clear()
+                self.render_window.Render()
+                try:
+                    self.interactor.GetInteractorStyle().SetAbortFlag(1)
+                except AttributeError:
+                    pass
     
+    def _on_mouse_move(self, obj, event):
+        """Handle mouse move for dragging a cross-section plane"""
+        if self._drag_plane_axis is None:
+            return
+
+        try:
+            obj.SetAbortFlag(1)
+        except AttributeError:
+            pass
+        try:
+            self.interactor.GetInteractorStyle().SetAbortFlag(1)
+        except AttributeError:
+            pass
+        click_pos = self.interactor.GetEventPosition()
+        x, y = click_pos[0], click_pos[1]
+
+        # Convert current screen position back to world at the cached display depth
+        renderer = self.renderer
+        renderer.SetDisplayPoint(x, y, self._drag_initial_display_z)
+        renderer.DisplayToWorld()
+        world_point = renderer.GetWorldPoint()
+
+        # Project onto the dragging axis to get the new position
+        axis = self._drag_plane_axis
+        plane = self.cross_section_planes[axis]
+        min_pos, max_pos = plane.get_position_range()
+
+        if axis == 'X':
+            new_pos = world_point[0]
+        elif axis == 'Y':
+            new_pos = world_point[1]
+        else:
+            new_pos = world_point[2]
+
+        # Clamp to bounds
+        new_pos = max(min_pos, min(max_pos, new_pos))
+
+        self.set_cross_section_position(axis, new_pos)
+
+        # Emit normalized position so the dialog slider stays in sync
+        range_size = max_pos - min_pos
+        if range_size > 0:
+            normalized = (new_pos - min_pos) / range_size
+        else:
+            normalized = 0.5
+        self.cross_section_position_changed.emit(axis, normalized)
+
+    def _on_left_button_release(self, obj, event):
+        """Clear drag state on mouse release"""
+        if self._drag_plane_axis is not None:
+            try:
+                obj.SetAbortFlag(1)
+            except AttributeError:
+                pass
+            try:
+                self.interactor.GetInteractorStyle().SetAbortFlag(1)
+            except AttributeError:
+                pass
+        self._drag_plane_axis = None
+
     def _init_cross_section_planes(self):
         """Initialize cutting planes for X, Y, Z axes"""
         for axis in ['X', 'Y', 'Z']:
@@ -1023,35 +1365,46 @@ class CastingVisualizer(QWidget):
     
     # ==================== Cross-Section Methods ====================
     
-    def enable_cross_section(self, axis: str, position: float = None, show_plane: bool = True):
+    def enable_cross_section(self, axis: str, position: float = None, show_plane: bool = True, direction: int = 1):
         """
         Enable a cross-section cutting plane
-        
+
         Args:
             axis: 'X', 'Y', or 'Z'
             position: Position along the axis (None = middle)
             show_plane: Whether to show the visual plane indicator
+            direction: +1 (default) or -1 to flip which side is kept
         """
         axis = axis.upper()
         if axis not in self.cross_section_planes:
             return
-        
+
         plane = self.cross_section_planes[axis]
-        
+
         # Update bounds if we have model bounds
         if self.model_bounds:
             plane.set_bounds(self.model_bounds)
-        
+
+        # Set direction before position so orientation is correct
+        plane.set_direction(direction)
+
         # Set position (default to middle)
         if position is None:
             min_pos, max_pos = plane.get_position_range()
             position = (min_pos + max_pos) / 2
-        
+
         plane.set_position(position)
         plane.enable(show_plane)
-        
+
         self._cross_section_enabled = True
         self._apply_cross_section_clipping()
+        self.render_window.Render()
+
+    def hide_cross_section_planes_visuals(self):
+        """Hide the blue visual plane actors while keeping clipping active"""
+        for plane in self.cross_section_planes.values():
+            if plane.enabled:
+                plane.plane_actor.SetVisibility(False)
         self.render_window.Render()
     
     def disable_cross_section(self, axis: str = None):
@@ -1173,7 +1526,19 @@ class CastingVisualizer(QWidget):
         if self.measurement_tool:
             self.measurement_tool.clear_measurements()
             self.render_window.Render()
-    
+
+    def enable_feed_modulus_leader(self, enabled: bool):
+        """Enable or disable feed modulus leader mode"""
+        self._feed_modulus_leader_enabled = enabled
+        if not enabled:
+            self.clear_feed_modulus_leader()
+
+    def clear_feed_modulus_leader(self):
+        """Clear the feed modulus leader annotation"""
+        if self.feed_modulus_leader:
+            self.feed_modulus_leader.clear()
+            self.render_window.Render()
+
     def handle_click_for_measurement(self, x: int, y: int):
         """Handle a click event for measurement"""
         if self.measurement_tool and self.measurement_tool.enabled:
@@ -1584,7 +1949,11 @@ class CastingVisualizer(QWidget):
         
         self.renderer.AddActor(self.shrinkage_actor)
         self.render_window.Render()
-        
+
+        # Clear any existing feed modulus leader (voxel positions are now invalid)
+        if self.feed_modulus_leader:
+            self.feed_modulus_leader.clear()
+
         # Count voxels displayed
         num_displayed = polydata.GetNumberOfCells() // 6  # Each cube has 6 faces
         print(f"Displayed {num_displayed:,} shrinkage voxels")
