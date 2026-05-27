@@ -7,6 +7,14 @@ Use context-mode MCP tools by default to keep context usage low and execution ef
 - Prefer `mcp__context_mode__ctx_execute` for commands with non-trivial output.
 - Prefer `mcp__context_mode__ctx_execute_file` for large file analysis instead of raw `cat`/`sed`.
 
+## Code Navigation Workflow (IMPORTANT)
+When exploring the codebase to find functions, understand relationships, or locate code:
+1. **FIRST** use `project-map` MCP tools: `set_active_project` → `find_symbol` / `describe_file` / `get_project_overview`
+2. **SECOND** use `mcp__context_mode__ctx_*` tools for batch inspection or heavy query workloads
+3. **LAST RESORT** use grep/glob — only when project-map doesn't provide the needed capability
+
+The `project-map` tools provide symbol-level understanding with less context usage than grep/glob searches.
+
 ## Project Structure & Module Organization
 Desktop entrypoints are `main.py` and `run.py`; the web entrypoint is `run_web.py`. Core simulation orchestration lives in `core/`, with the current user-facing pipeline centered on `core/simulation_pipeline.py`, `core/solidification_loop.py`, and `core/solidification.py`. Physics helper formulas and reference models live in `physics/`. Runtime settings and exceptions live in `config/`. The PyQt desktop UI is under `ui/`, while the Flask/React/Babylon web app is split across `web/app.py`, `web/app_factory.py`, `web/routes.py`, `web/payloads.py`, `web/repository.py`, `web/services/`, and `web/static/`. The React frontend sources live in `web_frontend/` with its own build system (npm). Treat `data/`, `logs/`, `models/`, `web/static/uploads/`, `web/simulations.db`, and `web_frontend/dist/` as generated or local-state paths unless the task explicitly targets them.
 
@@ -48,7 +56,7 @@ By design, GPU/backend detection and Numba thread banners are emitted by the mai
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **solidus-pro** (7829 symbols, 14132 relationships, 277 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **solidus-pro** (7890 symbols, 14208 relationships, 277 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
