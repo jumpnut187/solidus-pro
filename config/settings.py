@@ -151,7 +151,7 @@ class PerformanceSettings:
     # Parallel processing
     max_workers: int = 0                # 0 = auto (physical cores - 1)
     chunk_size: int = 10000             # Voxels per chunk
-    part_assignment_mode: str = "auto"  # auto, parallel, or legacy
+    part_assignment_mode: str = "parallel"  # auto, parallel, or legacy
     part_assignment_workers: int = 0    # 0 = auto
     part_assignment_batch_size: int = 2500
     

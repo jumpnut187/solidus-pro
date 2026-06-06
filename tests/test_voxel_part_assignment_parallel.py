@@ -55,7 +55,7 @@ class PartAssignmentParallelTests(unittest.TestCase):
         assert mesh.voxel_part_types is not None
         self.assertTrue(np.all(np.asarray(mesh.voxel_part_types) == 0))
 
-    def test_auto_mode_does_not_parallelize_medium_candidate_sets(self) -> None:
+    def test_auto_mode_does_not_parallelize_small_candidate_sets(self) -> None:
         mesh = AdaptiveVoxelMesh(
             base_voxel_size=0.1,
             part_assignment_mode="auto",
@@ -63,7 +63,37 @@ class PartAssignmentParallelTests(unittest.TestCase):
             part_assignment_batch_size=2_500,
         )
 
-        self.assertFalse(mesh._should_parallelize_part_assignment(25_000))
+        self.assertFalse(mesh._should_parallelize_part_assignment(5_000))
+
+    def test_auto_mode_worker_count_is_memory_bounded(self) -> None:
+        import unittest.mock as mock
+        import core.voxel_mesh as voxel_mesh_module
+
+        mesh = AdaptiveVoxelMesh(
+            base_voxel_size=0.1,
+            part_assignment_mode="auto",
+            part_assignment_workers=0,
+            part_assignment_batch_size=2_500,
+        )
+        per_worker = AdaptiveVoxelMesh.AUTO_PART_ASSIGNMENT_MEMORY_PER_WORKER_BYTES
+
+        with mock.patch.object(voxel_mesh_module.hardware, "available_memory", per_worker * 2), \
+             mock.patch.object(voxel_mesh_module.hardware, "get_optimal_thread_count", return_value=8):
+            self.assertEqual(mesh._get_part_assignment_workers(), 2)
+
+        with mock.patch.object(voxel_mesh_module.hardware, "available_memory", per_worker * 16), \
+             mock.patch.object(voxel_mesh_module.hardware, "get_optimal_thread_count", return_value=8):
+            self.assertEqual(mesh._get_part_assignment_workers(), 8)
+
+    def test_auto_mode_parallelizes_medium_candidate_sets(self) -> None:
+        mesh = AdaptiveVoxelMesh(
+            base_voxel_size=0.1,
+            part_assignment_mode="auto",
+            part_assignment_workers=2,
+            part_assignment_batch_size=2_500,
+        )
+
+        self.assertTrue(mesh._should_parallelize_part_assignment(25_000))
 
     def test_explicit_parallel_mode_still_parallelizes(self) -> None:
         mesh = AdaptiveVoxelMesh(

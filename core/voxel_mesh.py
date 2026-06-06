@@ -172,8 +172,8 @@ class AdaptiveVoxelMesh:
     - GPU acceleration when available
     """
 
-    AUTO_PART_ASSIGNMENT_MIN_CANDIDATES = 50_000
-    AUTO_PART_ASSIGNMENT_MAX_WORKERS = 4
+    AUTO_PART_ASSIGNMENT_MIN_CANDIDATES = 10_000
+    AUTO_PART_ASSIGNMENT_MEMORY_PER_WORKER_BYTES = int(1.5 * 1024 ** 3)
     PART_ASSIGNMENT_SUBMIT_MULTIPLIER = 2
     
     @staticmethod
@@ -1511,10 +1511,22 @@ class AdaptiveVoxelMesh:
         return _robust_contains_check_impl(mesh, points, tolerance)
 
     def _get_part_assignment_workers(self) -> int:
-        """Resolve worker count for part assignment."""
+        """Resolve worker count for part assignment.
+
+        Worker count is bounded by both the CPU budget (physical cores - 1)
+        and a memory budget (assume ~1.5 GB of working set per worker for
+        the trimesh mesh payload and numpy scratch). The lower of the two
+        wins, so 8 GB machines do not over-spawn workers and start
+        swapping.
+        """
         if self.part_assignment_workers > 0:
             return max(1, self.part_assignment_workers)
-        return max(1, min(hardware.get_optimal_thread_count('compute'), self.AUTO_PART_ASSIGNMENT_MAX_WORKERS))
+        cpu_budget = hardware.get_optimal_thread_count('compute')
+        mem_budget = max(
+            1,
+            int(hardware.available_memory // self.AUTO_PART_ASSIGNMENT_MEMORY_PER_WORKER_BYTES),
+        )
+        return max(1, min(cpu_budget, mem_budget))
 
     def _should_parallelize_part_assignment(self, n_candidates: int) -> bool:
         """Decide if this part should use process-based parallel containment checks."""

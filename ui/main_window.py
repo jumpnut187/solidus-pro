@@ -1220,6 +1220,8 @@ class VisualizationDialog(DraggableDialog):
     colormap_changed = pyqtSignal(str)
     color_scale_changed = pyqtSignal(float, float)
     cross_section_changed = pyqtSignal(str, bool, float, int)  # axis, enabled, position, direction
+    cross_section_interaction_started = pyqtSignal(str)  # axis
+    cross_section_interaction_ended = pyqtSignal(str)  # axis
     show_legend_changed = pyqtSignal(bool)
     
     def __init__(self, parent=None):
@@ -1244,7 +1246,8 @@ class VisualizationDialog(DraggableDialog):
         
         cs_info = QLabel(
             "Cross-section views let you see inside the model.\n"
-            "Enable a cutting plane, then drag the slider or click-hold the blue plane to move it."
+            "Enable a cutting plane, then drag the slider to move it.\n"
+            "The blue plane indicator is shown while adjusting and hidden when you let go."
         )
         cs_info.setStyleSheet("font-size: 10px; color: #888;")
         cs_info.setWordWrap(True)
@@ -1264,6 +1267,8 @@ class VisualizationDialog(DraggableDialog):
         self.x_plane_slider.setRange(0, 1000)
         self.x_plane_slider.setValue(500)
         self.x_plane_slider.valueChanged.connect(lambda v: self._on_plane_position('X', v))
+        self.x_plane_slider.sliderPressed.connect(lambda: self.cross_section_interaction_started.emit('X'))
+        self.x_plane_slider.sliderReleased.connect(lambda: self.cross_section_interaction_ended.emit('X'))
         self.x_plane_slider.setEnabled(False)
         x_slider_layout.addWidget(self.x_plane_slider)
         self.x_pos_label = QLabel("50%")
@@ -1292,6 +1297,8 @@ class VisualizationDialog(DraggableDialog):
         self.y_plane_slider.setRange(0, 1000)
         self.y_plane_slider.setValue(500)
         self.y_plane_slider.valueChanged.connect(lambda v: self._on_plane_position('Y', v))
+        self.y_plane_slider.sliderPressed.connect(lambda: self.cross_section_interaction_started.emit('Y'))
+        self.y_plane_slider.sliderReleased.connect(lambda: self.cross_section_interaction_ended.emit('Y'))
         self.y_plane_slider.setEnabled(False)
         y_slider_layout.addWidget(self.y_plane_slider)
         self.y_pos_label = QLabel("50%")
@@ -1320,6 +1327,8 @@ class VisualizationDialog(DraggableDialog):
         self.z_plane_slider.setRange(0, 1000)
         self.z_plane_slider.setValue(500)
         self.z_plane_slider.valueChanged.connect(lambda v: self._on_plane_position('Z', v))
+        self.z_plane_slider.sliderPressed.connect(lambda: self.cross_section_interaction_started.emit('Z'))
+        self.z_plane_slider.sliderReleased.connect(lambda: self.cross_section_interaction_ended.emit('Z'))
         self.z_plane_slider.setEnabled(False)
         z_slider_layout.addWidget(self.z_plane_slider)
         self.z_pos_label = QLabel("50%")
@@ -2840,7 +2849,10 @@ class MainWindow(QMainWindow):
             'use_gpu': gpu_manager.is_gpu_available,
             'chunked_voxelization': False,
             'incremental_solidification': False,
-            'use_octree': True
+            'use_octree': True,
+            'part_assignment_mode': 'parallel',
+            'part_assignment_workers': 0,
+            'part_assignment_batch_size': 2500,
         }
 
         # Solidification parameters (from SolidificationParameters defaults)
@@ -3174,7 +3186,12 @@ class MainWindow(QMainWindow):
         self.visualization_dialog.colormap_changed.connect(self._on_colormap_changed)
         self.visualization_dialog.color_scale_changed.connect(self._on_color_scale_changed)
         self.visualization_dialog.cross_section_changed.connect(self._on_cross_section_changed)
-        self.visualizer.cross_section_position_changed.connect(self._on_cross_section_position_changed)
+        self.visualization_dialog.cross_section_interaction_started.connect(
+            self.visualizer.show_cross_section_plane_visual
+        )
+        self.visualization_dialog.cross_section_interaction_ended.connect(
+            self.visualizer.hide_cross_section_plane_visual
+        )
         self.visualization_dialog.show_legend_changed.connect(self._on_legend_toggle)
         
         # Measurement dialog
@@ -5734,15 +5751,6 @@ class MainWindow(QMainWindow):
             self.visualizer.enable_cross_section(axis, actual_pos, direction=direction)
         else:
             self.visualizer.disable_cross_section(axis)
-    
-    def _on_cross_section_position_changed(self, axis: str, normalized: float):
-        """Sync dialog slider when plane is dragged in 3D view"""
-        slider = getattr(self.visualization_dialog, f"{axis.lower()}_plane_slider")
-        label = getattr(self.visualization_dialog, f"{axis.lower()}_pos_label")
-        slider.blockSignals(True)
-        slider.setValue(int(normalized * 1000))
-        slider.blockSignals(False)
-        label.setText(f"{int(normalized * 100)}%")
 
     def _on_legend_toggle(self, show: bool):
         """Handle legend show/hide toggle"""
