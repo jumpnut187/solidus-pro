@@ -9,8 +9,8 @@ import numpy as np
 from flask import Flask
 
 from core.surface_extraction import build_surface_payload, normalize_surface_request
-from web.repositories import simulation_repository as repo
-from web.routes.api import api_bp
+from web import repository as repo
+from web.routes import api_bp
 from web.services.simulation_queue import SimulationQueueManager
 
 
@@ -172,7 +172,7 @@ class SurfaceApiTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_surface_endpoint_reads_saved_visualization_artifact(self) -> None:
-        sim_id = repo.create_simulation(
+        sim_id = repo.create_project(
             self.database_path,
             {
                 "name": "Surface API",
@@ -191,14 +191,14 @@ class SurfaceApiTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        repo.mark_simulation_completed(
+        repo.mark_project_completed(
             self.database_path,
             sim_id,
             {"voxel_count": 125, "total_volume": 125.0},
-            voxel_data_path=str(artifact_path),
+            str(artifact_path),
         )
 
-        response = self.client.get(f"/api/simulations/{sim_id}/surface?mode=shrinkage&threshold=0.35")
+        response = self.client.get(f"/api/projects/{sim_id}/surface?mode=shrinkage&threshold=0.35")
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
@@ -206,7 +206,7 @@ class SurfaceApiTests(unittest.TestCase):
         self.assertFalse(payload["empty"])
 
     def test_surface_endpoint_rejects_invalid_mode(self) -> None:
-        response = self.client.get("/api/simulations/example/surface?mode=unknown")
+        response = self.client.get("/api/projects/example/surface?mode=unknown")
 
         self.assertEqual(response.status_code, 400)
 

@@ -29,7 +29,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Callable, Optional, Tuple, List, Protocol, TypeAlias
+from typing import Callable, Optional, Tuple, List, Protocol
+try:
+    from typing import TypeAlias
+except ImportError:
+    try:
+        from typing_extensions import TypeAlias
+    except ImportError:
+        from typing import Any
+        TypeAlias = Any
 import numpy as np
 from numpy.typing import NDArray
 

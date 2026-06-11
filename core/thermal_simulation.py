@@ -34,6 +34,8 @@ Author: GitHub Copilot
 Date: November 2025
 """
 
+from __future__ import annotations
+
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
