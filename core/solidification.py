@@ -2680,6 +2680,16 @@ class SolidificationEngine:
             + (0.35 * feed_loss)
             + (0.25 * isolation)
         ).astype(np.float32)
+        # Boost feed_loss contribution for explicitly blocked voxels where
+        # the hard connectivity evidence should outweigh the heuristic Niyama
+        # and isolation terms.
+        if np.any(blocked_mask):
+            boosted_weighted = (
+                (0.35 * directional)
+                + (0.40 * feed_loss)
+                + (0.25 * isolation)
+            ).astype(np.float32)
+            weighted = np.where(blocked_mask, boosted_weighted, weighted)
         trigger = np.maximum.reduce([directional, feed_loss, isolation]).astype(np.float32)
         evidence = np.maximum(weighted, late_factor * trigger)
 
@@ -2798,9 +2808,18 @@ class SolidificationEngine:
             blocked_count = np.sum(self.feeding_blocked)
             if blocked_count > 0:
                 print(f"  Using feeding path connectivity: {blocked_count:,} blocked voxels")
-                # Blocked voxels have ZERO feeding effectiveness
+                # Blocked voxels get minimum effectiveness.  Connected
+                # feeder necks are only exempt when they actually have a
+                # valid traced path back to a riser.
+                path_lengths = getattr(self, "feeding_path_lengths", None)
+                has_valid_path = np.zeros(len(feeding_effectiveness), dtype=bool)
+                if path_lengths is not None:
+                    has_valid_path = np.asarray(path_lengths, dtype=np.float32) >= 0.0
+                blocked_unfed = self.feeding_blocked & ~(
+                    connected_feeder_mask & has_valid_path
+                )
                 feeding_effectiveness = np.where(
-                    self.feeding_blocked & ~connected_feeder_mask,
+                    blocked_unfed,
                     0.1,  # Minimum effectiveness = blocked
                     feeding_effectiveness
                 )
@@ -2863,6 +2882,12 @@ class SolidificationEngine:
         valid_riser = include_mask & riser_mask & thick_enough_riser & interior_enough_riser
         valid_post = include_mask & riser_post_mask & thick_enough_riser & interior_enough_riser
         valid_mask = valid_cast | valid_riser | valid_post
+        # Always include feeding-blocked voxels regardless of geometry
+        # thresholds.  An isolated liquid pocket that cannot be fed is a
+        # defect candidate even in thin / near-surface sections.
+        feeding_blocked_arr = getattr(self, "feeding_blocked", None)
+        if feeding_blocked_arr is not None:
+            valid_mask |= np.asarray(feeding_blocked_arr, dtype=bool)
         
         # Get indices of valid voxels
         valid_indices = np.where(valid_mask)[0]

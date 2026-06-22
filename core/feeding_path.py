@@ -483,7 +483,7 @@ class FeedingPathAnalyzer:
                 history: Optional[List[np.ndarray]] = None,
                 history_times: Optional[List[float]] = None,
                 reference_times: Optional[np.ndarray] = None,
-                max_history_samples: int = 8) -> FeedingPathResult:
+                max_history_samples: int = 12) -> FeedingPathResult:
         """
         Analyze feeding paths from risers to all casting voxels.
         

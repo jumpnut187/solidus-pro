@@ -474,17 +474,15 @@ def _run_schedule_based_integration(
     # Set solidification_times from the schedule directly.
     engine.solidification_times[:] = end_times
 
-    # feeding_fraction_solid: record the first time each voxel crosses critical_fs.
-    # For schedule-driven mode we can approximate this from the schedule itself.
+    # feeding_fraction_solid: record the fraction solid when each voxel
+    # first crosses the coherency point.  Keep consistent with the
+    # front_based / thermal_coupled convention so that downstream
+    # feeding-path and Darcy analyses see physically meaningful values.
     critical_fs = float(getattr(engine.alloy, "critical_fraction_solid", 1.0))
     feeding_fraction_solid = getattr(engine, "feeding_fraction_solid", None)
     if feeding_fraction_solid is not None:
-        t_critical = start_times + local_times * (critical_fs ** (1.0 / curve_exponent))
-        t_critical = np.where(np.isfinite(t_critical), t_critical, final_schedule_time)
         mask = np.isnan(feeding_fraction_solid) & (local_times > 0)
-        feeding_fraction_solid[mask] = np.clip(
-            t_critical[mask], 0.0, final_schedule_time
-        )
+        feeding_fraction_solid[mask] = critical_fs
 
     # Report progress at discretized percentages so the callback still fires.
     if progress_callback or show_progress:
