@@ -192,6 +192,7 @@ def create_analysis_options(
     analysis_options.feeding_path = bool(option_map.get("feeding_path", False))
     analysis_options.stress_analysis = bool(option_map.get("stress_analysis", False))
     analysis_options.microstructure = bool(option_map.get("microstructure", False))
+    analysis_options.gas_porosity = bool(option_map.get("gas_porosity", False))
     try:
         sand_restraint_value = float(option_map.get("sand_restraint_index", 0.5))
     except (TypeError, ValueError):
@@ -351,6 +352,28 @@ def build_visualization_payload(
         visualization_data["fraction_liquid_history"] = fl_history
         visualization_data["fraction_liquid_times"] = engine.fraction_liquid_times or []
         result_data["fraction_liquid_snapshots"] = len(fl_history)
+
+    if getattr(engine, "gas_porosity_risk", None) is not None:
+        gas_risk = np.asarray(engine.gas_porosity_risk, dtype=np.float32)
+        if len(gas_risk) == n_voxels:
+            visualization_data["gas_porosity_risk"] = gas_risk[indices].tolist()
+            result_data["gas_porosity_stats"] = {
+                "max_risk": float(np.max(gas_risk)),
+                "mean_risk": float(np.mean(gas_risk)),
+                "hotspot_count": int(getattr(engine, "gas_porosity_count", 0)),
+            }
+    if getattr(engine, "gas_generation", None) is not None:
+        gas_gen = np.asarray(engine.gas_generation, dtype=np.float32)
+        if len(gas_gen) == n_voxels:
+            visualization_data["gas_generation"] = gas_gen[indices].tolist()
+    if getattr(engine, "gas_entrapment", None) is not None:
+        gas_ent = np.asarray(engine.gas_entrapment, dtype=np.float32)
+        if len(gas_ent) == n_voxels:
+            visualization_data["gas_entrapment"] = gas_ent[indices].tolist()
+    if getattr(engine, "gas_porosity_hotspots", None) is not None:
+        hotspots = np.asarray(engine.gas_porosity_hotspots, dtype=bool)
+        if len(hotspots) == n_voxels:
+            visualization_data["gas_porosity_hotspots"] = hotspots[indices].tolist()
 
     return result_data, visualization_data
 

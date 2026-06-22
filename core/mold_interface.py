@@ -54,6 +54,15 @@ class MoldType(str, Enum):
     CERAMIC_PLASTER = "ceramic_plaster"  # Plaster mold
 
 
+class BinderType(str, Enum):
+    """Binder chemistries used in sand mold/core production"""
+    PHENOLIC_URETHANE = "phenolic_urethane"
+    FURAN = "furan"
+    PHENOLIC_ESTER = "phenolic_ester"
+    SODIUM_SILICATE = "sodium_silicate"
+    CLAY_GREEN_SAND = "clay_green_sand"
+
+
 @dataclass
 class MoldProperties:
     """
@@ -93,6 +102,12 @@ class MoldProperties:
     # Higher = finer sand, better surface but lower permeability
     # Typical ranges: 30-50 (coarse), 50-70 (medium), 70-100 (fine), 100+ (very fine)
     grain_fineness: float = 55.0  # AFS grain fineness number
+    
+    # Gas porosity analysis properties
+    binder_type: BinderType = BinderType.PHENOLIC_URETHANE
+    binder_content: float = 1.5       # Weight-percent binder in sand mix
+    binder_gas_yield: float = 12.0    # cm³ gas per gram binder at STP
+    core_venting_effectiveness: float = 0.5  # 0-1, higher = better venting
     
     @property
     def thermal_diffusivity(self) -> float:

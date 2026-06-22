@@ -839,6 +839,32 @@ class AnalysisOptionsDialog(DraggableDialog):
         )
         analysis_layout.addWidget(self.sand_burn_in_check)
         
+        # Gas Porosity
+        self.gas_porosity_check = QCheckBox("Gas Porosity Risk")
+        self.gas_porosity_check.setChecked(False)
+        self.gas_porosity_check.setToolTip(
+            "Gas Porosity Analysis\n\n"
+            "Computes a gas porosity risk score based on mold gas\n"
+            "generation and entrapment in thick sections.\n\n"
+            "Three visualization modes are available:\n"
+            "• Gas Generation — raw surface gas field\n"
+            "• Gas Entrapment — thick-section trapping\n"
+            "• Combined Gas Risk — full R_gas = SGI x E x χ x F_niyama\n\n"
+            "RISK FACTORS:\n"
+            "• Core surfaces generate the most gas\n"
+            "• Thick, slow-freezing sections trap gas\n"
+            "• Poor feeding (low Niyama) amplifies risk\n\n"
+            "WHAT TO DO:\n"
+            "• Improve core venting and binder selection\n"
+            "• Reduce section thickness or add chills\n"
+            "• Ensure adequate risers for feeding\n\n"
+            "Alloy sensitivities:\n"
+            "• CA6NM: HIGH (0.75)\n"
+            "• CF8M: MEDIUM-HIGH (0.60)\n"
+            "• WCB: MEDIUM (0.50)"
+        )
+        analysis_layout.addWidget(self.gas_porosity_check)
+        
         # Fraction Liquid
         self.fraction_liquid_check = QCheckBox("Fraction Liquid (Solidification Path)")
         self.fraction_liquid_check.setChecked(False)
@@ -959,6 +985,7 @@ class AnalysisOptionsDialog(DraggableDialog):
             'niyama': self.niyama_check.isChecked(),
             'hot_tear': self.hot_tear_check.isChecked(),
             'sand_burn_in': self.sand_burn_in_check.isChecked(),
+            'gas_porosity': self.gas_porosity_check.isChecked(),
             'fraction_liquid': self.fraction_liquid_check.isChecked(),
             'feeding_path': self.feeding_path_check.isChecked(),
             'stress_analysis': self.stress_check.isChecked(),
@@ -974,6 +1001,7 @@ class AnalysisOptionsDialog(DraggableDialog):
             self.niyama_check.setChecked(self._original_values['niyama'])
             self.hot_tear_check.setChecked(self._original_values['hot_tear'])
             self.sand_burn_in_check.setChecked(self._original_values['sand_burn_in'])
+            self.gas_porosity_check.setChecked(self._original_values['gas_porosity'])
             self.fraction_liquid_check.setChecked(self._original_values['fraction_liquid'])
             self.feeding_path_check.setChecked(self._original_values.get('feeding_path', False))
             self.stress_check.setChecked(self._original_values.get('stress_analysis', False))
@@ -992,6 +1020,7 @@ class AnalysisOptionsDialog(DraggableDialog):
             'niyama': self.niyama_check.isChecked(),
             'hot_tear': self.hot_tear_check.isChecked(),
             'sand_burn_in': self.sand_burn_in_check.isChecked(),
+            'gas_porosity': self.gas_porosity_check.isChecked(),
             'fraction_liquid': self.fraction_liquid_check.isChecked(),
             'feeding_path': self.feeding_path_check.isChecked(),
             'stress_analysis': self.stress_check.isChecked(),
@@ -1006,6 +1035,7 @@ class AnalysisOptionsDialog(DraggableDialog):
         self.niyama_check.setChecked(options.get('niyama', False))
         self.hot_tear_check.setChecked(options.get('hot_tear', False))
         self.sand_burn_in_check.setChecked(options.get('sand_burn_in', False))
+        self.gas_porosity_check.setChecked(options.get('gas_porosity', False))
         self.fraction_liquid_check.setChecked(options.get('fraction_liquid', False))
         self.feeding_path_check.setChecked(options.get('feeding_path', False))
         self.stress_check.setChecked(options.get('stress_analysis', False))
@@ -3699,6 +3729,8 @@ class MainWindow(QMainWindow):
             return alloy_default_thresholds.get(alloy_key, 30)
         elif vis_mode == "sand_burn_in":
             return 20
+        elif vis_mode == "gas_porosity":
+            return 10
         # Default for others
         return 20
 
@@ -3813,6 +3845,9 @@ class MainWindow(QMainWindow):
             "Niyama Criterion": "niyama",
             "Hot Tear Risk": "hot_tear",
             "Sand Burn-In": "sand_burn_in",
+            "Gas Generation": "gas_generation",
+            "Gas Entrapment": "gas_entrapment",
+            "Gas Porosity Risk": "gas_porosity",
             "Fraction Liquid": "fraction_liquid",
             # Advanced analysis modes
             "Feeding Quality": "feeding_quality",
@@ -3874,6 +3909,18 @@ class MainWindow(QMainWindow):
             self.threshold_slider.setValue(rec_threshold)
             self.threshold_slider.setMarkerPosition(rec_threshold)
             self.threshold_label_title.setText("Min Burn-In Risk %:")
+        
+        elif self._current_vis_mode in ("gas_generation", "gas_entrapment", "gas_porosity"):
+            rec_threshold = self._get_recommended_threshold("gas_porosity", self._current_alloy)
+            self.threshold_slider.setValue(rec_threshold)
+            self.threshold_slider.setMarkerPosition(rec_threshold)
+            mode_label = {
+                "gas_generation": "Min Gas Generation %:",
+                "gas_entrapment": "Min Entrapment %:",
+                "gas_porosity": "Min Gas Risk %:",
+            }.get(self._current_vis_mode, "Min Risk %:")
+            self.threshold_label_title.setText(mode_label)
+            self.visualizer.set_colormap('defect_industry')
             
         elif self._current_vis_mode == "feed_modulus":
             self.threshold_slider.setValue(1)
@@ -5072,6 +5119,10 @@ class MainWindow(QMainWindow):
             available_types.append("Hot Tear Risk")
         if self._analysis_options.get('sand_burn_in', False):
             available_types.append("Sand Burn-In")
+        if self._analysis_options.get('gas_porosity', False):
+            available_types.append("Gas Generation")
+            available_types.append("Gas Entrapment")
+            available_types.append("Gas Porosity Risk")
         if self._analysis_options.get('fraction_liquid', False):
             available_types.append("Fraction Liquid")
         # Advanced analysis types
@@ -5106,6 +5157,9 @@ class MainWindow(QMainWindow):
                 "Niyama Criterion": "niyama",
                 "Hot Tear Risk": "hot_tear",
                 "Sand Burn-In": "sand_burn_in",
+                "Gas Generation": "gas_generation",
+                "Gas Entrapment": "gas_entrapment",
+                "Gas Porosity Risk": "gas_porosity",
                 "Fraction Liquid": "fraction_liquid",
                 "Feeding Quality": "feeding_quality",
                 "Thermal Stress": "thermal_stress",
@@ -5142,6 +5196,8 @@ class MainWindow(QMainWindow):
             self._visualize_hot_tear(simulation, voxel_mesh, threshold)
         elif self._current_vis_mode == 'sand_burn_in':
             self._visualize_sand_burn_in(simulation, voxel_mesh, threshold)
+        elif self._current_vis_mode in ('gas_generation', 'gas_entrapment', 'gas_porosity'):
+            self._visualize_gas_porosity(simulation, voxel_mesh, threshold)
         elif self._current_vis_mode == 'fraction_liquid':
             min_time, max_time = simulation.get_fraction_liquid_time_range()
             time_value = self._map_fraction_liquid_slider_time(
@@ -5409,6 +5465,50 @@ class MainWindow(QMainWindow):
             simulation.sand_burn_in_zones
         )
     
+    def _visualize_gas_porosity(self, simulation, voxel_mesh, threshold):
+        """Visualize gas porosity results (three sub-modes)."""
+        if simulation.gas_porosity_risk is None:
+            print("No gas porosity data available")
+            return
+
+        mode = self._current_vis_mode
+
+        if mode == "gas_generation":
+            if simulation.gas_generation is None:
+                print("No gas generation data available")
+                return
+            intensities = simulation.gas_generation.astype(np.float32)
+            legend_title = "Gas Generation (SGI)"
+        elif mode == "gas_entrapment":
+            if simulation.gas_entrapment is None:
+                print("No gas entrapment data available")
+                return
+            intensities = simulation.gas_entrapment.astype(np.float32)
+            legend_title = "Gas Entrapment (E)"
+        else:
+            intensities = simulation.gas_porosity_risk.astype(np.float32)
+            legend_title = "Gas Porosity Risk (R_gas)"
+
+        print(f"  Gas porosity ({mode}) range: {np.min(intensities):.4f} - {np.max(intensities):.4f}")
+        if simulation.gas_porosity_hotspots is not None:
+            print(f"  Gas porosity hotspots: {np.sum(simulation.gas_porosity_hotspots):,}")
+
+        self.visualizer.load_gas_porosity(
+            voxel_mesh.voxel_centers,
+            voxel_mesh.voxel_sizes,
+            intensities,
+            threshold,
+            mode=mode,
+        )
+        self.visualizer.update_legend(legend_title, 0.0, 1.0)
+
+        self.visualizer.current_gas_porosity_data = (
+            voxel_mesh.voxel_centers,
+            voxel_mesh.voxel_sizes,
+            intensities,
+            mode,
+        )
+    
     def _visualize_feeding_quality(self, simulation, voxel_mesh, threshold):
         """Visualize feeding path quality results"""
         if simulation.feeding_quality is None:
@@ -5647,6 +5747,10 @@ class MainWindow(QMainWindow):
             if hasattr(self.visualizer, 'current_sand_burn_in_data') and \
                self.visualizer.current_sand_burn_in_data is not None:
                 self.visualizer.update_sand_burn_in_threshold(threshold)
+        elif mode in ('gas_generation', 'gas_entrapment', 'gas_porosity'):
+            if hasattr(self.visualizer, 'current_gas_porosity_data') and \
+               self.visualizer.current_gas_porosity_data is not None:
+                self.visualizer.update_gas_porosity_threshold(threshold)
         elif mode in ('feeding_quality', 'thermal_stress', 'distortion',
                       'crack_susceptibility', 'sdas', 'predicted_uts'):
             if hasattr(self.visualizer, 'current_hotspot_data') and \

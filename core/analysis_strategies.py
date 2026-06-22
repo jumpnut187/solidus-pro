@@ -100,6 +100,33 @@ def run_post_analyses(engine: Any, *, show_progress: bool) -> None:
         finally:
             _record("analysis_sand_burn_in", stage_start)
 
+    if engine.analysis_options.gas_porosity:
+        if show_progress:
+            print("  Calculating gas porosity risk...")
+        stage_start = time.perf_counter()
+        try:
+            engine._calculate_gas_porosity()
+        except Exception as exc:
+            engine._logger.log_simulation_error(
+                stage="gas_porosity_analysis",
+                error=exc,
+                mesh_info={
+                    "n_voxels": len(engine.mesh.voxel_centers),
+                    "alloy": engine.alloy.name,
+                    "analysis_options": {"gas_porosity": engine.analysis_options.gas_porosity},
+                },
+            )
+            if show_progress:
+                print(f"  Warning: Gas porosity analysis failed: {exc}")
+            n_voxels = len(engine.mesh.voxel_centers)
+            engine.gas_generation = np.zeros(n_voxels, dtype=np.float32)
+            engine.gas_entrapment = np.zeros(n_voxels, dtype=np.float32)
+            engine.gas_porosity_risk = np.zeros(n_voxels, dtype=np.float32)
+            engine.gas_porosity_hotspots = np.zeros(n_voxels, dtype=bool)
+            engine.gas_porosity_count = 0
+        finally:
+            _record("analysis_gas_porosity", stage_start)
+
     if engine.analysis_options.stress_analysis:
         if show_progress:
             print("  Calculating thermal stress and distortion...")
@@ -167,4 +194,6 @@ def run_post_analyses(engine: Any, *, show_progress: bool) -> None:
             print(f"Hot tear risk zones: {engine.hot_tear_count:,}")
         if engine.analysis_options.sand_burn_in:
             print(f"Sand burn-in risk zones: {engine.sand_burn_in_count:,}")
+        if engine.analysis_options.gas_porosity:
+            print(f"Gas porosity hotspots: {engine.gas_porosity_count:,}")
         print("=" * 60 + "\n")

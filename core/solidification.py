@@ -130,6 +130,7 @@ class AnalysisOptions:
     feeding_path: bool = False      # Feeding path analysis (MAGMASOFT-style)
     stress_analysis: bool = False   # Thermal stress and distortion analysis
     microstructure: bool = False    # SDAS and mechanical property prediction
+    gas_porosity: bool = False      # Gas porosity analysis (binder gas + entrapment)
     sand_restraint_index: float = 0.5  # 0-1 mold restraint/collapse behavior for hot tear & crack risk
     use_gpu: bool = False           # GPU acceleration (requires cupy or pyopencl)
     use_incremental: bool = False   # Incremental solidification (can be slower for small models)
@@ -257,6 +258,12 @@ class SolidificationEngine:
         self.sand_burn_in_risk = None   # 0-1, higher = more burn-in risk
         self.sand_burn_in_zones = None  # Boolean mask of burn-in prone surface voxels
         
+        # Gas Porosity analysis results
+        self.gas_generation = None          # SGI field after surface propagation
+        self.gas_entrapment = None          # E field (solidification-time-based)
+        self.gas_porosity_risk = None       # Combined R_gas field (0-1)
+        self.gas_porosity_hotspots = None   # Boolean mask (risk > 0.65)
+        
         # Feeding Path analysis results (MAGMASOFT-style)
         self.feeding_path_result = None    # FeedingPathResult object
         self.feeding_quality = None        # 0-1 feeding quality score
@@ -289,6 +296,7 @@ class SolidificationEngine:
         self.niyama_defect_count = 0
         self.hot_tear_count = 0         # Number of hot tear risk voxels
         self.sand_burn_in_count = 0     # Number of sand burn-in risk voxels
+        self.gas_porosity_count = 0     # Number of gas porosity hotspot voxels
         self.feeding_blocked_count = 0  # Number of voxels with blocked feeding
         self.max_stress_mpa = 0.0       # Maximum thermal stress
         self.avg_sdas_um = 0.0          # Average SDAS
@@ -574,6 +582,13 @@ class SolidificationEngine:
             self.sand_burn_in_risk = create_managed_array(n_voxels, dtype=np.float32, name="sand_burn_in_risk")
             self.sand_burn_in_zones = create_managed_array(n_voxels, dtype=np.bool_, name="sand_burn_in_zones")
         
+        # Gas Porosity arrays
+        if self.analysis_options.gas_porosity:
+            self.gas_generation = create_managed_array(n_voxels, dtype=np.float32, name="gas_generation")
+            self.gas_entrapment = create_managed_array(n_voxels, dtype=np.float32, name="gas_entrapment")
+            self.gas_porosity_risk = create_managed_array(n_voxels, dtype=np.float32, name="gas_porosity_risk")
+            self.gas_porosity_hotspots = create_managed_array(n_voxels, dtype=np.bool_, name="gas_porosity_hotspots")
+        
         # Fraction Liquid tracking
         if self._should_capture_fraction_history():
             # Store snapshots every 10 seconds (configurable)
@@ -590,6 +605,7 @@ class SolidificationEngine:
                 'hotspot': self.analysis_options.hotspot,
                 'niyama': self.analysis_options.niyama,
                 'sand_burn_in': self.analysis_options.sand_burn_in,
+                'gas_porosity': self.analysis_options.gas_porosity,
                 'fraction_liquid': self.analysis_options.fraction_liquid
             }
         })
@@ -611,6 +627,8 @@ class SolidificationEngine:
             analyses.append(f"Niyama (threshold={NIYAMA_THRESHOLDS.get(self.alloy.name.split()[0], 1.0)})")
         if self.analysis_options.sand_burn_in:
             analyses.append("Sand Burn-In")
+        if self.analysis_options.gas_porosity:
+            analyses.append("Gas Porosity")
         if self.analysis_options.fraction_liquid:
             analyses.append("Fraction Liquid")
         print(f"Analyses: {', '.join(analyses)}")
@@ -4217,6 +4235,114 @@ class SolidificationEngine:
         print(f"  Sand burn-in threshold: {risk_threshold:.2f}")
         print(f"  Surface voxels at risk: {self.sand_burn_in_count:,} ({self.sand_burn_in_count/n_surface*100:.1f}% of surface)")
     
+    def _calculate_gas_porosity(self):
+        """
+        Calculate gas porosity risk for all voxels.
+
+        Gas porosity is a post-processing analysis that combines:
+        1. Surface gas generation (binder decomposition + moisture)
+        2. Exponential distance decay from surfaces
+        3. Entrapment in thick sections (slow solidification)
+        4. Niyama coupling (amplifies risk where feeding is poor)
+
+        Produces three visualization layers:
+        - gas_generation: raw SGI field
+        - gas_entrapment: E field
+        - gas_porosity_risk: combined R_gas field
+        """
+        from physics.gas_porosity import (
+            compute_surface_gas_generation,
+            propagate_gas_to_interior,
+            compute_combined_risk,
+            compute_hotspots,
+        )
+        from core.mold_interface import BinderType
+
+        n_voxels = len(self.mesh.voxel_centers)
+
+        if n_voxels == 0:
+            raise ValueError("Mesh has no voxels for gas porosity analysis")
+
+        gas_sensitivity = getattr(self.alloy, "gas_sensitivity", 0.5)
+
+        surface_indices = np.asarray(
+            self.mesh.get_surface_voxel_indices(), dtype=np.int32
+        )
+        n_surface = len(surface_indices)
+
+        if n_surface == 0:
+            print("  Warning: No surface voxels found for gas porosity analysis")
+            self.gas_generation = np.zeros(n_voxels, dtype=np.float32)
+            self.gas_entrapment = np.zeros(n_voxels, dtype=np.float32)
+            self.gas_porosity_risk = np.zeros(n_voxels, dtype=np.float32)
+            self.gas_porosity_hotspots = np.zeros(n_voxels, dtype=bool)
+            self.gas_porosity_count = 0
+            return
+
+        print(f"  Analyzing gas porosity for {n_surface:,} surface voxels...")
+
+        # Parameters (can be overridden via environment or defaults)
+        humidity = 0.5
+        binder_type = "phenolic_urethane"
+        binder_content = 1.5
+        core_venting = 0.5
+        penetration_depth = 3.0       # inches
+        entrapment_exponent = 2.0
+        niyama_coupling_alpha = 0.5
+
+        # 1. Compute SGI₀ per surface voxel
+        sgi0 = compute_surface_gas_generation(
+            surface_indices=surface_indices,
+            voxel_part_types=self.mesh.voxel_part_types,
+            local_solidification_times=self.local_solidification_time,
+            humidity=humidity,
+            binder_type=binder_type,
+            binder_content=binder_content,
+            core_venting_effectiveness=core_venting,
+        )
+
+        # 2. Propagate SGI from surfaces to all interior voxels
+        gas_gen, _nearest_map = propagate_gas_to_interior(
+            voxel_centers=self.mesh.voxel_centers,
+            surface_indices=surface_indices,
+            surface_sgi0=sgi0,
+            gas_penetration_depth=penetration_depth,
+        )
+
+        self.gas_generation = gas_gen.astype(np.float32)
+
+        # 3. Compute entrapment + Niyama coupling + combined risk
+        niyama_risk = getattr(self, "niyama_risk", None)
+
+        entrapment, _niyama_coupling, risk = compute_combined_risk(
+            self.gas_generation,
+            self.local_solidification_time,
+            niyama_risk,
+            gas_sensitivity,
+            entrapment_exponent,
+            niyama_coupling_alpha,
+        )
+
+        self.gas_entrapment = entrapment.astype(np.float32)
+        self.gas_porosity_risk = risk.astype(np.float32)
+
+        # 4. Identify hotspot voxels
+        self.gas_porosity_hotspots = compute_hotspots(
+            self.gas_porosity_risk, threshold=0.65
+        )
+
+        self.gas_porosity_count = int(np.sum(self.gas_porosity_hotspots))
+
+        print(f"    Alloy gas sensitivity (χ): {gas_sensitivity}")
+        print(f"    Gas penetration depth (λ): {penetration_depth:.1f} in")
+        print(f"    Entrapment exponent (n): {entrapment_exponent:.1f}")
+        print(f"    Niyama coupling (α): {niyama_coupling_alpha:.2f}")
+        print(f"    Gas generation range: {np.min(self.gas_generation):.4f} - {np.max(self.gas_generation):.4f}")
+        print(f"    Gas entrapment range: {np.min(self.gas_entrapment):.4f} - {np.max(self.gas_entrapment):.4f}")
+        print(f"    Gas porosity risk range: {np.min(self.gas_porosity_risk):.4f} - {np.max(self.gas_porosity_risk):.4f}")
+        print(f"    Gas porosity hotspots: {self.gas_porosity_count:,} "
+              f"({self.gas_porosity_count / n_voxels * 100:.1f}% of total)")
+    
     def _generate_statistics(self):
         """Generate simulation statistics"""
         # Lower threshold to catch more potential shrinkage
@@ -4713,6 +4839,7 @@ class SolidificationEngine:
                 'niyama': self.analysis_options.niyama,
                 'hot_tear': self.analysis_options.hot_tear,
                 'sand_burn_in': self.analysis_options.sand_burn_in,
+                'gas_porosity': self.analysis_options.gas_porosity,
                 'fraction_liquid': self.analysis_options.fraction_liquid
             }
         }
@@ -4775,6 +4902,14 @@ class SolidificationEngine:
             results['sand_burn_in_count'] = self.sand_burn_in_count
             results['sand_burn_in_risk'] = self.sand_burn_in_risk
             results['sand_burn_in_zones'] = self.sand_burn_in_zones
+        
+        # Gas porosity results
+        if self.analysis_options.gas_porosity:
+            results['gas_porosity_count'] = self.gas_porosity_count
+            results['gas_generation'] = self.gas_generation
+            results['gas_entrapment'] = self.gas_entrapment
+            results['gas_porosity_risk'] = self.gas_porosity_risk
+            results['gas_porosity_hotspots'] = self.gas_porosity_hotspots
         
         # Fraction liquid results
         if self.analysis_options.fraction_liquid:

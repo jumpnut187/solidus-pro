@@ -828,6 +828,9 @@ class CastingVisualizer(QWidget):
         # Sand burn-in actor
         self.sand_burn_in_actor = None
         
+        # Gas porosity actor
+        self.gas_porosity_actor = None
+        
         # Fraction liquid actor
         self.fraction_liquid_actor = None
         
@@ -838,6 +841,7 @@ class CastingVisualizer(QWidget):
         self.current_niyama_data = None
         self.current_hot_tear_data = None
         self.current_sand_burn_in_data = None
+        self.current_gas_porosity_data = None
         self.current_fraction_liquid_data = None
         
         # Pre-rendered shrinkage cache for fast threshold updates
@@ -855,6 +859,7 @@ class CastingVisualizer(QWidget):
         self._niyama_cache: Dict[float, vtk.vtkPolyData] = {}
         self._hot_tear_cache: Dict[float, vtk.vtkPolyData] = {}
         self._sand_burn_in_cache: Dict[float, vtk.vtkPolyData] = {}
+        self._gas_porosity_cache: Dict[float, vtk.vtkPolyData] = {}
         
         # ==================== NEW FEATURES ====================
         
@@ -1621,6 +1626,7 @@ class CastingVisualizer(QWidget):
         self._niyama_cache.clear()
         self._hot_tear_cache.clear()
         self._sand_burn_in_cache.clear()
+        self._gas_porosity_cache.clear()
 
     def _get_shrinkage_threshold_levels(self, current_threshold: float) -> List[float]:
         """Return nearby threshold levels that should be pre-built."""
@@ -3044,6 +3050,226 @@ class CastingVisualizer(QWidget):
             )
             print(f"Error updating sand burn-in threshold: {e}")
 
+    # ──────────────────────────────────────────────────────────────
+    # Gas Porosity Visualization
+    # ──────────────────────────────────────────────────────────────
+
+    def load_gas_porosity(self, voxel_centers: np.ndarray,
+                          voxel_sizes: np.ndarray,
+                          intensities: np.ndarray,
+                          threshold: float = 0.1,
+                          mode: str = "gas_porosity"):
+        """
+        Load and display gas porosity visualization.
+
+        Three sub-modes: gas_generation, gas_entrapment, gas_porosity.
+        Uses the industry-standard defect colormap (green-yellow-orange-red).
+        """
+        try:
+            if voxel_centers is None or len(voxel_centers) == 0:
+                logger.warning("load_gas_porosity called with empty voxel_centers")
+                print("Warning: No voxel data for gas porosity visualization")
+                return
+            if intensities is None:
+                logger.warning("load_gas_porosity called with missing intensity data")
+                print("Warning: Gas porosity intensity data not available")
+                return
+
+            if self.gas_porosity_actor is not None:
+                self.renderer.RemoveActor(self.gas_porosity_actor)
+
+            self.current_gas_porosity_data = (voxel_centers, voxel_sizes, intensities, mode)
+
+            self._clear_result_caches()
+
+            polydata = self._build_gas_porosity_geometry(
+                voxel_centers, voxel_sizes, intensities, threshold, mode
+            )
+
+            if polydata is None or polydata.GetNumberOfPoints() == 0:
+                print("No gas porosity risk voxels to display")
+                return
+
+            mapper = vtk.vtkPolyDataMapper()
+            mapper.SetInputData(polydata)
+            mapper.SetScalarModeToUsePointData()
+
+            self.gas_porosity_actor = vtk.vtkActor()
+            self.gas_porosity_actor.SetMapper(mapper)
+
+            prop = self.gas_porosity_actor.GetProperty()
+            prop.SetOpacity(0.75)
+            prop.SetInterpolationToFlat()
+
+            self.renderer.AddActor(self.gas_porosity_actor)
+            self.render_window.Render()
+
+            num_displayed = polydata.GetNumberOfCells() // 6
+            print(f"Displayed {num_displayed:,} gas porosity voxels")
+
+            self._prebuild_gas_porosity_cache(
+                voxel_centers, voxel_sizes, intensities, threshold, mode
+            )
+
+        except Exception as e:
+            logger.error(
+                f"Failed to load gas porosity visualization: {e}",
+                exc_info=True,
+                context={
+                    'n_voxels': len(voxel_centers) if voxel_centers is not None else 0,
+                    'threshold': threshold,
+                    'mode': mode,
+                }
+            )
+            print(f"Error loading gas porosity visualization: {e}")
+
+    def _build_gas_porosity_geometry(self, voxel_centers: np.ndarray,
+                                      voxel_sizes: np.ndarray,
+                                      intensities: np.ndarray,
+                                      threshold: float,
+                                      mode: str) -> Optional[vtk.vtkPolyData]:
+        """Build gas porosity visualization geometry with defect_industry colors."""
+        try:
+            mask = intensities >= threshold
+            filtered_centers = voxel_centers[mask]
+            filtered_sizes = voxel_sizes[mask]
+            filtered_intensities = intensities[mask]
+
+            n_voxels = len(filtered_centers)
+            if n_voxels == 0:
+                return None
+
+            centers_f32 = np.ascontiguousarray(filtered_centers, dtype=np.float32)
+            vtk_points_array = numpy_support.numpy_to_vtk(
+                centers_f32, deep=True, array_type=vtk.VTK_FLOAT
+            )
+            vtk_points_array.SetNumberOfComponents(3)
+
+            points = vtk.vtkPoints()
+            points.SetData(vtk_points_array)
+
+            scaled_sizes = np.ascontiguousarray(filtered_sizes * 0.85, dtype=np.float32)
+            vtk_scales = numpy_support.numpy_to_vtk(
+                scaled_sizes, deep=True, array_type=vtk.VTK_FLOAT
+            )
+            vtk_scales.SetName("Scale")
+
+            point_polydata = vtk.vtkPolyData()
+            point_polydata.SetPoints(points)
+            point_polydata.GetPointData().AddArray(vtk_scales)
+            point_polydata.GetPointData().SetActiveScalars("Scale")
+
+            colors = vtk.vtkUnsignedCharArray()
+            colors.SetNumberOfComponents(3)
+            colors.SetName("Colors")
+
+            min_int = np.min(filtered_intensities)
+            max_int = np.max(filtered_intensities)
+            int_range = max_int - min_int if max_int > min_int else 1.0
+
+            for v in filtered_intensities:
+                t = (v - min_int) / int_range
+                t = min(max(t, 0.0), 1.0)
+                r, g, b = get_color_for_value(t, 'defect_industry')
+                colors.InsertNextTuple3(r, g, b)
+
+            point_polydata.GetPointData().AddArray(colors)
+
+            cube = vtk.vtkCubeSource()
+            cube.SetXLength(1.0)
+            cube.SetYLength(1.0)
+            cube.SetZLength(1.0)
+
+            glyph3D = vtk.vtkGlyph3D()
+            glyph3D.SetSourceConnection(cube.GetOutputPort())
+            glyph3D.SetInputData(point_polydata)
+            glyph3D.SetScaleModeToScaleByScalar()
+            glyph3D.SetColorModeToColorByScalar()
+            glyph3D.Update()
+
+            return glyph3D.GetOutput()
+
+        except Exception as e:
+            logger.error(
+                f"Failed to build gas porosity geometry: {e}",
+                exc_info=True,
+                context={
+                    'n_voxels': len(voxel_centers) if voxel_centers is not None else 0,
+                    'threshold': threshold,
+                    'mode': mode,
+                }
+            )
+            return None
+
+    def _prebuild_gas_porosity_cache(self, voxel_centers, voxel_sizes,
+                                      intensities, current_threshold, mode):
+        """Pre-build geometry for nearby threshold levels."""
+        nearby_thresholds = self._get_bounded_threshold_levels(current_threshold)
+        for thresh in nearby_thresholds:
+            cache_key = (round(thresh, 2), mode)
+            if (
+                cache_key not in self._gas_porosity_cache
+                and self._should_cache_threshold(intensities, round(thresh, 2))
+            ):
+                polydata = self._build_gas_porosity_geometry(
+                    voxel_centers, voxel_sizes, intensities, thresh, mode
+                )
+                self._cache_polydata(self._gas_porosity_cache, cache_key, polydata)
+
+    def update_gas_porosity_threshold(self, threshold: float):
+        """Update gas porosity visualization threshold."""
+        try:
+            if self.current_gas_porosity_data is None:
+                return
+
+            voxel_centers, voxel_sizes, intensities, mode = self.current_gas_porosity_data
+
+            cache_key = (round(threshold, 2), mode)
+
+            if cache_key in self._gas_porosity_cache:
+                polydata = self._gas_porosity_cache[cache_key]
+            else:
+                polydata = self._build_gas_porosity_geometry(
+                    voxel_centers, voxel_sizes, intensities, threshold, mode
+                )
+
+            if self.gas_porosity_actor is not None:
+                self.renderer.RemoveActor(self.gas_porosity_actor)
+
+            if polydata is None or polydata.GetNumberOfPoints() == 0:
+                print("No gas porosity risk at this threshold")
+                self.render_window.Render()
+                return
+
+            mapper = vtk.vtkPolyDataMapper()
+            mapper.SetInputData(polydata)
+            mapper.SetScalarModeToUsePointData()
+
+            self.gas_porosity_actor = vtk.vtkActor()
+            self.gas_porosity_actor.SetMapper(mapper)
+
+            prop = self.gas_porosity_actor.GetProperty()
+            prop.SetOpacity(0.75)
+            prop.SetInterpolationToFlat()
+
+            self.renderer.AddActor(self.gas_porosity_actor)
+            self.render_window.Render()
+
+            num_displayed = polydata.GetNumberOfCells() // 6
+            print(f"Displayed {num_displayed:,} gas porosity voxels")
+
+            self._prebuild_gas_porosity_cache(
+                voxel_centers, voxel_sizes, intensities, threshold, mode
+            )
+
+        except Exception as e:
+            logger.error(
+                f"Failed to update gas porosity threshold: {e}",
+                exc_info=True,
+                context={'threshold': threshold}
+            )
+            print(f"Error updating gas porosity threshold: {e}")
+
     def hide_all_analysis(self):
         """Hide all analysis visualization actors"""
         if self.shrinkage_actor is not None:
@@ -3056,6 +3282,8 @@ class CastingVisualizer(QWidget):
             self.hot_tear_actor.SetVisibility(False)
         if self.sand_burn_in_actor is not None:
             self.sand_burn_in_actor.SetVisibility(False)
+        if self.gas_porosity_actor is not None:
+            self.gas_porosity_actor.SetVisibility(False)
         if self.fraction_liquid_actor is not None:
             self.fraction_liquid_actor.SetVisibility(False)
         self.render_window.Render()
@@ -3154,6 +3382,10 @@ class CastingVisualizer(QWidget):
         if self.sand_burn_in_actor is not None:
             self.renderer.RemoveActor(self.sand_burn_in_actor)
             self.sand_burn_in_actor = None
+        
+        if self.gas_porosity_actor is not None:
+            self.renderer.RemoveActor(self.gas_porosity_actor)
+            self.gas_porosity_actor = None
         
         if self.fraction_liquid_actor is not None:
             self.renderer.RemoveActor(self.fraction_liquid_actor)

@@ -97,6 +97,9 @@ class AlloyProperties:
     # IN625 ~0.37 (moderate)
     sand_burn_in_susceptibility: float = 0.40
     
+    # Gas porosity analysis
+    gas_sensitivity: float = 0.5  # 0-1, alloy-specific multiplier for gas risk
+    
     def __post_init__(self):
         """Set default liquid properties if not specified"""
         if self.conductivity_liquid is None:
@@ -331,7 +334,9 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         critical_fraction_solid=0.52,  # Coherency point for carbon steel
         dendrite_arm_spacing=80.0,  # μm - typical for sand casting cooling rates
         # Sand burn-in - moderate susceptibility (high superheat but good surface tension)
-        sand_burn_in_susceptibility=0.45
+        sand_burn_in_susceptibility=0.45,
+        # Gas porosity - moderate sensitivity (steel is intermediate)
+        gas_sensitivity=0.50
     ),
     
     'CF8': AlloyProperties(
@@ -363,7 +368,9 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         critical_fraction_solid=0.48,  # Lower coherency due to wide freezing range
         dendrite_arm_spacing=60.0,  # μm - finer structure due to alloying
         # Sand burn-in - lower susceptibility (higher viscosity, lower superheat tolerance)
-        sand_burn_in_susceptibility=0.35
+        sand_burn_in_susceptibility=0.35,
+        # Gas porosity - CF8M ~0.60 (stainless more sensitive)
+        gas_sensitivity=0.60
     ),
     
     'C958': AlloyProperties(
@@ -395,7 +402,9 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         critical_fraction_solid=0.62,  # Higher coherency - better fluidity
         dendrite_arm_spacing=120.0,  # μm - coarser structure, better permeability
         # Sand burn-in - higher susceptibility (excellent fluidity, wide superheat range)
-        sand_burn_in_susceptibility=0.55
+        sand_burn_in_susceptibility=0.55,
+        # Gas porosity - bronze has moderate gas sensitivity
+        gas_sensitivity=0.55
     ),
 
     'C964': AlloyProperties(
@@ -427,7 +436,9 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         critical_fraction_solid=0.56,  # Moderate coherency
         dendrite_arm_spacing=95.0,  # μm
         # Sand burn-in - good fluidity and superheat range
-        sand_burn_in_susceptibility=0.48
+        sand_burn_in_susceptibility=0.48,
+        # Gas porosity - moderate sensitivity
+        gas_sensitivity=0.50
     ),
 
     'CA6NM': AlloyProperties(
@@ -459,7 +470,9 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         critical_fraction_solid=0.54,
         dendrite_arm_spacing=78.0,  # μm
         # Sand burn-in - moderate susceptibility
-        sand_burn_in_susceptibility=0.43
+        sand_burn_in_susceptibility=0.43,
+        # Gas porosity - CA6NM ~0.75 (cast steel alloy is sensitive)
+        gas_sensitivity=0.75
     ),
 
     'MONEL400': AlloyProperties(
@@ -491,7 +504,9 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         critical_fraction_solid=0.53,  # Moderate coherency point
         dendrite_arm_spacing=85.0,  # μm
         # Sand burn-in - moderate susceptibility
-        sand_burn_in_susceptibility=0.39
+        sand_burn_in_susceptibility=0.39,
+        # Gas porosity - Monel 400 has moderate gas sensitivity
+        gas_sensitivity=0.55
     ),
 
     'IN625': AlloyProperties(
@@ -523,7 +538,9 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         critical_fraction_solid=0.50,  # Lower coherency due to restricted feeding
         dendrite_arm_spacing=70.0,  # μm
         # Sand burn-in - controlled by viscosity and oxidation behavior
-        sand_burn_in_susceptibility=0.37
+        sand_burn_in_susceptibility=0.37,
+        # Gas porosity - Inconel 625 has lower sensitivity
+        gas_sensitivity=0.45
     )
 }
 
