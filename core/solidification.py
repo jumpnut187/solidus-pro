@@ -19,6 +19,7 @@ Performance Optimizations:
 
 import numpy as np
 import time
+import warnings
 from typing import Tuple, Dict, Optional, List
 from collections import deque
 from scipy.spatial.distance import cdist
@@ -220,7 +221,6 @@ class SolidificationEngine:
         self.solidification_end_times = None
         self.local_solidification_time = None
         self.surface_distances = None
-        self.feeding_distances = None
         self.feeding_fraction_solid = None
         self.feeding_path_lengths = None
         
@@ -549,9 +549,8 @@ class SolidificationEngine:
             n_voxels, dtype=np.float32, name="local_solidification_time"
         )
         self.surface_distances = create_managed_array(n_voxels, dtype=np.float32, name="surface_distances")
-        # Preserve the legacy public name. This array still stores geometric
-        # distance to the nearest surface, not a traced feeder-path length.
-        self.feeding_distances = self.surface_distances
+        # Note: ``feeding_distances`` is exposed as a deprecated alias for
+        # ``surface_distances``; both point at the same managed array.
         self.feeding_fraction_solid = create_managed_array(
             n_voxels,
             dtype=np.float32,
@@ -1115,7 +1114,32 @@ class SolidificationEngine:
         self.solidification_start_times[:] = start_times
         self.solidification_end_times[:] = end_times
         self.local_solidification_time[:] = local_times
-    
+
+    @property
+    def feeding_distances(self) -> Optional[np.ndarray]:
+        """Deprecated alias for :attr:`surface_distances`.
+
+        Use ``surface_distances`` instead. This property is retained only for
+        backward compatibility with callers that have not yet migrated.
+        """
+        warnings.warn(
+            "`feeding_distances` is deprecated; use `surface_distances` instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.surface_distances
+
+    @feeding_distances.setter
+    def feeding_distances(self, value: Optional[np.ndarray]) -> None:
+        """Deprecated setter that writes through to :attr:`surface_distances`."""
+        warnings.warn(
+            "Setting `feeding_distances` is deprecated; assign to "
+            "`surface_distances` instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self.surface_distances = value
+
     def _calculate_feeding_distances(self):
         """
         Calculate distance from each voxel to the nearest free surface.
@@ -1126,20 +1150,19 @@ class SolidificationEngine:
         """
         surface_indices = self.mesh.get_surface_voxel_indices()
         surface_centers = self.mesh.voxel_centers[surface_indices]
-        
+
         n_voxels = len(self.mesh.voxel_centers)
-        
+
         print(f"  Computing feeding distances from {len(surface_indices):,} surface voxels...")
-        
+
         if len(surface_centers) == 0:
             self.surface_distances = np.zeros(n_voxels, dtype=np.float32)
-            self.feeding_distances = self.surface_distances
             return
-        
+
         # Ensure arrays are contiguous float32
         voxel_centers = np.ascontiguousarray(self.mesh.voxel_centers, dtype=np.float32)
         surface_centers = np.ascontiguousarray(surface_centers, dtype=np.float32)
-        
+
         # Use GPU-accelerated distance computation if available
         if self._use_gpu:
             print(f"  Using GPU-accelerated distance computation...")
@@ -1156,8 +1179,6 @@ class SolidificationEngine:
                 # Conservative fallback path if KD-tree query is unavailable.
                 self.surface_distances = compute_min_distances_parallel(voxel_centers, surface_centers)
                 print(f"  Feeding distances computed (JIT-parallel)")
-        
-        self.feeding_distances = self.surface_distances
     
     def _get_chill_voxel_indices(self) -> np.ndarray:
         """Get indices of voxels that are part of chills"""
@@ -1478,12 +1499,12 @@ class SolidificationEngine:
         if self._air_gap_slowdown is None:
             return
         
-        # Use feeding_distances as distance-from-surface metric
-        if self.feeding_distances is None:
+        # Use surface_distances as distance-from-surface metric
+        if self.surface_distances is None:
             return
-            
+
         voxel_states = np.ascontiguousarray(self.mesh.voxel_states, dtype=np.float32)
-        feeding_distances = np.ascontiguousarray(self.feeding_distances, dtype=np.float32)
+        surface_distances = np.ascontiguousarray(self.surface_distances, dtype=np.float32)
         surface_mask = np.ascontiguousarray(self.mesh.surface_voxels, dtype=np.bool_)
         
         # Air gap parameters
@@ -1494,7 +1515,7 @@ class SolidificationEngine:
 
         self._air_gap_slowdown[:] = compute_mold_air_gap_effect_parallel(
             voxel_states,
-            feeding_distances,
+            surface_distances,
             surface_mask,
             self.time,
             air_gap_time_constant,
@@ -2033,20 +2054,18 @@ class SolidificationEngine:
                 if result is not None:
                     path_lengths = result.path_length
 
+        fallback = getattr(self, "surface_distances", None)
+        if fallback is None:
+            fallback = getattr(self, "feeding_distances", None)
+
         if path_lengths is not None:
             path_lengths = np.asarray(path_lengths, dtype=np.float32)
             valid = path_lengths >= 0.0
             if np.any(valid):
-                fallback = getattr(self, "surface_distances", None)
-                if fallback is None:
-                    fallback = self.feeding_distances
                 effective = np.asarray(fallback, dtype=np.float32).copy()
                 effective[valid] = path_lengths[valid]
                 return effective
 
-        fallback = getattr(self, "surface_distances", None)
-        if fallback is None:
-            fallback = self.feeding_distances
         return np.asarray(fallback, dtype=np.float32)
 
     def _estimate_feeder_neck_resistance_factors(self) -> np.ndarray:
@@ -3339,7 +3358,7 @@ class SolidificationEngine:
         normalized_time = self.solidification_times / max_solid_time
         
         # Factor 2: Distance from surface (feeding distance)
-        surface_distances = self.surface_distances if self.surface_distances is not None else self.feeding_distances
+        surface_distances = self.surface_distances
         max_feeding_dist = np.max(surface_distances)
         normalized_feeding = surface_distances / max(max_feeding_dist, 0.1)
         
@@ -3432,7 +3451,7 @@ class SolidificationEngine:
                 isolation_score[i] = neighbors_before / total_neighbors
         
         # Boost score for voxels that are far from surface AND have high isolation
-        surface_distances = self.surface_distances if self.surface_distances is not None else self.feeding_distances
+        surface_distances = self.surface_distances
         surface_factor = surface_distances / np.max(surface_distances + 0.1)
         isolation_score = isolation_score * (0.5 + 0.5 * surface_factor)
         
@@ -3502,7 +3521,7 @@ class SolidificationEngine:
             threshold_status = "literature_default" if alloy_key == "WCB" else "estimated_default"
         else:
             # ===== THERMAL GRADIENT CALCULATION =====
-            surface_distances = self.surface_distances if self.surface_distances is not None else self.feeding_distances
+            surface_distances = self.surface_distances
             surface_feeding_dists = surface_distances
 
             min_distance_to_boundary = 0.1  # inches - minimum distance for gradient calculation
@@ -3720,7 +3739,7 @@ class SolidificationEngine:
         interior over a short section-size-based distance.
         """
         n_voxels = len(self.mesh.voxel_centers)
-        surface_distances = self.surface_distances if self.surface_distances is not None else self.feeding_distances
+        surface_distances = self.surface_distances
         if surface_distances is None:
             return np.zeros(n_voxels, dtype=np.float32)
 
@@ -3851,7 +3870,7 @@ class SolidificationEngine:
         )
 
         surface_distances = np.ascontiguousarray(
-            self.surface_distances if self.surface_distances is not None else self.feeding_distances,
+            self.surface_distances,
             dtype=np.float32,
         )
 

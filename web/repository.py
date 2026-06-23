@@ -351,7 +351,6 @@ def _default_analysis_options() -> Dict[str, Any]:
 
 def _default_performance_options() -> Dict[str, Any]:
     return {
-        "use_gpu": False,
         "use_incremental": False,
         "use_chunked_voxelization": False,
         "part_assignment_mode": "parallel",

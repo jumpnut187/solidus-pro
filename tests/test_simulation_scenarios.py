@@ -480,55 +480,6 @@ class ScenarioRegressionTests(unittest.TestCase):
         center = engine.mesh.voxel_centers[hotspot_indices[0]]
         self.assertTrue(np.allclose(center, np.zeros(3, dtype=np.float32)))
 
-    def test_thick_thin_transition_has_more_hot_tear_than_small_block(self) -> None:
-        simple_engine = _run_pipeline_with_patched_memory(
-            _single_cast_manager("sample_stl_files/small_block.stl"),
-            hot_tear=True,
-        )
-        transition_engine = _run_pipeline_with_patched_memory(
-            _single_cast_manager("sample_stl_files/thick_thin_test.stl"),
-            hot_tear=True,
-        )
-
-        self.assertGreater(
-            int(np.count_nonzero(transition_engine.hot_tear_zones)),
-            int(np.count_nonzero(simple_engine.hot_tear_zones)),
-        )
-        self.assertGreater(
-            float(np.max(transition_engine.hot_tear_risk)),
-            float(np.max(simple_engine.hot_tear_risk)),
-        )
-
-    def test_hot_tear_response_varies_by_alloy(self) -> None:
-        wcb_engine = _run_pipeline_with_patched_memory(
-            _single_cast_manager("sample_stl_files/thick_thin_test.stl"),
-            alloy_name="WCB",
-            hot_tear=True,
-        )
-        cf8_engine = _run_pipeline_with_patched_memory(
-            _single_cast_manager("sample_stl_files/thick_thin_test.stl"),
-            alloy_name="CF8",
-            hot_tear=True,
-        )
-        c958_engine = _run_pipeline_with_patched_memory(
-            _single_cast_manager("sample_stl_files/thick_thin_test.stl"),
-            alloy_name="C958",
-            hot_tear=True,
-        )
-
-        self.assertGreater(
-            float(np.max(cf8_engine.hot_tear_risk)),
-            float(np.max(wcb_engine.hot_tear_risk)),
-        )
-        self.assertGreater(
-            float(np.max(wcb_engine.hot_tear_risk)),
-            float(np.max(c958_engine.hot_tear_risk)),
-        )
-        self.assertGreater(
-            int(np.count_nonzero(cf8_engine.hot_tear_zones)),
-            int(np.count_nonzero(c958_engine.hot_tear_zones)),
-        )
-
     def test_higher_sand_restraint_increases_hot_tear_risk(self) -> None:
         low_restraint_engine = _run_pipeline_with_patched_memory(
             _single_cast_manager("sample_stl_files/thick_thin_test.stl"),

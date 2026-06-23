@@ -38,7 +38,7 @@ class ProjectStateTests(unittest.TestCase):
                 refinement_level=4,
                 memory_mode="disk",
                 analysis_options={"shrinkage": True, "microstructure": True, "sand_restraint_index": 0.75},
-                performance_options={"use_gpu": False, "chunked_voxelization": True},
+                performance_options={"chunked_voxelization": True},
                 mesh_setting_origin="ml",
                 current_vis_mode="hotspot",
                 ui_state={"result_type": "Hot Spots", "threshold": 12},

@@ -11,7 +11,7 @@ import numpy as np
 from werkzeug.datastructures import FileStorage
 from werkzeug.utils import secure_filename
 
-from core.part_manager import PartManager, PartType, infer_part_type_from_filename
+from core.part_manager import PartManager, PartType, build_part_manager, infer_part_type_from_filename
 from core.simulation_pipeline import PipelineResult
 from core.stl_loader import STLLoader
 from core.surface_extraction import build_surface_payload, normalize_surface_request
@@ -83,39 +83,27 @@ def upload_stl_file(file: FileStorage, upload_folder: Path) -> Dict[str, Any]:
 
 
 def build_part_manager(parts_data: list[Dict[str, Any]]) -> PartManager:
-    manager = PartManager()
-    type_map = {
-        "cast": PartType.CAST,
-        "riser": PartType.RISER,
-        "riser_post": PartType.RISER_POST,
-        "chill": PartType.CHILL,
-        "core": PartType.CORE,
-    }
-    for part_data in parts_data:
-        filepath = str(part_data.get("filepath", ""))
-        if not filepath or not os.path.exists(filepath):
-            raise FileNotFoundError(f"Part file not found: {filepath}")
-        part_id = manager.load_part(filepath, name=part_data.get("name"), preserve_origin=True)
-        if not part_id:
-            raise RuntimeError(f"Failed to load part: {filepath}")
-        part = manager.get_part(part_id)
-        if part is None:
-            raise RuntimeError(f"Loaded part missing from manager: {part_id}")
-        part.set_part_type(type_map.get(str(part_data.get("part_type", "cast")), PartType.CAST))
-        part.set_position(
-            float(part_data.get("position_x", 0.0)),
-            float(part_data.get("position_y", 0.0)),
-            float(part_data.get("position_z", 0.0)),
-        )
-        part.set_rotation(
-            float(part_data.get("rotation_x", 0.0)),
-            float(part_data.get("rotation_y", 0.0)),
-            float(part_data.get("rotation_z", 0.0)),
-        )
-        part.set_scale(float(part_data.get("scale", 1.0)))
-        part.visible = bool(part_data.get("visible", True))
-        part.is_open_top = bool(part_data.get("is_open_top", False))
-    return manager
+    """Build a :class:`PartManager` from serialized web payload data.
+
+    Re-export of :func:`core.part_manager.build_part_manager` so existing
+    web callers keep their import path. The canonical helper honours the
+    ``visible`` and ``is_open_top`` per-part overrides that web payloads
+    send.
+    """
+    return build_part_manager_from_core(parts_data, preserve_origin=True)
+
+
+def build_part_manager_from_core(
+    parts_data: list[Dict[str, Any]],
+    *,
+    preserve_origin: bool = True,
+) -> PartManager:
+    return build_part_manager(
+        parts_data,
+        preserve_origin=preserve_origin,
+        default_visible=True,
+        default_is_open_top=False,
+    )
 
 
 def build_fork_artifact(result: PipelineResult) -> Dict[str, Any]:

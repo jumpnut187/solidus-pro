@@ -33,6 +33,7 @@ from core.memory_limits import (
     estimate_voxel_count,
     estimate_memory_usage_mb,
 )
+from config.exceptions import BoundsError, InvalidMeshError, MeshGenerationError
 from config.hardware_config import hardware
 
 # Import error logger
@@ -237,7 +238,7 @@ class AdaptiveVoxelMesh:
             # Get bounds
             bounds = trimesh_obj.bounds
             if bounds is None or len(bounds) != 2:
-                raise ValueError("Invalid mesh bounds")
+                raise InvalidMeshError("Mesh bounds are missing or malformed")
             
             x_range = max(0.001, bounds[1][0] - bounds[0][0])
             y_range = max(0.001, bounds[1][1] - bounds[0][1])
@@ -695,10 +696,11 @@ class AdaptiveVoxelMesh:
             )
 
             if batch_failed == len(batch_z_coords):
-                raise RuntimeError(
+                raise MeshGenerationError(
                     f"All {batch_failed} slices in batch [{batch_start+1}-{batch_end}] "
-                    f"failed during containment checks. This may indicate missing rtree "
-                    f"or a mesh geometry issue. Install rtree: pip install rtree"
+                    "failed during containment checks. This may indicate missing rtree "
+                    "or a mesh geometry issue. Install rtree: pip install rtree",
+                    voxel_size=float(self.base_voxel_size),
                 )
 
             if len(all_voxels) == 0 and processed_slices == 0 and batch_failed > 0:

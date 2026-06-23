@@ -14,7 +14,6 @@ export const analysisDefaults = {
 };
 
 export const performanceDefaults = {
-  use_gpu: false,
   use_incremental: false,
   use_chunked_voxelization: false,
   part_assignment_mode: 'parallel',

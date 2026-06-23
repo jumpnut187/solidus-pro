@@ -13,7 +13,7 @@ import os
 import numpy as np
 
 from core.materials import get_alloy
-from core.part_manager import PartManager, PartType, infer_part_type_from_filename
+from core.part_manager import PartManager, PartType, build_part_manager, infer_part_type_from_filename
 from core.solidification import (
     AnalysisOptions,
     SOLVER_MODE_SCHEDULE_LEGACY,
@@ -22,6 +22,12 @@ from core.solidification import (
     SolidificationEngine,
 )
 from core.voxel_mesh import AdaptiveVoxelMesh
+from config.exceptions import (
+    MeshError,
+    SimulationError,
+    STLLoadError,
+    ValidationError,
+)
 
 
 ProgressMessageCallback = Callable[[str], None]
@@ -119,54 +125,13 @@ def _check_cancel(callback: Optional[CancelCallback]) -> None:
 
 
 def build_part_manager_from_parts(parts_data: Sequence[Dict[str, Any]]) -> PartManager:
+    """Build a ``PartManager`` from serialized web API part payloads.
+
+    Thin wrapper around :func:`core.part_manager.build_part_manager` that
+    preserves the historical "preserve STL coordinates" default for the
+    desktop pipeline.
     """
-    Build a PartManager instance from serialized web API part payloads.
-    """
-    part_manager = PartManager()
-    type_map = {
-        "cast": PartType.CAST,
-        "riser": PartType.RISER,
-        "riser_post": PartType.RISER_POST,
-        "chill": PartType.CHILL,
-        "core": PartType.CORE,
-    }
-
-    for part_data in parts_data:
-        filepath = str(part_data.get("filepath", ""))
-        if not filepath or not os.path.exists(filepath):
-            raise FileNotFoundError(f"Part file not found: {filepath}")
-
-        part_id = part_manager.load_part(filepath, name=part_data.get("name"))
-        if not part_id:
-            raise RuntimeError(f"Failed to load part: {filepath}")
-
-        part = part_manager.get_part(part_id)
-        if part is None:
-            raise RuntimeError(f"Loaded part missing from manager: {part_id}")
-
-        part.set_position(
-            float(part_data.get("position_x", 0.0)),
-            float(part_data.get("position_y", 0.0)),
-            float(part_data.get("position_z", 0.0)),
-        )
-        part.set_rotation(
-            float(part_data.get("rotation_x", 0.0)),
-            float(part_data.get("rotation_y", 0.0)),
-            float(part_data.get("rotation_z", 0.0)),
-        )
-        part.set_scale(float(part_data.get("scale", 1.0)))
-        part_type_key = str(part_data.get("part_type", "cast"))
-        part_type = cast(PartType, type_map.get(part_type_key, PartType.CAST))
-        inferred_type = infer_part_type_from_filename(filepath)
-        part_name = str(part_data.get("name", "")).lower()
-        if inferred_type != PartType.RISER_POST:
-            if any(keyword in part_name for keyword in ("riser post", "riser_post", "post", "neck")):
-                inferred_type = PartType.RISER_POST
-        if part_type == PartType.RISER and inferred_type == PartType.RISER_POST:
-            part_type = PartType.RISER_POST
-        part.set_part_type(part_type)
-
-    return part_manager
+    return build_part_manager(parts_data, preserve_origin=True)
 
 
 def create_analysis_options(
@@ -403,7 +368,10 @@ def run_pipeline(
         combined_mesh = part_manager.get_combined_mesh()
         combined_bounds = part_manager.get_combined_bounds()
         if combined_mesh is None or combined_bounds is None:
-            raise RuntimeError("Failed to build combined mesh from parts")
+            raise MeshError(
+                "Failed to build combined mesh from parts",
+                suggestion="Inspect each STL for malformed geometry and reload",
+            )
         mesh_to_use = combined_mesh
         bounds_to_use = combined_bounds
         total_volume = float(part_manager.get_total_volume())
@@ -413,7 +381,11 @@ def run_pipeline(
         bounds_to_use = stl_loader.get_bounds_array()
         total_volume = float(getattr(stl_loader, "volume", 0.0) or 0.0)
     else:
-        raise ValueError("No valid geometry source provided to simulation pipeline")
+        raise ValidationError(
+            "No valid geometry source provided to simulation pipeline",
+            parameter="part_manager|stl_loader",
+            expected="A non-empty PartManager or an initialized STLLoader",
+        )
 
     _emit_message(
         progress_message_callback,
@@ -442,7 +414,11 @@ def run_pipeline(
         progress_callback=on_mesh_progress,
     )
     if not success:
-        raise RuntimeError("Voxel mesh generation failed")
+        raise SimulationError(
+            "Voxel mesh generation failed",
+            phase="mesh_generation",
+            suggestion="Increase voxel size or reduce model complexity",
+        )
 
     _check_cancel(cancel_callback)
     if parts_with_types:

@@ -4,10 +4,12 @@ Allows loading and positioning multiple castings in the simulation space
 Supports part types: CAST, RISER, CHILL for simulation behavior
 """
 
+from __future__ import annotations
+
 import numpy as np
 import trimesh
 from stl import mesh as numpy_stl_mesh
-from typing import List, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 import os
@@ -691,3 +693,87 @@ class MultiPartSTLLoader:
     def get_part_manager(self) -> PartManager:
         """Get the underlying part manager"""
         return self.part_manager
+
+
+_PART_TYPE_KEY_MAP: Dict[str, PartType] = {
+    "cast": PartType.CAST,
+    "riser": PartType.RISER,
+    "riser_post": PartType.RISER_POST,
+    "chill": PartType.CHILL,
+    "core": PartType.CORE,
+}
+
+
+def build_part_manager(
+    parts_data: Sequence[Dict[str, Any]],
+    *,
+    preserve_origin: bool = True,
+    default_visible: bool = True,
+    default_is_open_top: bool = False,
+) -> PartManager:
+    """Build a ``PartManager`` from serialized web API part payloads.
+
+    The ``parts_data`` entries should be dictionaries with at least a
+    ``filepath`` field and may carry optional ``name``, ``part_type``,
+    ``position_x/y/z``, ``rotation_x/y/z``, ``scale``, ``visible`` and
+    ``is_open_top`` overrides. Unknown ``part_type`` values fall back to
+    ``PartType.CAST`` unless filename heuristics suggest a riser post.
+
+    Args:
+        parts_data: Sequence of part dictionaries (web payload shape).
+        preserve_origin: When True, keep each STL's original coordinates so
+            assembled parts line up. When False, center each loaded part at
+            the origin unless ``position_x/y/z`` overrides are provided.
+        default_visible: Default value applied to ``Part.visible`` when the
+            payload omits the ``visible`` flag.
+        default_is_open_top: Default value applied to ``Part.is_open_top``
+            when the payload omits the ``is_open_top`` flag.
+    """
+    manager = PartManager()
+    for part_data in parts_data:
+        filepath = str(part_data.get("filepath", ""))
+        if not filepath or not os.path.exists(filepath):
+            raise FileNotFoundError(f"Part file not found: {filepath}")
+
+        part_id = manager.load_part(
+            filepath,
+            name=part_data.get("name"),
+            preserve_origin=preserve_origin,
+        )
+        if not part_id:
+            raise RuntimeError(f"Failed to load part: {filepath}")
+
+        part = manager.get_part(part_id)
+        if part is None:
+            raise RuntimeError(f"Loaded part missing from manager: {part_id}")
+
+        part.set_position(
+            float(part_data.get("position_x", 0.0)),
+            float(part_data.get("position_y", 0.0)),
+            float(part_data.get("position_z", 0.0)),
+        )
+        part.set_rotation(
+            float(part_data.get("rotation_x", 0.0)),
+            float(part_data.get("rotation_y", 0.0)),
+            float(part_data.get("rotation_z", 0.0)),
+        )
+        part.set_scale(float(part_data.get("scale", 1.0)))
+
+        inferred_type = infer_part_type_from_filename(filepath)
+        part_name = str(part_data.get("name", "")).lower()
+        if inferred_type != PartType.RISER_POST:
+            if any(
+                keyword in part_name
+                for keyword in ("riser post", "riser_post", "post", "neck")
+            ):
+                inferred_type = PartType.RISER_POST
+        part_type = _PART_TYPE_KEY_MAP.get(
+            str(part_data.get("part_type", "cast")), PartType.CAST
+        )
+        if part_type == PartType.RISER and inferred_type == PartType.RISER_POST:
+            part_type = PartType.RISER_POST
+        part.set_part_type(part_type)
+        part.visible = bool(part_data.get("visible", default_visible))
+        part.is_open_top = bool(part_data.get("is_open_top", default_is_open_top))
+
+    return manager
