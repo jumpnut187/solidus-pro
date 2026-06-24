@@ -1,316 +1,189 @@
-# Casting Solidification Simulator
-### Optimized for Apple M3 MacBook Air
+# Solidus Pro — Casting Solidification Simulator
 
-Advanced casting solidification simulator with shrinkage and porosity prediction, inspired by SolidCast and Magmasoft.
+Advanced casting solidification simulation with multi-part assemblies, defect prediction, and dual-interface access (desktop + web). Inspired by SolidCast and Magmasoft.
+
+**Supports macOS, Windows, and Linux.**
 
 ## Features
 
-✨ **Multi-Core CPU Acceleration**
-- Utilizes all 8 cores (4 Performance + 4 Efficiency) of M3 chip
-- Numba JIT compilation with parallel processing
-- Joblib for efficient task distribution
+**Multi-Interface Access**
+- **Desktop app** — PyQt5 + VTK 3D visualization with full interactive controls
+- **Web app** — Flask backend + React/Babylon.js frontend served at `localhost:5050`
+- Both share a unified `core/simulation_pipeline.py` engine
 
-💾 **Intelligent Memory Management** ⭐ NEW!
-- Automatic RAM vs disk storage for large models
-- Prevents crashes on complex parts (10M+ voxels)
-- Memory-mapped arrays for 50-90% RAM savings
+**Multi-Part Assemblies**
+- CAST (grey), RISER (orange), RISER_POST, CHILL (dark blue), CORE (brown)
+- Automatic part-type inference from filenames
+- Parallel point-containment checking for fast voxel-to-part assignment
+- Configurable transforms (position, rotation, scale) per part
+
+**GPU Acceleration**
+- Apple Silicon: Metal via MLX + Taichi (stencil kernels compiled to Metal shaders)
+- NVIDIA: CUDA via CuPy
+- Intel/AMD: OpenCL via PyOpenCL
+- Lazy detection — backends only initialise when a simulation runs
+
+**Multi-Core CPU Acceleration**
+- Numba JIT with `parallel=True`, restricted to physical cores only
+- joblib parallel task distribution
+- Worker processes suppress startup banners for clean log output
+
+**Intelligent Memory Management**
 - Three modes: Auto (recommended), Force RAM, Force Disk
-- See [MEMORY_QUICKSTART.md](MEMORY_QUICKSTART.md) for details
+- Memory-mapped arrays via `np.memmap` for 50–90 % RAM savings on large models
+- Session-scoped temp directories with automatic cleanup
 
-🎮 **GPU Acceleration (Metal)**
-- OpenCL with Metal backend for GPU compute
-- Parallel voxelization and distance calculations
+**Seven Analysis Types**
+| Analysis | Description |
+|---|---|
+| Shrinkage / Porosity | Feed-failure defect risk (0–1) |
+| Hot Spots | Last-to-freeze regions |
+| Niyama Criterion | Thermal gradient `G / √R` criterion |
+| Fraction Liquid | Time-resolved liquid fraction with playback |
+| Hot Tear | Brittle Temperature Range strain analysis |
+| Sand Burn-In | Mold penetration risk |
+| Feeding Paths | Traced riser-to-voxel connectivity |
 
-🧠 **Neural Engine Ready**
-- CoreML integration for future ML-based predictions
-- ONNX runtime support
+**Visualization**
+- Translucent ghost model with defect overlay
+- Cross-section planes (X / Y / Z)
+- Six colormaps: Red Gradient, Viridis, Plasma, Cool-Warm, Inferno, Turbo
+- Measurement tools, screenshot export, MP4/GIF animation export
+- Playable fraction-liquid timeline (desktop + web)
 
-## Capabilities
+**Professional Reporting**
+- Export HTML, PDF, or Markdown simulation reports with Jinja2 templates
 
-### STL Import
-- Load STL files in inches (auto-converts to mm)
-- Watertight mesh validation and repair
-- Volume and surface area calculations
+**Plugin System**
+- Register custom materials, analysis types, and visualization modes
 
-### Adaptive Voxel Mesh
-- Automatic refinement in intricate sections
-- Coarse voxels in solid regions
-- Multi-level octree refinement (up to 4 levels)
-- Parallel voxel generation
+## Supported Alloys
 
-### Physics-Based Solidification
-- **Geometric modulus** calculation for each voxel
-- **Edge-inward** solidification from surfaces
-- **Vertical progression** due to density changes (liquidus→solidus)
-- **Material-specific feeding-distance multipliers**
-- High refinement for accurate results
+| Alloy | Type | Feeding Multiplier |
+|---|---|---|
+| WCB | Carbon Steel Casting | 6.0× |
+| CF8 | Stainless Steel 304 | 5.5× |
+| C958 | Aluminum Bronze | 8.0× |
+| CA6NM | Cast Steel | 5.9× |
+| C964 | Copper-Nickel (CuNi) | — |
+| MONEL400 | Monel 400 | — |
+| IN625 | Inconel 625 | — |
 
-### Material Properties
-- **WCB** (Carbon Steel Casting)
-- **CF8** (Stainless Steel 304)
-- **C958** (Aluminum Bronze)
-- **CA6NM** (Cast Steel)
-
-Each material includes:
-- Liquidus/solidus temperatures
-- Density changes
-- Thermal properties
-- Shrinkage characteristics
-- Feeding distance multipliers
-
-### Visualization
-- **3D translucent "ghost" model** of the casting
-- **Red shrinkage/porosity regions** displayed internally
-- High accuracy placement inside model geometry
-- Interactive rotation, zoom, pan
-- Adjustable shrinkage threshold
-- Screenshot export
+Each alloy includes 40+ properties: liquidus/solidus/pouring temperatures, density, conductivity, latent heat, shrinkage characteristics, SDAS parameters, Niyama threshold, hot-tear susceptibility, and more.
 
 ## Installation
 
 ### Prerequisites
 - Python 3.9 or higher
-- macOS (for M3 optimization)
+- macOS, Windows, or Linux
 
 ### Setup
 
 ```bash
-# Create virtual environment
 python3 -m venv venv
-source venv/bin/activate
+source venv/bin/activate    # Linux / macOS
+# venv\Scripts\activate     # Windows
 
-# Install dependencies
 pip install -r requirements.txt
-
-# Note: For GPU acceleration, ensure Xcode Command Line Tools are installed
-xcode-select --install
 ```
+
+### Optional GPU Dependencies
+
+| Platform | Command |
+|---|---|
+| Apple Silicon (M1–M4) | `pip install mlx taichi` |
+| NVIDIA CUDA 12.x | `pip install cupy-cuda12x` |
+| NVIDIA CUDA 11.x | `pip install cupy-cuda11x` |
+| Intel / AMD / legacy macOS | `pip install pyopencl` |
 
 ## Usage
 
-### Run the Simulator
+### Desktop App
 
 ```bash
-python main.py
+python run.py         # dependency check then launch
+# or
+python main.py        # launch directly
 ```
 
-### Workflow
+1. Load a STL file and assign part types
+2. Select an alloy and configure mesh parameters
+3. Run the simulation — progress shown in status area
+4. Analyse results with the 3D VTK viewer — toggle layers, adjust thresholds, slice
 
-1. **Load STL File**
-   - Click "Load STL File (Inches)"
-   - Select your STL model
-   - Model will be converted from inches to millimeters
+### Web App
 
-2. **Select Material**
-   - Choose alloy: WCB, CF8, C958, or CA6NM
-   - View material properties
-
-3. **Configure Mesh**
-   - Base Voxel Size: 0.5-10mm (default: 2mm)
-   - Refinement Level: 1-4 (default: 3)
-   - Higher refinement = more accuracy but slower
-
-4. **Run Simulation**
-   - Click "Run Simulation"
-   - Watch progress in status area
-   - Simulation uses all CPU cores
-
-5. **Analyze Results**
-   - Translucent ghost model shows part geometry
-   - Red regions indicate shrinkage/porosity
-   - Adjust threshold slider to filter severity
-   - Toggle visibility of components
-   - Export screenshot
-
-## Hardware Optimization
-
-### CPU (M3 Chip)
-The simulator automatically detects and optimizes for your M3:
-
-- **Performance Cores (4)**: Used for compute-intensive tasks
-  - Voxel generation
-  - Solidification simulation
-  - Modulus calculations
-
-- **Efficiency Cores (4)**: Used for I/O and background tasks
-  - File loading
-  - UI updates
-  - Data management
-
-### Parallel Processing
-- Numba JIT with `parallel=True` for hot loops
-- Joblib for embarrassingly parallel operations
-- Automatic chunk sizing based on core count
-
-### Memory Management
-- Uses ~70% of available RAM
-- Automatic memory estimation
-- Efficient numpy arrays (float32)
-
-## Technical Details
-
-### Solidification Algorithm
-
-1. **Initialization**
-   - Surface voxels marked as solidification fronts
-   - All internal voxels start as liquid
-
-2. **Time-Stepping**
-   - Each time step updates solidification state
-   - Solidification rate = f(geometric modulus)
-   - Smaller modulus → faster solidification
-   - Vertical factor: bottom solidifies faster
-
-3. **Shrinkage Calculation**
-   - Distance to nearest feeding source
-   - Beyond feeding distance → high shrinkage
-   - Combined with modulus factor
-
-4. **Porosity Prediction**
-   - Based on shrinkage probability
-   - Amplified by solidification time
-   - Longer solidification → more porosity
-
-### Geometric Modulus
-
-```
-Modulus = Volume / Surface Area
+```bash
+python run_web.py     # dependency check then serve at http://localhost:5050
 ```
 
-- Fundamental indicator of solidification behavior
-- Higher modulus = slower cooling = more shrinkage
-- Used to predict hot spots and feeding issues
+The Flask backend serves the React/Babylon.js frontend. Upload STL files, manage multiple projects, run simulations in a FIFO job queue (max 1 concurrent, 6 queued, 1 per user), and visualise results in-browser.
 
-### Feeding Distance
+## Solver Modes
 
-```
-Feeding Distance = Thickness × Material Multiplier
-```
+| Mode | Description |
+|---|---|
+| `schedule_legacy` | Fast geometry-driven solidification from precomputed surface/chill/riser schedules |
+| `thermal_coupled` (default) | Physics-richer mode coupling thermal diffusion with solidification progression |
 
-- **WCB**: 6.0x thickness
-- **CF8**: 5.5x thickness
-- **C958**: 8.0x thickness
-- **CA6NM**: 5.9x thickness
+The SCHEIL fraction-solid option uses a bounded linearised Scheil surrogate (full phase-diagram path not yet included).
 
-Regions beyond feeding distance cannot be fed by risers and will experience shrinkage.
+## Configuration
+
+Tunable via environment variables or YAML/TOML config files (see `config/settings.py`). Key controls:
+
+- `CASTSIM_PART_ASSIGNMENT_MODE` — `auto` / `parallel` / `legacy`
+- `CASTSIM_PART_ASSIGNMENT_WORKERS` — worker processes (0 = auto)
+- `CASTSIM_PART_ASSIGNMENT_BATCH_SIZE` — points per containment batch
 
 ## Model Assumptions
 
-- `voxel_states` is the authoritative fraction-solid proxy for the fast engine. It is now generated from precomputed start/end solidification schedules (surface/chill early, feeder-connected riser regions late), not from a pure neighbor-fill front.
-- `feeding_distances` is the legacy public name for the engine's nearest-surface distance field.
-- `feeding_path_lengths` is only populated for riser-fed cases where the solver can trace a connected path to a riser through the mush.
-- `shrinkage_risk` and `porosity_risk` are the primary bounded 0-1 defect-risk fields. `shrinkage_probability` and `porosity_probability` remain as legacy aliases for compatibility with existing UI/export code.
-- `porosity_risk` is a hybrid risk field built from shrinkage as the base feed-failure signal, then amplified by relative solidification time and Niyama directional-solidification severity. It is not a calibrated void-volume fraction.
-- The merged "Shrinkage/Porosity" visualization uses the maximum of the shrinkage and porosity risk fields for thresholding and color intensity.
-- `niyama_values` uses the standard `G / sqrt(R)` form, but the gradient and cooling-rate fields are estimated from the engine's geometric/time fields rather than a full thermal solve. Thresholds are interpreted in the engine's approximate `C * sqrt(s) / mm` units.
-- `local_thickness = 2 * modulus` is treated as a section-size proxy for relative ranking, not a literal wall-thickness measurement.
+- `voxel_states` is the authoritative fraction-solid proxy, generated from precomputed start/end solidification schedules (surface/chill early, riser regions late).
+- `shrinkage_risk` and `porosity_risk` are the primary bounded 0–1 defect-risk fields. `shrinkage_probability` and `porosity_probability` remain as legacy aliases.
+- `porosity_risk` is a hybrid: shrinkage base + solidification time amplification + Niyama directional-solidification modifiers. It is not a calibrated void-volume fraction.
+- The merged Shrinkage/Porosity visualization uses `max(shrinkage_risk, porosity_risk)`.
+- `niyama_values` uses the standard `G / √R` form with fields estimated from geometric/time proxies rather than a full thermal solve.
+- `local_thickness = 2 × modulus` is a section-size proxy for relative ranking, not a literal wall-thickness measurement.
 
 ## Known Simplifications
 
-- The default solver is still a geometry-driven solidification engine. It is faster than a full thermal/phase simulation, and uses a schedule-driven directional-solidification proxy rather than a solved thermal PDE.
-- The `SCHEIL` option uses a bounded linearized Scheil surrogate anchored to liquidus and solidus because the repo does not yet include a full phase-diagram path.
-- Feeding effectiveness uses a transient mush-state snapshot for Darcy resistance. In riser-fed cases it now prefers a traced riser path length, but open-casting cases still fall back to the surface-distance proxy.
-- Niyama risk interpretation includes directional-solidification modifiers near chills so the reported risk field tracks improved feeding conditions without changing the raw `Ny` output itself.
-- Stress/distortion, hot tearing, and microstructure results are comparative engineering guidance rather than full FEA or CALPHAD predictions.
-- `core/solidification.py` is the authoritative application path for user-visible results today. `core/thermal_simulation.py`, `physics/niyama.py`, and `physics/shrinkage.py` are secondary/reference modules and are not currently the authoritative output path for the UI.
+- The default solver is geometry-driven, using a schedule-driven directional-solidification proxy rather than a solved thermal PDE.
+- Feeding effectiveness prefers traced riser path lengths in riser-fed cases; open-casting cases fall back to a surface-distance proxy.
+- Niyama risk interpretation includes directional-solidification modifiers near chills.
+- Stress/distortion, hot tearing, and microstructure results are comparative engineering guidance, not full FEA or CALPHAD predictions.
 
 ## Formula Provenance
 
-- Niyama: uses the standard `Ny = G / sqrt(R)` criterion form. This repo's field construction is approximate and geometry-driven unless a thermal solve is added.
-- Darcy feeding resistance: uses the common mushy-zone pressure-drop form `delta_P = mu * L * v / K` with permeability from the alloy's Kozeny-Carman-style relation.
-- Chvorinov time scaling: uses the standard modulus-based `t = B * M^2` family with material-tuned mold constants.
-- SDAS correlations: use power-law cooling-rate correlations and simplified property mappings intended for comparative foundry guidance, not alloy certification.
-- Chill and riser modifiers: use engineering heuristics inspired by directional-solidification rules of thumb rather than a calibrated foundry handbook dataset.
-- Reference notes: NIST Scheil notes (`https://www.ctcms.nist.gov/~kattner/solidifc/scheil.html`) and the MDPI Materials Niyama discussion (`https://www.mdpi.com/1996-1944/19/1/198`) informed the audit and naming/unit decisions.
+- **Niyama**: `Ny = G / √R` — approximate, geometry-driven field construction.
+- **Darcy feeding resistance**: `ΔP = μ × L × v / K` with Kozeny-Carman permeability.
+- **Chvorinov time scaling**: `t = B × M²` with material-tuned mold constants.
+- **SDAS correlations**: power-law cooling-rate correlations for comparative foundry guidance.
+- References: [NIST Scheil notes](https://www.ctcms.nist.gov/~kattner/solidifc/scheil.html), [MDPI Niyama discussion](https://www.mdpi.com/1996-1944/19/1/198).
 
-## Results Interpretation
+## Tech Stack
 
-### Shrinkage (Red Regions)
-- **Dark Red**: High probability (>70%)
-- **Red**: Medium probability (50-70%)
-- **Orange**: Low probability (30-50%)
+- **Desktop GUI**: PyQt5
+- **3D (desktop)**: VTK
+- **Backend**: Flask, Flask-CORS
+- **Frontend**: React 19 + TypeScript + Vite + Babylon.js
+- **Numerical**: NumPy, SciPy
+- **Acceleration**: Numba, joblib, MLX, Taichi, CuPy, PyOpenCL
+- **Mesh**: Trimesh, numpy-stl
+- **Persistence**: SQLite (web)
+- **Reports**: Jinja2
 
-### What to Look For
-- ✅ **Good**: Minimal red regions, localized near risers
-- ⚠️ **Caution**: Moderate red regions, consider adding risers
-- ❌ **Poor**: Extensive red throughout part, redesign needed
+## Testing
 
-### Recommended Actions
-- Add risers near hot spots (thick sections)
-- Modify part geometry to improve feeding
-- Consider different alloy with better fluidity
-- Adjust pouring temperature
-
-## Performance Benchmarks
-
-### M3 MacBook Air (8-core)
-
-| Model Complexity | Voxels | Generation | Simulation | Total |
-|-----------------|--------|------------|------------|-------|
-| Simple (1K vertices) | ~10K | 5s | 15s | 20s |
-| Medium (10K vertices) | ~50K | 20s | 60s | 80s |
-| Complex (100K vertices) | ~200K | 90s | 240s | 330s |
-
-*Times are approximate and vary with refinement level*
-
-## Troubleshooting
-
-### Import Errors
-If you get import errors for VTK or PyQt5:
 ```bash
-pip install --upgrade vtk PyQt5
+python -m unittest discover tests     # full regression suite
+python -m mypy --config-file mypy.ini # type checking
+python -m compileall config core physics ui web  # syntax verification
 ```
-
-### GPU Not Detected
-Metal should be automatically available on M3. If not:
-```bash
-# Check OpenCL platforms
-python -c "import pyopencl as cl; print(cl.get_platforms())"
-```
-
-### Slow Performance
-- Reduce voxel refinement level
-- Increase base voxel size
-- Close other applications
-- Check Activity Monitor for background processes
-
-### Mesh Not Loading
-- Ensure STL file is valid (watertight)
-- Try opening in mesh repair tool (Meshmixer, Netfabb)
-- Check file units (should be inches)
-
-## Future Enhancements
-
-- [ ] Riser design automation
-- [ ] Thermal gradient visualization
-- [ ] Gating system analysis
-- [ ] Neural network for instant predictions
-- [ ] Multi-part assemblies
-- [ ] Animation of solidification progression
-- [ ] Export results to CAD formats
-
-## Technical Stack
-
-- **GUI**: PyQt5
-- **3D Visualization**: VTK
-- **Numerical Computing**: NumPy, SciPy
-- **Acceleration**: Numba, Joblib, PyOpenCL
-- **Mesh Processing**: Trimesh, numpy-stl
-- **ML Ready**: CoreML, ONNX Runtime
 
 ## License
 
 Educational and research use.
 
-## Credits
-
-Based on casting simulation principles from SolidCast and Magmasoft.
-
-Optimized for Apple Silicon (M3) by leveraging:
-- Multi-core CPU parallelism
-- Metal GPU acceleration
-- Neural Engine capabilities
-
 ---
 
-**Note**: This simulator provides predictions based on geometric analysis and simplified solidification models. For production casting, validation with actual trials is recommended.
+*This simulator provides predictions based on geometric analysis and simplified solidification models. For production casting, validation with actual trials is recommended.*
