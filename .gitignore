@@ -42,5 +42,8 @@ Thumbs.db
 # data/*.csv
 # models/*.joblib
 
+# Docs
+docs/
+
 # Memory mapped files
 *.mmap

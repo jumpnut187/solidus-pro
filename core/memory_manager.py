@@ -12,19 +12,10 @@ import psutil
 from typing import Optional, Tuple
 from pathlib import Path
 
-# Import error logger
 try:
     from core.error_logger import logger
 except ImportError:
-    class DummyLogger:
-        def debug(self, msg, **kwargs): pass
-        def info(self, msg, **kwargs): pass
-        def warning(self, msg, **kwargs): pass
-        def error(self, msg, **kwargs): pass
-        def critical(self, msg, **kwargs): pass
-        def exception(self, msg, **kwargs): pass
-        def log_memory_warning(self, msg, **kwargs): pass
-    logger = DummyLogger()
+    from core.error_logger_dummy import logger
 
 
 class MemoryManager:

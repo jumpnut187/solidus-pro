@@ -36,9 +36,8 @@ import json
 
 # Import exception classes
 from config.exceptions import (
-    ConfigurationError, 
-    ConfigFileError, 
-    MissingConfigError,
+    ConfigurationError,
+    ConfigFileError,
     ValidationError,
     BoundsError
 )
@@ -476,88 +475,6 @@ class Settings:
                 f"Unsupported format: {suffix}",
                 suggestion="Use .yaml, .yml, .toml, or .json"
             )
-    
-    def print_config(self) -> None:
-        """Print current configuration to console"""
-        print("\n" + "=" * 60)
-        print("Current Configuration")
-        print("=" * 60)
-        
-        if self._config_files_loaded:
-            print(f"Loaded files: {', '.join(self._config_files_loaded)}")
-        if self._env_vars_applied:
-            print(f"Environment overrides: {', '.join(self._env_vars_applied)}")
-        
-        print("\n[Mesh]")
-        print(f"  Base voxel size: {self.mesh.base_voxel_size} inches")
-        print(f"  Max refinement: {self.mesh.max_refinement_level}")
-        print(f"  Memory mode: {self.mesh.memory_mode}")
-        
-        print("\n[Simulation]")
-        print(f"  Default alloy: {self.simulation.default_alloy}")
-        print(f"  GPU enabled: {self.simulation.use_gpu}")
-        print(f"  Analyses: ", end="")
-        analyses = []
-        if self.simulation.enable_shrinkage:
-            analyses.append("Shrinkage")
-        if self.simulation.enable_hotspot:
-            analyses.append("Hot Spots")
-        if self.simulation.enable_niyama:
-            analyses.append("Niyama")
-        if self.simulation.enable_hot_tear:
-            analyses.append("Hot Tear")
-        if self.simulation.enable_sand_burn_in:
-            analyses.append("Sand Burn-In")
-        if self.simulation.enable_fraction_liquid:
-            analyses.append("Fraction Liquid")
-        print(", ".join(analyses) if analyses else "None")
-        
-        print("\n[Performance]")
-        print(f"  Max RAM: {self.performance.max_ram_percent}%")
-        print(f"  GPU backend: {self.performance.gpu_backend}")
-        print(f"  Max workers: {self.performance.max_workers or 'auto'}")
-        print(f"  Part assignment mode: {self.performance.part_assignment_mode}")
-        print(f"  Part assignment workers: {self.performance.part_assignment_workers or 'auto'}")
-        print(f"  Part assignment batch size: {self.performance.part_assignment_batch_size}")
-
-        if self.solidification_params:
-            print("\n[Solidification Parameters]")
-            import json
-            print(json.dumps(self.solidification_params, indent=2))
-
-        print("=" * 60 + "\n")
-
-
-# ============================================================================
-# Validation Utilities
-# ============================================================================
-
-def validate_voxel_size(value: float, settings: Settings) -> float:
-    """Validate and clamp voxel size to allowed range"""
-    min_val = settings.mesh.min_voxel_size
-    max_val = settings.mesh.max_voxel_size
-    
-    if value < min_val:
-        return min_val
-    if value > max_val:
-        return max_val
-    return value
-
-
-def validate_alloy_name(name: str) -> str:
-    """Validate alloy name exists"""
-    # Import here to avoid circular import
-    from core.materials import get_all_alloy_names
-    
-    valid_names = get_all_alloy_names()
-    if name not in valid_names:
-        raise ValidationError(
-            f"Unknown alloy: {name}",
-            parameter="alloy",
-            value=name,
-            expected=f"One of: {', '.join(valid_names)}"
-        )
-    return name
 
 
 # ============================================================================
@@ -582,12 +499,6 @@ def get_settings() -> Settings:
     if _settings_instance is None:
         _settings_instance = create_settings()
     return _settings_instance
-
-
-def reset_settings() -> None:
-    """Reset global settings to defaults"""
-    global _settings_instance
-    _settings_instance = create_settings()
 
 
 # For convenient import: `from config.settings import settings`
@@ -682,35 +593,3 @@ default_format = "html"
 include_screenshots = true
 include_recommendations = true
 """
-
-
-def create_default_config(directory: Union[str, Path], format: str = "yaml") -> Path:
-    """
-    Create default configuration file in specified directory.
-    
-    Args:
-        directory: Directory to create config in
-        format: "yaml" or "toml"
-        
-    Returns:
-        Path to created config file
-    """
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
-    
-    if format == "yaml":
-        filepath = directory / "config.yaml"
-        content = YAML_TEMPLATE
-    elif format == "toml":
-        filepath = directory / "config.toml"
-        content = TOML_TEMPLATE
-    else:
-        raise ConfigurationError(
-            f"Unknown config format: {format}",
-            suggestion="Use 'yaml' or 'toml'"
-        )
-    
-    with open(filepath, 'w') as f:
-        f.write(content)
-    
-    return filepath

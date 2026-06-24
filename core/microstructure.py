@@ -546,20 +546,6 @@ class MicrostructurePredictor:
         }
 
 
-def create_microstructure_predictor(mesh, alloy=None) -> MicrostructurePredictor:
-    """
-    Convenience function to create MicrostructurePredictor.
-    
-    Args:
-        mesh: AdaptiveVoxelMesh
-        alloy: AlloyProperties (optional)
-        
-    Returns:
-        Configured MicrostructurePredictor
-    """
-    return MicrostructurePredictor(mesh, alloy)
-
-
 # Test function
 if __name__ == '__main__':
     print("Microstructure Prediction Module")

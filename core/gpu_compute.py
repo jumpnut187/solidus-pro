@@ -782,12 +782,7 @@ class GPUComputeManager:
 gpu_compute = GPUComputeManager()
 
 
-def get_gpu_compute() -> GPUComputeManager:
-    """Get the global GPU compute manager"""
-    return gpu_compute
-
-
-def compute_distances_accelerated(points: np.ndarray, 
+def compute_distances_accelerated(points: np.ndarray,
                                   reference_points: np.ndarray) -> np.ndarray:
     """
     Convenience function for GPU-accelerated distance computation.

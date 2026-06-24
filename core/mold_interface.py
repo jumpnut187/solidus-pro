@@ -659,36 +659,6 @@ def print_mold_info(mold_type: MoldType):
     print(f"{'='*60}\n")
 
 
-# Convenience functions for quick setup
-def create_mold_interface(
-    mesh,  # AdaptiveVoxelMesh
-    mold_type: MoldType = MoldType.SAND_SILICA,
-    alloy=None  # AlloyProperties
-) -> MoldInterfaceModel:
-    """
-    Create and initialize mold interface model from mesh.
-    
-    Args:
-        mesh: AdaptiveVoxelMesh with surface voxel data
-        mold_type: Type of mold
-        alloy: Alloy properties (for solidification temperatures)
-    
-    Returns:
-        Initialized MoldInterfaceModel
-    """
-    surface_indices = mesh.get_surface_voxel_indices()
-    n_surface = len(surface_indices)
-    
-    model = MoldInterfaceModel(n_surface, mold_type)
-    
-    if alloy is not None:
-        # Get initial surface temperatures (pouring temp)
-        surface_temps = np.full(n_surface, alloy.pouring_temp, dtype=np.float32)
-        model.initialize(surface_temps, alloy.solidus_temp, alloy.liquidus_temp)
-    
-    return model
-
-
 if __name__ == '__main__':
     # Display all mold types
     for mold_type in get_all_mold_types():

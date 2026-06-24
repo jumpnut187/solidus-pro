@@ -30,13 +30,7 @@ import sys
 try:
     from core.error_logger import logger
 except ImportError:
-    # Fallback if error_logger not available
-    class DummyLogger:
-        def info(self, msg, **kwargs): print(f"INFO: {msg}")
-        def warning(self, msg, **kwargs): print(f"WARNING: {msg}")
-        def error(self, msg, **kwargs): print(f"ERROR: {msg}")
-        def exception(self, msg, **kwargs): print(f"EXCEPTION: {msg}")
-    logger = DummyLogger()
+    from core.error_logger_dummy import logger
 
 
 # ==================== Color Map Definitions ====================

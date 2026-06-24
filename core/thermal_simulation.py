@@ -597,35 +597,4 @@ class ThermalSimulationEngine:
         }
 
 
-# Convenience function for quick setup
-def create_thermal_simulation(
-    mesh,  # AdaptiveVoxelMesh
-    alloy: AlloyProperties,
-    mold_type: str | MoldType = MoldType.SAND_SILICA,
-    include_convection: bool = True,
-    save_history: bool = True
-) -> ThermalSimulationEngine:
-    """
-    Create and configure thermal simulation engine.
-    
-    Args:
-        mesh: AdaptiveVoxelMesh
-        alloy: AlloyProperties
-        mold_type: Type of mold material
-        include_convection: Include natural convection
-        save_history: Save snapshots for animation
-    
-    Returns:
-        Configured ThermalSimulationEngine
-    """
-    config = ThermalSimConfig()
-    config.mode = (
-            "full_thermal"
-        if include_convection
-            else "thermal_only"
-    )
-    config.mold_type = mold_type.value if isinstance(mold_type, MoldType) else str(mold_type)
-    config.include_convection = include_convection
-    config.save_history = save_history
-    
-    return ThermalSimulationEngine(mesh, alloy, config)
+

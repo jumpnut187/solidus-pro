@@ -22,7 +22,6 @@ import time
 import warnings
 from typing import Tuple, Dict, Optional, List
 from collections import deque
-from scipy.spatial.distance import cdist
 from scipy.spatial import cKDTree
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from core.solidification_params import (
@@ -35,26 +34,16 @@ from dataclasses import dataclass, field
 from physics.heat_transfer import BoundaryType, HeatTransferModel
 from physics.solidification_physics import SolidificationModel as ThermalSolidificationModel
 from core.acceleration import (
-    compute_distances_parallel,
-    compute_shrinkage_parallel,
-    update_solidification_front_parallel,
     update_solidification_with_part_types_parallel,
     update_solidification_with_feeding_connectivity,
     compute_min_distances_parallel,
-    compute_chill_boost_parallel,
-    compute_niyama_parallel,
-    compute_thermal_gradient_parallel,
-    compute_strain_rate_parallel,
     compute_modulus_variance_parallel,
-    compute_near_surface_interior_parallel,
     compute_constraint_strain_parallel,
     compute_chill_internal_thickness_parallel,
     compute_dynamic_chill_boost_parallel,
     compute_mold_air_gap_effect_parallel,
     compute_riser_influence_parallel,
     compute_solid_path_strain_parallel,
-    identify_mushy_zone_voxels_parallel,
-    accelerator
 )
 from core.materials import AlloyProperties
 from core.voxel_mesh import AdaptiveVoxelMesh
@@ -67,24 +56,14 @@ from core.solidification_loop import (
     run_time_integration,
 )
 from core.analysis_strategies import run_post_analyses
-from core.shrinkage_parallel import compute_shrinkage_chunk
 
 
 SHRINK_SCALAR_FORMULA = "adjusted_risk = clamp(raw_risk / shrink_scalar, 0, 1)"
 
-# Import error logger
 try:
     from core.error_logger import logger
 except ImportError:
-    class DummyLogger:
-        def debug(self, msg, **kwargs): pass
-        def info(self, msg, **kwargs): pass
-        def warning(self, msg, **kwargs): pass
-        def error(self, msg, **kwargs): pass
-        def exception(self, msg, **kwargs): pass
-        def log_performance(self, *args, **kwargs): pass
-        def log_simulation_error(self, *args, **kwargs): pass
-    logger = DummyLogger()
+    from core.error_logger_dummy import logger
 
 # Optional performance modules
 try:

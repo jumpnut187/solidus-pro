@@ -55,21 +55,10 @@ from core.mesh_ml import MeshRecommendation
 from core.solidification_params import SolidificationParameters
 from core.memory_manager import reset_memory_manager
 
-# Import error logger at top level for consistent logging
 try:
     from core.error_logger import logger
 except ImportError:
-    class DummyLogger:
-        def debug(self, msg, **kwargs): pass
-        def info(self, msg, **kwargs): pass
-        def warning(self, msg, **kwargs): pass
-        def error(self, msg, **kwargs): pass
-        def critical(self, msg, **kwargs): pass
-        def exception(self, msg, **kwargs): pass
-        def log_simulation_error(self, msg, **kwargs): pass
-        def log_memory_warning(self, msg, **kwargs): pass
-        def log_performance(self, msg, **kwargs): pass
-    logger = DummyLogger()
+    from core.error_logger_dummy import logger
 
 
 FRACTION_LIQUID_TIME_SLIDER_MAX = 1000

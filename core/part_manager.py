@@ -8,24 +8,16 @@ from __future__ import annotations
 
 import numpy as np
 import trimesh
-from stl import mesh as numpy_stl_mesh
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 import os
 import uuid
 
-# Import error logger
 try:
     from core.error_logger import logger
 except ImportError:
-    class DummyLogger:
-        def debug(self, msg, **kwargs): pass
-        def info(self, msg, **kwargs): pass
-        def warning(self, msg, **kwargs): pass
-        def error(self, msg, **kwargs): pass
-        def exception(self, msg, **kwargs): pass
-    logger = DummyLogger()
+    from core.error_logger_dummy import logger
 
 
 class PartType(Enum):
@@ -125,7 +117,6 @@ class Part:
     name: str
     filepath: str
     trimesh_obj: trimesh.Trimesh
-    numpy_mesh: numpy_stl_mesh.Mesh
     
     # Part type for simulation behavior
     part_type: PartType = PartType.CAST
@@ -296,8 +287,7 @@ class PartManager:
             # Generate unique ID
             part_id = str(uuid.uuid4())[:8]
             
-            # Load with both libraries
-            numpy_mesh = numpy_stl_mesh.Mesh.from_file(filepath)
+            # Load mesh via trimesh (handles STL, STEP, and other formats)
             trimesh_obj = trimesh.load(filepath)
             
             # Default name from filename
@@ -320,7 +310,6 @@ class PartManager:
                 name=name,
                 filepath=filepath,
                 trimesh_obj=trimesh_obj,
-                numpy_mesh=numpy_mesh,
                 part_type=inferred_type,
                 color=PART_TYPE_COLORS.get(inferred_type, (0.7, 0.75, 0.8)),
             )

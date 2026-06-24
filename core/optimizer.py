@@ -687,37 +687,6 @@ class DesignOptimizer:
         return "\n".join(lines)
 
 
-def create_optimizer(mesh, alloy, simulation, 
-                     objective: str = 'balanced') -> DesignOptimizer:
-    """
-    Convenience function to create DesignOptimizer.
-    
-    Args:
-        mesh: AdaptiveVoxelMesh
-        alloy: AlloyProperties
-        simulation: Completed SolidificationEngine
-        objective: Optimization objective string
-        
-    Returns:
-        Configured DesignOptimizer
-    """
-    obj_map = {
-        'shrinkage': OptimizationObjective.MINIMIZE_SHRINKAGE,
-        'minimize_shrinkage': OptimizationObjective.MINIMIZE_SHRINKAGE,
-        'riser': OptimizationObjective.MINIMIZE_RISER_VOLUME,
-        'minimize_riser': OptimizationObjective.MINIMIZE_RISER_VOLUME,
-        'coverage': OptimizationObjective.MAXIMIZE_COVERAGE,
-        'maximize_coverage': OptimizationObjective.MAXIMIZE_COVERAGE,
-        'hotspot': OptimizationObjective.MINIMIZE_HOTSPOTS,
-        'minimize_hotspots': OptimizationObjective.MINIMIZE_HOTSPOTS,
-        'balanced': OptimizationObjective.BALANCED
-    }
-    
-    obj = obj_map.get(objective.lower(), OptimizationObjective.BALANCED)
-    
-    return DesignOptimizer(mesh, alloy, simulation, obj)
-
-
 # Test
 if __name__ == '__main__':
     print("Design Optimization Module")
@@ -728,5 +697,5 @@ if __name__ == '__main__':
         print(f"  - {obj.value}")
     print("\nKey features:")
     print("  - Riser size optimization")
-    print("  - Riser position optimization")  
+    print("  - Riser position optimization")
     print("  - Multi-objective balanced optimization")

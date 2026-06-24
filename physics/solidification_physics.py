@@ -316,7 +316,20 @@ class SolidificationModel:
         - monotonic increase as temperature decreases
         """
         k = self.params.partition_coefficient
-        return _scheil_fraction_array(T, self.T_liq, self.T_sol, k)
+        T_liq = self.T_liq
+        T_sol = self.T_sol
+        if abs(k - 1.0) < 1e-6:
+            fs = (T_liq - T) / max(T_liq - T_sol, 1e-12)
+            return np.clip(fs, 0.0, 1.0)
+        theta = (T - T_sol) / max(T_liq - T_sol, 1e-12)
+        theta = np.clip(theta, 0.0, 1.0)
+        if abs(k - 1.0) < 1e-6:
+            exponent = 1.0
+        elif k < 1.0:
+            exponent = 1.0 / max(1.0 - k, 1e-6)
+        else:
+            exponent = max(k, 1.0)
+        return 1.0 - np.power(theta, exponent)
     
     def _back_diffusion(self, T: FloatArray) -> FloatArray:
         """
@@ -369,8 +382,22 @@ class FractionSolidCalculator:
     @staticmethod
     def scheil(T: float, T_liq: float, T_sol: float, k: float) -> float:
         """Scheil equation calculation"""
-        return _scheil_fraction_scalar(T, T_liq, T_sol, k)
-    
+        if T >= T_liq:
+            return 0.0
+        if T <= T_sol:
+            return 1.0
+        if abs(k - 1.0) < 1e-6:
+            return FractionSolidCalculator.lever_rule(T, T_liq, T_sol)
+        theta = (T - T_sol) / max(T_liq - T_sol, 1e-12)
+        theta = min(max(theta, 0.0), 1.0)
+        if abs(k - 1.0) < 1e-6:
+            exponent = 1.0
+        elif k < 1.0:
+            exponent = 1.0 / max(1.0 - k, 1e-6)
+        else:
+            exponent = max(k, 1.0)
+        return float(1.0 - theta ** exponent)
+
     @staticmethod
     def equilibrium_path(
         T: FloatArray,
@@ -395,42 +422,6 @@ class FractionSolidCalculator:
             return np.clip(fs, 0.0, 1.0)
 
 
-def _scheil_exponent(k: float) -> float:
-    """Return a bounded exponent for the normalized Scheil surrogate."""
-    if abs(k - 1.0) < 1e-6:
-        return 1.0
-    if k < 1.0:
-        return 1.0 / max(1.0 - k, 1e-6)
-    return max(k, 1.0)
-
-
-def _scheil_fraction_scalar(T: float, T_liq: float, T_sol: float, k: float) -> float:
-    """Scalar normalized Scheil surrogate."""
-    if T >= T_liq:
-        return 0.0
-    if T <= T_sol:
-        return 1.0
-    if abs(k - 1.0) < 1e-6:
-        return FractionSolidCalculator.lever_rule(T, T_liq, T_sol)
-
-    theta = (T - T_sol) / max(T_liq - T_sol, 1e-12)
-    theta = min(max(theta, 0.0), 1.0)
-    exponent = _scheil_exponent(k)
-    return float(1.0 - theta ** exponent)
-
-
-def _scheil_fraction_array(T: FloatArray, T_liq: float, T_sol: float, k: float) -> FloatArray:
-    """Vectorized normalized Scheil surrogate."""
-    if abs(k - 1.0) < 1e-6:
-        fs = (T_liq - T) / max(T_liq - T_sol, 1e-12)
-        return np.clip(fs, 0.0, 1.0)
-
-    theta = (T - T_sol) / max(T_liq - T_sol, 1e-12)
-    theta = np.clip(theta, 0.0, 1.0)
-    exponent = _scheil_exponent(k)
-    return 1.0 - np.power(theta, exponent)
-
-
 # ============================================================================
 # Numba-accelerated functions
 # ============================================================================
@@ -443,27 +434,6 @@ except ImportError:
 
 
 if NUMBA_AVAILABLE:
-    @njit(parallel=True, cache=True)
-    def compute_fraction_solid_lever_parallel(
-        T: FloatArray,
-        T_liq: float,
-        T_sol: float
-    ) -> FloatArray:
-        """Parallel lever rule calculation"""
-        n = len(T)
-        fs = np.empty(n, dtype=np.float64)
-        dT = T_liq - T_sol
-        
-        for i in prange(n):
-            if T[i] >= T_liq:
-                fs[i] = 0.0
-            elif T[i] <= T_sol:
-                fs[i] = 1.0
-            else:
-                fs[i] = (T_liq - T[i]) / dT
-        
-        return fs
-    
     @njit(parallel=True, cache=True)
     def compute_fraction_solid_scheil_parallel(
         T: FloatArray,
@@ -493,19 +463,4 @@ if NUMBA_AVAILABLE:
         
         return fs
     
-    @njit(parallel=True, cache=True)
-    def compute_latent_heat_release_parallel(
-        fs_new: FloatArray,
-        fs_old: FloatArray,
-        L_vol: float,
-        dt: float
-    ) -> FloatArray:
-        """Parallel latent heat calculation"""
-        n = len(fs_new)
-        Q = np.empty(n, dtype=np.float64)
-        
-        for i in prange(n):
-            dfs = max(fs_new[i] - fs_old[i], 0.0)
-            Q[i] = L_vol * dfs / dt
-        
-        return Q
+

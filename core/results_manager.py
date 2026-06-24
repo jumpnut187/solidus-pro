@@ -380,40 +380,6 @@ class ResultsManager:
             return self._create_summary(data.get('results', data), name)
 
 
-# Convenience functions
-def save_simulation_results(simulation, name: str) -> str:
-    """
-    Save simulation results to file.
-    
-    Args:
-        simulation: SolidificationEngine with completed simulation
-        name: Name for the saved results
-        
-    Returns:
-        Path to saved file
-    """
-    manager = ResultsManager()
-    return manager.save_results(simulation.export_results(), name)
-
-
-def compare_simulations(baseline_name: str, comparison_name: str) -> str:
-    """
-    Compare two saved simulations and print report.
-    
-    Args:
-        baseline_name: Name of baseline results
-        comparison_name: Name of comparison results
-        
-    Returns:
-        Comparison report string
-    """
-    manager = ResultsManager()
-    baseline = manager.load_results(baseline_name)
-    comparison = manager.load_results(comparison_name)
-    result = manager.compare_results(baseline, comparison, baseline_name, comparison_name)
-    return manager.generate_comparison_report(result)
-
-
 # Test
 if __name__ == '__main__':
     print("Results Manager Module")
@@ -423,6 +389,6 @@ if __name__ == '__main__':
     print("  - Load and compare results")
     print("  - Generate comparison reports")
     print("\nUsage:")
-    print("  from core.results_manager import save_simulation_results, compare_simulations")
-    print("  save_simulation_results(sim, 'baseline')")
-    print("  report = compare_simulations('baseline', 'optimized')")
+    print("  from core.results_manager import ResultsManager")
+    print("  manager = ResultsManager()")
+    print("  manager.save_results(sim.export_results(), 'baseline')")

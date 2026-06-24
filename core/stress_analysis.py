@@ -567,20 +567,6 @@ class StressAnalyzer:
         }
 
 
-def create_stress_analyzer(mesh, alloy=None) -> StressAnalyzer:
-    """
-    Convenience function to create StressAnalyzer.
-    
-    Args:
-        mesh: AdaptiveVoxelMesh
-        alloy: AlloyProperties (optional)
-        
-    Returns:
-        Configured StressAnalyzer
-    """
-    return StressAnalyzer(mesh, alloy)
-
-
 # Test function
 if __name__ == '__main__':
     print("Stress and Distortion Analysis Module")

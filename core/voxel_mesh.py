@@ -19,8 +19,6 @@ from scipy.spatial import cKDTree
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
 import multiprocessing
 from core.acceleration import (
-    accelerator, 
-    compute_distances_parallel,
     compute_modulus_parallel
 )
 from core.memory_manager import create_managed_array, get_memory_manager
@@ -40,15 +38,7 @@ from config.hardware_config import hardware
 try:
     from core.error_logger import logger
 except ImportError:
-    class DummyLogger:
-        def debug(self, msg, **kwargs): pass
-        def info(self, msg, **kwargs): pass
-        def warning(self, msg, **kwargs): pass
-        def error(self, msg, **kwargs): pass
-        def exception(self, msg, **kwargs): pass
-        def log_memory_warning(self, *args, **kwargs): pass
-        def log_performance(self, *args, **kwargs): pass
-    logger = DummyLogger()
+    from core.error_logger_dummy import logger
 
 # Optional imports for enhanced performance
 try:
@@ -65,8 +55,7 @@ except ImportError:
 
 RTREE_AVAILABLE = True
 try:
-    from rtree import index as rtree_index
-    import rtree
+    from rtree import index
 except ImportError:
     RTREE_AVAILABLE = False
 

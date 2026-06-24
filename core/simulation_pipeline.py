@@ -25,7 +25,6 @@ from core.voxel_mesh import AdaptiveVoxelMesh
 from config.exceptions import (
     MeshError,
     SimulationError,
-    STLLoadError,
     ValidationError,
 )
 

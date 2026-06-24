@@ -211,21 +211,6 @@ class ConfigFileError(ConfigurationError):
         )
 
 
-class MissingConfigError(ConfigurationError):
-    """Raised when required configuration is missing"""
-    
-    def __init__(
-        self,
-        key: str,
-        suggestion: Optional[str] = None
-    ):
-        super().__init__(
-            f"Required configuration missing: {key}",
-            config_key=key,
-            suggestion=suggestion or f"Add '{key}' to your configuration file"
-        )
-
-
 # ============================================================================
 # File/IO Errors
 # ============================================================================
@@ -250,22 +235,6 @@ class FileError(CastSimError):
             error_code="FILE001"
         )
         self.filepath = filepath
-
-
-class STLLoadError(FileError):
-    """Raised when STL file cannot be loaded"""
-    
-    def __init__(
-        self,
-        filepath: str,
-        reason: str,
-        suggestion: Optional[str] = None
-    ):
-        super().__init__(
-            f"Cannot load STL file '{filepath}': {reason}",
-            filepath=filepath,
-            suggestion=suggestion or "Ensure file is a valid binary or ASCII STL"
-        )
 
 
 class MeshError(FileError):
@@ -367,43 +336,6 @@ class MeshGenerationError(SimulationError):
         self.details.update(details_dict)
 
 
-class SolidificationError(SimulationError):
-    """Raised when solidification simulation fails"""
-    
-    def __init__(
-        self,
-        reason: str,
-        time_step: Optional[float] = None,
-        iteration: Optional[int] = None
-    ):
-        super().__init__(
-            f"Solidification simulation failed: {reason}",
-            phase="solidification",
-            iteration=iteration,
-            suggestion="Check material properties and mesh quality"
-        )
-        if time_step:
-            self.details["time_step"] = time_step
-
-
-class ConvergenceError(SimulationError):
-    """Raised when simulation fails to converge"""
-    
-    def __init__(
-        self,
-        max_iterations: int,
-        final_residual: Optional[float] = None
-    ):
-        super().__init__(
-            f"Simulation did not converge after {max_iterations} iterations",
-            phase="convergence",
-            iteration=max_iterations,
-            suggestion="Try smaller time steps or check boundary conditions"
-        )
-        if final_residual is not None:
-            self.details["final_residual"] = final_residual
-
-
 # ============================================================================
 # Resource Errors (Memory, GPU, etc.)
 # ============================================================================
@@ -466,19 +398,6 @@ class GPUError(ResourceError):
             self.details["backend"] = backend
 
 
-class GPUNotAvailableError(GPUError):
-    """Raised when GPU is requested but not available"""
-    
-    def __init__(
-        self,
-        reason: str = "No compatible GPU found"
-    ):
-        super().__init__(
-            reason,
-            suggestion="Install CUDA/cupy (NVIDIA) or PyOpenCL (Metal/OpenCL)"
-        )
-
-
 # ============================================================================
 # Material Errors
 # ============================================================================
@@ -503,45 +422,6 @@ class MaterialError(CastSimError):
             error_code="MAT001"
         )
         self.material_name = material_name
-
-
-class UnknownMaterialError(MaterialError):
-    """Raised when material is not found in database"""
-    
-    def __init__(
-        self,
-        material_name: str,
-        available_materials: Optional[List[str]] = None
-    ):
-        avail_str = ""
-        if available_materials:
-            avail_str = f". Available: {', '.join(available_materials)}"
-            
-        super().__init__(
-            f"Unknown material: '{material_name}'{avail_str}",
-            material_name=material_name,
-            suggestion="Use one of the available materials or add a custom material definition"
-        )
-        self.available_materials = available_materials
-
-
-class InvalidMaterialPropertyError(MaterialError):
-    """Raised when material property is invalid"""
-    
-    def __init__(
-        self,
-        material_name: str,
-        property_name: str,
-        value: Any,
-        expected: str
-    ):
-        super().__init__(
-            f"Invalid property '{property_name}' for material '{material_name}': {value}",
-            material_name=material_name,
-            suggestion=f"Expected: {expected}"
-        )
-        self.details["property_name"] = property_name
-        self.details["value"] = value
 
 
 # ============================================================================
@@ -587,21 +467,6 @@ class PluginLoadError(PluginError):
         )
 
 
-class PluginInterfaceError(PluginError):
-    """Raised when plugin doesn't implement required interface"""
-    
-    def __init__(
-        self,
-        plugin_name: str,
-        missing_method: str
-    ):
-        super().__init__(
-            f"Plugin '{plugin_name}' missing required method: {missing_method}",
-            plugin_name=plugin_name,
-            suggestion=f"Plugin must implement the '{missing_method}' method"
-        )
-
-
 # ============================================================================
 # Report Errors
 # ============================================================================
@@ -627,67 +492,6 @@ class ReportError(CastSimError):
         )
 
 
-class ReportTemplateError(ReportError):
-    """Raised when report template is invalid"""
-    
-    def __init__(
-        self,
-        template_name: str,
-        reason: str
-    ):
-        super().__init__(
-            f"Invalid report template '{template_name}': {reason}",
-            suggestion="Check template syntax and required variables"
-        )
-        self.details["template_name"] = template_name
-
-
 # ============================================================================
 # Utility Functions
 # ============================================================================
-
-def format_exception_chain(exc: Exception) -> str:
-    """
-    Format exception chain for logging.
-    
-    Args:
-        exc: Exception to format
-        
-    Returns:
-        Formatted string with full exception chain
-    """
-    lines = []
-    current = exc
-    depth = 0
-    
-    while current is not None:
-        indent = "  " * depth
-        if isinstance(current, CastSimError):
-            lines.append(f"{indent}{current.__class__.__name__}: {current.message}")
-            if current.suggestion:
-                lines.append(f"{indent}  💡 {current.suggestion}")
-        else:
-            lines.append(f"{indent}{current.__class__.__name__}: {str(current)}")
-        
-        current = current.__cause__
-        depth += 1
-    
-    return "\n".join(lines)
-
-
-def validate_positive(value: float, name: str) -> None:
-    """Validate that value is positive, raise BoundsError if not"""
-    if value <= 0:
-        raise BoundsError(name, value, min_val=0.0)
-
-
-def validate_range(value: float, name: str, min_val: float, max_val: float) -> None:
-    """Validate that value is within range, raise BoundsError if not"""
-    if value < min_val or value > max_val:
-        raise BoundsError(name, value, min_val=min_val, max_val=max_val)
-
-
-def validate_not_none(value: Any, name: str) -> None:
-    """Validate that value is not None, raise MissingDataError if it is"""
-    if value is None:
-        raise MissingDataError(name)

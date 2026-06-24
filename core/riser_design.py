@@ -872,86 +872,19 @@ class RiserDesigner:
 # Utility Functions
 # ============================================================================
 
-def calculate_section_modulus(
-    volume: float,
-    surface_area: float
-) -> float:
-    """
-    Calculate geometric modulus.
-    
-    M = V / A
-    
-    Args:
-        volume: Volume in m³
-        surface_area: Surface area in m²
-        
-    Returns:
-        Modulus in meters
-    """
-    if surface_area <= 0:
-        return 0.0
-    return volume / surface_area
-
-
-def cylindrical_riser_dimensions(
-    modulus: float,
-    height_ratio: float = 1.0
-) -> Tuple[float, float]:
-    """
-    Calculate cylindrical riser dimensions for given modulus.
-    
-    Args:
-        modulus: Required modulus
-        height_ratio: H/D ratio
-        
-    Returns:
-        Tuple of (diameter, height)
-    """
-    # M = V/A = πr²H / (2πrH + πr²) = rH / (2H + r)
-    # For H = ratio * D = 2 * ratio * r:
-    # M = r * 2*ratio*r / (2*2*ratio*r + r) = 2*ratio*r² / (4*ratio*r + r)
-    #   = 2*ratio*r / (4*ratio + 1)
-    # r = M * (4*ratio + 1) / (2*ratio)
-    # D = 2r = M * (4*ratio + 1) / ratio
-    
-    diameter = modulus * (4 * height_ratio + 1) / height_ratio
-    height = diameter * height_ratio
-    
-    return diameter, height
-
-
-def feeding_distance_pellini(
-    modulus: float,
-    alloy_constant: float = 4.5
-) -> float:
-    """
-    Calculate feeding distance using Pellini's rule.
-    
-    Lf = T * √M
-    
-    Args:
-        modulus: Section modulus
-        alloy_constant: Alloy-specific constant
-        
-    Returns:
-        Maximum feeding distance
-    """
-    return alloy_constant * np.sqrt(modulus)
-
-
 def chvorinov_time(
     modulus: float,
     mold_constant: float = 0.05
 ) -> float:
     """
     Calculate solidification time using Chvorinov's rule.
-    
+
     t = B * M²
-    
+
     Args:
         modulus: Section modulus
         mold_constant: Mold constant B (m²/min)
-        
+
     Returns:
         Solidification time in minutes
     """

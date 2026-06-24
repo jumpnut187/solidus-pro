@@ -10,16 +10,10 @@ import platform
 import subprocess
 from typing import Dict, Tuple, Optional
 
-# Import error logger
 try:
     from core.error_logger import logger
 except ImportError:
-    class DummyLogger:
-        def debug(self, msg, **kwargs): pass
-        def info(self, msg, **kwargs): pass
-        def warning(self, msg, **kwargs): pass
-        def error(self, msg, **kwargs): pass
-    logger = DummyLogger()
+    from core.error_logger_dummy import logger
 
 class HardwareConfig:
     """Detect and configure hardware resources for optimal performance"""

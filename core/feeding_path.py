@@ -771,20 +771,6 @@ class FeedingPathAnalyzer:
         }
 
 
-def create_feeding_analyzer(mesh, alloy=None) -> FeedingPathAnalyzer:
-    """
-    Convenience function to create FeedingPathAnalyzer.
-    
-    Args:
-        mesh: AdaptiveVoxelMesh
-        alloy: AlloyProperties (optional)
-        
-    Returns:
-        Configured FeedingPathAnalyzer
-    """
-    return FeedingPathAnalyzer(mesh, alloy)
-
-
 # Test function
 if __name__ == '__main__':
     print("Feeding Path Analysis Module")

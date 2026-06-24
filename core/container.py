@@ -29,12 +29,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import (
-    Optional, Any, Dict, TypeVar, Generic, Callable, 
+    Optional, Any, Dict, TypeVar, Generic, Callable,
     Type, Union, Protocol, runtime_checkable
 )
-from functools import cached_property
 import threading
-from weakref import WeakValueDictionary
 
 
 T = TypeVar('T')
@@ -395,60 +393,6 @@ def get_container() -> Container:
     return _global_container
 
 
-def reset_container() -> None:
-    """Reset global container (useful for testing)"""
-    global _global_container
-    
-    with _container_lock:
-        if _global_container is not None:
-            _global_container.reset()
-        _global_container = None
-
-
-def set_container(container: Container) -> None:
-    """
-    Set the global container instance.
-    
-    Useful for testing or custom configurations.
-    
-    Args:
-        container: Container to use as global
-    """
-    global _global_container
-    
-    with _container_lock:
-        _global_container = container
-
-
-# ============================================================================
-# Injection Decorator
-# ============================================================================
-
-def inject(*service_names: str):
-    """
-    Decorator for automatic dependency injection.
-    
-    Injects services as keyword arguments to the decorated function.
-    
-    Example:
-        @inject('hardware', 'settings')
-        def my_function(x, y, hardware=None, settings=None):
-            # hardware and settings are injected automatically
-            cores = hardware.physical_cores
-            voxel_size = settings.mesh.base_voxel_size
-            ...
-    """
-    def decorator(func: Callable) -> Callable:
-        def wrapper(*args, **kwargs):
-            container = get_container()
-            for name in service_names:
-                if name not in kwargs:
-                    kwargs[name] = container.get(name)
-            return func(*args, **kwargs)
-        return wrapper
-    return decorator
-
-
 # ============================================================================
 # Testing Utilities
 # ============================================================================
@@ -518,36 +462,3 @@ class MockMemoryManager:
         self._arrays.clear()
         self.total_allocated_mb = 0.0
 
-
-def create_test_container(
-    hardware: Optional[Any] = None,
-    memory_manager: Optional[Any] = None,
-    settings: Optional[Any] = None
-) -> Container:
-    """
-    Create a container configured for testing.
-    
-    Args:
-        hardware: Mock hardware config (default: MockHardwareConfig)
-        memory_manager: Mock memory manager (default: MockMemoryManager)
-        settings: Mock settings (default: None, uses real settings)
-        
-    Returns:
-        Configured Container for testing
-    """
-    container = Container()
-    
-    if hardware is not None:
-        container.override('hardware', hardware)
-    else:
-        container.override('hardware', MockHardwareConfig())
-    
-    if memory_manager is not None:
-        container.override('memory_manager', memory_manager)
-    else:
-        container.override('memory_manager', MockMemoryManager())
-    
-    if settings is not None:
-        container.override('settings', settings)
-    
-    return container

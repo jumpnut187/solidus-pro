@@ -42,7 +42,7 @@ import importlib.util
 import sys
 import logging
 
-from config.exceptions import PluginError, PluginLoadError, PluginInterfaceError
+from config.exceptions import PluginError, PluginLoadError
 
 
 # Type variables
@@ -217,17 +217,6 @@ class MaterialPlugin(BasePlugin):
 # ============================================================================
 # Analysis Plugin Interface
 # ============================================================================
-
-@runtime_checkable
-class AnalysisResult(Protocol):
-    """Protocol for analysis results"""
-    name: str
-    data: Any
-    units: str
-    
-    def get_voxel_values(self) -> Any: ...
-    def get_threshold_mask(self, threshold: float) -> Any: ...
-
 
 @dataclass
 class AnalysisResultData:
@@ -708,115 +697,3 @@ def get_plugin_manager() -> PluginManager:
         _default_plugin_manager = PluginManager()
     return _default_plugin_manager
 
-
-def material_plugin(cls: Type[MaterialPlugin]) -> Type[MaterialPlugin]:
-    """
-    Decorator to automatically register a material plugin.
-    
-    Usage:
-        @material_plugin
-        class MyAlloy(MaterialPlugin):
-            ...
-    """
-    pm = get_plugin_manager()
-    try:
-        pm.register_plugin(cls())
-    except Exception as e:
-        logger.error(f"Failed to register material plugin {cls.__name__}: {e}")
-    return cls
-
-
-def analysis_plugin(cls: Type[AnalysisPlugin]) -> Type[AnalysisPlugin]:
-    """
-    Decorator to automatically register an analysis plugin.
-    
-    Usage:
-        @analysis_plugin
-        class MyAnalysis(AnalysisPlugin):
-            ...
-    """
-    pm = get_plugin_manager()
-    try:
-        pm.register_plugin(cls())
-    except Exception as e:
-        logger.error(f"Failed to register analysis plugin {cls.__name__}: {e}")
-    return cls
-
-
-def visualization_plugin(cls: Type[VisualizationPlugin]) -> Type[VisualizationPlugin]:
-    """
-    Decorator to automatically register a visualization plugin.
-    
-    Usage:
-        @visualization_plugin
-        class MyVisualization(VisualizationPlugin):
-            ...
-    """
-    pm = get_plugin_manager()
-    try:
-        pm.register_plugin(cls())
-    except Exception as e:
-        logger.error(f"Failed to register visualization plugin {cls.__name__}: {e}")
-    return cls
-
-
-# ============================================================================
-# Example Built-in Plugins
-# ============================================================================
-
-class ViridisColormap(VisualizationPlugin):
-    """Built-in Viridis colormap plugin"""
-    
-    @property
-    def metadata(self) -> PluginMetadata:
-        return PluginMetadata(
-            name="viridis",
-            version="1.0.0",
-            description="Perceptually uniform colormap (colorblind-friendly)"
-        )
-    
-    def initialize(self) -> None:
-        pass
-    
-    def get_colormap(self) -> ColorMap:
-        return ColorMap(
-            name="Viridis",
-            key="viridis",
-            description="Perceptually uniform, colorblind-friendly",
-            colors=[
-                (0.0, 0.267, 0.004, 0.329),   # Dark purple
-                (0.25, 0.282, 0.140, 0.457),  # Purple
-                (0.5, 0.127, 0.566, 0.550),   # Teal
-                (0.75, 0.369, 0.788, 0.382),  # Green
-                (1.0, 0.993, 0.906, 0.144),   # Yellow
-            ]
-        )
-
-
-class PlasmaColormap(VisualizationPlugin):
-    """Built-in Plasma colormap plugin"""
-    
-    @property
-    def metadata(self) -> PluginMetadata:
-        return PluginMetadata(
-            name="plasma",
-            version="1.0.0",
-            description="High contrast sequential colormap"
-        )
-    
-    def initialize(self) -> None:
-        pass
-    
-    def get_colormap(self) -> ColorMap:
-        return ColorMap(
-            name="Plasma",
-            key="plasma",
-            description="High contrast sequential colormap",
-            colors=[
-                (0.0, 0.050, 0.030, 0.527),   # Dark blue
-                (0.25, 0.417, 0.001, 0.658),  # Purple
-                (0.5, 0.798, 0.280, 0.470),   # Pink
-                (0.75, 0.973, 0.580, 0.254),  # Orange
-                (1.0, 0.940, 0.975, 0.131),   # Yellow
-            ]
-        )

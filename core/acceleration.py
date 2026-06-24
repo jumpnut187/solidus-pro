@@ -12,16 +12,10 @@ import multiprocessing
 from typing import Callable, Any, List
 from config.hardware_config import hardware
 
-# Import error logger
 try:
     from core.error_logger import logger
 except ImportError:
-    class DummyLogger:
-        def debug(self, msg, **kwargs): pass
-        def info(self, msg, **kwargs): pass
-        def warning(self, msg, **kwargs): pass
-        def error(self, msg, **kwargs): pass
-    logger = DummyLogger()
+    from core.error_logger_dummy import logger
 
 # Configure Numba to use physical cores only (no hyperthreading)
 optimal_threads = hardware.get_optimal_thread_count('compute')
@@ -125,24 +119,6 @@ class AccelerationManager:
 
 # JIT-compiled functions for performance-critical operations
 @jit(nopython=True, parallel=True, fastmath=True, cache=True)
-def compute_distances_parallel(points: np.ndarray, reference: np.ndarray) -> np.ndarray:
-    """
-    Compute distances from points to reference point (parallel)
-    Optimized for M3 multi-core CPU
-    """
-    n_points = points.shape[0]
-    distances = np.empty(n_points, dtype=np.float32)
-    
-    for i in prange(n_points):
-        dx = points[i, 0] - reference[0]
-        dy = points[i, 1] - reference[1]
-        dz = points[i, 2] - reference[2]
-        distances[i] = np.sqrt(dx*dx + dy*dy + dz*dz)
-    
-    return distances
-
-
-@jit(nopython=True, parallel=True, fastmath=True, cache=True)
 def compute_modulus_parallel(volumes: np.ndarray, areas: np.ndarray) -> np.ndarray:
     """
     Compute geometric modulus for voxels (parallel)
@@ -150,111 +126,14 @@ def compute_modulus_parallel(volumes: np.ndarray, areas: np.ndarray) -> np.ndarr
     """
     n_voxels = volumes.shape[0]
     moduli = np.empty(n_voxels, dtype=np.float32)
-    
+
     for i in prange(n_voxels):
         if areas[i] > 0:
             moduli[i] = volumes[i] / areas[i]
         else:
             moduli[i] = 0.0
-    
+
     return moduli
-
-
-@jit(nopython=True, parallel=True, fastmath=True, cache=True)
-def compute_cooling_rates_parallel(moduli: np.ndarray, 
-                                   thermal_diffusivity: float) -> np.ndarray:
-    """
-    Compute cooling rates based on geometric modulus
-    Higher modulus = slower cooling = higher shrinkage risk
-    """
-    n_voxels = moduli.shape[0]
-    cooling_rates = np.empty(n_voxels, dtype=np.float32)
-    
-    for i in prange(n_voxels):
-        if moduli[i] > 0:
-            # Cooling rate inversely proportional to modulus squared
-            cooling_rates[i] = thermal_diffusivity / (moduli[i] * moduli[i])
-        else:
-            cooling_rates[i] = 0.0
-    
-    return cooling_rates
-
-
-@jit(nopython=True, parallel=True, fastmath=True, cache=True)
-def compute_shrinkage_parallel(distances: np.ndarray, 
-                              moduli: np.ndarray,
-                              feeding_distance: float,
-                              shrinkage_rate: float) -> np.ndarray:
-    """
-    Compute shrinkage probability for each voxel
-    Based on feeding distance and geometric modulus
-    """
-    n_voxels = distances.shape[0]
-    shrinkage = np.zeros(n_voxels, dtype=np.float32)
-    
-    for i in prange(n_voxels):
-        # Distance factor: beyond feeding distance = high shrinkage
-        distance_factor = min(distances[i] / feeding_distance, 1.0)
-        
-        # Modulus factor: higher modulus = slower cooling = more shrinkage
-        # Normalize modulus to 0-1 range (typical modulus 0-2 inches)
-        modulus_factor = min(moduli[i] / 2.0, 1.0)
-        
-        # Combined shrinkage probability
-        shrinkage[i] = shrinkage_rate * distance_factor * modulus_factor
-    
-    return shrinkage
-
-
-@jit(nopython=True, parallel=True, fastmath=True, cache=True)
-def update_solidification_front_parallel(voxel_states: np.ndarray,
-                                        neighbors: np.ndarray,
-                                        moduli: np.ndarray,
-                                        heights: np.ndarray,
-                                        time_step: float) -> np.ndarray:
-    """
-    Update solidification front (edge-inward and vertical progression)
-    
-    Args:
-        voxel_states: Current solidification state (0=liquid, 1=solid)
-        neighbors: Neighbor connectivity matrix
-        moduli: Geometric modulus for each voxel
-        heights: Vertical position (Z coordinate) of each voxel
-        time_step: Current time step
-    
-    Returns:
-        Updated voxel states
-    """
-    n_voxels = voxel_states.shape[0]
-    new_states = voxel_states.copy()
-    
-    for i in prange(n_voxels):
-        if voxel_states[i] < 1.0:  # Not fully solid
-            # Check neighbors
-            has_solid_neighbor = False
-            for j in range(neighbors.shape[1]):
-                neighbor_idx = neighbors[i, j]
-                if neighbor_idx >= 0 and voxel_states[neighbor_idx] >= 1.0:
-                    has_solid_neighbor = True
-                    break
-            
-            if has_solid_neighbor:
-                # Base solidification rate based on modulus using Chvorinov's rule
-                # solidification time ∝ modulus² for realistic foundry physics
-                # Tuned for typical castings to solidify in 60-300 seconds
-                base_rate = 0.02  # Balanced rate for visible but realistic solidification
-                solidification_rate = base_rate / (1.0 + moduli[i] * moduli[i] * 2.0)
-                
-                # Vertical factor: bottom solidifies faster due to density
-                # Normalize height factor (lower height = faster solidification)
-                vertical_factor = 1.0 + (1.0 - heights[i]) * 0.3
-                
-                # Update state
-                new_states[i] = min(voxel_states[i] + 
-                                  solidification_rate * vertical_factor * time_step, 
-                                  1.0)
-    
-    return new_states
 
 
 @jit(nopython=True, parallel=True, fastmath=True, cache=True)
@@ -519,59 +398,6 @@ def compute_min_distances_parallel(
         min_distances[i] = min_dist
     
     return min_distances
-
-
-@jit(nopython=True, parallel=True, fastmath=True, cache=True)
-def compute_chill_boost_parallel(
-    voxel_centers: np.ndarray,
-    chill_centers: np.ndarray,
-    part_types: np.ndarray,
-    chill_influence_radius: float,
-    max_chill_boost: float
-) -> np.ndarray:
-    """
-    Compute chill influence boost for all voxels (JIT-optimized)
-    
-    Args:
-        voxel_centers: All voxel centers (n_voxels x 3)
-        chill_centers: Chill voxel centers (n_chills x 3)
-        part_types: Part type for each voxel (0=CAST, 1=RISER, 2=CHILL)
-        chill_influence_radius: Maximum distance of chill effect (inches)
-        max_chill_boost: Maximum boost factor at chill contact
-    
-    Returns:
-        Array of boost multipliers (n_voxels,)
-    """
-    n_voxels = voxel_centers.shape[0]
-    n_chills = chill_centers.shape[0]
-    chill_boost = np.ones(n_voxels, dtype=np.float32)
-    
-    if n_chills == 0:
-        return chill_boost
-    
-    for i in prange(n_voxels):
-        # Skip chill voxels themselves
-        if part_types[i] == 2:
-            continue
-        
-        # Find minimum distance to any chill
-        min_dist = np.float32(1e30)
-        px, py, pz = voxel_centers[i, 0], voxel_centers[i, 1], voxel_centers[i, 2]
-        
-        for j in range(n_chills):
-            dx = px - chill_centers[j, 0]
-            dy = py - chill_centers[j, 1]
-            dz = pz - chill_centers[j, 2]
-            dist = np.sqrt(dx*dx + dy*dy + dz*dz)
-            if dist < min_dist:
-                min_dist = dist
-        
-        if min_dist < chill_influence_radius:
-            # Linear falloff from max boost at contact to 1.0 at influence radius
-            influence = 1.0 - (min_dist / chill_influence_radius)
-            chill_boost[i] = 1.0 + (max_chill_boost - 1.0) * influence
-    
-    return chill_boost
 
 
 @jit(nopython=True, parallel=True, fastmath=True, cache=True)
@@ -840,109 +666,6 @@ def compute_mold_air_gap_effect_parallel(
     
     return air_gap_slowdown
 
-@jit(nopython=True, parallel=True, fastmath=True, cache=True)
-def compute_thermal_gradient_parallel(
-    feeding_distances: np.ndarray,
-    max_feeding_dist: float,
-    temp_range: float,
-    min_gradient: float
-) -> np.ndarray:
-    """
-    Compute thermal gradient for Niyama calculation (JIT-optimized)
-    
-    Higher gradient near surface, lower in interior.
-    G = ΔT / distance, inversely proportional to distance from surface.
-    
-    Args:
-        feeding_distances: Distance from surface for each voxel
-        max_feeding_dist: Maximum feeding distance in the model
-        temp_range: Temperature range (liquidus - solidus) in °C
-        min_gradient: Minimum gradient to avoid division issues
-    
-    Returns:
-        Array of thermal gradients (°C/inch)
-    """
-    n_voxels = feeding_distances.shape[0]
-    gradients = np.empty(n_voxels, dtype=np.float32)
-    
-    safe_max_dist = max(max_feeding_dist, 0.1)
-    
-    for i in prange(n_voxels):
-        # Gradient factor: inversely proportional to distance from surface
-        # Near surface (dist=0) -> factor=1.0, interior (dist=max) -> factor=0.05
-        normalized_dist = min(feeding_distances[i] / safe_max_dist, 0.95)
-        gradient_factor = 1.0 - normalized_dist
-        gradients[i] = temp_range * gradient_factor + min_gradient
-    
-    return gradients
-
-
-@jit(nopython=True, parallel=True, fastmath=True, cache=True)
-def compute_niyama_parallel(
-    thermal_gradients: np.ndarray,
-    cooling_rates: np.ndarray
-) -> np.ndarray:
-    """
-    Compute Niyama criterion for each voxel (JIT-optimized)
-    
-    Niyama = G / sqrt(R)
-    where G = thermal gradient (°C/inch), R = cooling rate (°C/s)
-    
-    Args:
-        thermal_gradients: Thermal gradient at each voxel (°C/inch)
-        cooling_rates: Cooling rate at each voxel (°C/s)
-    
-    Returns:
-        Array of Niyama values
-    """
-    n_voxels = thermal_gradients.shape[0]
-    niyama = np.empty(n_voxels, dtype=np.float32)
-    
-    for i in prange(n_voxels):
-        # Protect against sqrt of negative or very small values
-        safe_rate = max(cooling_rates[i], 1e-10)
-        niyama[i] = thermal_gradients[i] / np.sqrt(safe_rate)
-    
-    return niyama
-
-
-@jit(nopython=True, parallel=True, fastmath=True, cache=True)
-def compute_strain_rate_parallel(
-    cooling_rates: np.ndarray,
-    neighbor_matrix: np.ndarray,
-    thermal_expansion: float
-) -> np.ndarray:
-    """
-    Compute strain rate from cooling rate differential with neighbors (JIT-optimized).
-    
-    Strain rate ε̇ ≈ α * |dR/dx| where α = thermal expansion coefficient.
-    High differential = tensile stress across the voxel = hot tear risk.
-    
-    Args:
-        cooling_rates: Cooling rate at each voxel (°C/s)
-        neighbor_matrix: Neighbor indices for each voxel (n_voxels x max_neighbors)
-        thermal_expansion: Thermal expansion coefficient (1/K)
-    
-    Returns:
-        Array of strain rates
-    """
-    n_voxels = cooling_rates.shape[0]
-    max_neighbors = neighbor_matrix.shape[1]
-    strain_rate = np.zeros(n_voxels, dtype=np.float32)
-    
-    for i in prange(n_voxels):
-        max_diff = 0.0
-        for j in range(max_neighbors):
-            neighbor_idx = neighbor_matrix[i, j]
-            if 0 <= neighbor_idx < n_voxels:
-                diff = abs(cooling_rates[i] - cooling_rates[neighbor_idx])
-                if diff > max_diff:
-                    max_diff = diff
-        
-        strain_rate[i] = thermal_expansion * max_diff
-    
-    return strain_rate
-
 
 @jit(nopython=True, parallel=True, fastmath=True, cache=True)
 def compute_modulus_variance_parallel(
@@ -985,33 +708,6 @@ def compute_modulus_variance_parallel(
             modulus_variance[i] = np.sqrt(max(variance, 0.0))  # std dev
     
     return modulus_variance
-
-
-@jit(nopython=True, parallel=True, fastmath=True, cache=True)
-def compute_near_surface_interior_parallel(
-    feeding_distances: np.ndarray,
-    surface_mask: np.ndarray,
-    threshold: float
-) -> np.ndarray:
-    """
-    Identify voxels that are near surface but not surface voxels (JIT-optimized).
-    
-    Args:
-        feeding_distances: Distance to surface for each voxel
-        surface_mask: Boolean mask of surface voxels
-        threshold: Maximum distance to be considered "near surface"
-    
-    Returns:
-        Boolean array of near-surface interior voxels
-    """
-    n_voxels = feeding_distances.shape[0]
-    result = np.zeros(n_voxels, dtype=np.bool_)
-    
-    for i in prange(n_voxels):
-        if feeding_distances[i] < threshold and not surface_mask[i]:
-            result[i] = True
-    
-    return result
 
 
 @jit(nopython=True, parallel=True, fastmath=True, cache=True)
@@ -1193,89 +889,6 @@ def compute_solid_path_strain_parallel(
         path_strain[i] = thermal_expansion * temp_range * (max_solid_path / max_path_length)
     
     return path_strain
-
-
-@jit(nopython=True, parallel=True, fastmath=True, cache=True)
-def identify_mushy_zone_voxels_parallel(
-    solidification_times: np.ndarray,
-    voxel_moduli: np.ndarray,
-    neighbor_matrix: np.ndarray,
-    btr_start_fraction: float,
-    btr_end_fraction: float
-) -> np.ndarray:
-    """
-    Identify voxels that were in the mushy/BTR state while neighbors were solid (JIT-optimized).
-    
-    These are the critical voxels for hot tearing - they experienced mechanical
-    constraint while still having weak interdendritic liquid films.
-    
-    Criteria:
-    1. Voxel solidified in the middle portion of the sequence (not first, not last)
-    2. Has neighbors that solidified significantly earlier (creating constraint)
-    3. Located at section transitions (varying modulus among neighbors)
-    
-    Args:
-        solidification_times: Time when each voxel solidified (seconds)
-        voxel_moduli: Geometric modulus at each voxel
-        neighbor_matrix: Neighbor indices for each voxel (n_voxels x max_neighbors)
-        btr_start_fraction: Normalized time when BTR vulnerability starts (e.g., 0.3)
-        btr_end_fraction: Normalized time when BTR vulnerability ends (e.g., 0.85)
-    
-    Returns:
-        Boolean array indicating mushy zone voxels under constraint
-    """
-    n_voxels = solidification_times.shape[0]
-    max_neighbors = neighbor_matrix.shape[1]
-    mushy_constrained = np.zeros(n_voxels, dtype=np.bool_)
-    
-    # Find time range
-    max_time = 0.0
-    for i in range(n_voxels):
-        if solidification_times[i] > max_time:
-            max_time = solidification_times[i]
-    
-    if max_time <= 0:
-        return mushy_constrained
-    
-    btr_start_time = max_time * btr_start_fraction
-    btr_end_time = max_time * btr_end_fraction
-    
-    for i in prange(n_voxels):
-        my_time = solidification_times[i]
-        my_modulus = voxel_moduli[i]
-        
-        # Check if voxel solidified in the BTR time window
-        if my_time < btr_start_time or my_time > btr_end_time:
-            continue
-        
-        # Check if this voxel has solid neighbors that could constrain it
-        has_solid_constraint = False
-        has_section_change = False
-        
-        for j in range(max_neighbors):
-            neighbor_idx = neighbor_matrix[i, j]
-            if 0 <= neighbor_idx < n_voxels:
-                neighbor_time = solidification_times[neighbor_idx]
-                neighbor_modulus = voxel_moduli[neighbor_idx]
-                
-                # Neighbor solidified much earlier = solid constraint
-                if neighbor_time < my_time * 0.7 and neighbor_time > 0:
-                    has_solid_constraint = True
-                
-                # Significant modulus difference = section change
-                if my_modulus > 0 and neighbor_modulus > 0:
-                    ratio = neighbor_modulus / my_modulus
-                    if ratio < 0.5 or ratio > 2.0:
-                        has_section_change = True
-        
-        # Mark as mushy-constrained if both conditions met
-        if has_solid_constraint and has_section_change:
-            mushy_constrained[i] = True
-        # Also mark if strong constraint even without section change
-        elif has_solid_constraint and my_time > max_time * 0.5:
-            mushy_constrained[i] = True
-    
-    return mushy_constrained
 
 
 # Global acceleration manager instance

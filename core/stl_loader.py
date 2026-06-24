@@ -9,18 +9,10 @@ import trimesh
 from typing import Tuple, Optional
 import os
 
-# Import error logger
 try:
     from core.error_logger import logger
 except ImportError:
-    # Fallback if logger not available
-    class DummyLogger:
-        def debug(self, msg, **kwargs): pass
-        def info(self, msg, **kwargs): pass
-        def warning(self, msg, **kwargs): pass
-        def error(self, msg, **kwargs): pass
-        def exception(self, msg, **kwargs): pass
-    logger = DummyLogger()
+    from core.error_logger_dummy import logger
 
 
 class STLLoader:

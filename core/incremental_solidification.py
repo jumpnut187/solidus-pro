@@ -15,7 +15,7 @@ the front is ~O(n^2) while total voxels are O(n^3), giving O(n) speedup.
 """
 
 import numpy as np
-from numba import jit, prange, typed
+from numba import jit, prange
 from typing import Tuple, Set, List, Optional
 from dataclasses import dataclass
 
@@ -39,32 +39,6 @@ class SolidificationFront:
     # Statistics
     updates_performed: int = 0
     voxels_solidified: int = 0
-
-
-def create_solidification_front(n_voxels: int, 
-                                initial_solid_indices: np.ndarray) -> SolidificationFront:
-    """
-    Create initial solidification front from surface/chill voxels.
-    
-    Args:
-        n_voxels: Total number of voxels
-        initial_solid_indices: Indices of initially solid voxels (surface + chills)
-    
-    Returns:
-        SolidificationFront object ready for incremental updates
-    """
-    # Initially, the front consists of liquid voxels adjacent to solid voxels
-    # We'll populate this during the first update
-    
-    # Pre-allocate arrays (max size = all voxels, but typically much smaller)
-    max_front_size = min(n_voxels, len(initial_solid_indices) * 27)  # 27 = 26 neighbors + self
-    
-    return SolidificationFront(
-        active_indices=np.empty(max_front_size, dtype=np.int32),
-        n_active=0,
-        _new_solid_mask=np.zeros(n_voxels, dtype=np.bool_),
-        _next_front=np.empty(max_front_size, dtype=np.int32)
-    )
 
 
 @jit(nopython=True, cache=True)
@@ -397,13 +371,13 @@ def sparse_states_to_dense(sparse_indices: np.ndarray,
                            default_value: float = 0.0) -> np.ndarray:
     """
     Convert sparse state representation to dense array.
-    
+
     Args:
         sparse_indices: Indices of non-default values
         sparse_values: Values at those indices
         n_total: Total size of dense array
         default_value: Value for non-specified indices
-    
+
     Returns:
         Dense array
     """
@@ -411,39 +385,3 @@ def sparse_states_to_dense(sparse_indices: np.ndarray,
     for i in range(len(sparse_indices)):
         dense[sparse_indices[i]] = sparse_values[i]
     return dense
-
-
-@jit(nopython=True, cache=True)
-def dense_to_sparse_states(dense: np.ndarray,
-                           threshold: float = 0.0) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Convert dense array to sparse representation.
-    
-    Only stores values above threshold (useful for solidification states
-    where most voxels are 0 or 1).
-    
-    Args:
-        dense: Dense array
-        threshold: Only store values above this threshold
-    
-    Returns:
-        Tuple of (indices, values)
-    """
-    # Count non-zero/threshold values
-    count = 0
-    for i in range(len(dense)):
-        if dense[i] > threshold:
-            count += 1
-    
-    # Allocate and fill sparse arrays
-    indices = np.empty(count, dtype=np.int32)
-    values = np.empty(count, dtype=np.float32)
-    
-    idx = 0
-    for i in range(len(dense)):
-        if dense[i] > threshold:
-            indices[idx] = i
-            values[idx] = dense[i]
-            idx += 1
-    
-    return indices, values
