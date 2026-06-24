@@ -126,31 +126,58 @@ print("=" * 70)
 print("RECOMMENDATIONS:")
 print("=" * 70)
 
+# Probe MLX
+mlx_available = False
+try:
+    import mlx.core as mx
+    ver = getattr(mx, '__version__', 'unknown')
+    print(f"  MLX: installed ({ver})")
+    _ = mx.array([1.0, 2.0])
+    _ = mx.sum(_)
+    mlx_available = True
+except Exception as e:
+    print(f"  MLX: not installed ({e})")
+
+# Probe Taichi
+taichi_available = False
+try:
+    import taichi as ti
+    ver = ti.__version__
+    print(f"  Taichi: installed ({ver})")
+    taichi_available = True
+except Exception as e:
+    print(f"  Taichi: not installed ({e})")
+
+# Probe CUDA
+cuda_available = False
+try:
+    import cupy as cp
+    device_count = cp.cuda.runtime.getDeviceCount()
+    print(f"  CUDA: {device_count} device(s) found")
+    cuda_available = device_count > 0
+except ImportError:
+    print(f"  CuPy: not installed")
+except Exception as e:
+    print(f"  CUDA error: {e}")
+
+print()
 if platform.system() == 'Darwin':
-    print("""
-On macOS, OpenCL support is limited and being deprecated by Apple.
-The M3 GPU may not be fully accessible via OpenCL/PyOpenCL.
-
-ALTERNATIVE SOLUTIONS:
-
-1. USE METAL DIRECTLY (recommended for Apple Silicon):
-   - Install: pip install pyobjc-framework-Metal pyobjc-framework-MetalKit
-   - This requires code changes to use Metal Performance Shaders
-   
-2. USE MLX (Apple's ML framework):
-   - Install: pip install mlx
-   - MLX is designed for Apple Silicon and uses Metal directly
-   
-3. CHECK OPENCL AVAILABILITY:
-   - Run: /System/Library/Frameworks/OpenCL.framework/Versions/A/Headers
-   - Modern macOS may have limited OpenCL GPU support
-   
-4. NUMBA JIT FALLBACK (current behavior):
-   - Your app falls back to Numba JIT on CPU
-   - This is still reasonably fast with multi-threading
-
-To properly leverage M3 GPU, the code would need to be refactored to use:
-- Metal Performance Shaders (via pyobjc)
-- MLX framework
-- Or a Metal-native compute solution
-""")
+    if mlx_available and taichi_available:
+        print("  Apple Silicon GPU acceleration is AVAILABLE.")
+        print("  The Metal (MLX+Taichi) backend will be used automatically.")
+    else:
+        print("  To enable Apple Silicon GPU acceleration:")
+        if not mlx_available:
+            print("    pip install mlx")
+        if not taichi_available:
+            print("    pip install taichi")
+        print("  CPU (Numba JIT) will be used as fallback.")
+elif cuda_available:
+    print("  NVIDIA GPU acceleration is AVAILABLE.")
+    print("  CUDA backend will be used automatically.")
+elif platform.system() != 'Darwin':
+    print("  GPU acceleration requires one of:")
+    print("    NVIDIA: pip install cupy-cuda12x (or cupy-cuda11x)")
+    print("    Other:  pip install pyopencl")
+    print("  CPU (Numba JIT) will be used as fallback.")
+print("=" * 70)

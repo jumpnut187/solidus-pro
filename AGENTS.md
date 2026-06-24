@@ -53,6 +53,13 @@ Part-type assignment now supports explicit tuning controls for large CAST/RISER/
 
 By design, GPU/backend detection and Numba thread banners are emitted by the main process only. Worker processes suppress those startup prints to keep logs readable during parallel runs.
 
+### GPU Acceleration
+The application supports GPU acceleration on Apple Silicon (M1/M2/M3/M4), NVIDIA, and Intel/AMD GPUs:
+
+- **Apple Silicon**: Install `mlx` and `taichi` for Metal GPU acceleration via MLX (array ops) and Taichi (stencil kernels). `pip install mlx taichi`
+- **NVIDIA**: Install `cupy-cuda12x` (or `cupy-cuda11x` for older CUDA) for CUDA acceleration
+- **OpenCL**: Install `pyopencl` for Intel/AMD GPU acceleration (legacy macOS)
+
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 

@@ -67,6 +67,10 @@ class GPUComputeManager:
         self._opencl_queue = None
         self._metal_device = None
         
+        # Metal (MLX + Taichi) state
+        self._mlx = None
+        self._taichi_initialized = False
+        
         # Performance tracking
         self._kernel_times = {}
         
@@ -191,38 +195,40 @@ class GPUComputeManager:
             return False
     
     def _try_init_metal(self) -> bool:
-        """Try to initialize Metal via PyOpenCL on Apple Silicon"""
+        """Try to initialize Metal via MLX + Taichi on Apple Silicon"""
         try:
-            import pyopencl as cl
+            import mlx.core as mx
             
-            # Look for Apple GPU platform
-            platforms = cl.get_platforms()
-            print(f"  Metal: Found {len(platforms)} OpenCL platform(s)")
-            for plat in platforms:
-                print(f"  Metal: Checking platform '{plat.name}'")
-                if 'Apple' in plat.name:
-                    try:
-                        devices = plat.get_devices(device_type=cl.device_type.GPU)
-                        print(f"  Metal: Found {len(devices)} GPU device(s)")
-                        if devices:
-                            self._opencl_context = cl.Context(devices=[devices[0]])
-                            self._opencl_queue = cl.CommandQueue(self._opencl_context)
-                            self.device_name = devices[0].name
-                            self._metal_available = True
-                            self._opencl_available = True
-                            print(f"  Metal: Initialized {self.device_name}")
-                            return True
-                    except Exception as device_err:
-                        print(f"  Metal: Failed to get devices - {device_err}")
+            _ = mx.array([1.0, 2.0, 3.0])
+            _ = mx.sum(_)
             
-            print("  Metal: No Apple GPU found in OpenCL platforms")
-            return False
+            self._mlx = mx
+            self._metal_available = True
+            self.device_name = "Apple Silicon GPU (Metal via MLX + Taichi)"
+            print(f"  Metal: MLX initialized ({self.device_name})")
             
         except ImportError:
-            print("  Metal: PyOpenCL not installed (pip install pyopencl)")
+            print("  Metal: MLX not installed (pip install mlx)")
             return False
         except Exception as e:
-            print(f"  Metal: Initialization failed - {e}")
+            print(f"  Metal: MLX init failed - {e}")
+            return False
+        
+        try:
+            import taichi as ti
+            
+            if not self._taichi_initialized:
+                ti.init(arch=ti.metal, log_level=ti.WARN)
+                self._taichi_initialized = True
+                print(f"  Metal: Taichi Metal backend initialized")
+            
+            return True
+            
+        except ImportError:
+            print("  Metal: Taichi not installed (pip install taichi)")
+            return False
+        except Exception as e:
+            print(f"  Metal: Taichi init failed - {e}")
             return False
     
     def _try_init_opencl(self) -> bool:
@@ -310,10 +316,11 @@ class GPUComputeManager:
         self._ensure_initialized()
         if self.backend == GPUBackend.CUDA:
             return self._compute_distances_cuda(points, reference_points)
-        elif self.backend in (GPUBackend.METAL, GPUBackend.OPENCL):
+        elif self.backend == GPUBackend.METAL:
+            return self._compute_distances_metal(points, reference_points)
+        elif self.backend == GPUBackend.OPENCL:
             return self._compute_distances_opencl(points, reference_points)
         else:
-            # CPU fallback - use Numba JIT version
             from core.acceleration import compute_min_distances_parallel
             return compute_min_distances_parallel(
                 np.ascontiguousarray(points, dtype=np.float32),
@@ -419,6 +426,134 @@ class GPUComputeManager:
         
         return min_dists
     
+    def _compute_distances_metal(self, points: np.ndarray,
+                              reference_points: np.ndarray) -> np.ndarray:
+        """MLX implementation for Metal GPU distance computation"""
+        mx = self._mlx
+        
+        pts = np.ascontiguousarray(points, dtype=np.float32)
+        refs = np.ascontiguousarray(reference_points, dtype=np.float32)
+        
+        n_points = len(pts)
+        chunk_size = min(10000, n_points)
+        min_distances = np.empty(n_points, dtype=np.float32)
+        
+        for start in range(0, n_points, chunk_size):
+            end = min(start + chunk_size, n_points)
+            chunk = mx.array(pts[start:end])
+            refs_mx = mx.array(refs)
+            
+            diff = chunk[:, None, :] - refs_mx[None, :, :]
+            distances = mx.min(mx.sqrt(mx.sum(diff ** 2, axis=2)), axis=1)
+            min_distances[start:end] = np.array(distances)
+        
+        return min_distances
+    
+    def _update_solidification_metal(self,
+                                  voxel_states: np.ndarray,
+                                  neighbors: np.ndarray,
+                                  moduli: np.ndarray,
+                                  heights: np.ndarray,
+                                  chill_boost: np.ndarray,
+                                  riser_slowdown: np.ndarray,
+                                  part_types: np.ndarray,
+                                  time_step: float,
+                                  material_factor: float) -> np.ndarray:
+        """Taichi-compiled Metal kernel for solidification with full feeding-zone logic"""
+        import taichi as ti
+        
+        n_voxels = len(voxel_states)
+        n_neighbors = neighbors.shape[1] if len(neighbors.shape) > 1 else 26
+        
+        states = np.ascontiguousarray(voxel_states, dtype=np.float32)
+        neighs = np.ascontiguousarray(neighbors, dtype=np.int32)
+        mods = np.ascontiguousarray(moduli, dtype=np.float32)
+        hts = np.ascontiguousarray(heights, dtype=np.float32)
+        chills = np.ascontiguousarray(chill_boost, dtype=np.float32)
+        risers = np.ascontiguousarray(riser_slowdown, dtype=np.float32)
+        parts = np.ascontiguousarray(part_types, dtype=np.int32)
+        
+        new_states = states.copy()
+        
+        @ti.kernel
+        def _kernel(
+            states: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            neighs: ti.types.ndarray(dtype=ti.i32, ndim=2),
+            mods: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            hts: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            chills: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            risers: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            parts: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            new_states: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            dt: ti.f32,
+            mat_factor: ti.f32,
+        ):
+            feeding_zone_threshold = 0.6
+            CAST = 0
+            RISER = 1
+            CHILL = 2
+            
+            for i in range(n_voxels):
+                if states[i] >= 1.0:
+                    new_states[i] = states[i]
+                    continue
+                
+                is_riser_voxel = parts[i] == RISER
+                has_liquid_riser_neighbor = False
+                has_liquid_feeding_neighbor = False
+                has_solid_neighbor = False
+                
+                for j in range(n_neighbors):
+                    n_idx = neighs[i, j]
+                    if n_idx >= 0:
+                        neighbor_state = states[n_idx]
+                        neighbor_part_type = parts[n_idx]
+                        neighbor_slowdown = risers[n_idx]
+                        
+                        if neighbor_state >= 1.0:
+                            has_solid_neighbor = True
+                        else:
+                            if neighbor_part_type == RISER:
+                                has_liquid_riser_neighbor = True
+                            elif neighbor_slowdown < feeding_zone_threshold:
+                                has_liquid_feeding_neighbor = True
+                
+                in_feeding_zone = (
+                    is_riser_voxel or 
+                    has_liquid_riser_neighbor or 
+                    (risers[i] < feeding_zone_threshold and has_liquid_feeding_neighbor)
+                )
+                
+                effective_slowdown = risers[i]
+                if is_riser_voxel and in_feeding_zone:
+                    effective_slowdown = risers[i]
+                elif has_liquid_riser_neighbor and in_feeding_zone:
+                    effective_slowdown = risers[i] * 0.4
+                elif in_feeding_zone:
+                    effective_slowdown = risers[i] * 0.6
+                
+                if has_solid_neighbor:
+                    base_rate = 0.02
+                    solidification_rate = base_rate / (1.0 + mods[i] * mods[i] * 2.0)
+                    
+                    vertical_factor = 1.0 + (1.0 - hts[i]) * 0.3
+                    if in_feeding_zone:
+                        vertical_factor = 1.0 + (1.0 - hts[i]) * 0.5
+                    
+                    thermal_factor = mat_factor
+                    part_type_factor = chills[i] * effective_slowdown
+                    
+                    delta = (solidification_rate * vertical_factor * thermal_factor * 
+                             part_type_factor * dt)
+                    new_states[i] = min(states[i] + delta, 1.0)
+                else:
+                    new_states[i] = states[i]
+        
+        _kernel(states, neighs, mods, hts, chills, risers, parts, new_states,
+                float(time_step), float(material_factor))
+        
+        return np.array(new_states)
+    
     def compute_voxel_containment_gpu(self,
                                       voxel_centers: np.ndarray,
                                       mesh_vertices: np.ndarray,
@@ -439,8 +574,9 @@ class GPUComputeManager:
         self._ensure_initialized()
         if self.backend == GPUBackend.CUDA:
             return self._voxel_containment_cuda(voxel_centers, mesh_vertices, mesh_faces)
+        elif self.backend == GPUBackend.METAL:
+            return self._voxel_containment_metal(voxel_centers, mesh_vertices, mesh_faces)
         else:
-            # Fallback to trimesh contains (CPU)
             return None  # Signal to use CPU fallback
     
     def _voxel_containment_cuda(self, voxel_centers: np.ndarray,
@@ -472,6 +608,82 @@ class GPUComputeManager:
         
         return cp.asnumpy(in_bbox)
     
+    def _voxel_containment_metal(self,
+                              voxel_centers: np.ndarray,
+                              mesh_vertices: np.ndarray,
+                              mesh_faces: np.ndarray) -> np.ndarray:
+        """Taichi Metal ray-triangle intersection for point-in-mesh containment"""
+        import taichi as ti
+        import taichi.math as tm
+        
+        n_voxels = len(voxel_centers)
+        n_faces = len(mesh_faces)
+        
+        verts = np.ascontiguousarray(mesh_vertices, dtype=np.float32)
+        faces = np.ascontiguousarray(mesh_faces, dtype=np.int32)
+        centers = np.ascontiguousarray(voxel_centers, dtype=np.float32)
+        
+        inside = np.zeros(n_voxels, dtype=np.int32)
+        
+        @ti.kernel
+        def _kernel(
+            centers: ti.types.ndarray(dtype=ti.f32, ndim=2),
+            verts: ti.types.ndarray(dtype=ti.f32, ndim=2),
+            faces: ti.types.ndarray(dtype=ti.i32, ndim=2),
+            inside: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        ):
+            EPSILON = 1e-7
+            for i in range(n_voxels):
+                origin = ti.Vector([centers[i, 0], centers[i, 1], centers[i, 2]])
+                ray_dir = ti.Vector([1.0, 0.0, 0.0])
+
+                crossings = 0
+
+                for f in range(n_faces):
+                    v0_idx = faces[f, 0]
+                    v1_idx = faces[f, 1]
+                    v2_idx = faces[f, 2]
+                    v0 = ti.Vector([verts[v0_idx, 0], verts[v0_idx, 1], verts[v0_idx, 2]])
+                    v1 = ti.Vector([verts[v1_idx, 0], verts[v1_idx, 1], verts[v1_idx, 2]])
+                    v2 = ti.Vector([verts[v2_idx, 0], verts[v2_idx, 1], verts[v2_idx, 2]])
+
+                    e1 = v1 - v0
+                    e2 = v2 - v0
+
+                    pvec = tm.cross(ray_dir, e2)
+                    det = tm.dot(e1, pvec)
+
+                    if det > -EPSILON and det < EPSILON:
+                        continue
+
+                    inv_det = 1.0 / det
+                    tvec = origin - v0
+                    u = tm.dot(tvec, pvec) * inv_det
+
+                    if u < 0.0 or u > 1.0:
+                        continue
+
+                    qvec = tm.cross(tvec, e1)
+                    v = tm.dot(ray_dir, qvec) * inv_det
+
+                    if v < 0.0 or (u + v) > 1.0:
+                        continue
+
+                    t = tm.dot(e2, qvec) * inv_det
+
+                    if t > 0.0:
+                        crossings += 1
+
+                inside[i] = crossings % 2
+        
+        _kernel(centers, verts, faces, inside)
+        
+        min_dist_check = np.min(np.linalg.norm(centers[:, None, :] - verts[None, :, :], axis=2), axis=1)
+        if np.any(min_dist_check < 1e-4):
+            return None
+        
+        return inside.astype(bool)
+    
     def update_solidification_gpu(self,
                                   voxel_states: np.ndarray,
                                   neighbors: np.ndarray,
@@ -479,6 +691,7 @@ class GPUComputeManager:
                                   heights: np.ndarray,
                                   chill_boost: np.ndarray,
                                   riser_slowdown: np.ndarray,
+                                  part_types: np.ndarray,
                                   time_step: float,
                                   material_factor: float) -> np.ndarray:
         """
@@ -491,6 +704,7 @@ class GPUComputeManager:
             heights: Normalized vertical position
             chill_boost: Chill acceleration multiplier
             riser_slowdown: Riser slowdown multiplier
+            part_types: Part type for each voxel (0=CAST, 1=RISER, 2=CHILL)
             time_step: Current time step
             material_factor: Material solidification rate
         
@@ -501,15 +715,19 @@ class GPUComputeManager:
         if self.backend == GPUBackend.CUDA:
             return self._update_solidification_cuda(
                 voxel_states, neighbors, moduli, heights,
-                chill_boost, riser_slowdown, time_step, material_factor
+                chill_boost, riser_slowdown, part_types, time_step, material_factor
             )
-        elif self.backend in (GPUBackend.METAL, GPUBackend.OPENCL):
+        elif self.backend == GPUBackend.METAL:
+            return self._update_solidification_metal(
+                voxel_states, neighbors, moduli, heights,
+                chill_boost, riser_slowdown, part_types, time_step, material_factor
+            )
+        elif self.backend == GPUBackend.OPENCL:
             return self._update_solidification_opencl(
                 voxel_states, neighbors, moduli, heights,
-                chill_boost, riser_slowdown, time_step, material_factor
+                chill_boost, riser_slowdown, part_types, time_step, material_factor
             )
         else:
-            # CPU fallback
             from core.acceleration import update_solidification_with_part_types_parallel
             return update_solidification_with_part_types_parallel(
                 voxel_states, neighbors, moduli, heights,
@@ -523,14 +741,17 @@ class GPUComputeManager:
                                       heights: np.ndarray,
                                       chill_boost: np.ndarray,
                                       riser_slowdown: np.ndarray,
+                                      part_types: np.ndarray,
                                       time_step: float,
                                       material_factor: float) -> np.ndarray:
-        """OpenCL/Metal implementation of solidification update"""
+        """OpenCL implementation of solidification update with full feeding-zone logic"""
         import pyopencl as cl
-        import pyopencl.array as cl_array
         
-        # OpenCL kernel for solidification update
         kernel_source = """
+        #define CAST 0
+        #define RISER 1
+        #define CHILL 2
+        
         __kernel void solidification_update(
             __global const float* states,
             __global const int* neighbors,
@@ -538,6 +759,7 @@ class GPUComputeManager:
             __global const float* heights,
             __global const float* chill_boost,
             __global const float* riser_slowdown,
+            __global const int* part_types,
             __global float* new_states,
             const int n_neighbors,
             const float time_step,
@@ -548,79 +770,109 @@ class GPUComputeManager:
             float state = states[i];
             if (state >= 1.0f) {
                 new_states[i] = state;
-                return;  // Already solid
+                return;
             }
             
-            // Count solid neighbors
-            int solid_neighbors = 0;
+            float feeding_zone_threshold = 0.6f;
+            
+            int is_riser_voxel = part_types[i] == RISER;
+            int has_liquid_riser_neighbor = 0;
+            int has_liquid_feeding_neighbor = 0;
+            int has_solid_neighbor = 0;
+            
             for (int j = 0; j < n_neighbors; j++) {
                 int neighbor_idx = neighbors[i * n_neighbors + j];
-                if (neighbor_idx >= 0 && states[neighbor_idx] >= 1.0f) {
-                    solid_neighbors++;
+                if (neighbor_idx >= 0) {
+                    float neighbor_state = states[neighbor_idx];
+                    int neighbor_part_type = part_types[neighbor_idx];
+                    float neighbor_slowdown = riser_slowdown[neighbor_idx];
+                    
+                    if (neighbor_state >= 1.0f) {
+                        has_solid_neighbor = 1;
+                    } else {
+                        if (neighbor_part_type == RISER) {
+                            has_liquid_riser_neighbor = 1;
+                        } else if (neighbor_slowdown < feeding_zone_threshold) {
+                            has_liquid_feeding_neighbor = 1;
+                        }
+                    }
                 }
             }
             
-            // Calculate solidification rate
-            float modulus = moduli[i];
-            float height = heights[i];
-            float chill = chill_boost[i];
-            float riser = riser_slowdown[i];
+            int in_feeding_zone = is_riser_voxel || has_liquid_riser_neighbor ||
+                (riser_slowdown[i] < feeding_zone_threshold && has_liquid_feeding_neighbor);
             
-            // Base rate from neighbor influence
-            float neighbor_influence = (float)solid_neighbors / (float)n_neighbors;
+            float effective_slowdown;
+            if (in_feeding_zone) {
+                if (is_riser_voxel) {
+                    effective_slowdown = riser_slowdown[i];
+                } else if (has_liquid_riser_neighbor) {
+                    effective_slowdown = riser_slowdown[i] * 0.4f;
+                } else {
+                    effective_slowdown = riser_slowdown[i] * 0.6f;
+                }
+            } else {
+                effective_slowdown = riser_slowdown[i];
+            }
             
-            // Geometric modulus effect (smaller modulus = faster solidification)
-            float modulus_effect = 1.0f / (1.0f + modulus * 0.5f);
-            
-            // Height effect (lower = faster due to gravity/density)
-            float height_effect = 1.0f + (1.0f - height) * 0.3f;
-            
-            // Combined rate with chill boost and riser slowdown
-            float rate = neighbor_influence * modulus_effect * height_effect * 
-                        material_factor * time_step * chill * riser;
-            
-            new_states[i] = fmin(state + rate, 1.0f);
+            if (has_solid_neighbor) {
+                float base_rate = 0.02f;
+                float solidification_rate = base_rate / (1.0f + moduli[i] * moduli[i] * 2.0f);
+                
+                float vertical_factor;
+                if (in_feeding_zone) {
+                    vertical_factor = 1.0f + (1.0f - heights[i]) * 0.5f;
+                } else {
+                    vertical_factor = 1.0f + (1.0f - heights[i]) * 0.3f;
+                }
+                
+                float thermal_factor = material_factor;
+                float part_type_factor = chill_boost[i] * effective_slowdown;
+                
+                float delta = solidification_rate * vertical_factor * thermal_factor *
+                             part_type_factor * time_step;
+                new_states[i] = fmin(state + delta, 1.0f);
+            } else {
+                new_states[i] = state;
+            }
         }
         """
         
-        # Ensure contiguous arrays
         states = np.ascontiguousarray(voxel_states, dtype=np.float32)
         neighs = np.ascontiguousarray(neighbors, dtype=np.int32)
         mods = np.ascontiguousarray(moduli, dtype=np.float32)
         hts = np.ascontiguousarray(heights, dtype=np.float32)
         chill = np.ascontiguousarray(chill_boost, dtype=np.float32)
         riser = np.ascontiguousarray(riser_slowdown, dtype=np.float32)
+        parts = np.ascontiguousarray(part_types, dtype=np.int32)
         
         n_voxels = len(states)
         n_neighbors = neighs.shape[1] if len(neighs.shape) > 1 else 26
         
-        # Build and compile kernel
         program = cl.Program(self._opencl_context, kernel_source).build()
         
-        # Create buffers
         states_buf = cl.Buffer(self._opencl_context, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=states)
         neighbors_buf = cl.Buffer(self._opencl_context, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=neighs)
         moduli_buf = cl.Buffer(self._opencl_context, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=mods)
         heights_buf = cl.Buffer(self._opencl_context, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=hts)
         chill_buf = cl.Buffer(self._opencl_context, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=chill)
         riser_buf = cl.Buffer(self._opencl_context, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=riser)
+        parts_buf = cl.Buffer(self._opencl_context, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=parts)
         
         new_states = np.empty_like(states)
         new_states_buf = cl.Buffer(self._opencl_context, cl.mem_flags.WRITE_ONLY, new_states.nbytes)
         
-        # Execute kernel
         program.solidification_update(
             self._opencl_queue,
             (n_voxels,),
             None,
             states_buf, neighbors_buf, moduli_buf, heights_buf,
-            chill_buf, riser_buf, new_states_buf,
+            chill_buf, riser_buf, parts_buf, new_states_buf,
             np.int32(n_neighbors),
             np.float32(time_step),
             np.float32(material_factor)
         )
         
-        # Read result
         cl.enqueue_copy(self._opencl_queue, new_states, new_states_buf)
         
         return new_states
@@ -632,24 +884,23 @@ class GPUComputeManager:
                                     heights: np.ndarray,
                                     chill_boost: np.ndarray,
                                     riser_slowdown: np.ndarray,
+                                    part_types: np.ndarray,
                                     time_step: float,
                                     material_factor: float) -> np.ndarray:
-        """CUDA implementation of solidification update"""
+        """CUDA implementation of solidification update with full feeding-zone logic"""
         cp = self._cupy
         
-        # Transfer to GPU
         states_gpu = cp.asarray(voxel_states, dtype=cp.float32)
         neighbors_gpu = cp.asarray(neighbors, dtype=cp.int32)
         moduli_gpu = cp.asarray(moduli, dtype=cp.float32)
         heights_gpu = cp.asarray(heights, dtype=cp.float32)
         chill_gpu = cp.asarray(chill_boost, dtype=cp.float32)
         riser_gpu = cp.asarray(riser_slowdown, dtype=cp.float32)
+        parts_gpu = cp.asarray(part_types, dtype=cp.int32)
         
         new_states = states_gpu.copy()
         n_voxels = len(states_gpu)
         
-        # Create custom CUDA kernel for solidification
-        # This is the performance-critical inner loop
         solidification_kernel = cp.RawKernel(r'''
         extern "C" __global__
         void solidification_update(
@@ -659,6 +910,7 @@ class GPUComputeManager:
             const float* heights,
             const float* chill_boost,
             const float* riser_slowdown,
+            const int* part_types,
             float* new_states,
             int n_voxels,
             int n_neighbors,
@@ -668,50 +920,87 @@ class GPUComputeManager:
             int i = blockDim.x * blockIdx.x + threadIdx.x;
             if (i >= n_voxels) return;
             
+            #define CAST 0
+            #define RISER 1
+            #define CHILL 2
+            
             if (states[i] >= 1.0f) {
                 new_states[i] = states[i];
                 return;
             }
             
-            // Check for solid neighbor
-            bool has_solid_neighbor = false;
+            float feeding_zone_threshold = 0.6f;
+            
+            int is_riser_voxel = part_types[i] == RISER;
+            int has_liquid_riser_neighbor = 0;
+            int has_liquid_feeding_neighbor = 0;
+            int has_solid_neighbor = 0;
+            
             for (int j = 0; j < n_neighbors; j++) {
                 int neighbor_idx = neighbors[i * n_neighbors + j];
-                if (neighbor_idx >= 0 && states[neighbor_idx] >= 1.0f) {
-                    has_solid_neighbor = true;
-                    break;
+                if (neighbor_idx >= 0) {
+                    float neighbor_state = states[neighbor_idx];
+                    int neighbor_part_type = part_types[neighbor_idx];
+                    float neighbor_slowdown = riser_slowdown[neighbor_idx];
+                    
+                    if (neighbor_state >= 1.0f) {
+                        has_solid_neighbor = 1;
+                    } else {
+                        if (neighbor_part_type == RISER) {
+                            has_liquid_riser_neighbor = 1;
+                        } else if (neighbor_slowdown < feeding_zone_threshold) {
+                            has_liquid_feeding_neighbor = 1;
+                        }
+                    }
                 }
             }
             
-            if (!has_solid_neighbor) {
-                new_states[i] = states[i];
-                return;
+            int in_feeding_zone = is_riser_voxel || has_liquid_riser_neighbor ||
+                (riser_slowdown[i] < feeding_zone_threshold && has_liquid_feeding_neighbor);
+            
+            float effective_slowdown;
+            if (in_feeding_zone) {
+                if (is_riser_voxel) {
+                    effective_slowdown = riser_slowdown[i];
+                } else if (has_liquid_riser_neighbor) {
+                    effective_slowdown = riser_slowdown[i] * 0.4f;
+                } else {
+                    effective_slowdown = riser_slowdown[i] * 0.6f;
+                }
+            } else {
+                effective_slowdown = riser_slowdown[i];
             }
             
-            // Calculate solidification rate
-            float base_rate = 0.02f;
-            float mod = moduli[i];
-            float solidification_rate = base_rate / (1.0f + mod * mod * 2.0f);
-            
-            // Apply factors
-            float vertical_factor = 1.0f + (1.0f - heights[i]) * 0.3f;
-            float part_type_factor = chill_boost[i] * riser_slowdown[i];
-            
-            // Update state
-            float delta = solidification_rate * vertical_factor * material_factor * 
-                         part_type_factor * time_step;
-            new_states[i] = min(states[i] + delta, 1.0f);
+            if (has_solid_neighbor) {
+                float base_rate = 0.02f;
+                float solidification_rate = base_rate / (1.0f + moduli[i] * moduli[i] * 2.0f);
+                
+                float vertical_factor;
+                if (in_feeding_zone) {
+                    vertical_factor = 1.0f + (1.0f - heights[i]) * 0.5f;
+                } else {
+                    vertical_factor = 1.0f + (1.0f - heights[i]) * 0.3f;
+                }
+                
+                float thermal_factor = material_factor;
+                float part_type_factor = chill_boost[i] * effective_slowdown;
+                
+                float delta = solidification_rate * vertical_factor * thermal_factor *
+                             part_type_factor * time_step;
+                new_states[i] = fminf(states[i] + delta, 1.0f);
+            } else {
+                new_states[i] = states[i];
+            }
         }
         ''', 'solidification_update')
         
-        # Launch kernel
         block_size = 256
         grid_size = (n_voxels + block_size - 1) // block_size
         
         solidification_kernel(
             (grid_size,), (block_size,),
             (states_gpu, neighbors_gpu, moduli_gpu, heights_gpu,
-             chill_gpu, riser_gpu, new_states,
+             chill_gpu, riser_gpu, parts_gpu, new_states,
              n_voxels, neighbors.shape[1],
              np.float32(time_step), np.float32(material_factor))
         )
@@ -805,6 +1094,7 @@ def update_solidification_accelerated(
     heights: np.ndarray,
     chill_boost: np.ndarray,
     riser_slowdown: np.ndarray,
+    part_types: np.ndarray,
     time_step: float,
     material_factor: float
 ) -> np.ndarray:
@@ -818,6 +1108,7 @@ def update_solidification_accelerated(
         heights: Normalized heights
         chill_boost: Chill boost factors
         riser_slowdown: Riser slowdown factors
+        part_types: Part type for each voxel (0=CAST, 1=RISER, 2=CHILL)
         time_step: Time step
         material_factor: Material factor
     
@@ -826,5 +1117,5 @@ def update_solidification_accelerated(
     """
     return gpu_compute.update_solidification_gpu(
         voxel_states, neighbors, moduli, heights,
-        chill_boost, riser_slowdown, time_step, material_factor
+        chill_boost, riser_slowdown, part_types, time_step, material_factor
     )

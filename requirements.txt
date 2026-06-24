@@ -42,18 +42,23 @@ scikit-learn>=1.3.0        # ML models (GradientBoostingRegressor, preprocessing
 
 
 # ============================================================================
-# OPTIONAL PERFORMANCE DEPENDENCIES (GPU Acceleration - currently unsupported)
+# OPTIONAL PERFORMANCE DEPENDENCIES (GPU Acceleration)
 # ============================================================================
-# Uncomment based on your platform and GPU:
-# GPU acceleration disabled due to PyQt5 stability issues
+# The CPU (Numba JIT) path is the universal fallback and is always used when
+# these are absent. Uncomment based on your platform and GPU.
 
-# For NVIDIA GPU acceleration (CUDA 11.x)
-# cupy-cuda11x>=12.0.0
+# Apple Silicon GPU acceleration (M1/M2/M3/M4)
+# macOS users: pip install mlx taichi
+# mlx>=0.20.0           # Apple ML framework: array ops, reductions (Metal backend)
+# taichi>=1.7.0         # GPU kernel DSL compiling to Metal shaders
 
-# For NVIDIA GPU acceleration (CUDA 12.x)
+# NVIDIA GPU acceleration (Linux/Windows + CUDA 12.x)
 # cupy-cuda12x>=12.0.0
 
-# For AMD/Intel/Apple GPU acceleration (OpenCL)
+# NVIDIA GPU acceleration (Linux/Windows + CUDA 11.x)
+# cupy-cuda11x>=12.0.0
+
+# Generic OpenCL (Intel/AMD integrated GPUs; legacy macOS only)
 # pyopencl>=2023.1.1
 
 # ============================================================================

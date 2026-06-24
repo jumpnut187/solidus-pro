@@ -329,20 +329,25 @@ class PerformanceDialog(DraggableDialog):
         
         # GPU status info with platform-specific messaging
         if gpu_available:
-            gpu_status = QLabel(f"✓ {gpu_backend} available: {gpu_device}")
-            gpu_status.setStyleSheet("color: #4a4; font-weight: bold;")
-            gpu_layout.addWidget(gpu_status)
+            if gpu_backend == 'METAL':
+                gpu_status = QLabel("✓ Apple Silicon GPU active (MLX + Taichi)")
+                gpu_status.setStyleSheet("color: #4a4; font-weight: bold;")
+                gpu_layout.addWidget(gpu_status)
+            else:
+                gpu_status = QLabel(f"✓ {gpu_backend} available: {gpu_device}")
+                gpu_status.setStyleSheet("color: #4a4; font-weight: bold;")
+                gpu_layout.addWidget(gpu_status)
         else:
             gpu_status = QLabel("✗ GPU acceleration not available")
             gpu_status.setStyleSheet("color: #a44; font-weight: bold;")
             gpu_layout.addWidget(gpu_status)
-            
+
             # Platform-specific explanation
             system = platform.system()
             if system == 'Darwin':  # macOS
                 reason_label = QLabel(
-                    "Apple deprecated OpenCL - Metal cannot be accessed via PyOpenCL.\n"
-                    "Using optimized Numba JIT (CPU) instead. Performance is still good!"
+                    "Metal GPU acceleration not active. Install: pip install mlx taichi  (then restart)\n"
+                    "Using optimized Numba JIT (CPU) instead."
                 )
             elif system == 'Windows':
                 reason_label = QLabel(
@@ -357,7 +362,7 @@ class PerformanceDialog(DraggableDialog):
             reason_label.setStyleSheet("font-size: 10px; color: #888; margin-left: 10px;")
             reason_label.setWordWrap(True)
             gpu_layout.addWidget(reason_label)
-            
+
             # Show Numba thread info as the fallback
             numba_threads = hardware.get_optimal_thread_count('compute')
             fallback_label = QLabel(f"✓ Numba JIT active: {numba_threads} threads")

@@ -258,6 +258,9 @@ def _run_front_based_integration(
                 engine.material_solidification_factor,
             )
         elif engine._use_gpu:
+            part_types = getattr(engine.mesh, "voxel_part_types", None)
+            if part_types is None:
+                part_types = np.zeros(len(engine.mesh.voxel_states), dtype=np.int32)
             engine.mesh.voxel_states[:] = engine._gpu_update_fn(
                 np.asarray(engine.mesh.voxel_states, dtype=np.float32),
                 np.asarray(engine.mesh.voxel_neighbors, dtype=np.int32),
@@ -265,6 +268,7 @@ def _run_front_based_integration(
                 np.asarray(engine._get_normalized_heights(), dtype=np.float32),
                 np.asarray(chill_boost, dtype=np.float32),
                 np.asarray(effective_slowdown, dtype=np.float32),
+                np.asarray(part_types, dtype=np.int32),
                 engine.time_step,
                 engine.material_solidification_factor,
             )
