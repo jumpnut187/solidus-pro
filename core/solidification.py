@@ -44,6 +44,7 @@ from core.acceleration import (
     compute_mold_air_gap_effect_parallel,
     compute_riser_influence_parallel,
     compute_solid_path_strain_parallel,
+    compute_isolation_score_parallel,
 )
 from core.materials import AlloyProperties
 from core.voxel_mesh import AdaptiveVoxelMesh
@@ -610,7 +611,9 @@ class SolidificationEngine:
         if self.analysis_options.fraction_liquid:
             analyses.append("Fraction Liquid")
         print(f"Analyses: {', '.join(analyses)}")
-        print(f"Solver mode: {self._get_solver_mode()}")
+        print()
+        print(f"  SOLVER MODE: {self._get_solver_mode().upper()}")
+        print(f"  {'='*56}")
         
         # Report part types if available
         if self.mesh.voxel_part_types is not None:
@@ -2173,68 +2176,32 @@ class SolidificationEngine:
                     fs_proc * max(self.alloy.freezing_range, 1.0)
                 )
 
-            vis_arr = np.array(
-                [
-                    self.alloy.get_dynamic_viscosity(temperature=lt, fraction_solid=fs)
-                    for lt, fs in zip(local_temp_arr, fs_proc)
-                ],
-                dtype=np.float64,
-            )
+            vis_arr = self.alloy.vectorized_dynamic_viscosity(
+                local_temp_arr, fs_proc
+            ).astype(np.float64)
 
             if local_sdas is not None:
-                sdas_arr = local_sdas[idx_arr]
+                sdas_arr = np.asarray(local_sdas[idx_arr], dtype=np.float64)
+            elif local_cooling_rates is not None:
+                sdas_arr = self.alloy.vectorized_sdas(
+                    local_cooling_rates[idx_arr]
+                ).astype(np.float64)
             else:
-                sdas_arr = np.array(
-                    [
-                        self.alloy.get_sdas_from_cooling_rate(
-                            float(max(local_cooling_rates[i], 1e-4))
-                            if local_cooling_rates is not None
-                            else None
-                        )
-                        for i in idx_arr
-                    ],
+                sdas_arr = np.full(
+                    len(idx_arr),
+                    float(self.alloy.dendrite_arm_spacing),
                     dtype=np.float64,
                 )
 
-            perm_arr = np.array(
-                [
-                    self.alloy.get_permeability(
-                        fs,
-                        sdas_um=float(s),
-                        cooling_rate=(
-                            float(max(local_cooling_rates[i], 1e-4))
-                            if local_cooling_rates is not None
-                            else None
-                        ),
-                    )
-                    for i, fs, s in zip(idx_arr, fs_proc, sdas_arr)
-                ],
-                dtype=np.float64,
-            )
-
+            perm_arr = self.alloy.vectorized_permeability(fs_proc, sdas_arr)
             dist_m_arr = dist_proc * 0.0254
-            pd_arr = np.array(
-                [
-                    (
-                        self.alloy.get_pressure_drop(
-                            fs,
-                            base_velocity,
-                            float(vis_arr[j]),
-                            float(dist_m_arr[j]),
-                            sdas_um=float(sdas_arr[j]),
-                            cooling_rate=(
-                                float(max(local_cooling_rates[idx_arr[j]], 1e-4))
-                                if local_cooling_rates is not None
-                                else None
-                            ),
-                        )
-                        * float(feeder_neck_factors[idx_arr[j]])
-                    )
-                    if perm_arr[j] > 1e-20
-                    else 1e10
-                    for j, fs in enumerate(fs_proc)
-                ],
-                dtype=np.float64,
+            pd_arr = self.alloy.vectorized_pressure_drop(
+                fs_proc,
+                base_velocity,
+                vis_arr,
+                dist_m_arr,
+                sdas_arr,
+                feeder_neck_factors[idx_arr],
             )
 
             p_ferro_proc = ferrostatic_pressure[idx_arr]
@@ -3392,48 +3359,24 @@ class SolidificationEngine:
     def _calculate_isolation_score(self) -> np.ndarray:
         """
         Calculate how "isolated" each voxel became during solidification.
-        
+
         A voxel is isolated if:
         1. It solidified while surrounded mostly by solid neighbors
         2. Its path to the casting surface was blocked by solid material
-        
+
         Returns:
             Array of isolation scores (0-1), higher = more isolated
         """
         n_voxels = len(self.mesh.voxel_centers)
-        isolation_score = np.zeros(n_voxels, dtype=np.float32)
-        
-        neighbors = self.mesh.voxel_neighbors
-        solid_times = self.solidification_times
-        
-        # For each voxel, count how many neighbors solidified BEFORE it
-        # High count = this voxel was surrounded by solid when it solidified
-        for i in range(n_voxels):
-            my_solid_time = solid_times[i]
-            if my_solid_time <= 0:
-                continue
-            
-            neighbors_before = 0
-            total_neighbors = 0
-            
-            for j in range(neighbors.shape[1]):
-                neighbor_idx = neighbors[i, j]
-                if neighbor_idx >= 0:
-                    total_neighbors += 1
-                    neighbor_time = solid_times[neighbor_idx]
-                    # Neighbor solidified before me?
-                    if neighbor_time > 0 and neighbor_time < my_solid_time:
-                        neighbors_before += 1
-            
-            if total_neighbors > 0:
-                # Ratio of neighbors that solidified before this voxel
-                isolation_score[i] = neighbors_before / total_neighbors
-        
-        # Boost score for voxels that are far from surface AND have high isolation
+        neighbors = np.ascontiguousarray(self.mesh.voxel_neighbors, dtype=np.int32)
+        solid_times = np.ascontiguousarray(self.solidification_times, dtype=np.float32)
+
+        isolation_score = compute_isolation_score_parallel(solid_times, neighbors)
+
         surface_distances = self.surface_distances
         surface_factor = surface_distances / np.max(surface_distances + 0.1)
         isolation_score = isolation_score * (0.5 + 0.5 * surface_factor)
-        
+
         return np.clip(isolation_score, 0.0, 1.0).astype(np.float32)
     
     def _calculate_niyama(self):

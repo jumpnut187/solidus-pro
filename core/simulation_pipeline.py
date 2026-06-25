@@ -443,20 +443,24 @@ def run_pipeline(
     default_solver_mode = _get_default_solver_mode_override()
     if default_solver_mode is not None:
         analysis_options.solver_mode = default_solver_mode
-    elif (
-        analysis_options.solver_mode == SOLVER_MODE_THERMAL_COUPLED
-        and _should_use_legacy_solver_default(inputs.analysis_options)
-        and not analysis_options.niyama
-        and (
-            analysis_options.fraction_liquid
-            or analysis_options.hot_tear
-            or analysis_options.shrinkage
-            or analysis_options.feeding_path
-        )
-    ):
-        # Preserve historical timing/history behavior for legacy callers that do not
-        # explicitly pin the new thermal solver.
-        analysis_options.solver_mode = SOLVER_MODE_SCHEDULE_LEGACY
+    # LEGACY FALLBACK DISABLED — always use thermal_coupled unless explicitly overridden.
+    # This ensures the full Numba-prange time-integration loop runs on all hardware.
+    # To re-enable schedule_legacy as a fallback, set CASTSIM_DEFAULT_SOLVER_MODE=schedule_legacy
+    # or pass solver_mode="schedule_legacy" explicitly in analysis_options.
+    # elif (
+    #     analysis_options.solver_mode == SOLVER_MODE_THERMAL_COUPLED
+    #     and _should_use_legacy_solver_default(inputs.analysis_options)
+    #     and not analysis_options.niyama
+    #     and (
+    #         analysis_options.fraction_liquid
+    #         or analysis_options.hot_tear
+    #         or analysis_options.shrinkage
+    #         or analysis_options.feeding_path
+    #     )
+    # ):
+    #     # Preserve historical timing/history behavior for legacy callers that do not
+    #     # explicitly pin the new thermal solver.
+    #     analysis_options.solver_mode = SOLVER_MODE_SCHEDULE_LEGACY
 
     _emit_message(progress_message_callback, "Running solidification simulation...")
     engine = SolidificationEngine(voxel_mesh, alloy, analysis_options)

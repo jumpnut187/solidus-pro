@@ -887,8 +887,53 @@ def compute_solid_path_strain_parallel(
         # Accumulated strain along the solid path
         # ε = α × ΔT × L_path (normalized by max_path_length)
         path_strain[i] = thermal_expansion * temp_range * (max_solid_path / max_path_length)
-    
+
     return path_strain
+
+
+@jit(nopython=True, parallel=True, fastmath=True, cache=True)
+def compute_isolation_score_parallel(
+    solid_times: np.ndarray,
+    neighbors: np.ndarray,
+) -> np.ndarray:
+    """
+    Compute isolation score for each voxel (JIT-optimized).
+
+    For each voxel, count the fraction of neighbors that solidified before it.
+    High values mean the voxel was surrounded by solid material when it froze,
+    indicating a likely shrinkage defect candidate.
+
+    Args:
+        solid_times: Solidification time per voxel (0 = never solidified)
+        neighbors: Neighbor connectivity matrix (n_voxels x max_neighbors)
+
+    Returns:
+        Array of isolation scores in [0, 1].
+    """
+    n_voxels = solid_times.shape[0]
+    isolation_score = np.zeros(n_voxels, dtype=np.float32)
+    max_neighbors = neighbors.shape[1]
+
+    for i in prange(n_voxels):
+        my_solid_time = solid_times[i]
+        if my_solid_time <= 0.0:
+            continue
+
+        neighbors_before = 0
+        total_neighbors = 0
+
+        for j in range(max_neighbors):
+            neighbor_idx = neighbors[i, j]
+            if neighbor_idx >= 0:
+                total_neighbors += 1
+                neighbor_time = solid_times[neighbor_idx]
+                if neighbor_time > 0.0 and neighbor_time < my_solid_time:
+                    neighbors_before += 1
+
+        if total_neighbors > 0:
+            isolation_score[i] = neighbors_before / total_neighbors
+
+    return isolation_score
 
 
 # Global acceleration manager instance

@@ -62,14 +62,13 @@ def _configure_numba_threads_for_solidification(engine: Any, *, show_progress: b
     active_threads = int(get_num_threads())
     setattr(engine, "_solidification_numba_threads", active_threads)
 
-    if show_progress:
-        logical_cores = int(getattr(hardware, "logical_cores", 0) or (os.cpu_count() or active_threads))
-        physical_cores = int(getattr(hardware, "physical_cores", 0) or logical_cores)
-        print(
-            "  CPU threading: "
-            f"Numba thread pool configured {active_threads}/{logical_cores} "
-            f"(physical cores: {physical_cores})"
-        )
+    logical_cores = int(getattr(hardware, "logical_cores", 0) or (os.cpu_count() or active_threads))
+    physical_cores = int(getattr(hardware, "physical_cores", 0) or logical_cores)
+    print(
+        "  CPU threading: "
+        f"Numba thread pool configured {active_threads}/{logical_cores} "
+        f"(physical cores: {physical_cores})"
+    )
 
 
 def _least_squares_gradients_c_per_mm(

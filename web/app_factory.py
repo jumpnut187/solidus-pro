@@ -10,7 +10,7 @@ from flask_cors import CORS
 
 from web.services.simulation_queue import QueueConfig, SimulationQueueManager
 from web import repository as repo
-from web.routes import api_bp, execute_project_task
+from web.routes import api_bp
 
 
 def create_app() -> Flask:
@@ -44,12 +44,11 @@ def create_app() -> Flask:
     )
     app.extensions["simulation_queue_manager"] = queue_manager
 
-    app_object = app
     database_path = Path(app.config["DATABASE"])
+    queue_manager.set_paths(str(database_path), str(repo_root))
 
     def worker(project_id: str, project, parts) -> None:
-        with app_object.app_context():
-            execute_project_task(project_id, project, parts, queue_manager, database_path)
+        pass
 
     queue_manager.set_worker(worker)
 

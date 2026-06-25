@@ -20,6 +20,7 @@ tqdm>=4.65.0               # Progress bars
 Flask>=3.0.0               # Web framework
 Flask-CORS>=4.0.0          # Cross-origin resource sharing
 Werkzeug>=3.0.0            # WSGI utilities
+gunicorn>=21.2.0          # Production WSGI server (use --dev for Werkzeug dev)
 
 # Configuration file support (conditionally imported)
 PyYAML>=6.0.1              # YAML configuration file support

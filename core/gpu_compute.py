@@ -106,10 +106,8 @@ class GPUComputeManager:
                 print("="*60 + "\n")
             return
         
-        # Try Metal on macOS with Apple Silicon
-        # Note: hardware.metal_available just checks if running on Apple Silicon
-        # PyOpenCL cannot access Metal GPU on modern macOS - OpenCL is deprecated
-        if system == 'Darwin' and hardware.metal_available:
+        # Try Metal on macOS with Apple Silicon (genuine arm64 only — not x86_64 Intel Macs)
+        if system == 'Darwin' and platform.machine() == 'arm64':
             with devnull:
                 metal_ready = self._try_init_metal()
             if metal_ready:
@@ -119,9 +117,8 @@ class GPUComputeManager:
                     print("=" * 60 + "\n")
                 return
             else:
-                # OpenCL cannot access Metal GPU on modern macOS
                 if is_main_process:
-                    print("  Apple Silicon detected - OpenCL/Metal GPU bridge not available")
+                    print("  Apple Silicon (arm64) - MLX/Taichi Metal bridge not available")
         
         # Try generic OpenCL
         with devnull:

@@ -1598,8 +1598,10 @@ class AdaptiveVoxelMesh:
             inside_count = 0
             completed = 0
 
+            _spawn_ctx = multiprocessing.get_context('spawn')
             with ProcessPoolExecutor(
                 max_workers=workers,
+                mp_context=_spawn_ctx,
                 initializer=_init_part_assignment_worker,
                 initargs=(mesh_payload,),
             ) as executor:
@@ -1649,7 +1651,7 @@ class AdaptiveVoxelMesh:
                 return []
             return list(np.concatenate(ordered))
         except Exception as e:
-            logger.warning(f"Parallel part assignment failed; falling back to sequential: {e}")
+            logger.error(f"Parallel part assignment failed; falling back to sequential: {e}")
             print(f"\n      Parallel fallback: {e}")
             return self._run_part_assignment_sequential(
                 mesh=mesh,

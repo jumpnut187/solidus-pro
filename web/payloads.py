@@ -11,7 +11,7 @@ import numpy as np
 from werkzeug.datastructures import FileStorage
 from werkzeug.utils import secure_filename
 
-from core.part_manager import PartManager, PartType, build_part_manager, infer_part_type_from_filename
+from core.part_manager import PartManager, PartType, build_part_manager as _core_build_part_manager, infer_part_type_from_filename
 from core.simulation_pipeline import PipelineResult
 from core.stl_loader import STLLoader
 from core.surface_extraction import build_surface_payload, normalize_surface_request
@@ -98,7 +98,7 @@ def build_part_manager_from_core(
     *,
     preserve_origin: bool = True,
 ) -> PartManager:
-    return build_part_manager(
+    return _core_build_part_manager(
         parts_data,
         preserve_origin=preserve_origin,
         default_visible=True,

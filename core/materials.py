@@ -273,18 +273,18 @@ class AlloyProperties:
     ) -> float:
         """
         Calculate interdendritic pressure drop using Darcy's Law.
-        
+
         ΔP = (μ * L * v) / K
-        
+
         This is the pressure required to push liquid metal through
         the mushy zone (dendritic network).
-        
+
         Args:
             fraction_solid: Fraction solid (0-1)
             flow_velocity: Feed metal velocity (m/s)
             viscosity: Dynamic viscosity (Pa·s)
             path_length: Length of mushy zone path (m)
-        
+
         Returns:
             Pressure drop in Pa
         """
@@ -293,14 +293,108 @@ class AlloyProperties:
             sdas_um=sdas_um,
             cooling_rate=cooling_rate,
         )
-        
+
         # Prevent division by zero (very low permeability = infinite pressure drop)
         if K < 1e-20:
             return 1e10  # Very high pressure drop (feeding impossible)
-        
+
         delta_P = (viscosity * path_length * flow_velocity) / K
-        
+
         return delta_P
+
+    def vectorized_dynamic_viscosity(
+        self,
+        temperatures: np.ndarray,
+        fraction_solids: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Vectorized dynamic viscosity over arrays of voxels.
+
+        Mirrors :meth:`get_dynamic_viscosity` element-wise so callers
+        can avoid Python-level loops over potentially tens of thousands
+        of voxels.
+        """
+        temps = np.asarray(temperatures, dtype=np.float64)
+        fss = np.asarray(fraction_solids, dtype=np.float64)
+        viscosity = float(self.dynamic_viscosity)
+        freeze_range = max(float(self.freezing_range), 1.0)
+
+        result = np.full(temps.shape, viscosity, dtype=np.float64)
+
+        undercooling = np.maximum(float(self.liquidus_temp) - temps, 0.0)
+        temp_factor = np.exp(
+            float(self.viscosity_temp_sensitivity) * (undercooling / freeze_range)
+        )
+        result = result * temp_factor
+
+        fs_clamped = np.clip(fss, 0.0, 1.0)
+        above_critical = fs_clamped >= float(self.critical_fraction_solid)
+        if np.any(above_critical):
+            denom = max(1.0 - float(self.critical_fraction_solid), 1e-6)
+            overshoot = (fs_clamped - float(self.critical_fraction_solid)) / denom
+            mush_factor = np.where(above_critical, np.exp(3.0 * overshoot), 1.0)
+            result = result * mush_factor
+
+        low = float(self.dynamic_viscosity) * 0.5
+        high = float(self.dynamic_viscosity) * 250.0
+        return np.clip(result, low, high)
+
+    def vectorized_sdas(
+        self,
+        cooling_rates: Optional[np.ndarray],
+    ) -> np.ndarray:
+        """Vectorized SDAS calculation from cooling-rate arrays."""
+        if cooling_rates is None:
+            return np.full(1, float(self.dendrite_arm_spacing), dtype=np.float64)
+
+        rates = np.asarray(cooling_rates, dtype=np.float64)
+        clamped = np.maximum(rates, 1e-4)
+        ref = max(float(self.sdas_reference_cooling_rate), 1e-4)
+        sdas = float(self.dendrite_arm_spacing) * (
+            (clamped / ref) ** float(self.sdas_cooling_rate_exponent)
+        )
+        return np.clip(sdas, 10.0, 500.0)
+
+    def vectorized_permeability(
+        self,
+        fraction_solids: np.ndarray,
+        sdas_um: np.ndarray,
+    ) -> np.ndarray:
+        """Vectorized Kozeny-Carman permeability."""
+        fs = np.clip(np.asarray(fraction_solids, dtype=np.float64), 0.001, 0.999)
+        sdas_arr = np.asarray(sdas_um, dtype=np.float64)
+        lambda_m = sdas_arr * 1e-6
+
+        decay = np.ones_like(fs)
+        above = fs >= float(self.critical_fraction_solid)
+        if np.any(above):
+            denom = max(1.0 - float(self.critical_fraction_solid), 1e-6)
+            overshoot = (fs - float(self.critical_fraction_solid)) / denom
+            decay = np.where(above, np.exp(-10.0 * overshoot), 1.0)
+            fs_eff = np.where(above, float(self.critical_fraction_solid), fs)
+        else:
+            fs_eff = fs
+
+        liquid_fraction = 1.0 - fs_eff
+        fs_eff_safe = np.where(fs_eff < 0.001, 0.001, fs_eff)
+        K = (lambda_m ** 2 * liquid_fraction ** 3) / (180.0 * fs_eff_safe ** 2)
+        K = np.where(fs_eff < 0.001, 1e-8, K * decay)
+        return K
+
+    def vectorized_pressure_drop(
+        self,
+        fraction_solids: np.ndarray,
+        flow_velocity: float,
+        viscosities: np.ndarray,
+        path_lengths_m: np.ndarray,
+        sdas_um: np.ndarray,
+        feeder_neck_factors: np.ndarray,
+    ) -> np.ndarray:
+        """Vectorized Darcy pressure drop with feeder-neck resistance."""
+        K = self.vectorized_permeability(fraction_solids, sdas_um)
+        delta_P = (viscosities * path_lengths_m * float(flow_velocity)) / np.maximum(K, 1e-20)
+        delta_P = np.where(K < 1e-20, 1e10, delta_P)
+        return delta_P * feeder_neck_factors
 
 
 # Material database

@@ -353,7 +353,7 @@ def _default_performance_options() -> Dict[str, Any]:
     return {
         "use_incremental": False,
         "use_chunked_voxelization": False,
-        "part_assignment_mode": "parallel",
+        "part_assignment_mode": "auto",
         "part_assignment_workers": 0,
         "part_assignment_batch_size": 2500,
     }
