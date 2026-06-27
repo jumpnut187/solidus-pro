@@ -65,10 +65,12 @@ Shows all alloy properties for WCB, CF8, C958, and CA6NM.
    python3 main.py
    ```
 
-2. **Load STL File**
-   - Click "Load STL File (Inches)"
-   - Select your STL model
+2. **Load CAD File (STL or STEP)**
+   - Click "Load CAD File (Inches)"
+   - Select an STL or STEP (.step / .stp) file
+   - STEP files are auto-fanned-out: each body in the assembly becomes its own part
    - File will auto-convert from inches to millimeters
+   - **Note:** STEP support requires the optional `cascadio` package — install with `pip install cascadio` if a STEP upload fails
 
 3. **Select Material**
    - Choose from dropdown: WCB, CF8, C958, or CA6NM
@@ -230,11 +232,12 @@ pip3 install vtk
 pip3 install -r requirements.txt
 ```
 
-### STL Won't Load
+### CAD File Won't Load
 
 **Check file:**
-- Is it a valid STL file?
+- Is it a valid STL or STEP file?
 - Is it in inches? (If in mm, select from file dialog)
+- For STEP files specifically: install `cascadio` (`pip install cascadio`)
 - Try opening in mesh viewer first
 
 **Fix mesh issues:**

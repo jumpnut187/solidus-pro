@@ -9,6 +9,7 @@ numpy-stl>=3.0.1           # STL file reading/writing
 numba>=0.57.0              # JIT compilation with parallel support
 psutil>=5.9.5              # System and process utilities (CPU/memory detection)
 trimesh>=3.21.0            # 3D mesh processing
+cascadio>=0.0.13,<1.0       # Optional STEP file backend (used by trimesh via cascadio)
 rtree>=0.9.7                # Spatial indexing for trimesh.contains()
 joblib>=1.3.0              # Parallel processing and model persistence
 matplotlib>=3.7.0          # Plotting and visualization

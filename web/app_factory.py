@@ -29,7 +29,9 @@ def create_app() -> Flask:
     app.config["UPLOAD_FOLDER"] = base_dir / "static" / "uploads"
     app.config["TEMP_FOLDER"] = base_dir / "static" / "temp"
     app.config["DATABASE"] = base_dir / "simulations.db"
-    app.config["MAX_CONTENT_LENGTH"] = 250 * 1024 * 1024
+    # Bumped from 250 MB to 500 MB to accommodate STEP assemblies,
+    # which are typically 2-5x larger than equivalent STLs.
+    app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024
 
     Path(app.config["UPLOAD_FOLDER"]).mkdir(parents=True, exist_ok=True)
     Path(app.config["TEMP_FOLDER"]).mkdir(parents=True, exist_ok=True)
@@ -54,7 +56,7 @@ def create_app() -> Flask:
 
     @app.errorhandler(413)
     def request_entity_too_large(error):
-        return jsonify({"error": "File too large. Maximum size is 250MB"}), 413
+        return jsonify({"error": "File too large. Maximum size is 500MB"}), 413
 
     @app.errorhandler(500)
     def internal_error(error):

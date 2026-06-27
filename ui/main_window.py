@@ -2174,7 +2174,7 @@ class MainWindow(QMainWindow):
         # Add Part
         self.add_part_action = QAction("📦 Add Part...", self)
         self.add_part_action.setShortcut("Ctrl+O")
-        self.add_part_action.setStatusTip("Add an STL part to the simulation")
+        self.add_part_action.setStatusTip("Add a CAD part (STL or STEP) to the simulation")
         self.add_part_action.triggered.connect(self._add_part)
         file_menu.addAction(self.add_part_action)
         
@@ -2501,7 +2501,7 @@ class MainWindow(QMainWindow):
         
         # Parts button
         self.open_parts_btn = QPushButton("📦 Parts Manager...")
-        self.open_parts_btn.setToolTip("Manage STL parts (Add, Remove, Position)")
+        self.open_parts_btn.setToolTip("Manage CAD parts (Add, Remove, Position)")
         self.open_parts_btn.clicked.connect(self._open_parts_dialog)
         settings_layout.addWidget(self.open_parts_btn)
         
@@ -3395,7 +3395,7 @@ class MainWindow(QMainWindow):
     def _apply_ml_mesh(self):
         """Invoke ML-based mesh recommendation."""
         if not self.stl_loader.is_valid():
-            QMessageBox.warning(self, "Machine Learning Mesh", "Please load an STL file first.")
+            QMessageBox.warning(self, "Machine Learning Mesh", "Please load a CAD file first.")
             return
 
         if self.mesh_suggestion_worker is not None and self.mesh_suggestion_worker.isRunning():
@@ -3455,39 +3455,51 @@ class MainWindow(QMainWindow):
     # ==================== Part Management Methods ====================
     
     def _add_part(self):
-        """Add new parts from STL files (supports multi-select)"""
+        """Add new parts from CAD files (supports multi-select).
+
+        STL files load as single parts. STEP (``.step`` / ``.stp``)
+        files are treated as multi-body assemblies: each body in the
+        file is registered as its own Part with the CAD body name and
+        auto-inferred part type.
+        """
         filepaths, _ = QFileDialog.getOpenFileNames(
             self,
-            "Add STL Parts (Select Multiple)",
+            "Add CAD Parts (Select Multiple)",
             "",
-            "STL Files (*.stl);;All Files (*)"
+            "CAD Files (*.stl *.step *.stp);;STL Files (*.stl);;STEP Files (*.step *.stp);;All Files (*)"
         )
-        
+
         if filepaths:
-            self.status_label.setText(f"Loading {len(filepaths)} part(s)...")
+            self.status_label.setText(f"Loading {len(filepaths)} file(s)...")
             self.progress_bar.setRange(0, len(filepaths))
-            
+
             loaded_count = 0
             for i, filepath in enumerate(filepaths):
                 self.progress_bar.setValue(i)
-                
-                # Load part preserving its original position from STL
-                # (no position override - STL coordinates are maintained)
-                part_id = self.part_manager.load_part(filepath, position=None, preserve_origin=True)
-                
-                if part_id:
-                    loaded_count += 1
-            
+
+                ext = os.path.splitext(filepath)[1].lower()
+                if ext in (".step", ".stp"):
+                    # Multi-body assembly: one Part per body.
+                    new_ids = self.part_manager.load_assembly_parts(filepath)
+                else:
+                    # Single-body CAD file (STL/OBJ/PLY/...).
+                    part_id = self.part_manager.load_part(
+                        filepath, position=None, preserve_origin=True
+                    )
+                    new_ids = [part_id] if part_id else []
+
+                loaded_count += len(new_ids)
+
             self.progress_bar.setValue(len(filepaths))
             self.progress_bar.setRange(0, 100)
             self.progress_bar.setValue(0)
-            
+
             if loaded_count > 0:
                 self._update_parts_ui()
                 self._update_visualization()
-                
+
                 if loaded_count > 1:
-                    self.status_label.setText(f"Added {loaded_count} parts - positions preserved from STL")
+                    self.status_label.setText(f"Added {loaded_count} parts - positions preserved from CAD file")
                 else:
                     self.status_label.setText(f"Added {loaded_count} part")
             else:
@@ -3708,12 +3720,18 @@ class MainWindow(QMainWindow):
     # ==================== Legacy STL Loading (Single Part) ====================
     
     def _load_stl_file(self):
-        """Load STL file (legacy single-part mode - clears existing parts)"""
+        """Load STL file (legacy single-part mode - clears existing parts).
+
+        Deprecated: kept for backwards compatibility but unreferenced by
+        any menu/button. The file dialog now accepts STEP files too, but
+        the single-part mode always loads only the first body if a STEP
+        is selected. New code should use :meth:`_add_part`.
+        """
         filepath, _ = QFileDialog.getOpenFileName(
             self,
-            "Open STL File",
+            "Open CAD File",
             "",
-            "STL Files (*.stl);;All Files (*)"
+            "CAD Files (*.stl *.step *.stp);;STL Files (*.stl);;STEP Files (*.step *.stp);;All Files (*)"
         )
         
         if filepath:
@@ -4075,7 +4093,7 @@ class MainWindow(QMainWindow):
     def _run_simulation(self):
         """Run solidification simulation"""
         if not self.stl_loader.is_valid():
-            QMessageBox.warning(self, "Error", "Please load an STL file first")
+            QMessageBox.warning(self, "Error", "Please load a CAD file first")
             return
         
         # PRE-VALIDATION: Check memory requirements before starting
@@ -5171,7 +5189,7 @@ class MainWindow(QMainWindow):
         # Check if we have parts loaded
         if not self.part_manager.get_all_parts():
             QMessageBox.warning(self, "No Parts Loaded", 
-                               "Please load an STL part before opening riser design.")
+                               "Please load a CAD part before opening riser design.")
             return
         
         # Just show the dialog - mesh will be generated when user clicks Analyze
@@ -5184,7 +5202,7 @@ class MainWindow(QMainWindow):
         # Check if we have a mesh to analyze
         if not self.part_manager.get_all_parts():
             QMessageBox.warning(self, "No Parts Loaded", 
-                               "Please load an STL part before running riser design analysis.")
+                               "Please load a CAD part before running riser design analysis.")
             return
         
         try:

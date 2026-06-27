@@ -45,6 +45,15 @@ def check_dependencies() -> list[str]:
         except ImportError:
             print(f"✗ {name} - not installed")
             missing.append(name)
+
+    # Optional: cascadio for STEP file support. Failing here is OK —
+    # STL-only users can still run; only STEP uploads will be rejected.
+    try:
+        __import__('cascadio')
+        print("✓ cascadio (STEP support enabled)")
+    except ImportError:
+        print("○ cascadio (STEP support disabled — install with `pip install cascadio` for STEP files)")
+
     return missing
 
 

@@ -78,14 +78,14 @@ untitled folder/
 | **Acceleration** | Numba | JIT compilation, parallel loops |
 | **GPU** | PyOpenCL | Metal backend for M3 GPU |
 | **Parallel** | Joblib | Multi-core task distribution |
-| **Mesh** | Trimesh, numpy-stl | STL processing and analysis |
+| **Mesh** | Trimesh, numpy-stl, cascadio (optional) | STL/STEP processing and analysis |
 | **ML Ready** | CoreML, ONNX | Neural Engine support |
 
 ### 🎓 How It Works
 
 #### Step 1: Load Geometry
 ```
-STL (inches) → Convert to mm → Validate mesh → Extract properties
+STL or STEP (inches) → Convert to mm → Validate mesh → Extract properties
 ```
 
 #### Step 2: Generate Voxel Mesh

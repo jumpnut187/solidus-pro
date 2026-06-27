@@ -256,7 +256,7 @@ class MeshError(FileError):
 
 class InvalidMeshError(MeshError):
     """Raised when mesh geometry is invalid"""
-    
+
     def __init__(
         self,
         reason: str,
@@ -268,12 +268,40 @@ class InvalidMeshError(MeshError):
             mesh_info["vertex_count"] = vertex_count
         if face_count is not None:
             mesh_info["face_count"] = face_count
-            
+
         super().__init__(
             f"Invalid mesh geometry: {reason}",
             mesh_info=mesh_info,
             suggestion="Try repairing the mesh with a tool like MeshLab or Blender"
         )
+
+
+class CADLoadError(InvalidMeshError):
+    """Raised when a CAD file (STL, STEP, OBJ, ...) cannot be loaded.
+
+    Covers both file-format errors and missing-optional-dependency
+    errors for backend-specific formats (e.g. STEP requires the
+    optional ``cascadio`` package). When raised from the part loader,
+    the message directs the user to the right install command.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        filepath: Optional[str] = None,
+        suggestion: Optional[str] = None,
+    ):
+        # Skip InvalidMeshError.__init__'s "Invalid mesh geometry: "
+        # prefix — CADLoadError has its own domain (file loading), not
+        # mesh-repair semantics. Bypass the parent constructor and
+        # populate MeshError's state directly.
+        self.message = f"CAD load failed: {reason}"
+        self.details: dict = {"filepath": filepath} if filepath else {}
+        self.suggestion = suggestion or (
+            "Verify the file is a valid CAD mesh, or install missing "
+            "optional dependencies (e.g. `pip install cascadio` for STEP files)."
+        )
+        self.original_error: Optional[BaseException] = None
 
 
 # ============================================================================

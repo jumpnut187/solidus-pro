@@ -8,8 +8,21 @@ riser database for ML training and auto-riser selection.
 Riser File Naming Convention:
     riser_##_D{diameter}_H{height}.step
     riser_post_##_D{diameter}_H{height}.step
-    
+
 Where diameter and height are in inches.
+
+STEP loading note
+-----------------
+This module's ``_get_step_geometry`` function uses ``gmsh`` directly
+to obtain BREP-exact analytic volume and mesh-derived surface area.
+It is intentionally separate from the user-facing CAD upload path
+(``web/payloads.py`` / ``core/part_manager.py``), which uses ``trimesh``
++ ``cascadio`` for STEP-to-mesh conversion.
+
+If ``gmsh`` is unavailable (it is not declared in ``requirements.txt``),
+``GMSH_AVAILABLE`` is ``False`` and ``_get_step_geometry`` returns
+``(0, 0)`` silently. Migrating this path to ``cascadio`` is tracked
+as a future change — see ``docs/STEP-integration-plan.md``.
 """
 
 import os

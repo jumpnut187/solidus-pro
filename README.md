@@ -127,7 +127,7 @@ python run.py       # checks deps, then launches
 # or
 python main.py      # launches directly
 ```
-Load STL → assign parts → pick alloy → run → inspect with full 3D controls.
+Load CAD (STL or STEP) → assign parts → pick alloy → run → inspect with full 3D controls.
 
 ### Web App
 ```bash
@@ -200,7 +200,7 @@ References: [NIST Scheil notes](https://www.ctcms.nist.gov/~kattner/solidifc/sch
 | Numerics | NumPy, SciPy |
 | CPU Accel | Numba (JIT + parallel), joblib |
 | GPU Accel | MLX, Taichi (Metal) · CuPy (CUDA) · PyOpenCL (OpenCL) |
-| Mesh I/O | Trimesh, numpy-stl |
+| Mesh I/O | Trimesh, numpy-stl, cascadio (optional, for STEP) |
 | Persistence | SQLite (web projects) |
 | Reports | Jinja2 (HTML / PDF / Markdown) |
 | Plugin System | Custom materials, analysis types, viz modes |

@@ -2,6 +2,21 @@
 Part Manager for Multiple STL Parts
 Allows loading and positioning multiple castings in the simulation space
 Supports part types: CAST, RISER, CHILL for simulation behavior
+
+CAD format support
+------------------
+Parts can be loaded from any format that ``trimesh.load`` understands.
+STL files are handled natively; STEP (``.step`` / ``.stp``) files are
+handled via the optional ``cascadio`` backend, which statically links
+OpenCASCADE and tessellates the B-rep to a triangle mesh on the fly.
+
+Multi-body STEP assemblies are returned by ``trimesh.load`` as a
+``trimesh.Scene``; :meth:`PartManager.load_assembly_parts` iterates
+``scene.geometry`` and registers each body as its own ``Part`` with
+its CAD body name preserved and part type auto-inferred.
+
+If ``cascadio`` is not installed, ``STEP_SUPPORTED`` is ``False`` and
+the loader raises a clear error directing users to install it.
 """
 
 from __future__ import annotations
@@ -18,6 +33,60 @@ try:
     from core.error_logger import logger
 except ImportError:
     from core.error_logger_dummy import logger
+
+# Optional STEP backend. Mirrors the GMSH_AVAILABLE pattern from
+# riser_geometry_loader.py — silently absent is acceptable for STL-only
+# users, but STEP loading must raise a clear error in that case.
+try:
+    import cascadio  # noqa: F401  (presence test only)
+    STEP_SUPPORTED = True
+except ImportError:
+    STEP_SUPPORTED = False
+
+# File extensions we treat as STEP assemblies. Anything else is assumed
+# to be a single-body mesh (STL, OBJ, PLY, GLB, ...).
+_STEP_EXTENSIONS = (".step", ".stp")
+
+# Conversion factor from meters to inches. Used to undo cascadio's
+# meters-unit GLB output for STEP files (see ``_scale_step_to_inches``).
+_METERS_TO_INCHES = 39.3701
+
+
+def _scale_step_to_inches(geometry):
+    """Rescale cascadio/trimesh STEP output from meters back to inches.
+
+    ``trimesh.load`` on a STEP file dispatches to ``cascadio``, which
+    converts the STEP assembly to GLB as an intermediate. The glTF 2.0
+    spec mandates that POSITION coordinates are in **meters**, so
+    trimesh hands us STEP meshes in meters regardless of the STEP file's
+    authored units (mm, inches, m, ...). Every other code path in this
+    project (STLLoader, voxel_mesh, payloads, UI) assumes inches, so
+    without rescaling a STEP file authored in mm is loaded ~39× too
+    small — every downstream dimension collapses and defect analyses
+    silently return 0.
+
+    This helper applies the meters→inches scale to either a single
+    ``Trimesh`` or to every body of a ``Scene``. Empty / placeholder
+    meshes (zero faces) are skipped because ``trimesh`` cannot compute
+    meaningful extents for them.
+
+    Limitation: cascadio's own unit-detection heuristic is fragile for
+    inch-authored STEP files (it conflates any extent > 1.0 with
+    millimeters), so for that rare case the returned mesh would still
+    be mis-scaled. STEP files from mainstream CAD tools
+    (Solidworks, Onshape, etc.) almost always export in mm, where this
+    helper is correct.
+    """
+    import numpy as np
+
+    if isinstance(geometry, trimesh.Scene):
+        bodies = list(geometry.geometry.values())
+        for body in bodies:
+            if body is None or len(body.faces) == 0:
+                continue
+            body.apply_scale(_METERS_TO_INCHES)
+    elif geometry is not None and len(geometry.faces) > 0:
+        geometry.apply_scale(_METERS_TO_INCHES)
 
 
 class PartType(Enum):
@@ -61,53 +130,75 @@ PART_TYPE_KEYWORDS = {
 }
 
 
-def infer_part_type_from_filename(filename: str) -> PartType:
+def infer_part_type_from_name(name: str) -> PartType:
     """
-    Infer part type from filename based on keywords.
-    
-    Keywords (case-insensitive):
+    Infer part type from a name string based on keywords.
+
+    Keywords (case-insensitive, first match wins):
     - CAST: 'casting', 'part'
     - RISER_POST: 'riser_post', 'riser post', 'post', 'neck'
     - RISER: 'feeder', 'riser', 'bridge', 'pad'
     - CHILL: 'chill'
     - CORE: 'core', 'sand_core', 'sand core'
-    
+
+    The input is lowercased and matched as substrings, so underscores,
+    spaces, and concatenated words are all handled. When checking a
+    multi-body STEP assembly, this lets us infer the part type from
+    each body's CAD name (e.g. ``"Riser_Sleeve"`` → ``RISER``).
+
     Args:
-        filename: The filename (with or without path/extension)
-    
+        name: A bare name or full filename. Path and extension are
+              stripped if present; matching is otherwise identical to
+              :func:`infer_part_type_from_filename`.
+
     Returns:
-        Inferred PartType, defaults to CAST if no keywords match
+        Inferred :class:`PartType`, defaults to ``CAST`` if no
+        keywords match.
     """
-    # Get just the filename without path, convert to lowercase
-    base_name = os.path.splitext(os.path.basename(filename))[0].lower()
-    
-    # Check for core first (most specific for internal cavities)
+    base_name = os.path.splitext(os.path.basename(name))[0].lower()
+
+    # CORE first (most specific for internal cavities)
     for keyword in PART_TYPE_KEYWORDS[PartType.CORE]:
         if keyword in base_name:
             return PartType.CORE
-    
-    # Check for chill first (most specific)
+
+    # CHILL next (specific material/semantic)
     for keyword in PART_TYPE_KEYWORDS[PartType.CHILL]:
         if keyword in base_name:
             return PartType.CHILL
-    
-    # Check for riser post keywords (before riser since 'post' is more specific)
+
+    # RISER_POST before RISER (since 'post' is more specific than 'riser')
     for keyword in PART_TYPE_KEYWORDS[PartType.RISER_POST]:
         if keyword in base_name:
             return PartType.RISER_POST
-    
-    # Check for riser keywords
+
     for keyword in PART_TYPE_KEYWORDS[PartType.RISER]:
         if keyword in base_name:
             return PartType.RISER
-    
-    # Check for cast keywords (though CAST is the default anyway)
+
     for keyword in PART_TYPE_KEYWORDS[PartType.CAST]:
         if keyword in base_name:
             return PartType.CAST
-    
-    # Default to CAST
+
     return PartType.CAST
+
+
+def infer_part_type_from_filename(filename: str) -> PartType:
+    """
+    Infer part type from a filename based on keywords.
+
+    Convenience wrapper around :func:`infer_part_type_from_name` that
+    accepts a full path or filename. Equivalent semantics; provided for
+    backwards compatibility with callers that already pass file paths.
+
+    Args:
+        filename: The filename (with or without path/extension).
+
+    Returns:
+        Inferred :class:`PartType`, defaults to ``CAST`` if no
+        keywords match.
+    """
+    return infer_part_type_from_name(filename)
 
 
 @dataclass
@@ -260,51 +351,96 @@ class PartManager:
         self.parts: Dict[str, Part] = {}
         self._part_order: List[str] = []  # Maintains insertion order
     
-    def load_part(self, filepath: str, name: Optional[str] = None, 
+    def load_part(self, filepath: str, name: Optional[str] = None,
                   position: Optional[Tuple[float, float, float]] = None,
                   preserve_origin: bool = True) -> Optional[str]:
         """
-        Load an STL file as a new part.
-        
+        Load a CAD file (STL, STEP, OBJ, ...) as a new part.
+
         Args:
-            filepath: Path to STL file
-            name: Optional name for the part (defaults to filename)
-            position: Optional initial position (x, y, z) - overrides STL position
-            preserve_origin: If True, keep the original STL coordinates (for assemblies).
-                           If False and no position given, center at origin.
-        
+            filepath: Path to a CAD mesh file. STL/OBJ/PLY are handled
+                      natively by ``trimesh``. ``.step``/``.stp`` require
+                      the optional ``cascadio`` package.
+            name: Optional name for the part (defaults to filename).
+            position: Optional initial position (x, y, z) - overrides
+                      the mesh's stored origin.
+            preserve_origin: If True, keep the original mesh coordinates
+                              (useful for assemblies). If False and no
+                              position is given, center at origin with
+                              the bottom face on Z=0.
+
         Returns:
-            Part ID if successful, None otherwise
+            Part ID if successful, ``None`` otherwise.
+
+        Notes:
+            For multi-body STEP assemblies, use
+            :meth:`load_assembly_parts` instead — this method returns
+            only the first body.
         """
         logger.info(f"Loading part from: {filepath}")
-        
+
         if not os.path.exists(filepath):
             logger.error(f"Part file not found: {filepath}")
             print(f"Error: File not found: {filepath}")
             return None
-        
+
+        # STEP-specific guard: fail fast with a clear install hint
+        # instead of letting trimesh raise an opaque ImportError.
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext in _STEP_EXTENSIONS and not STEP_SUPPORTED:
+            message = (
+                "STEP support requires the 'cascadio' package. "
+                "Install with: pip install cascadio"
+            )
+            logger.error(message)
+            print(f"Error: {message}")
+            return None
+
         try:
             # Generate unique ID
             part_id = str(uuid.uuid4())[:8]
-            
-            # Load mesh via trimesh (handles STL, STEP, and other formats)
+
+            # Load mesh via trimesh (handles STL, STEP via cascadio, and other formats)
             trimesh_obj = trimesh.load(filepath)
-            
+
+            # If a multi-body STEP slipped through, only register the first body.
+            # Callers should use load_assembly_parts() for full Scene support.
+            if isinstance(trimesh_obj, trimesh.Scene):
+                if not trimesh_obj.geometry:
+                    raise ValueError("STEP file contains no bodies")
+                first_body_name, first_body_mesh = next(
+                    iter(trimesh_obj.geometry.items())
+                )
+                logger.warning(
+                    f"STEP file '{filepath}' contains multiple bodies; "
+                    f"registering only '{first_body_name}'. "
+                    f"Use load_assembly_parts() to load all bodies."
+                )
+                trimesh_obj = first_body_mesh
+
+            # STEP files load in meters (cascadio's GLB intermediate).
+            # Rescale to inches so downstream STL-equivalent units match.
+            if ext in _STEP_EXTENSIONS:
+                _scale_step_to_inches(trimesh_obj)
+
             # Default name from filename
             if name is None:
                 name = os.path.splitext(os.path.basename(filepath))[0]
-            
+
             # Make name unique if needed
             base_name = name
             counter = 1
             while any(p.name == name for p in self.parts.values()):
                 name = f"{base_name}_{counter}"
                 counter += 1
-            
-            # Infer part type from filename
-            inferred_type = infer_part_type_from_filename(filepath)
-            
-            # Create part with inferred type
+
+            # Infer part type from filename (works for STL; for single-body
+            # STEP, falls back to filename rather than the CAD body name).
+            inferred_type = infer_part_type_from_name(filepath)
+
+            # Create part with inferred type. Mirror load_part's existing
+            # pattern of explicitly setting color from PART_TYPE_COLORS for
+            # consistency with load_assembly_parts().
             part = Part(
                 id=part_id,
                 name=name,
@@ -313,7 +449,7 @@ class PartManager:
                 part_type=inferred_type,
                 color=PART_TYPE_COLORS.get(inferred_type, (0.7, 0.75, 0.8)),
             )
-            
+
             # Set position based on arguments
             if position is not None:
                 # Explicit position provided - use it
@@ -326,25 +462,145 @@ class PartManager:
                 center_z = -bounds[2][0]  # Place bottom on Z=0
                 part.set_position(center_x, center_y, center_z)
             # else: preserve_origin=True, position=None -> keep STL coordinates (position stays 0,0,0)
-            
+
             self.parts[part_id] = part
             self._part_order.append(part_id)
-            
+
             bounds = trimesh_obj.bounds
             logger.info(f"Part loaded: '{name}' (ID: {part_id}), type={part.part_type.value}, vertices={len(trimesh_obj.vertices):,}, faces={len(trimesh_obj.faces):,}, volume={part.get_volume():.4f} in³")
             print(f"✓ Loaded part '{name}' (ID: {part_id})")
             print(f"  Type: {part.part_type.value.upper()} (auto-detected from filename)")
             print(f"  Vertices: {len(trimesh_obj.vertices):,}")
             print(f"  Faces: {len(trimesh_obj.faces):,}")
-            print(f"  STL bounds: X[{bounds[0][0]:.2f}, {bounds[1][0]:.2f}] Y[{bounds[0][1]:.2f}, {bounds[1][1]:.2f}] Z[{bounds[0][2]:.2f}, {bounds[1][2]:.2f}]")
+            print(f"  Bounds: X[{bounds[0][0]:.2f}, {bounds[1][0]:.2f}] Y[{bounds[0][1]:.2f}, {bounds[1][1]:.2f}] Z[{bounds[0][2]:.2f}, {bounds[1][2]:.2f}]")
             print(f"  Volume: {part.get_volume():.4f} in³")
-            
+
             return part_id
-            
+
         except Exception as e:
-            logger.exception(f"Failed to load STL part: {filepath}")
-            print(f"Error loading STL: {e}")
+            logger.exception(f"Failed to load CAD part: {filepath}")
+            print(f"Error loading CAD file: {e}")
             return None
+
+    def load_assembly_parts(
+        self,
+        filepath: str,
+        name_prefix: Optional[str] = None,
+    ) -> List[str]:
+        """
+        Load a multi-body CAD assembly (typically a STEP file) and
+        register each body as its own ``Part``.
+
+        Bodies are loaded via ``trimesh.load(filepath, force="scene")``;
+        each entry in ``scene.geometry`` becomes a Part whose name is
+        the CAD body name and whose ``part_type`` is auto-inferred from
+        that name via :func:`infer_part_type_from_name` (e.g. a body
+        named ``Riser_Sleeve`` is classified as ``RISER``).
+
+        Single-body files are handled by registering the lone mesh and
+        returning a one-element list — semantically equivalent to
+        :meth:`load_part` but uniformly returning a list.
+
+        Args:
+            filepath: Path to a CAD assembly file. ``.step``/``.stp``
+                      require the optional ``cascadio`` package.
+            name_prefix: Optional prefix prepended to each body name
+                         (useful when loading multiple assemblies).
+
+        Returns:
+            List of newly created Part IDs in the same order as
+            ``scene.geometry.items()``. Empty list on failure.
+        """
+        logger.info(f"Loading assembly from: {filepath}")
+
+        if not os.path.exists(filepath):
+            logger.error(f"Assembly file not found: {filepath}")
+            print(f"Error: File not found: {filepath}")
+            return []
+
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext in _STEP_EXTENSIONS and not STEP_SUPPORTED:
+            message = (
+                "STEP support requires the 'cascadio' package. "
+                "Install with: pip install cascadio"
+            )
+            logger.error(message)
+            print(f"Error: {message}")
+            return []
+
+        try:
+            # force="scene" ensures trimesh returns a Scene even for
+            # single-body files, so we can iterate uniformly.
+            scene = trimesh.load(filepath, force="scene")
+
+            if not isinstance(scene, trimesh.Scene):
+                # Defensive: if trimesh ever returns a bare Trimesh
+                # despite force="scene", wrap it.
+                scene = trimesh.Scene(geometry={"Body_1": scene})
+
+            if not scene.geometry:
+                raise ValueError("Assembly contains no bodies")
+
+            # STEP assemblies come back from cascadio in meters. Rescale
+            # the whole scene once so every body's vertices are in
+            # inches — matches STLLoader and the rest of the pipeline.
+            ext = os.path.splitext(filepath)[1].lower()
+            if ext in _STEP_EXTENSIONS:
+                _scale_step_to_inches(scene)
+
+            part_ids: List[str] = []
+            base_prefix = name_prefix or os.path.splitext(os.path.basename(filepath))[0]
+
+            for body_index, (body_name, body_mesh) in enumerate(scene.geometry.items()):
+                if body_mesh is None or len(body_mesh.faces) == 0:
+                    logger.warning(
+                        f"Skipping empty body '{body_name}' in '{filepath}'"
+                    )
+                    continue
+
+                part_id = str(uuid.uuid4())[:8]
+                # Use CAD body name as the Part name; prefix ensures
+                # uniqueness when multiple assemblies are loaded.
+                part_name = f"{base_prefix}_{body_name}" if name_prefix else body_name
+                # Make name unique if needed
+                unique_name = part_name
+                counter = 1
+                while any(p.name == unique_name for p in self.parts.values()):
+                    unique_name = f"{part_name}_{counter}"
+                    counter += 1
+
+                inferred_type = infer_part_type_from_name(body_name)
+
+                part = Part(
+                    id=part_id,
+                    name=unique_name,
+                    filepath=filepath,
+                    trimesh_obj=body_mesh,
+                    part_type=inferred_type,
+                    color=PART_TYPE_COLORS.get(inferred_type, (0.7, 0.75, 0.8)),
+                )
+
+                self.parts[part_id] = part
+                self._part_order.append(part_id)
+                part_ids.append(part_id)
+
+                logger.info(
+                    f"Assembly body loaded: '{unique_name}' (ID: {part_id}), "
+                    f"type={part.part_type.value}, "
+                    f"vertices={len(body_mesh.vertices):,}, "
+                    f"faces={len(body_mesh.faces):,}"
+                )
+
+            print(
+                f"✓ Loaded assembly '{base_prefix}' with {len(part_ids)} body(ies) "
+                f"from {os.path.basename(filepath)}"
+            )
+            return part_ids
+
+        except Exception as e:
+            logger.exception(f"Failed to load assembly: {filepath}")
+            print(f"Error loading assembly: {e}")
+            return []
     
     def remove_part(self, part_id: str) -> bool:
         """Remove a part by ID"""

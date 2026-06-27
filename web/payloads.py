@@ -3,17 +3,26 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional, cast
+from typing import Any, Dict, List, Optional, cast
 import json
 import os
+import re
 
 import numpy as np
+import trimesh
 from werkzeug.datastructures import FileStorage
 from werkzeug.utils import secure_filename
 
-from core.part_manager import PartManager, PartType, build_part_manager as _core_build_part_manager, infer_part_type_from_filename
+from core.part_manager import (
+    PartManager,
+    PartType,
+    STEP_SUPPORTED,
+    _scale_step_to_inches,
+    build_part_manager as _core_build_part_manager,
+    infer_part_type_from_filename,
+    infer_part_type_from_name,
+)
 from core.simulation_pipeline import PipelineResult
-from core.stl_loader import STLLoader
 from core.surface_extraction import build_surface_payload, normalize_surface_request
 
 
@@ -38,12 +47,92 @@ ADVANCED_SURFACE_MODES = {
 }
 SURFACE_MODES = BASIC_SURFACE_MODES | ADVANCED_SURFACE_MODES
 
+# Extensions accepted by upload_cad_file. STL is handled natively by
+# trimesh; STEP requires the optional ``cascadio`` package.
+ALLOWED_CAD_EXTENSIONS = {".stl", ".step", ".stp"}
+_STEP_EXTENSIONS = (".step", ".stp")
 
-def upload_stl_file(file: FileStorage, upload_folder: Path) -> Dict[str, Any]:
+
+def _format_dimensions(bounds: np.ndarray) -> str:
+    """Format bounds as a 'X" x Y" x Z"' human-readable string.
+
+    Accepts trimesh's native ``(2, 3)`` bounds format
+    (``[[xmin, ymin, zmin], [xmax, ymax, zmax]]``) and computes the
+    per-axis extents.
+    """
+    if bounds is None:
+        return "N/A"
+    bounds = np.asarray(bounds, dtype=np.float64)
+    if bounds.shape != (2, 3):
+        raise ValueError(
+            f"Expected trimesh bounds of shape (2, 3), got {bounds.shape}"
+        )
+    x_size = float(bounds[1][0] - bounds[0][0])
+    y_size = float(bounds[1][1] - bounds[0][1])
+    z_size = float(bounds[1][2] - bounds[0][2])
+    return f"{x_size:.2f}\" x {y_size:.2f}\" x {z_size:.2f}\""
+
+
+def _build_mesh_data(mesh: trimesh.Trimesh) -> Dict[str, Any]:
+    """Build the mesh_data payload section from a trimesh object.
+
+    ``mesh.bounds`` is shape ``(2, 3)`` natively; ``_bounds_payload``
+    expects the legacy ``(3, 2)`` per-axis shape (matching what the
+    frontend already consumes), so we transpose here.
+    """
+    bounds_native = np.asarray(mesh.bounds, dtype=np.float64)  # (2, 3)
+    bounds_per_axis = bounds_native.T  # (3, 2): [xmin,xmax], [ymin,ymax], [zmin,zmax]
+    vertices = np.asarray(mesh.vertices, dtype=np.float32)
+    faces = np.asarray(mesh.faces, dtype=np.int32)
+    return {
+        "vertices": vertices.reshape(-1).tolist(),
+        "faces": faces.reshape(-1).tolist(),
+        "bounds": _bounds_payload(bounds_per_axis),
+        "volume": float(mesh.volume) if mesh.volume else 0.0,
+        "surface_area": float(mesh.area) if mesh.area else 0.0,
+        "vertex_count": int(len(vertices)),
+        "face_count": int(len(faces)),
+    }
+
+
+def _sanitize_body_name(name: str) -> str:
+    """Sanitize a CAD body name for safe use in a filename.
+
+    Strips any file extension, replaces runs of unsafe characters with
+    a single underscore, and falls back to ``"body"`` for empty input.
+    """
+    name = os.path.splitext(name)[0]
+    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_")
+    return sanitized or "body"
+
+
+def upload_cad_file(file: FileStorage, upload_folder: Path) -> List[Dict[str, Any]]:
+    """Load a CAD file (STL or STEP) and return one file entry per body.
+
+    The function unifies STL and STEP handling on top of ``trimesh``.
+    A single STL produces a one-element list; a multi-body STEP
+    assembly produces one entry per body, with each body exported to
+    its own STL file on disk before the response is built. Body names
+    from the STEP B-rep are preserved in the response under
+    ``body_name`` and used for ``part_type`` inference.
+
+    For single-body files the original upload is kept on disk as well
+    (so downstream reloads still work); for multi-body files the
+    original STEP upload is removed after fanning out.
+
+    Raises:
+        ValueError: on missing file, unsupported extension, missing
+            ``cascadio`` (when a STEP file is uploaded), or load
+            failure.
+    """
     if not file.filename:
         raise ValueError("No file selected")
-    if not file.filename.lower().endswith(".stl"):
-        raise ValueError("Only STL files are allowed")
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in ALLOWED_CAD_EXTENSIONS:
+        raise ValueError(
+            f"Unsupported file extension '{ext}'. "
+            f"Allowed: {sorted(ALLOWED_CAD_EXTENSIONS)}"
+        )
 
     upload_folder.mkdir(parents=True, exist_ok=True)
     file_id = os.urandom(4).hex()
@@ -51,35 +140,119 @@ def upload_stl_file(file: FileStorage, upload_folder: Path) -> Dict[str, Any]:
     filepath = upload_folder / f"{file_id}_{filename}"
     file.save(str(filepath))
 
-    loader = STLLoader()
-    if not loader.load_stl(str(filepath)):
+    # STEP-specific guard: fail fast with a clear install hint rather
+    # than letting trimesh raise an opaque ImportError downstream.
+    if ext in _STEP_EXTENSIONS and not STEP_SUPPORTED:
         try:
             filepath.unlink()
         except FileNotFoundError:
             pass
-        raise ValueError("Failed to load STL file")
+        raise ValueError(
+            "STEP support requires the 'cascadio' package. "
+            "Install with: pip install cascadio"
+        )
 
-    bounds = loader.get_bounds_array()
-    vertices = np.asarray(loader.get_vertices(), dtype=np.float32)
-    faces = np.asarray(loader.get_faces(), dtype=np.int32)
-    part_type = infer_part_type_from_filename(filename).value
+    try:
+        # force="scene" ensures trimesh returns a Scene even for STL
+        # files, so we can iterate uniformly without a type branch.
+        loaded = trimesh.load(str(filepath), force="scene")
+    except Exception as exc:
+        try:
+            filepath.unlink()
+        except FileNotFoundError:
+            pass
+        raise ValueError(f"Failed to load CAD file: {exc}") from exc
 
-    return {
-        "file_id": file_id,
-        "filename": filename,
-        "filepath": str(filepath),
-        "part_type": part_type,
-        "dimensions": loader.get_dimensions(),
-        "mesh_data": {
-            "vertices": vertices.reshape(-1).tolist(),
-            "faces": faces.reshape(-1).tolist(),
-            "bounds": _bounds_payload(bounds),
-            "volume": float(loader.volume) if loader.volume else 0.0,
-            "surface_area": float(loader.surface_area) if loader.surface_area else 0.0,
-            "vertex_count": int(len(vertices)),
-            "face_count": int(len(faces)),
-        },
-    }
+    # STEP files arrive in meters (cascadio's GLB intermediate). The
+    # rest of the web pipeline — the persisted STL exports, the
+    # ``mesh_data`` payload, the dimensions string, the volume/area
+    # numbers — assumes inches (matching the existing STL path). Apply
+    # the meters→inches rescale at the single chokepoint so every
+    # downstream value is already in inches.
+    if ext in _STEP_EXTENSIONS:
+        _scale_step_to_inches(loaded)
+
+    if isinstance(loaded, trimesh.Scene):
+        body_items = list(loaded.geometry.items())
+        if not body_items:
+            try:
+                filepath.unlink()
+            except FileNotFoundError:
+                pass
+            raise ValueError("CAD assembly contains no bodies")
+    else:
+        # Defensive: trimesh.load(force="scene") should always return a
+        # Scene, but if a backend bypasses that (e.g. raises) we wrap.
+        body_items = [("Body_1", loaded)]
+
+    # For a single-body file, use the file's basename (without
+    # extension) as the body name so the part_type inference and the
+    # fan-out filename read cleanly. For multi-body files, trimesh
+    # already provides real CAD body names that we trust.
+    is_single_body = len(body_items) == 1
+    if is_single_body:
+        fallback_name = os.path.splitext(filename)[0]
+        body_items = [(fallback_name, body_items[0][1])]
+
+    entries: List[Dict[str, Any]] = []
+    for body_index, (body_name, body_mesh) in enumerate(body_items):
+        if body_mesh is None or len(body_mesh.faces) == 0:
+            # Skip degenerate bodies but keep going — a STEP assembly
+            # may contain construction geometry that isn't a real part.
+            continue
+
+        # Fan out each body as its own STL file. Downstream code
+        # expects STL on disk regardless of the original upload format,
+        # so this preserves the existing pipeline without changes.
+        body_filename = f"{file_id}_b{body_index}_{_sanitize_body_name(body_name)}.stl"
+        body_path = upload_folder / body_filename
+        body_mesh.export(str(body_path))
+
+        # Single-body files already have a clean name (the file's
+        # basename); multi-body files use the CAD body name.
+        part_type = infer_part_type_from_name(body_name).value
+
+        entries.append(
+            {
+                "file_id": f"{file_id}_b{body_index}",
+                "filename": body_filename,
+                "filepath": str(body_path),
+                "source_file": filename,
+                "body_name": body_name,
+                "part_type": part_type,
+                "dimensions": _format_dimensions(body_mesh.bounds),
+                "mesh_data": _build_mesh_data(body_mesh),
+            }
+        )
+
+    if not entries:
+        try:
+            filepath.unlink()
+        except FileNotFoundError:
+            pass
+        raise ValueError("CAD file contains no loadable bodies")
+
+    # For multi-body STEP uploads, the original STEP on disk is
+    # redundant once each body is on disk as an STL — remove it to
+    # avoid keeping a 100MB+ STEP around just for traceability.
+    if len(entries) > 1:
+        try:
+            filepath.unlink()
+        except FileNotFoundError:
+            pass
+
+    return entries
+
+
+# Backwards-compatible alias for any external callers still importing
+# the old name. Mirrors upload_cad_file; prefer the new name.
+def upload_stl_file(file: FileStorage, upload_folder: Path) -> List[Dict[str, Any]]:
+    """Deprecated: use :func:`upload_cad_file` instead.
+
+    Retained as a thin alias for one release so external integrations
+    don't break. Internally identical to ``upload_cad_file``.
+    """
+    return upload_cad_file(file, upload_folder)
 
 
 def build_part_manager(parts_data: list[Dict[str, Any]]) -> PartManager:

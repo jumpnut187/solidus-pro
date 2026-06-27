@@ -20,7 +20,7 @@ from web.payloads import (
     build_result_fields_payload,
     build_volume_payload,
     read_artifact,
-    upload_stl_file,
+    upload_cad_file,
     write_artifact,
 )
 
@@ -164,7 +164,11 @@ def upload_files():
     uploaded = []
     try:
         for file in files:
-            uploaded.append(upload_stl_file(file, upload_folder()))
+            # upload_cad_file returns one entry per body in the file.
+            # Single-body files return a one-element list; multi-body
+            # STEP assemblies return one entry per body. Flatten so the
+            # frontend sees a uniform list of file entries.
+            uploaded.extend(upload_cad_file(file, upload_folder()))
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     return jsonify({"files": uploaded})

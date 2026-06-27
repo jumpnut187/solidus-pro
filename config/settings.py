@@ -163,6 +163,7 @@ class PerformanceSettings:
 class PathSettings:
     """File path settings"""
     default_stl_directory: str = ""
+    default_step_directory: str = ""
     default_output_directory: str = ""
     temp_directory: str = ""
     log_directory: str = ""

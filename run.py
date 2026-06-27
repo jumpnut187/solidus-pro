@@ -20,7 +20,7 @@ def check_dependencies():
     """Check if dependencies are installed"""
     required = ['PyQt5', 'numpy', 'vtk', 'trimesh', 'numba']
     missing = []
-    
+
     for package in required:
         try:
             __import__(package)
@@ -28,7 +28,15 @@ def check_dependencies():
         except ImportError:
             print(f"✗ {package}")
             missing.append(package)
-    
+
+    # Optional: cascadio for STEP file support. Failing here is OK —
+    # STL-only users can still run; only STEP uploads will be rejected.
+    try:
+        __import__('cascadio')
+        print("✓ cascadio (STEP support enabled)")
+    except ImportError:
+        print("○ cascadio (STEP support disabled — install with `pip install cascadio` for STEP files)")
+
     return len(missing) == 0, missing
 
 def install_dependencies():
