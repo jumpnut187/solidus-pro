@@ -83,9 +83,9 @@ export function App() {
   }
 
   async function handleFiles(files: FileList | File[]) {
-    const fileArray = Array.from(files).filter((file) => file.name.toLowerCase().endsWith('.stl'));
+    const fileArray = Array.from(files).filter((file) => /\.(stl|step|stp)$/i.test(file.name));
     if (!fileArray.length) return;
-    setStatus(`Uploading ${fileArray.length} STL file(s)...`);
+    setStatus(`Uploading ${fileArray.length} CAD file(s)...`);
     const nextProjectId = await ensureProject();
     const uploaded = await api.uploadFiles(fileArray);
     const added: ProjectPart[] = [];
@@ -225,7 +225,7 @@ export function App() {
 
   async function runSimulation() {
     if (!parts.length) {
-      setStatus('Upload at least one STL part first.');
+      setStatus('Upload at least one CAD part first.');
       return;
     }
     const nextProjectId = await ensureProject();
@@ -302,8 +302,8 @@ export function App() {
             }}
           >
             <Upload size={22} />
-            <span>Upload or drop STL assembly files</span>
-            <input type="file" multiple accept=".stl" onChange={(event) => event.target.files && void handleFiles(event.target.files)} />
+            <span>Upload or drop CAD files (STL or STEP)</span>
+            <input type="file" multiple accept=".stl,.step,.stp" onChange={(event) => event.target.files && void handleFiles(event.target.files)} />
           </label>
           <div className="part-counts">
             <span>{parts.filter((p) => p.part_type === 'cast').length} Cast</span>
@@ -440,7 +440,7 @@ export function App() {
         <div className="stage-toolbar">
           <div>
             <strong>3D Solidification Canvas</strong>
-            <span>{parts.length ? `${parts.length} assembly part(s)` : 'Upload STL files to begin'}</span>
+            <span>{parts.length ? `${parts.length} assembly part(s)` : 'Upload CAD files to begin'}</span>
           </div>
           <div className="toolbar-actions">
             <button onClick={() => setCameraCommand('iso')}><Camera size={15} /> Iso</button>

@@ -371,6 +371,21 @@ class PerformanceDialog(DraggableDialog):
 
         gpu_group.setLayout(gpu_layout)
         self.content_layout.addWidget(gpu_group)
+
+        # Use GPU toggle (lives below the status group so it is always visible)
+        self.use_gpu_check = QCheckBox("Use GPU acceleration")
+        parent_opts = getattr(self.parent(), '_performance_options', {}) if self.parent() is not None else {}
+        self.use_gpu_check.setChecked(bool(parent_opts.get('use_gpu', True)))
+        self.use_gpu_check.setEnabled(bool(gpu_available))
+        if gpu_available:
+            self.use_gpu_check.setToolTip(
+                "Enable GPU acceleration for distance computations, solidification,\n"
+                "and containment. Disable to force CPU (Numba JIT) — useful for\n"
+                "benchmarking or when GPU results are unstable."
+            )
+        else:
+            self.use_gpu_check.setToolTip("No GPU detected — install mlx and taichi to enable.")
+        self.content_layout.addWidget(self.use_gpu_check)
         
         # Optimization Features Group
         opt_group = QGroupBox("Optimization Features")
@@ -441,7 +456,8 @@ class PerformanceDialog(DraggableDialog):
         self._original_values = {
             'chunked_voxelization': self.chunked_voxel_check.isChecked(),
             'incremental_solidification': self.incremental_check.isChecked(),
-            'use_octree': self.octree_check.isChecked()
+            'use_octree': self.octree_check.isChecked(),
+            'use_gpu': self.use_gpu_check.isChecked(),
         }
 
     def restore_original_values(self):
@@ -450,6 +466,7 @@ class PerformanceDialog(DraggableDialog):
             self.chunked_voxel_check.setChecked(self._original_values.get('chunked_voxelization', False))
             self.incremental_check.setChecked(self._original_values.get('incremental_solidification', False))
             self.octree_check.setChecked(self._original_values.get('use_octree', True))
+            self.use_gpu_check.setChecked(self._original_values.get('use_gpu', True))
 
     def apply_values(self):
         """Emit signal with current settings"""
@@ -460,7 +477,8 @@ class PerformanceDialog(DraggableDialog):
         return {
             'chunked_voxelization': self.chunked_voxel_check.isChecked(),
             'incremental_solidification': self.incremental_check.isChecked(),
-            'use_octree': self.octree_check.isChecked()
+            'use_octree': self.octree_check.isChecked(),
+            'use_gpu': self.use_gpu_check.isChecked(),
         }
 
     def set_options(self, options: dict):
@@ -468,6 +486,7 @@ class PerformanceDialog(DraggableDialog):
         self.chunked_voxel_check.setChecked(options.get('chunked_voxelization', False))
         self.incremental_check.setChecked(options.get('incremental_solidification', False))
         self.octree_check.setChecked(options.get('use_octree', True))
+        self.use_gpu_check.setChecked(options.get('use_gpu', True))
 
 
 # ==================== Visualization Settings Dialog ====================
@@ -2109,6 +2128,7 @@ class MainWindow(QMainWindow):
             'part_assignment_mode': 'parallel',
             'part_assignment_workers': 0,
             'part_assignment_batch_size': 2500,
+            'use_gpu': True,
         }
 
         # Solidification parameters (from SolidificationParameters defaults)
@@ -2163,6 +2183,13 @@ class MainWindow(QMainWindow):
         
         # Create modal dialogs
         self._create_dialogs()
+
+        # Seed use_gpu from persisted settings and render real label
+        from config.settings import settings as _settings
+        self._performance_options['use_gpu'] = bool(
+            getattr(_settings, 'use_gpu', self._performance_options.get('use_gpu', True))
+        )
+        self._update_performance_summary()
     
     def _create_menu_bar(self):
         """Create the application menu bar"""
@@ -2550,7 +2577,7 @@ class MainWindow(QMainWindow):
         settings_layout.addWidget(self.open_performance_btn)
         
         # Performance summary label
-        self.performance_summary_label = QLabel("GPU: Off")
+        self.performance_summary_label = QLabel("GPU: Detecting…")
         self.performance_summary_label.setStyleSheet("font-size: 10px; color: #888; margin-left: 10px;")
         settings_layout.addWidget(self.performance_summary_label)
         
@@ -2771,6 +2798,7 @@ class MainWindow(QMainWindow):
     
     def _open_performance_dialog(self):
         """Open the performance options dialog"""
+        self._update_performance_summary()
         self.performance_dialog.set_options(self._performance_options)
         self.performance_dialog.center_on_parent()
         self.performance_dialog.show()
@@ -3341,17 +3369,37 @@ class MainWindow(QMainWindow):
     
     def _on_performance_options_confirmed(self, options: dict):
         """Handle performance options confirmation from dialog"""
-        self._performance_options = options
+        self._performance_options.update(options)
+        if 'use_gpu' in options:
+            from config.settings import settings as _settings
+            _settings.use_gpu = bool(options['use_gpu'])
         self._update_performance_summary()
     
     def _update_performance_summary(self):
         """Update performance summary label in sidebar"""
-        parts = ["GPU: Off"]
+        gpu_mgr = GPUComputeManager()
+        gpu_available = gpu_mgr.is_gpu_available
+        use_gpu = bool(self._performance_options.get('use_gpu', True))
+
+        if gpu_available and use_gpu:
+            backend = gpu_mgr.backend.name
+            device = gpu_mgr.device_name
+            short = "Apple Silicon GPU" if "Apple Silicon" in device else device
+            gpu_text = f"GPU: {backend} ({short})"
+            color = "#4a4"
+        else:
+            gpu_text = "GPU: Off"
+            color = "#888"
+
+        parts = [gpu_text]
         if self._performance_options.get('chunked_voxelization', False):
             parts.append("Chunk")
         if self._performance_options.get('incremental_solidification', False):
             parts.append("Incr")
         self.performance_summary_label.setText(", ".join(parts))
+        self.performance_summary_label.setStyleSheet(
+            f"font-size: 10px; color: {color}; margin-left: 10px;"
+        )
     
     def _update_mesh_summary(self):
         """Update mesh summary label in sidebar"""
@@ -3446,7 +3494,11 @@ class MainWindow(QMainWindow):
     def _show_hardware_info(self):
         """Display hardware info in status"""
         gpu_manager = GPUComputeManager()
-        gpu_status = f"{gpu_manager.backend.name}" if gpu_manager.is_gpu_available else "Off"
+        use_gpu = bool(self._performance_options.get('use_gpu', True))
+        if gpu_manager.is_gpu_available and use_gpu:
+            gpu_status = f"{gpu_manager.backend.name} ({gpu_manager.device_name})"
+        else:
+            gpu_status = "Off"
         info = (f"Hardware: {hardware.cpu_count} cores "
                 f"({hardware.performance_cores}P+{hardware.efficiency_cores}E), "
                 f"GPU: {gpu_status}")

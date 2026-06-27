@@ -92,7 +92,7 @@ export function PartsManagerDialog({
           ref={fileInputRef}
           type="file"
           multiple
-          accept=".stl"
+          accept=".stl,.step,.stp"
           style={{ display: 'none' }}
           onChange={handleFileChange}
         />
@@ -113,7 +113,7 @@ export function PartsManagerDialog({
               <tr>
                 <td colSpan={4} className="parts-empty">
                   <Box size={28} />
-                  <span>No parts loaded. Click "Add Part" to import STL files.</span>
+                  <span>No parts loaded. Click "Add Part" to import CAD files.</span>
                 </td>
               </tr>
             )}
