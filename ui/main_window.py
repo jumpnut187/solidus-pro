@@ -2370,6 +2370,16 @@ class MainWindow(QMainWindow):
         reset_view_action.setStatusTip("Reset camera to default position")
         reset_view_action.triggered.connect(self._reset_camera_view)
         view_menu.addAction(reset_view_action)
+
+        view_menu.addSeparator()
+
+        # Projection toggle (default off = orthographic)
+        self.perspective_projection_action = QAction("Perspective Projection", self)
+        self.perspective_projection_action.setCheckable(True)
+        self.perspective_projection_action.setChecked(False)
+        self.perspective_projection_action.setStatusTip("Switch between orthographic (default) and perspective projection")
+        self.perspective_projection_action.triggered.connect(self._toggle_projection_mode)
+        view_menu.addAction(self.perspective_projection_action)
         
         # ==================== Window Menu ====================
         window_menu = menubar.addMenu("&Window")
@@ -5535,7 +5545,14 @@ class MainWindow(QMainWindow):
         """Reset the camera to default view"""
         self.visualizer.reset_camera()
         self.status_label.setText("Camera view reset")
-    
+
+    def _toggle_projection_mode(self, checked: bool):
+        """Toggle between perspective (checked) and orthographic (unchecked) projection"""
+        mode = 'perspective' if checked else 'orthographic'
+        self.visualizer.set_projection_mode(mode)
+        label = "Perspective" if checked else "Orthographic"
+        self.status_label.setText(f"Projection mode: {label}")
+
     def _show_about_dialog(self):
         """Show the about dialog"""
         QMessageBox.about(

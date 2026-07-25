@@ -40,6 +40,7 @@ export function App() {
   const [resultFields, setResultFields] = useState<ResultFieldsPayload | null>(null);
   const [meshEstimate, setMeshEstimate] = useState<string>('No mesh estimate');
   const [cameraCommand, setCameraCommand] = useState<string | null>(null);
+  const [projectionMode, setProjectionMode] = useState<'perspective' | 'orthographic'>('orthographic');
   const [showPartsDialog, setShowPartsDialog] = useState(false);
 
   const selectedPart = parts.find((part) => part.id === selectedPartId) ?? null;
@@ -447,6 +448,14 @@ export function App() {
             <button onClick={() => setCameraCommand('front')}>Front</button>
             <button onClick={() => setCameraCommand('top')}>Top</button>
             <button onClick={() => setCameraCommand('right')}>Right</button>
+            <span className="toolbar-separator" />
+            <button
+              className={projectionMode === 'orthographic' ? 'active' : ''}
+              onClick={() => setProjectionMode(projectionMode === 'orthographic' ? 'perspective' : 'orthographic')}
+              title="Toggle projection mode"
+            >
+              {projectionMode === 'orthographic' ? 'Orthographic' : 'Perspective'}
+            </button>
           </div>
         </div>
         <BabylonViewport
@@ -461,6 +470,7 @@ export function App() {
           theme={theme}
           cameraCommand={cameraCommand}
           onCameraHandled={() => setCameraCommand(null)}
+          projectionMode={projectionMode}
           onPartSelected={(id) => setSelectedPartId(id)}
         />
         <section className="result-console">

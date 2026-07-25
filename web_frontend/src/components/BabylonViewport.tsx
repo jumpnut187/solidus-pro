@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import {
   ArcRotateCamera,
+  Camera,
   Color3,
   Color4,
   DirectionalLight,
@@ -34,6 +35,7 @@ type Props = {
   theme: 'dark' | 'light';
   cameraCommand: string | null;
   onCameraHandled: () => void;
+  projectionMode: 'perspective' | 'orthographic';
   onPartSelected?: (partId: string | null) => void;
 };
 
@@ -84,6 +86,7 @@ export function BabylonViewport({
   theme,
   cameraCommand,
   onCameraHandled,
+  projectionMode,
   onPartSelected
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -333,6 +336,35 @@ export function BabylonViewport({
     camera.radius = distance;
     onCameraHandled();
   }, [cameraCommand, onCameraHandled]);
+
+  useEffect(() => {
+    const camera = cameraRef.current;
+    const engine = engineRef.current;
+    if (!camera || !engine) return;
+    const bounds = boundsFromParts(parts);
+    if (projectionMode === 'orthographic') {
+      camera.mode = Camera.ORTHOGRAPHIC_CAMERA;
+      if (bounds) {
+        const size = bounds.max.subtract(bounds.min);
+        const maxDim = Math.max(size.x, size.y, size.z, 1);
+        const aspect = engine.getAspectRatio(camera);
+        const margin = 1.2;
+        if (aspect > 1) {
+          camera.orthoTop = (maxDim * margin) / 2;
+          camera.orthoBottom = -(maxDim * margin) / 2;
+          camera.orthoRight = (maxDim * margin * aspect) / 2;
+          camera.orthoLeft = -(maxDim * margin * aspect) / 2;
+        } else {
+          camera.orthoRight = (maxDim * margin) / 2;
+          camera.orthoLeft = -(maxDim * margin) / 2;
+          camera.orthoTop = (maxDim * margin) / aspect / 2;
+          camera.orthoBottom = -(maxDim * margin) / aspect / 2;
+        }
+      }
+    } else {
+      camera.mode = Camera.PERSPECTIVE_CAMERA;
+    }
+  }, [projectionMode, parts]);
 
   return <canvas ref={canvasRef} className="viewport-canvas" />;
 }

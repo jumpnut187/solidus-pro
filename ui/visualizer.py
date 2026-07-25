@@ -883,6 +883,9 @@ class CastingVisualizer(QWidget):
         self._animation_frames: List[np.ndarray] = []
         self._is_recording = False
         self._interactor_initialized = False
+
+        # Projection mode (orthographic by default)
+        self._is_orthographic = True
         
         self._init_ui()
     
@@ -911,7 +914,11 @@ class CastingVisualizer(QWidget):
         camera.SetPosition(200, 200, 200)
         camera.SetFocalPoint(0, 0, 0)
         camera.SetViewUp(0, 0, 1)
-        
+
+        # Default to orthographic projection
+        camera.ParallelProjectionOn()
+        camera.SetParallelScale(120.0)
+
         # Store bounds for camera positioning
         self.model_bounds = None
         
@@ -1794,6 +1801,8 @@ class CastingVisualizer(QWidget):
         # Reset camera
         self.renderer.ResetCamera()
         self.renderer.ResetCameraClippingRange()
+        if self._is_orthographic:
+            self._update_parallel_scale()
         self.render_window.Render()
     
     def load_shrinkage(self, voxel_centers: np.ndarray, 
@@ -3561,6 +3570,8 @@ class CastingVisualizer(QWidget):
         # Reset camera to show all parts
         self.renderer.ResetCamera()
         self.renderer.ResetCameraClippingRange()
+        if self._is_orthographic:
+            self._update_parallel_scale()
         if not self.part_actors and part_manager.get_all_parts():
             logger.warning("No visible VTK part actors were created from loaded parts.")
         else:
@@ -3651,29 +3662,62 @@ class CastingVisualizer(QWidget):
         
         print(f"Screenshot saved to: {filepath}")
     
+    @property
+    def is_orthographic(self) -> bool:
+        return self._is_orthographic
+
+    def set_projection_mode(self, mode: str):
+        """
+        Set camera projection mode.
+
+        Args:
+            mode: 'orthographic' or 'perspective'
+        """
+        if mode not in ('orthographic', 'perspective'):
+            return
+        camera = self.renderer.GetActiveCamera()
+        if mode == 'orthographic':
+            camera.ParallelProjectionOn()
+            self._is_orthographic = True
+            self._update_parallel_scale()
+        else:
+            camera.ParallelProjectionOff()
+            self._is_orthographic = False
+        self.render_window.Render()
+
+    def _update_parallel_scale(self):
+        """Recalculate the parallel scale based on model bounds."""
+        camera = self.renderer.GetActiveCamera()
+        if self.model_bounds:
+            x_min, x_max, y_min, y_max, z_min, z_max = self.model_bounds
+            size = max(x_max - x_min, y_max - y_min, z_max - z_min, 1.0)
+            camera.SetParallelScale(size * 1.15)
+        else:
+            camera.SetParallelScale(120.0)
+
     def set_camera_view(self, view_type: str):
         """
         Set camera to preset view
-        
+
         Args:
             view_type: 'front', 'top', 'bottom', 'left', 'right', 'iso'
         """
         if self.model_bounds is None:
             return
-        
+
         # Calculate model center and size
         x_min, x_max, y_min, y_max, z_min, z_max = self.model_bounds
         center_x = (x_min + x_max) / 2
         center_y = (y_min + y_max) / 2
         center_z = (z_min + z_max) / 2
-        
+
         # Calculate distance based on model size
         size = max(x_max - x_min, y_max - y_min, z_max - z_min)
         distance = size * 2.5
-        
+
         camera = self.renderer.GetActiveCamera()
         camera.SetFocalPoint(center_x, center_y, center_z)
-        
+
         if view_type == 'front':
             # Looking from +Y towards -Y
             camera.SetPosition(center_x, center_y + distance, center_z)
@@ -3698,8 +3742,10 @@ class CastingVisualizer(QWidget):
             # Isometric view
             camera.SetPosition(center_x + distance, center_y + distance, center_z + distance)
             camera.SetViewUp(0, 0, 1)
-        
+
         self.renderer.ResetCamera()
+        if self._is_orthographic:
+            self._update_parallel_scale()
         self.render_window.Render()
 
     def reset_camera(self):
@@ -3709,7 +3755,7 @@ class CastingVisualizer(QWidget):
             self.renderer.ResetCamera()
             self.render_window.Render()
             return
-        
+
         # Use isometric view as default
         self.set_camera_view('iso')
 

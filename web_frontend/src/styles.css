@@ -374,6 +374,21 @@ button:disabled {
   padding: 7px 11px;
 }
 
+.toolbar-actions button.active {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
+.toolbar-separator {
+  display: inline-block;
+  width: 1px;
+  height: 24px;
+  margin: 0 4px;
+  background: var(--line);
+  align-self: center;
+}
+
 .viewport-canvas {
   position: absolute;
   inset: 0;
