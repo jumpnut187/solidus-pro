@@ -469,70 +469,132 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
     
     'C958': AlloyProperties(
         name='C958 (Aluminum Bronze)',
-        liquidus_temp=1063,  # 1945°F
-        solidus_temp=1043,   # 1910°F
-        pouring_temp=1288,   # 2350°F
-        density_liquid=7100,  # ~7% less than solid
-        density_solid=7640,   # ASTM B148 C95800 standard
-        thermal_conductivity=36,  # W/(m·K) per technical sources
-        specific_heat=440,    # J/(kg·K) standard value
-        latent_heat=205000,
-        linear_shrinkage=1.5,  # 1.5% linear, ~4.5% volumetric
+        # ---------------------------------------------------------------
+        # Sources (7-source cross-check, C95800 / CuAl10Fe5Ni5-C / CC333G):
+        #   CDA / copper.org (cast):    liquidus 1060 °C, solidus 1043 °C
+        #   Concast C95800 spec sheet:  1060 °C, 1043 °C
+        #   Cast Technologies PDF:      1060 °C, 1045 °C
+        #   St. Paul Foundry datasheet: 1910-1940 °F (~1043-1060 °C)
+        # Adopted: liquidus 1060 °C, solidus 1043 °C (CDA / Concast).
+        # ---------------------------------------------------------------
+        liquidus_temp=1060,  # 1940°F — CDA liquidus (was 1063)
+        solidus_temp=1043,   # 1910°F — CDA solidus (was 1043, unchanged)
+        pouring_temp=1255,   # 2300°F — St. Paul Foundry pour for light castings
+        # Density — CDA copper.org, AZoM, MatMake, Cast Technologies all give
+        #   7.64 g/cm³ (7640 kg/m³) at 20 °C for the solid casting.
+        #   C964 liquid density is typically 5-7 % below solid for Cu-Al bronzes
+        #   (rule-of-mixtures + thermal expansion); adopt 7.0 %.
+        density_liquid=7100,
+        density_solid=7640,
+        # Thermal conductivity (20 °C reference). All 5 sources agree exactly:
+        #   CDA copper.org: 20.8 Btu/(hr·ft·°F) → 36.0 W/(m·K)
+        #   Cast Technologies: 36.0 W/m-K
+        #   AZoM C95800 datasheet: 36.0 W/mK
+        #   MatMake C95800: 36 W/m·K
+        #   Concast C95800 spec: 36 W/m·K at 20 °C
+        thermal_conductivity=36,    # (unchanged, already correct)
+        specific_heat=440,         # J/(kg·K) — matches all 4 sources (unchanged)
+        # Latent heat of fusion — MakeItFrom lists 230 J/g for C95800
+        # specifically (the MakeItFrom AISI-316 vs C95800 comparison page).
+        # Rule-of-mixtures: ~0.79·Cu(205) + 0.09·Al(397) + 0.045·Ni(290)
+        #   + 0.04·Fe(247) + 0.012·Mn(267) ≈ 230-240 kJ/kg total. Al
+        # contribution raises this above pure Cu; published value is 230 kJ/kg.
+        # Previous 205,000 J/kg was effectively pure-copper value, missing the
+        # Al contribution entirely. Adopt MakeItFrom catalog value.
+        latent_heat=230000,
+        # CDA "Patternmakers shrinkage" for C95800 is 3/16 in/ft = 1.5625 % linear;
+        # Cast Technologies "Casting shrinkage allowance is 1.6 %". App's 1.5 %
+        # linear / 4.5 % volumetric is correct.
+        linear_shrinkage=1.5,
         feeding_distance_multiplier=8.0,
-        # Extended properties
-        conductivity_liquid=28,  # W/(m·K)
+        # Extended properties — liquid Cu-Al bronze retains ~ 0.78 of solid k
+        # and gains ~ 1.09× in cp at the liquidus.
+        conductivity_liquid=28,    # W/(m·K)
         specific_heat_liquid=480,
-        dynamic_viscosity=0.004,  # Pa·s - lower viscosity (better fluidity)
-        thermal_expansion=1.0e-4,  # 1/K
-        niyama_threshold=1.2,  # Higher threshold (better feeding)
-        # Hot tear properties - bronze has LOW susceptibility
-        hot_tear_susceptibility=0.20,  # Low - excellent ductility, narrow freezing range
-        solid_thermal_expansion=1.8e-5,  # 1/K solid-state thermal expansion
-        btr_critical_strain=0.012,  # Higher critical strain - more ductile
-        hot_tear_healing_factor=0.75,  # Excellent healing due to good feeding
-        btr_fraction_solid_start=0.92,  # Later onset - more ductile at high fs
-        btr_fraction_solid_end=0.97,    # Shorter BTR - regains ductility quickly
-        # Feeding/permeability properties - bronze has excellent feeding
-        critical_fraction_solid=0.62,  # Higher coherency - better fluidity
-        dendrite_arm_spacing=120.0,  # μm - coarser structure, better permeability
-        # Sand burn-in - higher susceptibility (excellent fluidity, wide superheat range)
+        dynamic_viscosity=0.004,  # Pa·s — consistent with NAB literature
+        thermal_expansion=1.0e-4,
+        # Niyama — NAB has excellent feeding and high thermal conductivity,
+        # so defect-tolerant threshold is high.
+        niyama_threshold=1.2,
+        # Hot tear properties — NAB has LOW hot-tear susceptibility (narrow
+        # ~ 17 °C freezing range; wide α + κ phase separation suppresses
+        # severe BTR; CuAl intermetallic contributes to ductility).
+        hot_tear_susceptibility=0.20,
+        solid_thermal_expansion=1.8e-5,  # CTE ~ 16-17 µm/m·K (CDA, AZoM)
+        btr_critical_strain=0.012,
+        hot_tear_healing_factor=0.75,
+        btr_fraction_solid_start=0.92,
+        btr_fraction_solid_end=0.97,
+        # Feeding/permeability — NAB has excellent feeding; CDA "Fluidity:
+        # Medium" but "Shrinkage in Solidification: HIGH" — feeding range
+        # extends further than most bronzes before coherency.
+        critical_fraction_solid=0.62,
+        dendrite_arm_spacing=120.0,
+        # Sand burn-in — excellent fluidity raises burn-in risk.
         sand_burn_in_susceptibility=0.55,
-        # Gas porosity - bronze has moderate gas sensitivity
+        # Gas porosity — CDA: "Gassing: MEDIUM" (H pickup from mould moisture;
+        # the Al content forms a protective Al2O3 skin that limits penetration).
         gas_sensitivity=0.55
     ),
 
     'C964': AlloyProperties(
         name='C964 (CuNi)',
-        liquidus_temp=1175,  # 2147°F
-        solidus_temp=1140,   # 2084°F
-        pouring_temp=1280,   # 2336°F
-        density_liquid=8700,
-        density_solid=8860,
-        thermal_conductivity=22,  # W/(m·K)
-        specific_heat=500,  # J/(kg·K)
-        latent_heat=186000,
-        linear_shrinkage=1.8,  # 1.8% linear, ~5.4% volumetric
-        feeding_distance_multiplier=7.8,
-        # Extended properties
-        conductivity_liquid=16,  # W/(m·K)
-        specific_heat_liquid=555,  # J/(kg·K)
-        dynamic_viscosity=0.0048,  # Pa·s - good cast fluidity
-        thermal_expansion=1.3e-4,  # 1/K
-        niyama_threshold=1.1,  # Good feeding and lower defect susceptibility
-        # Hot tear properties - copper-nickel has moderate susceptibility
-        hot_tear_susceptibility=0.28,  # Moderate susceptibility
-        solid_thermal_expansion=1.6e-5,  # 1/K solid-state thermal expansion
-        btr_critical_strain=0.007,  # Moderate critical strain
-        hot_tear_healing_factor=0.50,  # Moderate healing effectiveness
-        btr_fraction_solid_start=0.89,  # Later onset due to good ductility
-        btr_fraction_solid_end=0.97,    # Regains ductility more quickly
-        # Feeding/permeability properties
-        critical_fraction_solid=0.56,  # Moderate coherency
-        dendrite_arm_spacing=95.0,  # μm
-        # Sand burn-in - good fluidity and superheat range
+        # ---------------------------------------------------------------
+        # Sources (8-source cross-check):
+        #   NSWCCD-61-TR-2024/14         (DSC cast): liquidus 1232, solidus 1180
+        #   CDA / copper.org (cast):      liquidus 1232, solidus 1166
+        #   ZOLLERN GN 30 (cast spec):    1170 - 1240
+        #   Cast Technologies (sand-cast): 1170 - 1240
+        #   AZoM (sand-cast):              melting 1170 - 1240
+        # Adopted: liquidus 1232 °C, solidus 1180 °C (DSC measurement).
+        # ---------------------------------------------------------------
+        liquidus_temp=1232,  # 2250°F — DSC cast value (was 1175)
+        solidus_temp=1180,   # 2156°F — DSC cast value (was 1140)
+        pouring_temp=1280,   # 2336°F (~48 °C superheat above liquidus)
+        # Density — weighted solid ~ 8940 kg/m³ (CDA, AZoM, MatMake), liquid
+        # ~ 1.5-2 % lower (densification on solidification of Cu-Ni FCC).
+        density_liquid=8770,
+        density_solid=8940,
+        # Thermal conductivity (20 °C reference). C96400 sand-cast bar values:
+        #   AZoM 29.0, Cast Technologies 29.0, ZOLLERN 29.0, MatMake (C71500) 29.0,
+        #   copper.org (Btu conversion) 28.4, MakeItFrom 28.
+        # NSWCCD Table B-4 reports 6.15 W/(m·K) but the units in that PDF table
+        # are internally inconsistent (rho*cp*alpha yields ~750 W/(m·K) using
+        # their numbers); we adopt the literature consensus of 29 W/(m·K).
+        thermal_conductivity=29,  # W/(m·K) — was 22
+        specific_heat=376,       # J/(kg·K) — AZoM 375, MatMake 380, CDA 377 (was 500)
+        # Latent heat of fusion. MakeItFrom and MatMake both list 230-240 kJ/kg
+        # (~70% Cu × 205 + 30% Ni × 290 = 230.5 kJ/kg by rule-of-mixtures).
+        # NSWCCD Table B-2's 48.2 J/g is the integrated area of a single DSC
+        # sub-peak (the PDF itself notes "two peaks"); total latent heat
+        # is ~ 240 kJ/kg per industry data.
+        latent_heat=240000,
+        linear_shrinkage=1.8,  # CDA "Patternmakers shrinkage" 7/32 in/ft = 1.786%
+        feeding_distance_multiplier=7.8,  # CDA "Fluidity" is HIGH — large multiplier
+        # Extended properties — liquid Cu-Ni retains ~ 70% of solid conductivity
+        # and gains ~ 10% in specific heat near liquidus.
+        conductivity_liquid=20,   # W/(m·K) (≈ 0.7 of solid) — was 16
+        specific_heat_liquid=414, # J/(kg·K) (≈ 1.1 of solid) — was 555
+        dynamic_viscosity=0.0048,  # Pa·s — consistent with liquid Cu alloys
+        thermal_expansion=1.3e-4,  # 1/K (liquid)
+        niyama_threshold=1.1,  # Cu-Ni has good feeding; CDA "Fluidity: HIGH"
+        # Hot tear properties — copper-nickel has low-to-moderate susceptibility
+        # (CDA "Drossing: Medium", "Section size: Low"). The app default (0.28)
+        # sits between C958 (0.20) and CA6NM (0.38), matching CDA's profile.
+        hot_tear_susceptibility=0.28,
+        solid_thermal_expansion=1.6e-5,  # 1/K — mean CTE 16 µm/m·K (AZoM, CDA)
+        btr_critical_strain=0.007,
+        hot_tear_healing_factor=0.50,
+        btr_fraction_solid_start=0.89,
+        btr_fraction_solid_end=0.97,
+        critical_fraction_solid=0.56,
+        dendrite_arm_spacing=95.0,  # µm — typical 70/30 Cu-Ni sand-cast
+        # CDA "Sand burn-in" susceptibility falls between bronze (high) and
+        # stainless (low); C964 "Fluidity" rating is HIGH.
         sand_burn_in_susceptibility=0.48,
-        # Gas porosity - moderate sensitivity
-        gas_sensitivity=0.50
+        # CDA "Gassing: High" for Cu-Ni (hydrogen pickup from moisture is the
+        # primary gas-defect mode for 70/30 Cu-Ni in marine service).
+        gas_sensitivity=0.60
     ),
 
     'CA6NM': AlloyProperties(
