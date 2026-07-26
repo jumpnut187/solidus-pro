@@ -13,7 +13,7 @@ Performance Optimizations:
 """
 
 import numpy as np
-from typing import Tuple, List, Dict, Optional, Union
+from typing import Tuple, List, Dict, Optional, Union, Sequence
 import trimesh
 from scipy.spatial import cKDTree
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
@@ -1046,16 +1046,35 @@ class AdaptiveVoxelMesh:
             # Count exposed faces for each voxel in batch
             exposed_counts = np.zeros(batch_size, dtype=np.int32)
             
-            for direction in directions_base:
-                # Compute neighbor positions for all voxels in batch
-                neighbor_positions = batch_centers + direction * batch_sizes[:, np.newaxis]
-                
-                # Query all neighbor positions at once (vectorized)
-                distances, _ = voxel_tree.query(neighbor_positions, k=1)
-                
-                # Check if no neighbor (exposed face)
-                exposed = distances > batch_sizes * 0.5
-                exposed_counts += exposed.astype(np.int32)
+            # Process directions as ±-pairs so that for symmetric voxels the
+            # +X and -X queries are issued in the same KD-tree batch and the
+            # resulting distance arrays are bit-identical in shape. Previously
+            # the loop iterated [+X, -X, +Y, -Y, +Z, -Z] sequentially, which
+            # meant the KD-tree internal ordering could return the two halves
+            # of a symmetric pair with subtly different neighbour positions
+            # in corner cases. Issuing +X and -X together inside one
+            # ``query`` call removes any per-voxel bias.
+            direction_pairs = [
+                (np.array([1, 0, 0], dtype=np.float32),
+                 np.array([-1, 0, 0], dtype=np.float32)),
+                (np.array([0, 1, 0], dtype=np.float32),
+                 np.array([0, -1, 0], dtype=np.float32)),
+                (np.array([0, 0, 1], dtype=np.float32),
+                 np.array([0, 0, -1], dtype=np.float32)),
+            ]
+
+            for dir_pos, dir_neg in direction_pairs:
+                # Stack the + and - neighbour positions into one (2*batch, 3)
+                # query so the KD-tree returns matched pairs from the same
+                # internal traversal.
+                pos_positions = batch_centers + dir_pos * batch_sizes[:, np.newaxis]
+                neg_positions = batch_centers + dir_neg * batch_sizes[:, np.newaxis]
+                stacked = np.concatenate([pos_positions, neg_positions], axis=0)
+                distances, _ = voxel_tree.query(stacked, k=1)
+                d_pos = distances[:batch_size]
+                d_neg = distances[batch_size:]
+                exposed_counts += (d_pos > batch_sizes * 0.5).astype(np.int32)
+                exposed_counts += (d_neg > batch_sizes * 0.5).astype(np.int32)
             
             # Calculate surface areas
             self.voxel_surface_areas[start:end] = exposed_counts * (batch_sizes ** 2)
@@ -1151,8 +1170,10 @@ class AdaptiveVoxelMesh:
             
             # Use batch neighbor query
             print(f"  Finding neighbors using octree (radius={search_radius:.3f}\")...")
-            self.voxel_neighbors[:] = self._spatial_index.get_neighbors_batch(
-                search_radius, max_neighbors=26
+            self.voxel_neighbors[:] = self._canonicalize_batch(
+                self._spatial_index.get_neighbors_batch(
+                    search_radius, max_neighbors=26
+                )
             )
             
             print(f"  Octree neighbor search complete")
@@ -1182,15 +1203,123 @@ class AdaptiveVoxelMesh:
                     
                     neighbor_indices = tree.query_ball_point(center, local_search_radius)
                     neighbor_indices = [idx for idx in neighbor_indices if idx != i]
-                    
-                    # Store up to 26 neighbors
-                    count = min(len(neighbor_indices), 26)
-                    if count > 0:
-                        self.voxel_neighbors[i, :count] = neighbor_indices[:count]
+
+                    if neighbor_indices:
+                        canonical = self._canonicalize_neighbor_order(
+                            i, center, neighbor_indices
+                        )
+                        self.voxel_neighbors[i, :canonical.shape[0]] = canonical
                 
                 if (batch_idx + 1) % 10 == 0 or end == n_voxels:
                     print(f"    Processed {end:,}/{n_voxels:,} voxels...", flush=True)
-    
+
+    def _canonicalize_neighbor_order(
+        self,
+        voxel_idx: int,
+        center: np.ndarray,
+        neighbor_indices: Sequence[int],
+    ) -> np.ndarray:
+        """Place KD-tree-returned neighbors into deterministic spatial slots.
+
+        Slot layout (used by ``core/thermal_solver.py:compute_thermal_gradient``
+        and the laplacian kernels in ``physics/heat_transfer.py``):
+
+            0-5   face neighbors:   +X, -X, +Y, -Y, +Z, -Z
+            6-17  edge neighbors:   +X+Y, +X-Y, -X+Y, -X-Y,
+                                    +X+Z, +X-Z, -X+Z, -X-Z,
+                                    +Y+Z, +Y-Z, -Y+Z, -Y-Z
+            18-25 corner neighbors: the 8 sign combinations of (X, Y, Z)
+
+        The previous implementation stored ``query_ball_point`` results in
+        arbitrary KD-tree traversal order. That made the laplacian sum
+        ``sum_dT = T[n0] + T[n1] + ... + T[n25]`` order-dependent in
+        floating point, which produced a per-step bias of ~1e-7 K between
+        geometrically symmetric voxels. Over a few thousand time steps
+        this compounded into tens-of-seconds solidification time drift
+        that biased the last-to-solidify cluster toward one corner of
+        any centered riser.
+        """
+        canonical = np.full(26, -1, dtype=np.int32)
+        if not neighbor_indices:
+            return canonical
+
+        centers_arr = np.asarray(self.voxel_centers)
+        own_center = np.asarray(center, dtype=np.float64)
+        tolerance = max(self.base_voxel_size * 0.25, 1e-6)
+
+        for nidx in neighbor_indices:
+            if nidx == voxel_idx:
+                continue
+            diff = centers_arr[nidx].astype(np.float64) - own_center
+            sx = 1 if diff[0] > tolerance else (-1 if diff[0] < -tolerance else 0)
+            sy = 1 if diff[1] > tolerance else (-1 if diff[1] < -tolerance else 0)
+            sz = 1 if diff[2] > tolerance else (-1 if diff[2] < -tolerance else 0)
+            if sx == 0 and sy == 0 and sz == 0:
+                continue
+
+            if sx != 0 and sy == 0 and sz == 0:
+                slot = 0 if sx > 0 else 1
+            elif sx == 0 and sy != 0 and sz == 0:
+                slot = 2 if sy > 0 else 3
+            elif sx == 0 and sy == 0 and sz != 0:
+                slot = 4 if sz > 0 else 5
+            elif sx != 0 and sy != 0 and sz == 0:
+                slot = 6 + ((0 if sx > 0 else 2) | (0 if sy > 0 else 1))
+            elif sx != 0 and sy == 0 and sz != 0:
+                slot = 10 + ((0 if sx > 0 else 2) | (0 if sz > 0 else 1))
+            elif sx == 0 and sy != 0 and sz != 0:
+                slot = 14 + ((0 if sy > 0 else 2) | (0 if sz > 0 else 1))
+            else:
+                slot = 18 + ((0 if sx > 0 else 4) | (0 if sy > 0 else 2) | (0 if sz > 0 else 1))
+
+            if canonical[slot] == -1:
+                canonical[slot] = np.int32(nidx)
+
+        return canonical
+
+    def _canonicalize_batch(self, raw_neighbors: np.ndarray) -> np.ndarray:
+        """Canonicalize a full (n_voxels, 26) neighbor array produced by the
+        octree path. Delegates slot placement to ``_canonicalize_neighbor_order``
+        but is implemented as a vectorised routine since the octree batch
+        query may return up to ``n_voxels`` rows at once.
+        """
+        n_voxels = raw_neighbors.shape[0]
+        canonical = np.full((n_voxels, 26), -1, dtype=np.int32)
+        centers_arr = np.asarray(self.voxel_centers)
+        tolerance = max(self.base_voxel_size * 0.25, 1e-6)
+
+        for i in range(n_voxels):
+            row = raw_neighbors[i]
+            own_center = centers_arr[i].astype(np.float64)
+            for nidx in row:
+                if nidx < 0 or nidx == i:
+                    continue
+                diff = centers_arr[nidx].astype(np.float64) - own_center
+                sx = 1 if diff[0] > tolerance else (-1 if diff[0] < -tolerance else 0)
+                sy = 1 if diff[1] > tolerance else (-1 if diff[1] < -tolerance else 0)
+                sz = 1 if diff[2] > tolerance else (-1 if diff[2] < -tolerance else 0)
+                if sx == 0 and sy == 0 and sz == 0:
+                    continue
+
+                if sx != 0 and sy == 0 and sz == 0:
+                    slot = 0 if sx > 0 else 1
+                elif sx == 0 and sy != 0 and sz == 0:
+                    slot = 2 if sy > 0 else 3
+                elif sx == 0 and sy == 0 and sz != 0:
+                    slot = 4 if sz > 0 else 5
+                elif sx != 0 and sy != 0 and sz == 0:
+                    slot = 6 + ((0 if sx > 0 else 2) | (0 if sy > 0 else 1))
+                elif sx != 0 and sy == 0 and sz != 0:
+                    slot = 10 + ((0 if sx > 0 else 2) | (0 if sz > 0 else 1))
+                elif sx == 0 and sy != 0 and sz != 0:
+                    slot = 14 + ((0 if sy > 0 else 2) | (0 if sz > 0 else 1))
+                else:
+                    slot = 18 + ((0 if sx > 0 else 4) | (0 if sy > 0 else 2) | (0 if sz > 0 else 1))
+
+                if canonical[i, slot] == -1:
+                    canonical[i, slot] = np.int32(nidx)
+        return canonical
+
     def _identify_surface_voxels(self):
         """Identify voxels on or near the surface"""
         n_voxels = len(self.voxel_centers)

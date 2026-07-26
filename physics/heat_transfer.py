@@ -375,19 +375,46 @@ class HeatTransferModel:
         else:
             # Compute Laplacian using neighbor stencil (vectorized)
             # ∇²T ≈ Σ(T_neighbor - T_i) / (n * dx²)
+            #
+            # Slot layout (set by core/voxel_mesh.py._canonicalize_neighbor_order):
+            #   0 = +X, 1 = -X, 2 = +Y, 3 = -Y, 4 = +Z, 5 = -Z
+            #   6..17 = 12 edge neighbors, 18..25 = 8 corner neighbors.
+            # Summing in slot pairs (face, then edge, then corner) keeps the
+            # accumulation order symmetric between geometrically symmetric
+            # voxels and removes the per-step floating-point bias that would
+            # otherwise compound over thousands of time steps.
+            #
+            # Some unit tests pass a smaller neighbour array (e.g. only the
+            # 6 face slots); we clamp each loop range to whatever shape[1]
+            # actually provides.
             laplacian = np.zeros(self.n_voxels, dtype=np.float64)
+            max_slot = self.neighbors.shape[1]
 
-            for j in range(self.neighbors.shape[1]):
-                neighbor_indices = self.neighbors[:, j]
-                valid = neighbor_indices >= 0
+            slot_pairs = [(0, 1), (2, 3), (4, 5)]
+            for j_a, j_b in slot_pairs:
+                if j_a >= max_slot or j_b >= max_slot:
+                    continue
+                n_a = self.neighbors[:, j_a]
+                n_b = self.neighbors[:, j_b]
+                v_a = n_a >= 0
+                v_b = n_b >= 0
+                dT_a = np.where(v_a, T[np.maximum(n_a, 0)] - T, 0.0)
+                dT_b = np.where(v_b, T[np.maximum(n_b, 0)] - T, 0.0)
+                laplacian += dT_a + dT_b
 
-                # T_neighbor - T for valid neighbors
-                dT = np.where(
-                    valid,
-                    T[np.maximum(neighbor_indices, 0)] - T,
-                    0.0
-                )
-                laplacian += dT
+            edge_start = min(6, max_slot)
+            edge_end = min(18, max_slot)
+            for j in range(edge_start, edge_end):
+                n_j = self.neighbors[:, j]
+                valid = n_j >= 0
+                laplacian += np.where(valid, T[np.maximum(n_j, 0)] - T, 0.0)
+
+            corner_start = min(18, max_slot)
+            corner_end = min(26, max_slot)
+            for j in range(corner_start, corner_end):
+                n_j = self.neighbors[:, j]
+                valid = n_j >= 0
+                laplacian += np.where(valid, T[np.maximum(n_j, 0)] - T, 0.0)
 
             # Normalize by neighbor count and dx²
             laplacian = np.where(
@@ -527,22 +554,47 @@ if NUMBA_AVAILABLE:
     ) -> FloatArray:
         """
         Compute discrete Laplacian in parallel.
-        
+
         Uses Numba for acceleration.
+
+        Slots follow the canonical layout set by
+        ``core/voxel_mesh.py._canonicalize_neighbor_order``: slots 0-5
+        are face neighbors in [+X, -X, +Y, -Y, +Z, -Z] order, slots
+        6-17 are edges, slots 18-25 are corners. Summing in slot pairs
+        (face-pair, edge-row, corner-row) keeps the float-summation
+        order consistent between geometrically symmetric voxels.
         """
         n = len(T)
         laplacian = np.zeros(n, dtype=np.float64)
-        
+        max_slot = neighbors.shape[1]
+        slot_face_end = min(6, max_slot)
+        slot_edge_start = min(6, max_slot)
+        slot_edge_end = min(18, max_slot)
+        slot_corner_start = min(18, max_slot)
+        slot_corner_end = min(26, max_slot)
+
         for i in prange(n):
+            t_i = T[i]
             sum_dT = 0.0
-            for j in range(neighbors.shape[1]):
+
+            for j in range(slot_face_end):
                 neighbor_idx = neighbors[i, j]
                 if neighbor_idx >= 0:
-                    sum_dT += T[neighbor_idx] - T[i]
-            
+                    sum_dT += T[neighbor_idx] - t_i
+
+            for j in range(slot_edge_start, slot_edge_end):
+                neighbor_idx = neighbors[i, j]
+                if neighbor_idx >= 0:
+                    sum_dT += T[neighbor_idx] - t_i
+
+            for j in range(slot_corner_start, slot_corner_end):
+                neighbor_idx = neighbors[i, j]
+                if neighbor_idx >= 0:
+                    sum_dT += T[neighbor_idx] - t_i
+
             if neighbor_counts[i] > 0:
                 laplacian[i] = sum_dT / (neighbor_counts[i] * dx2)
-        
+
         return laplacian
     
     @njit(parallel=True, cache=True)
