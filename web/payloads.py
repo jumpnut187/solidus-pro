@@ -34,11 +34,15 @@ BASIC_SURFACE_MODES = {
     "niyama_raw",
     "combined_feed_risk",
     "fraction_liquid",
+    "porosity",
 }
 ADVANCED_SURFACE_MODES = {
     "hot_tear",
     "sand_burn_in",
     "feeding_quality",
+    "feeding_blocked",
+    "feeding_path_lengths",
+    "feeding_open_fraction",
     "thermal_stress",
     "distortion",
     "crack_susceptibility",
@@ -304,6 +308,10 @@ def build_fork_artifact(result: PipelineResult) -> Dict[str, Any]:
         "crack_susceptibility": getattr(engine, "crack_susceptibility", None),
         "sdas": _normalize(getattr(engine, "sdas", None)),
         "predicted_uts": _invert(_normalize(getattr(engine, "predicted_uts", None))),
+        "porosity": getattr(engine, "porosity_probability", None),
+        "feeding_blocked": getattr(engine, "feeding_blocked", None),
+        "feeding_path_lengths": getattr(engine, "feeding_path_lengths", None),
+        "feeding_open_fraction": getattr(engine, "feeding_open_fraction", None),
     }
     raw_ranges: Dict[str, Dict[str, float]] = {}
     part_types = getattr(mesh, "voxel_part_types", None)
@@ -534,15 +542,17 @@ def _solidification_path_values(visualization: Dict[str, Any], time_percent: flo
     finite = times[np.isfinite(times) & (times >= 0.0)]
     if finite.size == 0:
         return None
+    # Only return a synthetic field when fraction_liquid_history is empty.
+    history = visualization.get("fraction_liquid_history")
+    if isinstance(history, list) and history:
+        return None
     min_time = float(np.min(finite))
     max_time = float(np.max(finite))
     if max_time <= min_time:
         return None
-
     progress = float(np.clip(time_percent / 100.0, 0.0, 1.0))
     if progress >= 0.995:
         return np.zeros_like(times, dtype=np.float32)
-
     normalized = np.clip((times - min_time) / (max_time - min_time), 0.0, 1.0)
     front_width = 0.075
     remaining_liquid = np.clip((normalized - progress) / front_width, 0.0, 1.0)

@@ -134,6 +134,83 @@ class ShrinkageDisplayIntensityTests(unittest.TestCase):
         self.assertFalse(lowered)
         self.assertAlmostEqual(threshold, 0.30, places=6)
 
+    def test_isolation_factor_uses_feeding_blocked_when_hotspot_missing(self) -> None:
+        """Isolation factor is non-zero for feeding-blocked voxels even without hotspot."""
+        engine = SolidificationEngine.__new__(SolidificationEngine)
+        engine.mesh = SimpleNamespace(
+            voxel_part_types=np.array([0, 0], dtype=np.int32),
+            voxel_moduli=np.array([0.5, 0.5], dtype=np.float32),
+        )
+        engine.solidification_times = np.array([100.0, 100.0], dtype=np.float32)
+        engine.hotspot_intensity = None
+        engine.feeding_blocked = np.array([True, False], dtype=bool)
+        engine.feeding_open_fraction = np.array([0.1, 1.0], dtype=np.float32)
+
+        valid_indices = np.array([0, 1], dtype=np.int32)
+        normalized_heights = np.array([0.5, 0.5], dtype=np.float32)
+        local_section_size = np.array([1.0, 1.0], dtype=np.float32)
+        riser_mask = np.array([False, False], dtype=bool)
+        riser_post_mask = np.array([False, False], dtype=bool)
+
+        (base_risk, _, _, _, _, _, _, _, _, _, _) = engine._compute_shrinkage_base_risk(
+            valid_indices,
+            normalized_heights,
+            local_section_size,
+            riser_mask,
+            riser_post_mask,
+        )
+
+        # Blocked voxel (index 0) should have higher base risk due to
+        # feeding_blocked contributing 0.85 to isolation_factor (40% weight).
+        # Open voxel (index 1) has no isolation contribution.
+        self.assertGreater(
+            float(base_risk[0]),
+            float(base_risk[1]),
+            "Feeding-blocked voxel should have higher base_risk",
+        )
+
+    def test_shrinkage_keeps_isolated_pocket_visible(self) -> None:
+        """Feeding-blocked voxels return high feed_loss so they remain visible.
+
+        The low-evidence cap (Item 3) would otherwise suppress these voxels
+        since they have low thermal evidence.  The blocked_floor override ensures
+        they stay above the 0.30 UI threshold.
+        """
+        dummy = SimpleNamespace(
+            mesh=SimpleNamespace(
+                voxel_centers=np.zeros((4, 3), dtype=np.float32),
+            ),
+            shrinkage_probability=np.array([0.1, 0.1, 0.1, 0.1], dtype=np.float32),
+            solidification_times=np.array([100.0, 100.0, 100.0, 100.0], dtype=np.float32),
+            niyama_severity=np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32),
+            feeding_quality=np.array([1.0, 1.0, 0.0, 0.0], dtype=np.float32),
+            feeding_open_fraction=np.array([1.0, 1.0, 0.0, 0.0], dtype=np.float32),
+            feeding_blocked=np.array([False, False, True, True], dtype=bool),
+            feeding_darcy_margin=np.array([1.0, 1.0, -0.8, -0.8], dtype=np.float32),
+        )
+        dummy._get_connected_feeder_mask = lambda: np.array([True, True, True, True], dtype=bool)
+
+        evidence, feed_loss, healthy = SolidificationEngine._calculate_shrinkage_evidence(
+            dummy,
+            np.array([1.0, 1.0, 0.1, 0.1], dtype=np.float32),
+        )
+
+        # Voxels 0 and 1 are well-fed; their feed_loss should be low.
+        self.assertLess(float(feed_loss[0]), 0.1)
+        self.assertLess(float(feed_loss[1]), 0.1)
+        # Voxels 2 and 3 are feeding-blocked; feed_loss must be high so that
+        # the blocked_floor in _calculate_shrinkage keeps shrinkage visible.
+        self.assertGreater(
+            float(feed_loss[2]),
+            0.9,
+            "Blocked voxel 2 must have high feed_loss",
+        )
+        self.assertGreater(
+            float(feed_loss[3]),
+            0.9,
+            "Blocked voxel 3 must have high feed_loss",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -159,6 +159,96 @@ class IsolatedPocketDetectionTests(unittest.TestCase):
         self.assertTrue(bool(result.blocked_voxels[3]))
         self.assertTrue(bool(result.blocked_voxels[4]))
 
+    def test_isolated_pocket_in_history_blocked_at_intermediate_snapshot(self) -> None:
+        """A pocket blocked at an intermediate snapshot is reported as blocked.
+
+        This is the regression test for the bug where the history merge
+        overwrote blocked_voxels with the most recent eligible snapshot's
+        value, causing pockets that were blocked at intermediate times but
+        connected at the last snapshot to be falsely reported as fed.
+        """
+        analyzer = FeedingPathAnalyzer(self.mesh, None)
+        riser_indices = np.array([0], dtype=np.int64)
+        fraction_solid = np.array([0.5, 0.5, 0.5, 0.5, 0.5], dtype=np.float32)
+
+        # Snap 0 (t=0): all liquid, barrier not yet solidified, pocket is fed
+        snap_early = np.array([0.3, 0.3, 0.3, 0.3, 0.3], dtype=np.float32)
+        # Snap 1 (t=4): barrier (voxel 2) now at 0.99, pocket becomes isolated
+        snap_mid = np.array([0.4, 0.4, 0.99, 0.4, 0.4], dtype=np.float32)
+        # Snap 2 (t=8): barrier fully solid, but if barrier were removed the pocket
+        # would be connected. In the history we simulate the barrier staying.
+        snap_late = np.array([0.5, 0.5, 1.0, 0.5, 0.5], dtype=np.float32)
+
+        history = [snap_early, snap_mid, snap_late]
+        history_times = [0.0, 4.0, 8.0]
+        # All CAST voxels cross critical_fs at t=6
+        reference_times = np.array([6.0, 6.0, 6.0, 6.0, 6.0], dtype=np.float32)
+
+        result = analyzer.analyze(
+            riser_indices,
+            fraction_solid,
+            show_progress=False,
+            history=history,
+            history_times=history_times,
+            reference_times=reference_times,
+        )
+
+        # Voxel 1 is connected at all snapshots
+        self.assertFalse(bool(result.blocked_voxels[1]))
+        # Voxels 3 and 4 were blocked at t=4 (eligible <= 6.0), so they must
+        # be reported as blocked in the merged result even though they were
+        # fed at t=0 and t=8.
+        self.assertTrue(
+            bool(result.blocked_voxels[3]),
+            "Pocket voxels 3,4 must be blocked even though they were fed at t=0",
+        )
+        self.assertTrue(
+            bool(result.blocked_voxels[4]),
+            "Pocket voxels 3,4 must be blocked even though they were fed at t=0",
+        )
+
+    def test_isolated_pocket_history_consistent_across_max_samples(self) -> None:
+        """Higher max_history_samples produces the same result when snapshots are identical."""
+        analyzer = FeedingPathAnalyzer(self.mesh, None)
+        riser_indices = np.array([0], dtype=np.int64)
+        fraction_solid = np.array([0.5, 0.5, 0.5, 0.5, 0.5], dtype=np.float32)
+
+        snap_early = np.array([0.3, 0.3, 0.4, 0.3, 0.3], dtype=np.float32)
+        snap_mid = np.array([0.4, 0.4, 0.995, 0.4, 0.4], dtype=np.float32)
+        snap_late = np.array([0.5, 0.5, 1.0, 0.5, 0.5], dtype=np.float32)
+
+        history = [snap_early, snap_mid, snap_late]
+        history_times = [0.0, 5.0, 10.0]
+        reference_times = np.array([8.0, 8.0, 8.0, 8.0, 8.0], dtype=np.float32)
+
+        result_default = analyzer.analyze(
+            riser_indices,
+            fraction_solid,
+            show_progress=False,
+            history=history,
+            history_times=history_times,
+            reference_times=reference_times,
+        )
+
+        result_high = analyzer.analyze(
+            riser_indices,
+            fraction_solid,
+            show_progress=False,
+            history=history,
+            history_times=history_times,
+            reference_times=reference_times,
+            max_history_samples=200,
+        )
+
+        # Both should agree on blocked status
+        for i in range(5):
+            self.assertEqual(
+                bool(result_default.blocked_voxels[i]),
+                bool(result_high.blocked_voxels[i]),
+                f"Voxel {i}: default max_samples={result_default.blocked_voxels[i]}, "
+                f"high max_samples={result_high.blocked_voxels[i]}",
+            )
+
     def test_permeability_threshold_allows_mushy_traversal(self) -> None:
         """At default critical_fs (0.52), permeability is well above 1e-16."""
         analyzer = FeedingPathAnalyzer(self.mesh, None)

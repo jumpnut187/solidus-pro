@@ -243,6 +243,20 @@ def build_visualization_payload(
             "affected_count": int(np.sum(shrinkage > 0.05)),
         }
 
+    # Expose feeding-blocked and feeding-path fields for the shrinkage/porosity overlay.
+    feeding_blocked = getattr(engine, "feeding_blocked", None)
+    if feeding_blocked is not None and len(feeding_blocked) == n_voxels:
+        visualization_data["feeding_blocked"] = np.asarray(feeding_blocked, dtype=bool)[indices].tolist()
+    feeding_path_lengths = getattr(engine, "feeding_path_lengths", None)
+    if feeding_path_lengths is not None and len(feeding_path_lengths) == n_voxels:
+        visualization_data["feeding_path_lengths"] = np.asarray(feeding_path_lengths, dtype=np.float32)[indices].tolist()
+    feeding_open_fraction = getattr(engine, "feeding_open_fraction", None)
+    if feeding_open_fraction is not None and len(feeding_open_fraction) == n_voxels:
+        visualization_data["feeding_open_fraction"] = np.asarray(feeding_open_fraction, dtype=np.float32)[indices].tolist()
+    porosity_standalone = getattr(engine, "porosity_probability", None)
+    if porosity_standalone is not None and len(porosity_standalone) == n_voxels:
+        visualization_data["porosity"] = np.asarray(porosity_standalone, dtype=np.float32)[indices].tolist()
+
     local_modulus = getattr(engine, "local_modulus", None)
     if local_modulus is None:
         local_modulus = getattr(voxel_mesh, "voxel_moduli", None)

@@ -79,6 +79,48 @@ class WebApiPayloadTests(unittest.TestCase):
         self.assertEqual(len(payload["fraction_liquid"]["frames"]), 2)
         self.assertEqual(len(payload["fraction_liquid"]["frames"][0]), 64)
 
+    def test_synthetic_fraction_liquid_only_when_history_empty(self) -> None:
+        """Synthetic fraction_liquid front is only returned when no history exists.
+
+        When fraction_liquid_history is present, the actual interpolated frame
+        from history is returned instead of the synthetic smooth front.
+        """
+        from web.payloads import _solidification_path_values
+
+        # Case 1: Both history and solidification_times present - synthetic NOT returned.
+        vis_with_history = {
+            "centers": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+            "sizes": [1.0, 1.0, 1.0],
+            "solidification_times": [0.0, 50.0, 100.0],
+            "fraction_liquid_history": [
+                [1.0, 1.0, 1.0],  # fully liquid at t=0
+                [0.5, 0.5, 0.5],  # half solid at t=mid
+                [0.0, 0.0, 0.0],  # fully solid at t=end
+            ],
+        }
+        result_with_history = _solidification_path_values(vis_with_history, 50.0)
+        # Should return None because history is non-empty.
+        self.assertIsNone(
+            result_with_history,
+            "Synthetic field should be None when history is present",
+        )
+
+        # Case 2: Only solidification_times (no history) - synthetic IS returned.
+        vis_no_history = {
+            "centers": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+            "sizes": [1.0, 1.0, 1.0],
+            "solidification_times": [0.0, 50.0, 100.0],
+            "fraction_liquid_history": [],
+        }
+        result_no_history = _solidification_path_values(vis_no_history, 50.0)
+        self.assertIsNotNone(
+            result_no_history,
+            "Synthetic field should be returned when history is empty",
+        )
+        # At 50% progress, the front is at the middle (normalized=0.5).
+        # The synthetic front is a smooth gradient, so values should vary.
+        self.assertEqual(len(result_no_history), 3)
+
     def test_shrinkage_mode_uses_combined_adjusted_risk(self) -> None:
         shrinkage = np.array([0.1, 0.8, 0.0], dtype=np.float32)
         porosity = np.array([0.7, 0.2, 0.4], dtype=np.float32)
@@ -118,6 +160,64 @@ class WebApiPayloadTests(unittest.TestCase):
         np.testing.assert_allclose(fields["fields"]["shrinkage"]["values"], [0.7, 0.8, 0.4])
         self.assertEqual(summary["shrink_scalar"], 2.0)
         self.assertEqual(summary["shrinkage_stats"]["affected_count"], 3)
+
+    def test_porosity_mode_exposed_separately(self) -> None:
+        """Feeding-blocked, path lengths, open fraction, and porosity are exposed."""
+        shrinkage = np.array([0.1, 0.8, 0.3], dtype=np.float32)
+        porosity = np.array([0.7, 0.2, 0.4], dtype=np.float32)
+        feeding_blocked = np.array([False, True, True], dtype=bool)
+        feeding_path_lengths = np.array([-1.0, 2.5, 3.0], dtype=np.float32)
+        feeding_open_fraction = np.array([1.0, 0.1, 0.0], dtype=np.float32)
+        engine = SimpleNamespace(
+            shrinkage_probability=shrinkage,
+            porosity_probability=porosity,
+            shrink_scalar=1.0,
+            shrink_scalar_formula="adjusted_risk = clamp(raw_risk / shrink_scalar, 0, 1)",
+            hotspot_intensity=None,
+            niyama_values=None,
+            niyama_risk=None,
+            combined_feed_risk=None,
+            solidification_times=None,
+            fraction_liquid_history=[],
+            feeding_blocked=feeding_blocked,
+            feeding_path_lengths=feeding_path_lengths,
+            feeding_open_fraction=feeding_open_fraction,
+        )
+        engine.get_shrinkage_display_intensity = lambda: np.maximum(shrinkage, porosity)
+        voxel_mesh = SimpleNamespace(
+            voxel_centers=np.array(
+                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+                dtype=np.float32,
+            ),
+            voxel_sizes=np.ones(3, dtype=np.float32),
+            surface_voxels=None,
+            voxel_states=None,
+        )
+
+        summary, visualization = build_visualization_payload(
+            engine,
+            voxel_mesh,
+            total_volume=3.0,
+            bounds=np.array([[0.0, 2.0], [0.0, 0.0], [0.0, 0.0]], dtype=np.float32),
+            max_voxels=10,
+        )
+
+        # Check that all new fields are present and have correct length.
+        self.assertIn("porosity", visualization)
+        self.assertEqual(len(visualization["porosity"]), 3)
+        np.testing.assert_allclose(visualization["porosity"], [0.7, 0.2, 0.4])
+
+        self.assertIn("feeding_blocked", visualization)
+        self.assertEqual(len(visualization["feeding_blocked"]), 3)
+        self.assertEqual(list(visualization["feeding_blocked"]), [False, True, True])
+
+        self.assertIn("feeding_path_lengths", visualization)
+        self.assertEqual(len(visualization["feeding_path_lengths"]), 3)
+        np.testing.assert_allclose(visualization["feeding_path_lengths"], [-1.0, 2.5, 3.0])
+
+        self.assertIn("feeding_open_fraction", visualization)
+        self.assertEqual(len(visualization["feeding_open_fraction"]), 3)
+        np.testing.assert_allclose(visualization["feeding_open_fraction"], [1.0, 0.1, 0.0])
 
     def test_feed_modulus_mode_uses_local_modulus_in_inches(self) -> None:
         engine = SimpleNamespace(

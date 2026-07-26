@@ -2430,10 +2430,26 @@ class SolidificationEngine:
         time_factor = np.where(is_riser, time_factor * 0.85, time_factor)
         time_factor = np.where(is_riser_post, time_factor * 0.65, time_factor)
 
+        isolation_factor = np.zeros(len(valid_indices), dtype=np.float32)
         if self.hotspot_intensity is not None:
-            isolation_factor = self.hotspot_intensity[valid_indices]
-        else:
-            isolation_factor = np.zeros(len(valid_indices), dtype=np.float32)
+            isolation_factor = np.maximum(
+                isolation_factor,
+                self.hotspot_intensity[valid_indices],
+            )
+        feeding_blocked_arr = getattr(self, "feeding_blocked", None)
+        feeding_open_arr = getattr(self, "feeding_open_fraction", None)
+        if feeding_blocked_arr is not None and len(feeding_blocked_arr) == len(isolation_factor):
+            blocked_local = np.asarray(feeding_blocked_arr, dtype=bool)[valid_indices]
+            isolation_factor = np.maximum(
+                isolation_factor,
+                np.where(blocked_local, 0.85, 0.0).astype(np.float32),
+            )
+        if feeding_open_arr is not None and len(feeding_open_arr) == len(isolation_factor):
+            open_local = np.asarray(feeding_open_arr, dtype=np.float32)[valid_indices]
+            isolation_factor = np.maximum(
+                isolation_factor,
+                np.clip(1.0 - open_local, 0.0, 1.0).astype(np.float32),
+            )
 
         base_risk = (
             0.40 * isolation_factor +
@@ -2950,16 +2966,39 @@ class SolidificationEngine:
             ).astype(np.float32)
 
             # CAST and RISER_POST voxels need supporting thermal/feeding
-            # evidence. This damps broad geometry-only false positives while
+            # evidence. This dampens broad geometry-only false positives while
             # keeping isolated, low-Niyama, or freeze-off regions visible.
             evidence_factors = shrinkage_evidence[valid_indices]
             feed_loss_factors = feed_loss_evidence[valid_indices]
             cast_or_post = ~is_riser
+
+            # Per-voxel floor for voxels that are feeding-blocked (isolated pockets).
+            # This ensures they remain visible above the 0.30 UI threshold.
+            feeding_blocked_full = getattr(self, "feeding_blocked", None)
+            feeding_blocked_local = None
+            if feeding_blocked_full is not None and len(feeding_blocked_full) == n_voxels:
+                feeding_blocked_local = np.asarray(feeding_blocked_full, dtype=bool)[valid_indices]
+            blocked_mask = (
+                np.asarray(feeding_blocked_local, dtype=bool)
+                if feeding_blocked_local is not None
+                else np.zeros(len(valid_indices), dtype=bool)
+            )
+            blocked_floor = np.where(
+                blocked_mask,
+                np.minimum(0.35 + 0.55 * feed_loss_factors, 0.95).astype(np.float32),
+                np.zeros(len(valid_indices), dtype=np.float32),
+            )
+
             low_evidence = cast_or_post & (evidence_factors < 0.28)
             low_evidence_cap = 0.04 + (0.10 * evidence_factors)
             final_risk = np.where(
                 low_evidence,
                 np.minimum(final_risk * (0.35 + evidence_factors), low_evidence_cap),
+                final_risk,
+            )
+            final_risk = np.where(
+                blocked_mask,
+                np.maximum(final_risk, blocked_floor),
                 final_risk,
             )
 

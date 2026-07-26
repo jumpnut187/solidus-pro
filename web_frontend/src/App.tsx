@@ -32,7 +32,7 @@ export function App() {
   const [isRunning, setIsRunning] = useState(false);
   const [results, setResults] = useState<Record<string, unknown> | null>(null);
   const [resultMode, setResultMode] = useState('fraction_liquid');
-  const [threshold, setThreshold] = useState(30);
+  const [threshold, setThreshold] = useState(15);
   const [timePercent, setTimePercent] = useState(0);
   const [isPlayingTimeline, setIsPlayingTimeline] = useState(false);
   const [modelOpacity, setModelOpacity] = useState(34);

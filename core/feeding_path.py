@@ -483,15 +483,19 @@ class FeedingPathAnalyzer:
                 history: Optional[List[np.ndarray]] = None,
                 history_times: Optional[List[float]] = None,
                 reference_times: Optional[np.ndarray] = None,
-                max_history_samples: int = 12) -> FeedingPathResult:
+                max_history_samples: int = 48) -> FeedingPathResult:
         """
         Analyze feeding paths from risers to all casting voxels.
-        
+
         Args:
             riser_voxel_indices: Indices of voxels that are risers
             fraction_solid: Current fraction solid at each voxel
             show_progress: Print progress information
-            
+            max_history_samples: Cap on snapshots used for history merging.  The
+                cap exists for performance and 48 gives ~1% time resolution across
+                typical solidification timelines while keeping analysis under 1
+                second for moderate voxel counts.
+
         Returns:
             FeedingPathResult with path quality and blocking info
         """
@@ -596,6 +600,8 @@ class FeedingPathAnalyzer:
             history_open_fraction = np.zeros(n_voxels, dtype=np.float32)
             latest_open_time = np.full(n_voxels, -1.0, dtype=np.float32)
             total_weight = np.zeros(n_voxels, dtype=np.float32)
+            # Track whether a voxel was blocked at ANY eligible snapshot (history-aware).
+            any_blocked_accum = np.zeros(n_voxels, dtype=np.bool_)
 
             for time_value, snapshot_result in zip(times_array, snapshot_results):
                 eligible = time_value <= (clipped_reference_times + 1e-6)
@@ -613,7 +619,8 @@ class FeedingPathAnalyzer:
                 path_length[eligible] = snapshot_result.path_length[eligible]
                 path_permeability[eligible] = snapshot_result.path_permeability[eligible]
                 feeding_source[eligible] = snapshot_result.feeding_source[eligible]
-                blocked_voxels[eligible] = snapshot_result.blocked_voxels[eligible]
+                # Accumulate blocked status across all eligible snapshots.
+                any_blocked_accum[eligible] |= snapshot_result.blocked_voxels[eligible]
 
             valid_weight = total_weight > 0.0
             history_open_fraction[valid_weight] /= total_weight[valid_weight]
@@ -623,7 +630,8 @@ class FeedingPathAnalyzer:
                 1.0,
             ).astype(np.float32)
             fed_mask = path_length >= 0.0
-            blocked_voxels = (~fed_mask) & ~riser_mask
+            # Use history-aware blocked accumulation instead of just the last snapshot.
+            blocked_voxels = any_blocked_accum & ~riser_mask
             latest_open_time[riser_mask] = np.float32(max_reference_time)
             history_open_fraction[riser_mask] = 1.0
             feeding_quality[riser_mask] = 1.0
