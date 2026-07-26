@@ -4576,6 +4576,18 @@ class MainWindow(QMainWindow):
             intensities
         )
 
+        # Register shrink/porosity inspector data so clicks reveal the
+        # connected defect pocket volume in cubic inches.
+        shrinkage_risk = getattr(simulation, "shrinkage_probability", None)
+        porosity_risk = getattr(simulation, "porosity_probability", None)
+        self.visualizer.set_shrink_inspector_data(
+            display_intensity=intensities,
+            mesh=voxel_mesh,
+            shrinkage_risk=shrinkage_risk,
+            porosity_risk=porosity_risk,
+            threshold=effective_threshold,
+        )
+
     def _visualize_feed_modulus(self, simulation, voxel_mesh, threshold):
         """Visualize local feed modulus in inches."""
         local_modulus = getattr(simulation, "local_modulus", None)
@@ -5013,14 +5025,22 @@ class MainWindow(QMainWindow):
         """Update visualization threshold for current analysis type"""
         threshold = value / 100.0
         self.threshold_label.setText(f"{value}%")
-        
+
         # Update based on current visualization mode
         mode = getattr(self, '_current_vis_mode', 'shrinkage')
-        
+
         if mode == 'shrinkage':
             if hasattr(self.visualizer, 'current_shrinkage_data') and \
                self.visualizer.current_shrinkage_data is not None:
                 self.visualizer.update_shrinkage_threshold(threshold)
+                # The shrink/porosity inspector stores its own threshold for
+                # pocket extraction. The visualizer clears the leader on
+                # threshold change so the next click uses the new range.
+                shrink_data = getattr(
+                    self.visualizer, "_shrink_inspector_data", None
+                )
+                if shrink_data is not None:
+                    shrink_data["threshold"] = float(threshold)
         elif mode == 'feed_modulus':
             if hasattr(self.visualizer, 'current_shrinkage_data') and \
                self.visualizer.current_shrinkage_data is not None:

@@ -18,6 +18,7 @@ from vtk.util import numpy_support
 from vtk.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 from PyQt5.QtWidgets import QWidget, QVBoxLayout
 from PyQt5.QtCore import QTimer, pyqtSignal
+from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Tuple, Callable, Set
 from concurrent.futures import ThreadPoolExecutor
 import threading
@@ -613,10 +614,57 @@ class MeasurementTool:
         return total_volume
 
 
-# ==================== Feed Modulus Leader Tool ====================
+# ==================== Generic Leader Annotation Tool ====================
+
+
+@dataclass(frozen=True)
+class LeaderCallout:
+    """Description of a single leader annotation to display.
+
+    Attributes:
+        text: The label rendered alongside the leader.
+        anchor_position: World position the leader's marker points to.
+            The elbow and label are offset radially from this point using
+            the same model-diagonal scaling the feedmod tool always used.
+    """
+
+    text: str
+    anchor_position: Tuple[float, float, float]
+
+
+@dataclass
+class InspectorLayer:
+    """Describes what the click handler should pick on and how to render it.
+
+    The visualizer keeps at most one active layer. Setting ``shrink_inspector``
+    to a new layer swaps the active inspector; passing ``None`` clears it.
+
+    Attributes:
+        mode: Free-form identifier such as ``"feed_modulus"`` or ``"shrinkage"``.
+        pick_actor: VTK actor the cell picker is restricted to.
+        displayed_voxel_indices: Per-glyph global voxel index, in the order
+            the geometry was built. ``cell_id // cells_per_glyph`` indexes it.
+        cells_per_glyph: Number of cells emitted by the glyph source per glyph.
+            ``6`` for the default cube source (6 quad faces).
+        resolver: Callable invoked with the picked voxel index. Returns a
+            ``LeaderCallout`` describing the label text and anchor position
+            to render. Returning ``None`` clears the existing leader.
+    """
+
+    mode: str
+    pick_actor: vtk.vtkActor
+    displayed_voxel_indices: np.ndarray
+    cells_per_glyph: int
+    resolver: Callable[[int], Optional[LeaderCallout]]
+
 
 class FeedModulusLeaderTool:
-    """Tool for displaying feed modulus values at clicked points with L-shaped leader + arrow flag"""
+    """L-shaped leader with a sphere marker and camera-facing text flag.
+
+    Now generalized so the same geometry can host arbitrary ``text`` strings
+    while preserving the original feedmod rendering. New inspectors should
+    call :meth:`show_leader` directly with their own label.
+    """
 
     def __init__(self, renderer: vtk.vtkRenderer):
         self.renderer = renderer
@@ -642,15 +690,32 @@ class FeedModulusLeaderTool:
 
     def show_leader(self, world_pos: Tuple[float, float, float], value: float,
                     model_bounds: Optional[Tuple[float, float, float, float, float, float]] = None):
+        """Backwards-compatible feedmod entry point.
+
+        Formats ``"FM: {value:.2f} in"`` and delegates to
+        :meth:`show_callout` so the call site stays unchanged.
         """
-        Display an L-shaped leader with arrow and flag showing feed modulus value.
+        self.show_callout(
+            LeaderCallout(
+                text=f"FM: {value:.2f} in",
+                anchor_position=tuple(world_pos),
+            ),
+            model_bounds,
+        )
+
+    def show_callout(self, callout: LeaderCallout,
+                     model_bounds: Optional[Tuple[float, float, float, float, float, float]] = None):
+        """Display an L-shaped leader with the supplied callout text.
 
         Args:
-            world_pos: Picked world position (should be near the voxel center)
-            value: Feed modulus value to display
-            model_bounds: Optional model bounds (xmin,xmax,ymin,ymax,zmin,zmax) for scaling
+            callout: ``LeaderCallout`` describing the text and anchor position.
+            model_bounds: Optional ``(xmin, xmax, ymin, ymax, zmin, zmax)``
+                model bounds used to size the leader.
         """
         self.clear()
+
+        world_pos = tuple(callout.anchor_position)
+        text_value = callout.text
 
         diagonal = 1.0
         if model_bounds:
@@ -689,7 +754,7 @@ class FeedModulusLeaderTool:
 
         elbow_tuple = tuple(elbow)
         text_tuple = tuple(text_base)
-        world_tuple = tuple(world_pos)
+        world_tuple = world_pos
 
         line_pts = vtk.vtkPoints()
         line_pts.InsertNextPoint(*world_tuple)
@@ -742,7 +807,7 @@ class FeedModulusLeaderTool:
         self.renderer.AddActor(self._cone_actor)
 
         text = vtk.vtkVectorText()
-        text.SetText(f"FM: {value:.2f} in")
+        text.SetText(text_value)
 
         text_mapper = vtk.vtkPolyDataMapper()
         text_mapper.SetInputConnection(text.GetOutputPort())
@@ -879,6 +944,12 @@ class CastingVisualizer(QWidget):
         self.feed_modulus_leader = None
         self._feed_modulus_leader_enabled = False
 
+        # Active result-mode inspector (feedmod, shrink/porosity, ...)
+        self._inspector_layer: Optional[InspectorLayer] = None
+        # Cached source-voxel indices for the currently-displayed shrinkage actor
+        self._shrinkage_displayed_voxel_indices: Optional[np.ndarray] = None
+        self._shrinkage_cells_per_glyph: int = 6
+
         # Animation export
         self._animation_frames: List[np.ndarray] = []
         self._is_recording = False
@@ -976,53 +1047,66 @@ class CastingVisualizer(QWidget):
                 self.render_window.Render()
             return
 
-        # Feed modulus leader tool: pick on result voxels
-        if self._feed_modulus_leader_enabled and self.current_shrinkage_data is not None:
+        # Active result-mode inspector (feedmod, shrink/porosity, ...).
+        # The layer's resolver decides how to format the label, so feedmod
+        # keeps its old "FM: X.XX in" text while shrink/porosity can
+        # extract a connected pocket and report its volume in in^3.
+        layer = self._inspector_layer
+        if layer is not None and layer.pick_actor is not None:
             click_pos = self.interactor.GetEventPosition()
             x, y = click_pos[0], click_pos[1]
 
-            if self.shrinkage_actor is None:
-                return
-
             picker = vtk.vtkCellPicker()
-            picker.AddPickList(self.shrinkage_actor)
+            picker.AddPickList(layer.pick_actor)
             picker.SetPickFromList(True)
             picker.SetTolerance(0.01)
             picker.Pick(x, y, 0, self.renderer)
 
-            if picker.GetCellId() >= 0:
-                pick_pos = picker.GetPickPosition()
-                voxel_centers, voxel_sizes, values = self.current_shrinkage_data
-
-                finite_mask = np.isfinite(values) & (values > 0.0)
-                if not np.any(finite_mask):
-                    self.feed_modulus_leader.clear()
+            try:
+                if picker.GetCellId() < 0:
+                    if self.feed_modulus_leader is not None:
+                        self.feed_modulus_leader.clear()
                     self.render_window.Render()
+                    try:
+                        self.interactor.GetInteractorStyle().SetAbortFlag(1)
+                    except AttributeError:
+                        pass
                     return
 
-                finite_centers = voxel_centers[finite_mask]
-                finite_values = values[finite_mask]
+                glyph_index = picker.GetCellId() // max(int(layer.cells_per_glyph), 1)
+                voxel_indices = layer.displayed_voxel_indices
+                if (
+                    voxel_indices is None
+                    or glyph_index < 0
+                    or glyph_index >= int(voxel_indices.shape[0])
+                ):
+                    if self.feed_modulus_leader is not None:
+                        self.feed_modulus_leader.clear()
+                    self.render_window.Render()
+                    try:
+                        self.interactor.GetInteractorStyle().SetAbortFlag(1)
+                    except AttributeError:
+                        pass
+                    return
 
-                dists = np.linalg.norm(finite_centers - np.array(pick_pos), axis=1)
-                nearest_idx = np.argmin(dists)
-                value = float(finite_values[nearest_idx])
-                nearest_center = finite_centers[nearest_idx]
-
-                self.feed_modulus_leader.show_leader(
-                    tuple(pick_pos), value, self.model_bounds
-                )
+                voxel_index = int(voxel_indices[glyph_index])
+                callout = layer.resolver(voxel_index)
+                if callout is None:
+                    if self.feed_modulus_leader is not None:
+                        self.feed_modulus_leader.clear()
+                else:
+                    if self.feed_modulus_leader is not None:
+                        self.feed_modulus_leader.show_callout(callout, self.model_bounds)
                 self.render_window.Render()
                 try:
                     self.interactor.GetInteractorStyle().SetAbortFlag(1)
                 except AttributeError:
                     pass
-            else:
-                self.feed_modulus_leader.clear()
+            except Exception as exc:
+                logger.exception(f"Inspector click failed: {exc}")
+                if self.feed_modulus_leader is not None:
+                    self.feed_modulus_leader.clear()
                 self.render_window.Render()
-                try:
-                    self.interactor.GetInteractorStyle().SetAbortFlag(1)
-                except AttributeError:
-                    pass
     
     def _init_cross_section_planes(self):
         """Initialize cutting planes for X, Y, Z axes"""
@@ -1429,16 +1513,200 @@ class CastingVisualizer(QWidget):
             self.render_window.Render()
 
     def enable_feed_modulus_leader(self, enabled: bool):
-        """Enable or disable feed modulus leader mode"""
+        """Enable or disable feed modulus leader mode.
+
+        Backwards-compatible wrapper around :meth:`set_inspector`. The feedmod
+        layer reads its values from ``current_shrinkage_data``; the layer is
+        installed (or refreshed) when shrinkage geometry is (re)built.
+        Enabling feedmod also clears any registered shrink/porosity data
+        so the two inspector modes do not race.
+        """
         self._feed_modulus_leader_enabled = enabled
         if not enabled:
+            if (
+                self._inspector_layer is not None
+                and self._inspector_layer.mode == "feed_modulus"
+            ):
+                self._inspector_layer = None
             self.clear_feed_modulus_leader()
+            return
+        # Disabling the shrink inspector intent so feedmod takes over.
+        self._shrink_inspector_data = None
+        if (
+            self._inspector_layer is not None
+            and self._inspector_layer.mode == "shrinkage"
+        ):
+            self._inspector_layer = None
+            if self.feed_modulus_leader is not None:
+                self.feed_modulus_leader.clear()
+        self._install_feedmod_inspector()
 
     def clear_feed_modulus_leader(self):
         """Clear the feed modulus leader annotation"""
         if self.feed_modulus_leader:
             self.feed_modulus_leader.clear()
             self.render_window.Render()
+
+    def set_inspector(self, layer: Optional[InspectorLayer]) -> None:
+        """Install or remove the active result-mode inspector.
+
+        Passing ``None`` clears the inspector and any visible leader. The
+        layer's ``resolver`` is invoked on each click to format the label.
+        """
+        self._inspector_layer = layer
+        if layer is None and self.feed_modulus_leader is not None:
+            self.feed_modulus_leader.clear()
+            self.render_window.Render()
+
+    def clear_inspector(self) -> None:
+        """Clear the active inspector and its leader (if any)."""
+        self.set_inspector(None)
+
+    def set_shrink_inspector_data(
+        self,
+        *,
+        display_intensity: np.ndarray,
+        mesh,
+        shrinkage_risk: Optional[np.ndarray],
+        porosity_risk: Optional[np.ndarray],
+        threshold: float,
+        connectivity: int = 6,
+    ) -> None:
+        """Register the data the shrink/porosity inspector needs.
+
+        Called by ``main_window`` after :meth:`load_shrinkage` so the click
+        handler can build a connected defect pocket and report its volume.
+        The layer is reinstalled after every shrinkage geometry rebuild so
+        the displayed voxel indices always match the active actor.
+
+        Registering shrink data also disables the feedmod inspector intent
+        so the two modes do not race for the click handler.
+        """
+        self._shrink_inspector_data = {
+            "display_intensity": np.asarray(display_intensity, dtype=np.float32),
+            "mesh": mesh,
+            "shrinkage_risk": (
+                None if shrinkage_risk is None
+                else np.asarray(shrinkage_risk, dtype=np.float32)
+            ),
+            "porosity_risk": (
+                None if porosity_risk is None
+                else np.asarray(porosity_risk, dtype=np.float32)
+            ),
+            "threshold": float(threshold),
+            "connectivity": int(connectivity),
+        }
+        # Disabling feedmod intent so shrink mode owns the click handler.
+        self._feed_modulus_leader_enabled = False
+        if (
+            self._inspector_layer is not None
+            and self._inspector_layer.mode == "feed_modulus"
+        ):
+            self._inspector_layer = None
+            if self.feed_modulus_leader is not None:
+                self.feed_modulus_leader.clear()
+        self._install_shrink_inspector()
+
+    def clear_shrink_inspector_data(self) -> None:
+        """Forget shrink/porosity inspector data and clear the active leader."""
+        had_layer = (
+            self._inspector_layer is not None
+            and self._inspector_layer.mode == "shrinkage"
+        )
+        self._shrink_inspector_data = None
+        if had_layer:
+            self._inspector_layer = None
+            if self.feed_modulus_leader is not None:
+                self.feed_modulus_leader.clear()
+                self.render_window.Render()
+
+    def _install_feedmod_inspector(self) -> None:
+        """Install the feedmod layer using ``current_shrinkage_data``."""
+        if not self._feed_modulus_leader_enabled:
+            return
+        if self.shrinkage_actor is None or self.current_shrinkage_data is None:
+            return
+        if self._shrinkage_displayed_voxel_indices is None:
+            return
+
+        def _resolver(voxel_index: int) -> Optional[LeaderCallout]:
+            centers, _, values = self.current_shrinkage_data
+            if voxel_index < 0 or voxel_index >= int(values.shape[0]):
+                return None
+            v = float(values[voxel_index])
+            if not np.isfinite(v) or v <= 0.0:
+                return None
+            anchor = tuple(np.asarray(centers[voxel_index], dtype=np.float64).tolist())
+            return LeaderCallout(text=f"FM: {v:.2f} in", anchor_position=anchor)
+
+        self._inspector_layer = InspectorLayer(
+            mode="feed_modulus",
+            pick_actor=self.shrinkage_actor,
+            displayed_voxel_indices=self._shrinkage_displayed_voxel_indices,
+            cells_per_glyph=self._shrinkage_cells_per_glyph,
+            resolver=_resolver,
+        )
+
+    def _install_shrink_inspector(self) -> None:
+        """Install the shrink/porosity layer using registered data."""
+        data = getattr(self, "_shrink_inspector_data", None)
+        if data is None or self.shrinkage_actor is None:
+            return
+        if self._shrinkage_displayed_voxel_indices is None:
+            return
+
+        from core.defect_regions import extract_pocket_at, format_pocket_volume_label
+
+        def _resolver(voxel_index: int) -> Optional[LeaderCallout]:
+            mesh = data["mesh"]
+            pocket = extract_pocket_at(
+                voxel_index=voxel_index,
+                display_intensity=data["display_intensity"],
+                voxel_neighbors=mesh.voxel_neighbors,
+                voxel_centers=mesh.voxel_centers,
+                voxel_volumes=mesh.voxel_volumes,
+                shrinkage_risk=data["shrinkage_risk"],
+                porosity_risk=data["porosity_risk"],
+                threshold=data["threshold"],
+                connectivity=data["connectivity"],
+            )
+            if pocket is None:
+                return None
+            return LeaderCallout(
+                text=format_pocket_volume_label(pocket),
+                anchor_position=pocket.centroid,
+            )
+
+        self._inspector_layer = InspectorLayer(
+            mode="shrinkage",
+            pick_actor=self.shrinkage_actor,
+            displayed_voxel_indices=self._shrinkage_displayed_voxel_indices,
+            cells_per_glyph=self._shrinkage_cells_per_glyph,
+            resolver=_resolver,
+        )
+
+    def _refresh_active_inspector(self) -> None:
+        """Reinstall the active inspector after a geometry rebuild.
+
+        Called from ``load_shrinkage`` / ``update_shrinkage_threshold`` so the
+        displayed-voxel-indices pointer matches the current actor. If a mode
+        is already installed the data is refreshed in place; otherwise the
+        call installs the mode whose intent flag is currently set.
+        """
+        if self._inspector_layer is not None:
+            mode = self._inspector_layer.mode
+            if mode == "feed_modulus":
+                self._install_feedmod_inspector()
+            elif mode == "shrinkage":
+                self._install_shrink_inspector()
+            return
+
+        # No active layer: pick the most-recently-enabled mode.
+        if self._feed_modulus_leader_enabled:
+            self._install_feedmod_inspector()
+            return
+        if getattr(self, "_shrink_inspector_data", None) is not None:
+            self._install_shrink_inspector()
 
     def handle_click_for_measurement(self, x: int, y: int):
         """Handle a click event for measurement"""
@@ -1805,14 +2073,14 @@ class CastingVisualizer(QWidget):
             self._update_parallel_scale()
         self.render_window.Render()
     
-    def load_shrinkage(self, voxel_centers: np.ndarray, 
+    def load_shrinkage(self, voxel_centers: np.ndarray,
                       voxel_sizes: np.ndarray,
                       shrinkage_intensity: np.ndarray,
                       threshold: float = 0.3):
         """
         Load and display shrinkage regions using optimized batch rendering.
         Pre-builds geometry cache for fast threshold slider updates.
-        
+
         Args:
             voxel_centers: Nx3 array of voxel centers
             voxel_sizes: N array of voxel sizes
@@ -1822,35 +2090,42 @@ class CastingVisualizer(QWidget):
         # Remove old shrinkage actor
         if self.shrinkage_actor is not None:
             self.renderer.RemoveActor(self.shrinkage_actor)
-        
+
         # Store data for cache building
         self.current_shrinkage_data = (voxel_centers, voxel_sizes, shrinkage_intensity)
-        
+
         # Clear old result caches when loading new data
         self._clear_result_caches()
-        
+
         # Build geometry for current threshold using optimized method
         polydata = self._build_shrinkage_geometry_fast(
             voxel_centers, voxel_sizes, shrinkage_intensity, threshold
         )
-        
+
         if polydata is None or polydata.GetNumberOfPoints() == 0:
             print("No shrinkage voxels to display")
+            self._shrinkage_displayed_voxel_indices = None
+            self._refresh_active_inspector()
             return
-        
+
+        # Capture source voxel indices for the inspector (per-glyph)
+        mask = np.asarray(shrinkage_intensity, dtype=np.float32) >= float(threshold)
+        self._shrinkage_displayed_voxel_indices = np.where(mask)[0].astype(np.int32)
+        self._shrinkage_cells_per_glyph = 6  # vtkCubeSource emits 6 quad faces
+
         # Create mapper and actor
         mapper = vtk.vtkPolyDataMapper()
         mapper.SetInputData(polydata)
         mapper.SetScalarModeToUsePointData()
-        
+
         self.shrinkage_actor = vtk.vtkActor()
         self.shrinkage_actor.SetMapper(mapper)
-        
+
         # Set appearance
         prop = self.shrinkage_actor.GetProperty()
         prop.SetOpacity(0.5)
         prop.SetInterpolationToFlat()
-        
+
         self.renderer.AddActor(self.shrinkage_actor)
         self.render_window.Render()
 
@@ -1858,10 +2133,13 @@ class CastingVisualizer(QWidget):
         if self.feed_modulus_leader:
             self.feed_modulus_leader.clear()
 
+        # Reinstall the active inspector with the new displayed indices
+        self._refresh_active_inspector()
+
         # Count voxels displayed
         num_displayed = polydata.GetNumberOfCells() // 6  # Each cube has 6 faces
         print(f"Displayed {num_displayed:,} shrinkage voxels")
-        
+
         # Pre-build cache for nearby threshold levels in background
         self._prebuild_cache_async(voxel_centers, voxel_sizes, shrinkage_intensity, threshold)
     
@@ -3362,40 +3640,51 @@ class CastingVisualizer(QWidget):
     
     def clear_result_actors(self):
         """Clear only the result visualization actors (shrinkage, hotspot, niyama, hot tear, sand burn-in, fraction liquid).
-        
+
         This keeps the mesh/part actors intact but removes all analysis overlays.
         Call this when switching between visualization modes.
         """
         if self.shrinkage_actor is not None:
             self.renderer.RemoveActor(self.shrinkage_actor)
             self.shrinkage_actor = None
-        
+
         if self.hotspot_actor is not None:
             self.renderer.RemoveActor(self.hotspot_actor)
             self.hotspot_actor = None
-        
+
         if self.niyama_actor is not None:
             self.renderer.RemoveActor(self.niyama_actor)
             self.niyama_actor = None
-        
+
         if self.hot_tear_actor is not None:
             self.renderer.RemoveActor(self.hot_tear_actor)
             self.hot_tear_actor = None
-        
+
         if self.sand_burn_in_actor is not None:
             self.renderer.RemoveActor(self.sand_burn_in_actor)
             self.sand_burn_in_actor = None
-        
+
         if self.gas_porosity_actor is not None:
             self.renderer.RemoveActor(self.gas_porosity_actor)
             self.gas_porosity_actor = None
-        
+
         if self.fraction_liquid_actor is not None:
             self.renderer.RemoveActor(self.fraction_liquid_actor)
             self.fraction_liquid_actor = None
 
         self._clear_result_caches()
-        
+
+        # The actor is gone, so any cached per-glyph index pointer and the
+        # currently-installed inspector are stale. We deliberately keep the
+        # intent flags (``_feed_modulus_leader_enabled``,
+        # ``_shrink_inspector_data``) so the next ``load_shrinkage`` call
+        # can reinstall the appropriate inspector layer.
+        self._shrinkage_displayed_voxel_indices = None
+        self._shrinkage_cells_per_glyph = 6
+        self._inspector_layer = None
+        if self.feed_modulus_leader is not None:
+            self.feed_modulus_leader.clear()
+
         self.render_window.Render()
     
     def load_part(self, part_id: str, vertices: np.ndarray, faces: np.ndarray, 
@@ -3584,18 +3873,18 @@ class CastingVisualizer(QWidget):
         """
         Update shrinkage visualization threshold - optimized with caching.
         Uses pre-built geometry when available for instant updates.
-        
+
         Args:
             threshold: New threshold (0-1)
         """
         if self.current_shrinkage_data is None:
             return
-            
+
         voxel_centers, voxel_sizes, intensities = self.current_shrinkage_data
-        
+
         # Round threshold to cache key (1% increments)
         cache_key = round(threshold, 2)
-        
+
         # Check if we have cached geometry
         with self._shrinkage_cache_lock:
             polydata = self._shrinkage_cache.get(cache_key)
@@ -3605,35 +3894,58 @@ class CastingVisualizer(QWidget):
             polydata = self._build_shrinkage_geometry_fast(
                 voxel_centers, voxel_sizes, intensities, threshold
             )
-        
+
         # Remove old actor
         if self.shrinkage_actor is not None:
             self.renderer.RemoveActor(self.shrinkage_actor)
-        
+
         if polydata is None or polydata.GetNumberOfPoints() == 0:
             print("No shrinkage voxels at this threshold")
+            self._shrinkage_displayed_voxel_indices = None
             self.render_window.Render()
+            # Clear the leader on threshold change so the user re-clicks.
+            if self._inspector_layer is not None and self._inspector_layer.mode == "shrinkage":
+                self._inspector_layer = None
+            if self.feed_modulus_leader is not None:
+                self.feed_modulus_leader.clear()
             return
-        
+
+        # Refresh the displayed voxel indices for the inspector
+        mask = np.asarray(intensities, dtype=np.float32) >= float(threshold)
+        self._shrinkage_displayed_voxel_indices = np.where(mask)[0].astype(np.int32)
+        self._shrinkage_cells_per_glyph = 6
+
+        # Clear the previous shrink/porosity leader so the user re-clicks
+        # with the new threshold. Pocket identity can change at the new
+        # threshold, so the previous label would point at a stale region.
+        if self._inspector_layer is not None and self._inspector_layer.mode == "shrinkage":
+            self._inspector_layer = None
+        if self.feed_modulus_leader is not None:
+            self.feed_modulus_leader.clear()
+
         # Create mapper and actor
         mapper = vtk.vtkPolyDataMapper()
         mapper.SetInputData(polydata)
         mapper.SetScalarModeToUsePointData()
-        
+
         self.shrinkage_actor = vtk.vtkActor()
         self.shrinkage_actor.SetMapper(mapper)
-        
+
         prop = self.shrinkage_actor.GetProperty()
         prop.SetOpacity(0.5)
         prop.SetInterpolationToFlat()
-        
+
         self.renderer.AddActor(self.shrinkage_actor)
         self.render_window.Render()
-        
+
+        # Reinstall the active inspector with the new displayed indices so
+        # the next click on a defect voxel reports the updated pocket.
+        self._refresh_active_inspector()
+
         # Count voxels displayed
         num_displayed = polydata.GetNumberOfCells() // 6
         print(f"Displayed {num_displayed:,} shrinkage voxels")
-        
+
         # Pre-build nearby thresholds in cache for smoother slider movement
         self._prebuild_cache_async(voxel_centers, voxel_sizes, intensities, threshold)
     
