@@ -9,10 +9,19 @@ import numpy as np
 from config.hardware_config import hardware
 
 try:
-    from numba import get_num_threads, set_num_threads
+    from numba import get_num_threads, jit, prange, set_num_threads
+
     NUMBA_THREADING_AVAILABLE = True
 except ImportError:
     NUMBA_THREADING_AVAILABLE = False
+    prange = range  # type: ignore[assignment]
+
+
+def _jit(fn):  # type: ignore[no-redef]
+    """JIT decorator that gracefully no-ops when numba is missing."""
+    if NUMBA_THREADING_AVAILABLE:
+        return jit(nopython=True, parallel=True, fastmath=True, cache=True)(fn)
+    return fn
 
 
 ProgressCallback = Optional[Callable[[int, int, str], None]]
@@ -112,6 +121,223 @@ def _least_squares_gradients_c_per_mm(
             quality[out_i] = 1
 
     return gradients, quality
+
+
+@_jit
+def _feeding_zone_mask_kernel(
+    states: np.ndarray,
+    neighbors: np.ndarray,
+    part_types: np.ndarray,
+    out_mask: np.ndarray,
+) -> None:
+    """Fill ``out_mask`` with True for voxels inside the riser feeding zone.
+
+    A voxel is in the feeding zone when it is itself a riser or any of its
+    liquid neighbors is a riser. The legacy
+    ``acceleration.update_solidification_with_feeding_connectivity`` rule also
+    checks ``riser_slowdown < 0.6`` for propagated connectivity; the
+    thermal-coupled path does not carry per-voxel riser_slowdown arrays, so
+    only the part-type rule is reproduced here.
+    """
+    RISER = np.int32(1)
+    n_voxels = states.shape[0]
+    for i in prange(n_voxels):
+        in_zone = False
+        if part_types[i] == RISER:
+            in_zone = True
+        else:
+            for j in range(neighbors.shape[1]):
+                n_idx = neighbors[i, j]
+                if n_idx < 0:
+                    continue
+                if (
+                    states[n_idx] < 1.0
+                    and part_types[n_idx] == RISER
+                ):
+                    in_zone = True
+                    break
+        out_mask[i] = in_zone
+
+
+@_jit
+def _directional_solidification_delta_kernel(
+    states: np.ndarray,
+    heights: np.ndarray,
+    feeding_zone_mask: np.ndarray,
+    feeding_bias: float,
+    baseline: float,
+    base_rate: float,
+    dt: float,
+    out_delta: np.ndarray,
+) -> None:
+    """Compute per-voxel directional-solidification delta in parallel.
+
+    Writes to ``out_delta``:
+
+        extra[i] = min(1 - states[i],
+                       (1 - heights[i]) * factor * base_rate * dt)
+
+    where ``factor = max(feeding_bias, baseline)`` inside the feeding zone
+    and ``factor = baseline`` elsewhere. ``out_delta[i] = 0`` once the voxel
+    is fully solid.
+    """
+    n_voxels = states.shape[0]
+    fz_strength = max(feeding_bias, baseline)
+    for i in prange(n_voxels):
+        if states[i] >= 1.0:
+            out_delta[i] = 0.0
+            continue
+        factor = fz_strength if feeding_zone_mask[i] else baseline
+        raw = (1.0 - heights[i]) * factor * base_rate * dt
+        cap = 1.0 - states[i]
+        if raw < 0.0:
+            raw = 0.0
+        elif raw > cap:
+            raw = cap
+        out_delta[i] = raw
+
+
+# Public helpers exposed for tests; thin Python wrappers around the JIT
+# kernels above to keep test code ergonomic.
+def _compute_feeding_zone_mask(
+    voxel_states: np.ndarray,
+    voxel_neighbors: np.ndarray,
+    part_types: np.ndarray,
+) -> np.ndarray:
+    """Return a boolean mask of voxels inside the riser feeding zone.
+
+    JIT-compiled kernel; see ``_feeding_zone_mask_kernel`` for semantics.
+    """
+    out_mask = np.zeros(voxel_states.shape[0], dtype=np.bool_)
+    states_f32 = np.ascontiguousarray(voxel_states, dtype=np.float32)
+    neighbors_i32 = np.ascontiguousarray(voxel_neighbors, dtype=np.int32)
+    part_types_i32 = np.ascontiguousarray(part_types, dtype=np.int32)
+    _feeding_zone_mask_kernel(
+        states_f32, neighbors_i32, part_types_i32, out_mask
+    )
+    return out_mask
+
+
+# Baseline directional-solidification strength applied to EVERY voxel so the
+# casting solidifies from bottom to top by default. Matches the
+# `vertical_factor = 1 + (1 - h) * 0.3` constant in the legacy front-based
+# solver at ``core.acceleration.update_solidification_with_feeding_connectivity``.
+FEEDING_ZONE_BASELINE_VERTICAL_BIAS = 0.3
+DVR_RATE = 0.02
+
+
+def _resolve_feeding_zone_bias(engine: Any) -> float:
+    """Read ``feeding_zone_vertical_bias`` defensively from ``engine``."""
+    params = getattr(getattr(engine, "analysis_options", None), "solidification_params", None)
+    if params is None:
+        return 0.0
+    feeding = getattr(params, "feeding", None)
+    if feeding is None:
+        return 0.0
+    try:
+        return float(feeding.feeding_zone_vertical_bias)
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
+
+
+def _apply_feeding_zone_bias(
+    engine: Any,
+    solidification_model: Any,
+    feeding_bias: float,
+) -> bool:
+    """Apply directional-solidification bias in the thermal-coupled path.
+
+    Always applies a baseline vertical bias
+    (``FEEDING_ZONE_BASELINE_VERTICAL_BIAS``) to every liquid voxel so the
+    casting still solidifies bottom-up when no risers are present. In
+    addition, voxels inside the riser feeding zone receive an extra
+    directional bias controlled by the user-facing
+    ``feeding_zone_vertical_bias`` slider. The effective per-voxel
+    extra fraction-solid delta matches the legacy front-based formulation:
+
+        extra = (1 - normalized_height) * factor * DVR_RATE * dt
+
+    where ``factor`` is ``FEEDING_ZONE_BASELINE_VERTICAL_BIAS`` outside the
+    feeding zone and ``max(feeding_bias, FEEDING_ZONE_BASELINE_VERTICAL_BIAS)``
+    inside it.
+
+    Mutates ``solidification_model._fraction_solid`` and
+    ``engine.mesh.voxel_states`` so the bias compounds across iterations
+    rather than being overwritten by the next temperature-driven
+    ``SolidificationModel.update`` call.
+
+    Returns:
+        ``True`` when the bias produced a state change; ``False`` otherwise.
+    """
+    baseline = float(FEEDING_ZONE_BASELINE_VERTICAL_BIAS)
+    states = np.asarray(solidification_model._fraction_solid, dtype=np.float32)
+    n_voxels = states.shape[0]
+    if n_voxels == 0:
+        return False
+    if baseline <= 0.0 and float(feeding_bias) <= 0.0:
+        return False
+    heights_fn = getattr(engine, "_get_normalized_heights", None)
+    if not callable(heights_fn):
+        return False
+    # Cached heights array avoids the per-call O(n) z-min/z-max scan when the
+    # integration loop calls us every time step.
+    heights_cache = getattr(engine, "_directional_bias_heights", None)
+    if heights_cache is None or heights_cache.shape[0] != n_voxels:
+        heights_cache = np.ascontiguousarray(heights_fn(), dtype=np.float32)
+        engine._directional_bias_heights = heights_cache
+    heights = heights_cache
+
+    feeding_zone_mask = None
+    part_types_raw = getattr(engine.mesh, "voxel_part_types", None)
+    if part_types_raw is not None and float(feeding_bias) > 0.0:
+        part_types = np.ascontiguousarray(part_types_raw, dtype=np.int32)
+        if int(np.sum(part_types == 1)) > 0:
+            neighbors_raw = getattr(engine.mesh, "voxel_neighbors", None)
+            if neighbors_raw is not None:
+                neighbors = np.ascontiguousarray(neighbors_raw, dtype=np.int32)
+                feeding_zone_mask = np.zeros(n_voxels, dtype=np.bool_)
+                _feeding_zone_mask_kernel(states, neighbors, part_types, feeding_zone_mask)
+
+    if feeding_zone_mask is None:
+        feeding_zone_mask = np.zeros(n_voxels, dtype=np.bool_)
+
+    extra = np.zeros(n_voxels, dtype=np.float32)
+    _directional_solidification_delta_kernel(
+        states.astype(np.float32, copy=False),
+        heights,
+        feeding_zone_mask,
+        float(feeding_bias),
+        float(baseline),
+        float(DVR_RATE),
+        float(engine.time_step),
+        extra,
+    )
+    if not bool(np.any(extra > 0.0)):
+        return False
+    new_states = np.minimum(
+        states.astype(np.float32, copy=False) + extra.astype(np.float32, copy=False),
+        1.0,
+    ).astype(np.float64)
+    solidification_model._fraction_solid[:] = new_states
+    prev = np.asarray(solidification_model._fraction_solid_prev, dtype=np.float64)
+    solidification_model._fraction_solid_prev[:] = np.minimum(prev, new_states)
+    current_time = float(engine.time)
+    newly_complete = (
+        np.asarray(solidification_model._fraction_solid_prev, dtype=np.float64) < 0.99
+    ) & (new_states >= 0.99)
+    if newly_complete.any():
+        end_arr = np.asarray(solidification_model._solidification_end, dtype=np.float64)
+        end_arr[newly_complete] = current_time
+        solidification_model._solidification_end[:] = end_arr
+    newly_started = (
+        np.asarray(solidification_model._fraction_solid_prev, dtype=np.float64) < 0.01
+    ) & (new_states >= 0.01)
+    if newly_started.any():
+        start_arr = np.asarray(solidification_model._solidification_start, dtype=np.float64)
+        start_arr[newly_started] = current_time
+        solidification_model._solidification_start[:] = start_arr
+    engine.mesh.voxel_states[:] = np.asarray(new_states, dtype=np.float32)
+    return True
 
 
 def _capture_niyama_history_step(
@@ -245,9 +471,7 @@ def _run_front_based_integration(
         effective_slowdown = riser_slowdown * engine._air_gap_slowdown
         previous_states = np.asarray(engine.mesh.voxel_states, dtype=np.float32).copy()
 
-        feeding_bias = float(
-            engine.analysis_options.solidification_params.feeding.feeding_zone_vertical_bias
-        )
+        feeding_bias = _resolve_feeding_zone_bias(engine)
 
         if engine._use_incremental and engine._incremental_engine is not None:
             engine.mesh.voxel_states[:] = engine._incremental_engine.update(
@@ -592,6 +816,9 @@ def _run_thermal_coupled_integration(
         engine.mesh.voxel_states[:] = current_states
         engine.time = heat_model.time
         iteration += 1
+
+        feeding_bias = _resolve_feeding_zone_bias(engine)
+        _apply_feeding_zone_bias(engine, solidification_model, feeding_bias)
 
         start_times = np.asarray(solidification_model.solidification_time, dtype=np.float64)
         end_times = np.asarray(solidification_model._solidification_end, dtype=np.float64)

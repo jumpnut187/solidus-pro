@@ -1890,8 +1890,12 @@ class SolidificationParamsDialog(DraggableDialog):
         ("feeding", "feeding_zone_vertical_bias", "Feeding-Zone +Z Bias", 0.5, 0.0, 2.0, 0.05, 2, "",
          "Strength of +Z directional solidification inside the riser feeding zone. "
          "Higher = bottom solidifies faster in the feeding zone, hardening directional "
-         "freezing toward risers. 0 disables the bias; 2 is very aggressive. "
-         "Default 0.5 matches the legacy directional-solidification behavior."),
+         "freezing toward risers. 0 disables the feeding-zone extra (a constant 0.3 "
+         "baseline directional bias still applies to the entire cast so it solidifies "
+         "bottom-up). 2 is very aggressive. "
+         "Default 0.5 matches the legacy directional-solidification behavior. "
+         "Applied by the active solver (thermal_coupled or schedule_legacy); "
+         "this slider's extra contribution is a no-op when no RISER voxels are present."),
         # Chills
         ("chill", "max_chill_boost", "Max Chill Boost", 3.0, 1.0, 10.0, 0.1, 1, "multiplier",
          "Maximum solidification acceleration near chills."),

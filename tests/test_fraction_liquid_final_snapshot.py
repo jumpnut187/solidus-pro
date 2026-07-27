@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from core.solidification_params import SolidificationParameters
 from core.solidification_loop import run_time_integration
 
 
@@ -27,7 +28,10 @@ class _DummyEngine:
             voxel_moduli=np.array([0.0, 1.0], dtype=np.float32),
             voxel_centers=np.zeros((2, 3), dtype=np.float32),
         )
-        self.analysis_options = SimpleNamespace(fraction_liquid=True)
+        self.analysis_options = SimpleNamespace(
+            fraction_liquid=True,
+            solidification_params=SolidificationParameters(),
+        )
         self.fraction_liquid_history = []
         self.fraction_liquid_times = []
         self.solidification_times = np.zeros(2, dtype=np.float32)
