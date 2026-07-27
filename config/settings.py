@@ -85,7 +85,6 @@ class SimulationSettings:
     enable_shrinkage: bool = True
     enable_hotspot: bool = True
     enable_niyama: bool = False
-    enable_hot_tear: bool = False
     enable_sand_burn_in: bool = False
     enable_fraction_liquid: bool = True
     
@@ -525,7 +524,6 @@ simulation:
   enable_shrinkage: true
   enable_hotspot: true
   enable_niyama: false
-  enable_hot_tear: false
   enable_sand_burn_in: false
   enable_fraction_liquid: false
   sand_burn_in_threshold: 0.2
@@ -567,7 +565,6 @@ default_alloy = "WCB"
 enable_shrinkage = true
 enable_hotspot = true
 enable_niyama = false
-enable_hot_tear = false
 enable_sand_burn_in = false
 enable_fraction_liquid = false
 sand_burn_in_threshold = 0.2

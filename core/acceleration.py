@@ -720,60 +720,68 @@ def compute_constraint_strain_parallel(
 ) -> np.ndarray:
     """
     Compute mechanical constraint strain from already-solidified neighbors (JIT-optimized).
-    
+
     Physical model: When thin sections solidify first, they become rigid and contract.
     Adjacent mushy zones (still solidifying) are mechanically constrained by the solid
     sections and experience tensile strain as the solid contracts but the mush cannot flow.
-    
+
+    Hot tears localize at the most-restraining neighbor, not at the average restraint.
+    We therefore return the *worst-case* (max) constraint over all early-solidifying
+    neighbors, matching the experimental observation that a single adjacent
+    already-solidified thin section can nucleate a hot tear (Braccini et al., 2000).
+
     Strain accumulation = α × ΔT × (solid_neighbor_contraction / mushy_zone_compliance)
-    
+
     Args:
         solidification_times: Time when each voxel solidified (seconds)
         voxel_moduli: Geometric modulus (proxy for section thickness) at each voxel
         neighbor_matrix: Neighbor indices for each voxel (n_voxels x max_neighbors)
         thermal_expansion: Thermal expansion coefficient (1/K)
-        temp_range: Temperature range from liquidus to solidus (°C)
-    
+        temp_range: Temperature range used for the strain (°C) — pass the BTR
+                    temperature range, not the full freezing range, for physical
+                    accuracy (Phase 1.2 fix)
+
     Returns:
         Array of constraint strain values (dimensionless)
     """
     n_voxels = solidification_times.shape[0]
     max_neighbors = neighbor_matrix.shape[1]
     constraint_strain = np.zeros(n_voxels, dtype=np.float32)
-    
+
     # Find max solidification time for normalization
     max_time = 0.0
     for i in range(n_voxels):
         if solidification_times[i] > max_time:
             max_time = solidification_times[i]
-    
+
     if max_time <= 0:
         return constraint_strain
-    
+
     for i in prange(n_voxels):
         my_time = solidification_times[i]
         my_modulus = voxel_moduli[i]
-        
+
         # Skip if this voxel solidified first (no constraint from neighbors)
         if my_time <= 0:
             continue
-        
-        # Accumulate constraint from neighbors that solidified earlier
-        total_constraint = 0.0
+
+        # Track the worst-case (max) constraint from any early-solidifying neighbor.
+        # Hot tears localize at the most-restraining boundary, not at the average.
+        max_strain_seen = 0.0
         solid_neighbor_count = 0
-        
+
         for j in range(max_neighbors):
             neighbor_idx = neighbor_matrix[i, j]
             if 0 <= neighbor_idx < n_voxels:
                 neighbor_time = solidification_times[neighbor_idx]
                 neighbor_modulus = voxel_moduli[neighbor_idx]
-                
+
                 # Only count neighbors that solidified BEFORE this voxel
                 if neighbor_time < my_time and neighbor_time > 0:
                     # Time differential: how much earlier did neighbor solidify
                     time_diff = my_time - neighbor_time
                     time_factor = time_diff / max_time
-                    
+
                     # Modulus ratio: thin sections (low modulus) create more constraint
                     # on thick neighbors (high modulus) because thin solidifies first
                     # and contracts while thick is still mushy
@@ -784,17 +792,18 @@ def compute_constraint_strain_parallel(
                         thickness_factor = 1.0 / (1.0 + modulus_ratio)
                     else:
                         thickness_factor = 0.5
-                    
+
                     # Accumulated contraction strain from this neighbor
                     # ε = α × ΔT × time_factor × thickness_factor
                     neighbor_strain = thermal_expansion * temp_range * time_factor * thickness_factor
-                    total_constraint += neighbor_strain
+                    if neighbor_strain > max_strain_seen:
+                        max_strain_seen = neighbor_strain
                     solid_neighbor_count += 1
-        
+
         if solid_neighbor_count > 0:
-            # Average constraint from all solid neighbors
-            constraint_strain[i] = total_constraint / solid_neighbor_count
-    
+            # Worst-case (max) constraint — localizes hot tears correctly
+            constraint_strain[i] = max_strain_seen
+
     return constraint_strain
 
 
@@ -824,9 +833,11 @@ def compute_solid_path_strain_parallel(
         voxel_centers: 3D coordinates of each voxel center
         neighbor_matrix: Neighbor indices for each voxel (n_voxels x max_neighbors)
         thermal_expansion: Thermal expansion coefficient (1/K)
-        temp_range: Temperature range from liquidus to solidus (°C)
+        temp_range: Temperature range used for the strain (°C) — pass the BTR
+                    temperature range, not the full freezing range, for physical
+                    accuracy (Phase 1.2 fix)
         max_path_length: Maximum path length to trace (inches)
-    
+
     Returns:
         Array of path strain values (dimensionless)
     """
