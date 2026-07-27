@@ -245,6 +245,10 @@ def _run_front_based_integration(
         effective_slowdown = riser_slowdown * engine._air_gap_slowdown
         previous_states = np.asarray(engine.mesh.voxel_states, dtype=np.float32).copy()
 
+        feeding_bias = float(
+            engine.analysis_options.solidification_params.feeding.feeding_zone_vertical_bias
+        )
+
         if engine._use_incremental and engine._incremental_engine is not None:
             engine.mesh.voxel_states[:] = engine._incremental_engine.update(
                 np.asarray(engine.mesh.voxel_states, dtype=np.float32),
@@ -270,6 +274,7 @@ def _run_front_based_integration(
                 np.asarray(part_types, dtype=np.int32),
                 engine.time_step,
                 engine.material_solidification_factor,
+                feeding_bias,
             )
         else:
             engine.mesh.voxel_states = engine._update_solidification_with_part_types(

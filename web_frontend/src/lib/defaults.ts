@@ -30,7 +30,8 @@ export const solidificationDefaults = {
     riser_min_reduction: 1,
     post_contact_reduction: 0.35,
     disconnected_neck_floor: 0.7,
-    shrink_scalar: 1
+    shrink_scalar: 1,
+    feeding_zone_vertical_bias: 0.5
   },
   chill: {
     max_chill_boost: 3,

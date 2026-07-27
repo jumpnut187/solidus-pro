@@ -1869,6 +1869,8 @@ class SolidificationParamsDialog(DraggableDialog):
     params_changed = pyqtSignal(dict)
 
     # Field definitions: (group_key, field_key, label, default, min, max, step, decimals, unit, tooltip)
+    # A field is rendered as a slider+spin pair when its key is in SLIDER_FIELDS.
+    SLIDER_FIELDS: set = {"feeding_zone_vertical_bias"}
     FIELD_DEFS: list = [
         # Feeding
         ("feeding", "base_feeding_distance", "Base Feeding Distance", 6.0, 2.0, 24.0, 0.1, 2, "inches",
@@ -1885,6 +1887,11 @@ class SolidificationParamsDialog(DraggableDialog):
          "Minimum shrinkage reduction for feeder necks not connected to a riser system."),
         ("feeding", "shrink_scalar", "Shrink Scalar", 1.0, 0.25, 4.0, 0.05, 2, "",
          "Global Shrinkage/Porosity calibration. Values above 1 reduce displayed risk; values below 1 increase it."),
+        ("feeding", "feeding_zone_vertical_bias", "Feeding-Zone +Z Bias", 0.5, 0.0, 2.0, 0.05, 2, "",
+         "Strength of +Z directional solidification inside the riser feeding zone. "
+         "Higher = bottom solidifies faster in the feeding zone, hardening directional "
+         "freezing toward risers. 0 disables the bias; 2 is very aggressive. "
+         "Default 0.5 matches the legacy directional-solidification behavior."),
         # Chills
         ("chill", "max_chill_boost", "Max Chill Boost", 3.0, 1.0, 10.0, 0.1, 1, "multiplier",
          "Maximum solidification acceleration near chills."),
@@ -1962,6 +1969,7 @@ class SolidificationParamsDialog(DraggableDialog):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent, title="Solidification Parameters")
         self._spinboxes: dict = {}
+        self._sliders: dict = {}
         self._original_values: dict = {}
         self._setup_ui()
 
@@ -2036,7 +2044,39 @@ class SolidificationParamsDialog(DraggableDialog):
         spin.setSuffix(f" {unit}" if unit else "")
         spin.setToolTip(tooltip)
         row.addWidget(lbl)
-        row.addWidget(spin, 1)
+        if field_key in self.SLIDER_FIELDS:
+            slider = QSlider(Qt.Horizontal)
+            slider_steps = max(2, int(round((max_v - min_v) / step)))
+            slider.setRange(0, slider_steps)
+            slider.setSingleStep(1)
+            slider.setPageStep(max(1, slider_steps // 10))
+            slider.setToolTip(tooltip)
+            slider.setMinimumWidth(180)
+            row.addWidget(slider, 2)
+            row.addWidget(spin, 1)
+
+            def _spin_to_slider(value: float) -> None:
+                slider_steps_now = slider.maximum() - slider.minimum()
+                span = max_v - min_v
+                if span <= 0 or slider_steps_now <= 0:
+                    return
+                ratio = (value - min_v) / span
+                slider.setValue(int(round(ratio * slider_steps_now)))
+
+            def _slider_to_spin() -> None:
+                slider_steps_now = slider.maximum() - slider.minimum()
+                span = max_v - min_v
+                if slider_steps_now <= 0:
+                    return
+                ratio = (slider.value() - slider.minimum()) / slider_steps_now
+                spin.setValue(min_v + ratio * span)
+
+            spin.valueChanged.connect(_spin_to_slider)
+            slider.valueChanged.connect(_slider_to_spin)
+            _spin_to_slider(default)
+            self._sliders[(label, field_key)] = slider
+        else:
+            row.addWidget(spin, 1)
         self._spinboxes[(label, field_key)] = spin  # keyed by (group_label, field_key)
         return row
 
@@ -2048,8 +2088,48 @@ class SolidificationParamsDialog(DraggableDialog):
             self.set_options(self._original_values)
 
     def apply_values(self) -> None:
-        self.params_changed.emit(self.get_options())
+        options = self.get_options()
+        self.params_changed.emit(options)
+        self._persist_to_user_config(options)
         self.accept()
+
+    @staticmethod
+    def _persist_to_user_config(options: dict) -> None:
+        """Write solidification params to ~/.castsim/config.yaml so changes
+        persist across app sessions. Only writes if yaml is importable.
+        """
+        try:
+            import yaml
+        except ImportError:
+            return
+        try:
+            from pathlib import Path
+            config_dir = Path.home() / ".castsim"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            config_path = config_dir / "config.yaml"
+            existing: dict = {}
+            if config_path.exists():
+                try:
+                    existing = yaml.safe_load(config_path.read_text()) or {}
+                except Exception:
+                    existing = {}
+            if not isinstance(existing, dict):
+                existing = {}
+            solid_section = existing.get("solidification")
+            if not isinstance(solid_section, dict):
+                solid_section = {}
+            for grp_key, grp_values in options.items():
+                if not isinstance(grp_values, dict):
+                    continue
+                bucket = solid_section.get(grp_key)
+                if not isinstance(bucket, dict):
+                    bucket = {}
+                bucket.update(grp_values)
+                solid_section[grp_key] = bucket
+            existing["solidification"] = solid_section
+            config_path.write_text(yaml.safe_dump(existing, sort_keys=False))
+        except Exception as exc:
+            print(f"[SolidificationParamsDialog] failed to persist config: {exc}")
 
     def get_options(self) -> dict:
         result = {}
@@ -2131,8 +2211,9 @@ class MainWindow(QMainWindow):
             'use_gpu': True,
         }
 
-        # Solidification parameters (from SolidificationParameters defaults)
-        self._solidification_params = SolidificationParameters().to_dict()
+        # Solidification parameters (defaults merged with user-config overrides
+        # at ~/.castsim/config.yaml so changes persist across app sessions).
+        self._solidification_params = self._load_solidification_params_with_user_override()
 
         # Current visualization mode
         self._current_vis_mode = 'shrinkage'  # 'shrinkage', 'hotspot', 'niyama', 'fraction_liquid'
@@ -2792,6 +2873,45 @@ class MainWindow(QMainWindow):
     def _on_solidification_params_confirmed(self, options):
         """Handle solidification params confirmation from dialog"""
         self._solidification_params = options
+
+    @staticmethod
+    def _load_solidification_params_with_user_override() -> dict:
+        """Build SolidificationParameters defaults and apply user overrides from
+        ``~/.castsim/config.yaml`` so any prior dialog session persists.
+        """
+        defaults = SolidificationParameters().to_dict()
+        try:
+            from pathlib import Path
+            config_path = Path.home() / ".castsim" / "config.yaml"
+            if not config_path.exists():
+                return defaults
+            try:
+                import yaml
+            except ImportError:
+                return defaults
+            try:
+                data = yaml.safe_load(config_path.read_text()) or {}
+            except Exception:
+                return defaults
+            if not isinstance(data, dict):
+                return defaults
+            solid = data.get("solidification")
+            if not isinstance(solid, dict):
+                return defaults
+            for grp_key, grp_values in solid.items():
+                if not isinstance(grp_values, dict):
+                    continue
+                bucket = defaults.get(grp_key)
+                if not isinstance(bucket, dict):
+                    continue
+                for field_key, value in grp_values.items():
+                    if field_key in bucket:
+                        bucket[field_key] = value
+                defaults[grp_key] = bucket
+            return defaults
+        except Exception as exc:
+            print(f"[MainWindow] failed to read user overrides: {exc}")
+            return defaults
 
     def _open_mesh_dialog(self):
         """Open the mesh parameters dialog"""

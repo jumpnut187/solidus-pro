@@ -232,23 +232,24 @@ def update_solidification_with_feeding_connectivity(
     riser_slowdown: np.ndarray,
     part_types: np.ndarray,
     time_step: float,
-    material_factor: float = 1.0
+    material_factor: float = 1.0,
+    feeding_zone_vertical_bias: float = 0.5
 ) -> np.ndarray:
     """
     Update solidification with RISER connectivity-based feeding zone detection.
-    
+
     CRITICAL FIX: This function traces feeding connectivity through part_types,
     ensuring that voxels connected to RISER voxels (part_type=1) through liquid
     neighbors maintain feeding zone status. This prevents "islands" of molten
     metal at riser post junctions from solidifying prematurely.
-    
+
     Feeding Zone Rules:
     1. All RISER voxels (part_type=1) are in the feeding zone
     2. Any liquid CAST voxel with a liquid RISER neighbor is in the feeding zone
     3. Any liquid CAST voxel with a liquid feeding-zone neighbor propagates status
-    
+
     This implements neighbor-propagated directional solidification toward risers.
-    
+
     Args:
         voxel_states: Current solidification state (0=liquid, 1=solid)
         neighbors: Neighbor connectivity matrix (n_voxels x 26)
@@ -259,7 +260,10 @@ def update_solidification_with_feeding_connectivity(
         part_types: Part type for each voxel (0=CAST, 1=RISER, 2=CHILL)
         time_step: Current time step
         material_factor: Material-specific solidification rate multiplier
-    
+        feeding_zone_vertical_bias: Strength of +Z directional-solidification bias
+            inside the riser feeding zone. Effective vertical_factor = 1.0 +
+            (1.0 - height) * feeding_zone_vertical_bias.
+
     Returns:
         Updated voxel states
     """
@@ -344,7 +348,7 @@ def update_solidification_with_feeding_connectivity(
                 # ENHANCED: Feeding zone voxels have stronger upward bias
                 if in_feeding_zone:
                     # In feeding zone: even stronger upward bias (solidifies from bottom up)
-                    vertical_factor = 1.0 + (1.0 - heights[i]) * 0.5
+                    vertical_factor = 1.0 + (1.0 - heights[i]) * feeding_zone_vertical_bias
                 else:
                     # Normal: moderate upward bias
                     vertical_factor = 1.0 + (1.0 - heights[i]) * 0.3

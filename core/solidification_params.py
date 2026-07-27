@@ -68,6 +68,7 @@ class FeedingParams:
     post_contact_reduction: float = 0.35
     disconnected_neck_floor: float = 0.70
     shrink_scalar: float = SHRINK_SCALAR_DEFAULT
+    feeding_zone_vertical_bias: float = 0.5
 
     def __post_init__(self) -> None:
         self.shrink_scalar = _clamp_float(
@@ -76,6 +77,13 @@ class FeedingParams:
             SHRINK_SCALAR_MAX,
             SHRINK_SCALAR_DEFAULT,
         )
+        try:
+            bias = float(self.feeding_zone_vertical_bias)
+        except (TypeError, ValueError):
+            bias = 0.5
+        if bias != bias:
+            bias = 0.5
+        self.feeding_zone_vertical_bias = max(0.0, min(2.0, bias))
 
 
 @dataclass
@@ -204,6 +212,13 @@ class SolidificationParameters:
             SHRINK_SCALAR_MAX,
             SHRINK_SCALAR_DEFAULT,
         )
+        try:
+            bias = float(self.feeding.feeding_zone_vertical_bias)
+        except (TypeError, ValueError):
+            bias = 0.5
+        if bias != bias:
+            bias = 0.5
+        self.feeding.feeding_zone_vertical_bias = max(0.0, min(2.0, bias))
 
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -222,6 +237,7 @@ class SolidificationParameters:
                 'post_contact_reduction': self.feeding.post_contact_reduction,
                 'disconnected_neck_floor': self.feeding.disconnected_neck_floor,
                 'shrink_scalar': self.feeding.shrink_scalar,
+                'feeding_zone_vertical_bias': self.feeding.feeding_zone_vertical_bias,
             },
             'chill': {
                 'max_chill_boost': self.chill.max_chill_boost,

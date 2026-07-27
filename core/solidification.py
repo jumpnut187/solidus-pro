@@ -2346,14 +2346,19 @@ class SolidificationEngine:
         # Use the new enhanced function if part_types is available
         if self.mesh.voxel_part_types is not None:
             part_types = np.ascontiguousarray(self.mesh.voxel_part_types, dtype=np.int32)
-            
+
+            feeding_bias = float(
+                self.analysis_options.solidification_params.feeding.feeding_zone_vertical_bias
+            )
+
             # Use the ENHANCED feeding connectivity function
             # This traces RISER voxel connectivity through neighbors to establish
             # proper directional solidification toward risers
             new_states = update_solidification_with_feeding_connectivity(
                 voxel_states, neighbors, moduli, heights,
                 chill_boost, riser_slowdown, part_types, self.time_step,
-                np.float32(material_factor)
+                np.float32(material_factor),
+                np.float32(feeding_bias),
             )
         else:
             # Fallback to original function if no part types available
