@@ -60,11 +60,24 @@ class AlloyProperties:
     # Critical strain for BTR ductility (dimensionless)
     # Strain above this in the BTR leads to hot tear formation
     btr_critical_strain: float = 0.008
-    
+
+    # Strain-rate sensitivity of BTR critical strain (dimensionless, default 0 = no
+    # sensitivity). Hot tearing is a kinetic phenomenon: at higher strain rates
+    # the effective BTR ductility drops because the mush has less time to
+    # accommodate. Reference: Magnin et al. 1996; Novikov 1966.
+    # epsilon_c_eff = epsilon_c * (1 - sensitivity * log10(1 + strain_rate / ref))
+    # Typical values: steels ~0.10, Ni-base ~0.15, Al-bronze ~0.08
+    btr_critical_strain_rate_sensitivity: float = 0.0
+
+    # Reference strain rate for the BTR critical strain sensitivity (1/s).
+    # 1e-3 /s is a reasonable "static" reference (corresponds to foundry cooling
+    # in the minutes-timescale). Above this, the effective critical strain drops.
+    btr_critical_strain_ref_rate: float = 1.0e-3
+
     # Healing factor for hot tear risk reduction via feeding (0-1)
     # Higher values mean better feeding reduces hot tear risk more
     hot_tear_healing_factor: float = 0.55
-    
+
     # Brittle Temperature Range (BTR) fraction solid bounds
     # Range where alloy has minimum ductility (semi-solid "mush")
     # Hot tears form in this range when tensile strain exceeds ductility
@@ -72,7 +85,19 @@ class AlloyProperties:
     # btr_end: fraction solid where alloy regains ductility (typically 0.97-0.99)
     btr_fraction_solid_start: float = 0.90
     btr_fraction_solid_end: float = 0.98
-    
+
+    # Cooling-rate exponent for BTR bound adjustment (default 0 = no adjustment).
+    # Back diffusion in the solid reduces the effective BTR width (Liu and Kou
+    # 2015, Acta Mater 100:359). At faster cooling, less back diffusion
+    # occurs, the BTR widens, and the alloy becomes more susceptible.
+    # The exponent is POSITIVE: btr_width ~ (cooling_rate / ref) ** exponent.
+    # Typical values: steels 0.05, Ni-base 0.10, Al-alloys 0.08
+    btr_cooling_rate_exponent: float = 0.0
+
+    # Reference cooling rate for BTR cooling-rate adjustment (°C/s).
+    # 1.0 °C/s is a reasonable foundry reference (sand casting of a small block).
+    btr_btr_cooling_rate_ref: float = 1.0
+
     # Critical fraction solid: point where interdendritic feeding stops
     # Below this threshold, liquid can flow freely through mushy zone
     # Above this threshold, dendrites block flow (coherency point)
@@ -421,9 +446,11 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         hot_tear_susceptibility=0.30,  # Moderate - narrow freezing range helps
         solid_thermal_expansion=1.2e-5,  # 1/K solid-state thermal expansion
         btr_critical_strain=0.008,  # Critical strain for BTR ductility
+        btr_critical_strain_rate_sensitivity=0.10,  # Mild rate-dependence
         hot_tear_healing_factor=0.55,  # Healing factor for feeding relief
         btr_fraction_solid_start=0.90,  # BTR starts at 90% solid
         btr_fraction_solid_end=0.98,    # BTR ends at 98% solid
+        btr_cooling_rate_exponent=0.05,  # Mild BTR-widening with cooling rate
         # Feeding/permeability properties
         critical_fraction_solid=0.52,  # Coherency point for carbon steel
         dendrite_arm_spacing=80.0,  # μm - typical for sand casting cooling rates
@@ -455,9 +482,11 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         hot_tear_susceptibility=0.65,  # High - wide freezing range, low ductility at BTR
         solid_thermal_expansion=1.7e-5,  # 1/K solid-state thermal expansion
         btr_critical_strain=0.004,  # Lower critical strain - more susceptible
+        btr_critical_strain_rate_sensitivity=0.15,  # Strong rate-dependence (austenitic)
         hot_tear_healing_factor=0.35,  # Poor healing - lower feeding effectiveness
         btr_fraction_solid_start=0.85,  # Earlier onset due to alloy segregation
         btr_fraction_solid_end=0.99,    # Extended BTR due to wide freezing range
+        btr_cooling_rate_exponent=0.08,  # Moderate BTR-widening (segregation-driven)
         # Feeding/permeability properties - stainless has narrower feeding window
         critical_fraction_solid=0.48,  # Lower coherency due to wide freezing range
         dendrite_arm_spacing=60.0,  # μm - finer structure due to alloying
@@ -522,9 +551,11 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         hot_tear_susceptibility=0.20,
         solid_thermal_expansion=1.8e-5,  # CTE ~ 16-17 µm/m·K (CDA, AZoM)
         btr_critical_strain=0.012,
+        btr_critical_strain_rate_sensitivity=0.08,  # Mild rate-dependence
         hot_tear_healing_factor=0.75,
         btr_fraction_solid_start=0.92,
         btr_fraction_solid_end=0.97,
+        btr_cooling_rate_exponent=0.05,  # Mild BTR-widening (good ductility)
         # Feeding/permeability — NAB has excellent feeding; CDA "Fluidity:
         # Medium" but "Shrinkage in Solidification: HIGH" — feeding range
         # extends further than most bronzes before coherency.
@@ -584,9 +615,11 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         hot_tear_susceptibility=0.28,
         solid_thermal_expansion=1.6e-5,  # 1/K — mean CTE 16 µm/m·K (AZoM, CDA)
         btr_critical_strain=0.007,
+        btr_critical_strain_rate_sensitivity=0.10,  # Moderate rate-dependence
         hot_tear_healing_factor=0.50,
         btr_fraction_solid_start=0.89,
         btr_fraction_solid_end=0.97,
+        btr_cooling_rate_exponent=0.06,  # Mild BTR-widening
         critical_fraction_solid=0.56,
         dendrite_arm_spacing=95.0,  # µm — typical 70/30 Cu-Ni sand-cast
         # CDA "Sand burn-in" susceptibility falls between bronze (high) and
@@ -619,9 +652,11 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         hot_tear_susceptibility=0.38,
         solid_thermal_expansion=1.3e-5,  # 1/K solid-state thermal expansion
         btr_critical_strain=0.006,  # Moderate critical strain
+        btr_critical_strain_rate_sensitivity=0.10,  # Mild rate-dependence
         hot_tear_healing_factor=0.45,  # Moderate healing effectiveness
         btr_fraction_solid_start=0.87,
         btr_fraction_solid_end=0.98,
+        btr_cooling_rate_exponent=0.05,  # Mild BTR-widening
         # Feeding/permeability properties
         critical_fraction_solid=0.54,
         dendrite_arm_spacing=78.0,  # μm
@@ -653,9 +688,11 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         hot_tear_susceptibility=0.42,
         solid_thermal_expansion=1.4e-5,  # 1/K solid-state thermal expansion
         btr_critical_strain=0.005,  # Lower critical strain for Ni-based
+        btr_critical_strain_rate_sensitivity=0.12,  # Strong rate-dependence
         hot_tear_healing_factor=0.40,  # Moderate healing effectiveness
         btr_fraction_solid_start=0.86,  # Wider/earlier BTR than mild steel
         btr_fraction_solid_end=0.98,
+        btr_cooling_rate_exponent=0.10,  # Strong BTR-widening (Ni-base alloys)
         # Feeding/permeability properties
         critical_fraction_solid=0.53,  # Moderate coherency point
         dendrite_arm_spacing=85.0,  # μm
@@ -687,9 +724,11 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         hot_tear_susceptibility=0.58,
         solid_thermal_expansion=1.5e-5,  # 1/K solid-state thermal expansion
         btr_critical_strain=0.004,  # Low critical strain - high susceptibility
+        btr_critical_strain_rate_sensitivity=0.15,  # Strong rate-dependence
         hot_tear_healing_factor=0.30,  # Poor healing due to restricted feeding
         btr_fraction_solid_start=0.84,  # Earlier onset with wider BTR
         btr_fraction_solid_end=0.99,
+        btr_cooling_rate_exponent=0.10,  # Strong BTR-widening (Ni-base)
         # Feeding/permeability properties
         critical_fraction_solid=0.50,  # Lower coherency due to restricted feeding
         dendrite_arm_spacing=70.0,  # μm

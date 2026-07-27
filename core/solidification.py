@@ -3770,9 +3770,21 @@ class SolidificationEngine:
         hts = self.alloy.hot_tear_susceptibility
         solid_expansion = getattr(self.alloy, 'solid_thermal_expansion', 1.2e-5)
         btr_critical_strain = getattr(self.alloy, 'btr_critical_strain', 0.008)
+        btr_critical_strain_rate_sensitivity = getattr(
+            self.alloy, 'btr_critical_strain_rate_sensitivity', 0.0
+        )
+        btr_critical_strain_ref_rate = getattr(
+            self.alloy, 'btr_critical_strain_ref_rate', 1.0e-3
+        )
         healing_factor = getattr(self.alloy, 'hot_tear_healing_factor', 0.55)
         btr_start = self.alloy.btr_fraction_solid_start
         btr_end = self.alloy.btr_fraction_solid_end
+        btr_cooling_rate_exponent = getattr(
+            self.alloy, 'btr_cooling_rate_exponent', 0.0
+        )
+        btr_cooling_rate_ref = getattr(
+            self.alloy, 'btr_btr_cooling_rate_ref', 1.0
+        )
         full_temp_range = float(self.alloy.liquidus_temp - self.alloy.solidus_temp)
 
         # Phase 1.2 fix: use the BTR temperature range, not the full freezing range.
@@ -3790,8 +3802,15 @@ class SolidificationEngine:
         print(f"  BTR: {btr_start:.0%} to {btr_end:.0%} solid")
         print(f"  Solid thermal expansion: {solid_expansion:.2e} 1/K")
         print(f"  BTR critical strain: {btr_critical_strain:.4f}")
+        if btr_critical_strain_rate_sensitivity > 0:
+            print(f"  BTR critical strain rate-sensitivity: "
+                  f"{btr_critical_strain_rate_sensitivity:.2f} "
+                  f"(ref rate {btr_critical_strain_ref_rate:.1e} 1/s)")
         print(f"  Healing factor: {healing_factor:.2f}")
         print(f"  Freezing range: {full_temp_range:.1f} °C (full), {btr_temp_range:.2f} °C (BTR)")
+        if btr_cooling_rate_exponent != 0:
+            print(f"  BTR cooling-rate exponent: {btr_cooling_rate_exponent:.3f} "
+                  f"(ref rate {btr_cooling_rate_ref:.1f} °C/s)")
 
         part_types = np.asarray(self.mesh.voxel_part_types, dtype=np.int32) if self.mesh.voxel_part_types is not None else np.zeros(n_voxels, dtype=np.int32)
 
@@ -3842,6 +3861,40 @@ class SolidificationEngine:
             total_solidification_time = max(float(np.max(solidification_times)), 1e-6)
         btr_exposure = np.clip(btr_dwell_time / total_solidification_time, 0.0, 1.0).astype(np.float32)
 
+        # Phase 2.4: per-voxel BTR adjustment based on local cooling rate.
+        # Back diffusion in the solid reduces the effective BTR width (Liu and
+        # Kou 2015, Acta Mater 100:359). At faster cooling, less back diffusion
+        # occurs, the BTR widens, and the alloy spends more time in the
+        # vulnerable range. We approximate by scaling btr_dwell_time per voxel:
+        #     local_btr_width = nominal * (cooling_rate / ref) ** exponent
+        # where `btr_cooling_rate_exponent` is POSITIVE (typically 0.05 to 0.10)
+        # so faster cooling widens the BTR. When exponent is 0, this is a no-op.
+        if btr_cooling_rate_exponent != 0:
+            cooling_rates = getattr(self, "cooling_rates", None)
+            if cooling_rates is not None and len(cooling_rates) == n_voxels:
+                cr = np.maximum(np.asarray(cooling_rates, dtype=np.float32), 1e-4)
+                ref_cr = max(float(btr_cooling_rate_ref), 1e-4)
+                btr_width_ratio = np.power(cr / ref_cr, btr_cooling_rate_exponent)
+                # Clamp the ratio to a reasonable range to avoid runaway
+                # behavior from outliers
+                btr_width_ratio = np.clip(btr_width_ratio, 0.5, 2.0)
+                btr_dwell_time = btr_dwell_time * btr_width_ratio
+                btr_exposure = np.clip(
+                    btr_dwell_time / total_solidification_time, 0.0, 1.0
+                ).astype(np.float32)
+
+        # Phase 2.1: coherency weighting. The literature (Borland 1960) defines
+        # the BTR as the "grain boundary stage" — only meaningful when a
+        # coherent solid network has formed (neighbors above coherency point).
+        # `supporting_fraction` from _analyze_btr_history is the max fraction of
+        # neighbors above critical_fraction_solid while the voxel was in the
+        # BTR. We use a soft weight: 0 at 0% neighbors, full credit at >=50%
+        # neighbors. This avoids zeroing the result in sparse mesh regions
+        # while still discounting slurry-zone voxels.
+        if np.any(supporting_fraction > 0.0):
+            coherency_weight = np.clip(supporting_fraction * 2.0, 0.0, 1.0)
+            btr_exposure = (btr_exposure * coherency_weight).astype(np.float32)
+
         max_solid_time = np.max(solidification_times) if np.max(solidification_times) > 0 else 1.0
         normalized_time = solidification_times / max_solid_time
 
@@ -3873,11 +3926,8 @@ class SolidificationEngine:
             np.float32(btr_temp_range),
         )
 
-        strain_index = np.clip(
-            mechanical_strain / max(float(btr_critical_strain), 1e-6),
-            0.0,
-            1.0,
-        )
+        # Note: strain_index is now computed later, after strain_rate, so it
+        # can use the rate-dependent effective critical strain (Phase 2.5).
 
         modulus_variance = compute_modulus_variance_parallel(voxel_moduli, neighbors)
 
@@ -3916,6 +3966,35 @@ class SolidificationEngine:
             0.0,
         ).astype(np.float32)
         self.strain_rate = strain_rate
+
+        # Phase 2.5: rate-dependent critical strain. The BTR critical strain
+        # is not a static material property — at higher strain rates the
+        # effective ductility drops because the mush has less time to
+        # accommodate. Reference: Magnin et al. 1996 (Al-Cu), Novikov 1966.
+        #     epsilon_c_eff = epsilon_c * (1 - sensitivity * log10(1 + strain_rate / ref))
+        # When sensitivity is 0, this is a no-op (defaults preserve Phase 1).
+        if btr_critical_strain_rate_sensitivity > 0:
+            # log10(1 + strain_rate / ref) = log10((ref + strain_rate) / ref)
+            rate_log = np.log10(
+                (btr_critical_strain_ref_rate + strain_rate) / btr_critical_strain_ref_rate
+            )
+            rate_factor = 1.0 - btr_critical_strain_rate_sensitivity * rate_log
+            # Floor at 50% of the static critical strain to avoid going negative
+            # for very high strain rates
+            rate_factor = np.clip(rate_factor, 0.5, 1.0)
+            btr_critical_strain_effective = (
+                np.full(n_voxels, float(btr_critical_strain), dtype=np.float32) * rate_factor
+            )
+        else:
+            btr_critical_strain_effective = np.full(
+                n_voxels, float(btr_critical_strain), dtype=np.float32
+            )
+
+        strain_index = np.clip(
+            mechanical_strain / np.maximum(btr_critical_strain_effective, 1e-6),
+            0.0,
+            1.0,
+        )
 
         surface_distances = np.ascontiguousarray(
             self.surface_distances,
@@ -3971,6 +4050,38 @@ class SolidificationEngine:
                 healing_capacity,
                 np.asarray(history_open_fraction, dtype=np.float32),
             )
+
+        # Phase 2.2: BTR-window feeding. Per Clyne-Davies and Borland, healing
+        # only happens in the recovery window (1-5% liquid, i.e. f_s=0.95-0.99)
+        # where the solid bridges have formed but liquid films still exist. Bulk
+        # feeding_quality (which tracks shrinkage feeding through the entire
+        # mushy zone) over-states healing for hot tears: a voxel that was well-
+        # fed during the slurry stage but whose path closed at the BTR will not
+        # actually heal a hot tear. We refine by taking the maximum of the
+        # bulk feeding_quality and the BTR-window open fraction, computed
+        # from `feeding_path_result.latest_open_time` (the latest time an open
+        # path existed before freeze-off). A voxel whose path was open at the
+        # BTR time is considered to have full BTR-window healing capacity.
+        latest_open_time = None
+        if feeding_result is not None:
+            latest_open_time = getattr(feeding_result, "latest_open_time", None)
+        if latest_open_time is None:
+            latest_open_time = getattr(self, "feeding_latest_open_time", None)
+        if latest_open_time is not None and total_solidification_time > 0:
+            latest_open_arr = np.asarray(latest_open_time, dtype=np.float32)
+            # Normalize to [0, 1] of total solidification time
+            latest_open_norm = np.clip(
+                latest_open_arr / total_solidification_time, 0.0, 1.0
+            )
+            # BTR-window open: the path was open at any point during the BTR.
+            # We map (latest_open_norm - btr_start) / (btr_end - btr_start) to
+            # [0, 1], with 0 for paths closed before BTR start, and 1 for paths
+            # still open at the end of the BTR.
+            btr_window_open = np.clip(
+                (latest_open_norm - btr_start) / max(btr_width, 1e-6), 0.0, 1.0
+            )
+            healing_capacity = np.maximum(healing_capacity, btr_window_open)
+
         healing_capacity *= healing_factor
 
         healing_relief = float(getattr(hot_tear_params, 'healing_relief_strength', 0.65))
@@ -3984,6 +4095,29 @@ class SolidificationEngine:
 
         superheat = float(self.alloy.pouring_temp - self.alloy.liquidus_temp)
         material_factor *= (1.0 + 0.1 * (superheat / 200.0))
+
+        # Phase 2.3: grain refinement (SDAS) term. The literature (Pumphrey,
+        # Novikov, Eskin) shows that finer grains (lower SDAS) reduce hot
+        # tearing susceptibility. We use a per-voxel SDAS computed from the
+        # local cooling rate and the alloy's reference SDAS, then scale the
+        # material factor as (sdas / sdas_ref)^0.5 — coarser SDAS yields higher
+        # material factor. This captures the well-known foundry observation
+        # that grain refinement is one of the most effective hot tear
+        # mitigation strategies.
+        cooling_rates = getattr(self, "cooling_rates", None)
+        if cooling_rates is not None and len(cooling_rates) == n_voxels:
+            cr = np.maximum(np.asarray(cooling_rates, dtype=np.float32), 1e-4)
+            sdas_ref = max(float(self.alloy.dendrite_arm_spacing), 1.0)
+            sdas_exp = float(self.alloy.sdas_cooling_rate_exponent)
+            ref_cr = max(float(self.alloy.sdas_reference_cooling_rate), 1e-4)
+            # local_sdas = sdas_ref * (cr / ref_cr) ** sdas_exp
+            local_sdas = sdas_ref * np.power(cr / ref_cr, sdas_exp)
+            local_sdas = np.clip(local_sdas, 10.0, 500.0)
+            sdas_ratio = local_sdas / sdas_ref
+            # Coarser SDAS -> higher material factor; clip to avoid extremes
+            sdas_ratio = np.clip(sdas_ratio, 0.5, 2.0)
+            grain_refinement_factor = np.sqrt(sdas_ratio)
+            material_factor = material_factor * grain_refinement_factor
 
         material_factor = np.clip(material_factor, 0.1, 1.5)
 
@@ -4012,13 +4146,16 @@ class SolidificationEngine:
 
         # Additive components: existing 8 keys preserved, new keys added
         # (Phase 1.1 dwell time, Phase 1.2 BTR temp range, Phase 1.4 strain rate,
-        # Phase 2.1 supporting fraction — pre-computed and ready for downstream
-        # use). The dict is read by zero external consumers as of this change.
+        # Phase 2.1 supporting fraction, Phase 2.2 BTR-window healing,
+        # Phase 2.3 grain refinement factor, Phase 2.4 BTR cooling-rate ratio,
+        # Phase 2.5 effective critical strain). The dict is read by zero
+        # external consumers as of this change.
         self.hot_tear_components = {
             "btr_exposure": btr_exposure,
             "btr_dwell_time": btr_dwell_time,
             "btr_temp_range_used": np.full(n_voxels, btr_temp_range, dtype=np.float32),
             "coherency_support_fraction": supporting_fraction,
+            "btr_critical_strain_effective": btr_critical_strain_effective,
             "mechanical_strain": mechanical_strain,
             "strain_index": strain_index,
             "strain_rate": strain_rate,
