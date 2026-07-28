@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QBrush, QColor
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -90,12 +91,19 @@ class PartsDialog(DraggableDialog):
                 background-color: #333;
                 alternate-background-color: #3a3a3a;
                 gridline-color: #555;
+                color: #fff;
             }
             QTableWidget::item {
                 padding: 4px;
+                color: #fff;
+                background-color: transparent;
             }
             QTableWidget::item:selected {
                 background-color: #0066cc;
+                color: #fff;
+            }
+            QTableWidget::item:alternate {
+                color: #fff;
             }
             QHeaderView::section {
                 background-color: #444;
@@ -103,7 +111,16 @@ class PartsDialog(DraggableDialog):
                 border: 1px solid #555;
                 color: #ddd;
             }
+            QHeaderView {
+                background-color: #2b2b2b;
+            }
         """)
+
+        palette = self.parts_table.palette()
+        palette.setColor(palette.Text, QColor(255, 255, 255))
+        palette.setColor(palette.HighlightedText, QColor(255, 255, 255))
+        palette.setColor(palette.WindowText, QColor(255, 255, 255))
+        self.parts_table.setPalette(palette)
         self.content_layout.addWidget(self.parts_table)
 
         self.confirm_types_btn = QPushButton("Confirm Part Type Assignment")
@@ -345,8 +362,11 @@ class PartsDialog(DraggableDialog):
 
             name_item = QTableWidgetItem(name)
             name_item.setData(Qt.UserRole, part_id)
+            name_item.setData(Qt.ForegroundRole, QColor(255, 255, 255))
             name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+            name_item.setForeground(QBrush(QColor(255, 255, 255)))
             self.parts_table.setItem(row, 0, name_item)
+            self.parts_table.item(row, 0).setForeground(QBrush(QColor(255, 255, 255)))
 
             type_combo = QComboBox()
             type_combo.addItems(self.PART_TYPE_OPTIONS)

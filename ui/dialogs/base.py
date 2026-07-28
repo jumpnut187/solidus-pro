@@ -73,6 +73,37 @@ class DraggableDialog(QDialog):
             QPushButton:pressed {
                 background-color: #333;
             }
+            QComboBox {
+                background-color: #444;
+                border: 1px solid #666;
+                border-radius: 4px;
+                padding: 4px 8px;
+                color: #fff;
+            }
+            QComboBox:hover {
+                border: 1px solid #888;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 20px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #2b2b2b;
+                color: #fff;
+                selection-background-color: #0066cc;
+                selection-color: #fff;
+                border: 1px solid #555;
+                outline: 0;
+            }
+            QComboBox QAbstractItemView::item {
+                color: #fff;
+                background-color: transparent;
+                padding: 4px;
+            }
+            QComboBox QAbstractItemView::item:selected {
+                background-color: #0066cc;
+                color: #fff;
+            }
             """
         )
 
