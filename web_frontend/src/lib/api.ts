@@ -189,14 +189,27 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ voxel_size: voxelSize })
     }),
+  mlMesh: (projectId: string, targetAccuracy?: number) =>
+    requestJson<{
+      base_voxel_size: number;
+      refinement_level: number;
+      confidence: number;
+      reason: string;
+      used_model: boolean;
+      warning?: string;
+    }>(`/api/projects/${projectId}/ml-mesh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(targetAccuracy === undefined ? {} : { target_accuracy: targetAccuracy })
+    }),
   runProject: (projectId: string) =>
     requestJson<{ status: string; sim_id: string }>(`/api/projects/${projectId}/run`, { method: 'POST' }),
   cancelProject: (projectId: string) =>
     requestJson<{ status: string }>(`/api/projects/${projectId}/cancel`, { method: 'POST' }),
   status: (projectId: string) => requestJson<JobStatus>(`/api/jobs/${projectId}/status`),
   results: (projectId: string) => requestJson<ResultPayload>(`/api/projects/${projectId}/results?summary_only=1`),
-  resultFields: (projectId: string, maxPoints = 120000) => {
-    const params = new URLSearchParams({ max_points: String(maxPoints) });
+  resultFields: (projectId: string, options?: { maxPoints?: number }) => {
+    const params = new URLSearchParams({ max_points: String(options?.maxPoints ?? 120000) });
     return requestJson<ResultFieldsPayload>(`/api/projects/${projectId}/result-fields?${params.toString()}`);
   },
   surface: (projectId: string, mode: string, threshold: number, timePercent: number) => {

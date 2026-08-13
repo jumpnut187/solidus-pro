@@ -358,6 +358,39 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(uploaded["part_type"], "cast")
         self.assertGreater(uploaded["mesh_data"]["face_count"], 0)
 
+    def test_ml_mesh_requires_parts_then_recommends_settings(self) -> None:
+        create_response = self.client.post(
+            "/api/projects",
+            json={"name": "ML Mesh Test", "alloy": "WCB", "voxel_size": 0.2, "refinement_level": 2},
+        )
+        self.assertEqual(create_response.status_code, 201)
+        project_id = create_response.get_json()["id"]
+
+        empty_response = self.client.post(f"/api/projects/{project_id}/ml-mesh", json={})
+        self.assertEqual(empty_response.status_code, 400)
+
+        mesh_path = Path(self.temp_dir.name) / "ml_casting.stl"
+        trimesh.creation.box(extents=(2.0, 2.0, 2.0)).export(mesh_path)
+        with mesh_path.open("rb") as handle:
+            upload = self.client.post(
+                "/api/uploads",
+                data={"files": (io.BytesIO(handle.read()), "ml_casting.stl")},
+                content_type="multipart/form-data",
+            )
+        file_entry = upload.get_json()["files"][0]
+        self.client.post(
+            f"/api/projects/{project_id}/parts",
+            json={"name": "Cast", "part_type": "cast", "filepath": file_entry["filepath"], "visible": True},
+        )
+
+        response = self.client.post(f"/api/projects/{project_id}/ml-mesh", json={})
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertGreater(payload["base_voxel_size"], 0)
+        self.assertIn(payload["refinement_level"], {1, 2, 3, 4})
+        self.assertIn("reason", payload)
+        self.assertIsInstance(payload["used_model"], bool)
+
     def test_results_and_surface_read_saved_artifact(self) -> None:
         project_id = repo.create_project(self.database_path, {"name": "Artifact Test"})
         artifact_path = self.temp_folder / "artifacts" / f"{project_id}.json"

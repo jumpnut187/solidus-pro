@@ -93,6 +93,45 @@ export function defaultSettings(): ProjectSettings {
   };
 }
 
+const SETTINGS_STORAGE_KEY = 'solidus.settings.v1';
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function deepMerge<T>(base: T, override: unknown): T {
+  if (!isPlainObject(base) || !isPlainObject(override)) {
+    return override === undefined ? base : (override as T);
+  }
+  const result: Record<string, unknown> = { ...base };
+  for (const key of Object.keys(base)) {
+    if (key in override) {
+      result[key] = deepMerge((base as Record<string, unknown>)[key], (override as Record<string, unknown>)[key]);
+    }
+  }
+  return result as T;
+}
+
+export function loadStoredSettings(): ProjectSettings {
+  if (typeof window === 'undefined') return defaultSettings();
+  try {
+    const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (!raw) return defaultSettings();
+    return deepMerge(defaultSettings(), JSON.parse(raw));
+  } catch {
+    return defaultSettings();
+  }
+}
+
+export function saveStoredSettings(settings: ProjectSettings): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+  } catch {
+    /* storage unavailable (private mode / quota) - ignore */
+  }
+}
+
 export const resultModes = [
   { id: 'shrinkage', label: 'Shrinkage / Porosity', color: '#ff3f24' },
   { id: 'feed_modulus', label: 'Feed Modulus', color: '#ffd21a' },

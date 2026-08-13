@@ -10,7 +10,9 @@ from flask import Blueprint, current_app, jsonify, request, send_from_directory
 
 from core.materials import get_all_alloy_names, get_alloy
 from core.memory_limits import estimate_voxel_count, validate_mesh_parameters
+from core.mesh_ml import MeshRecommendation, recommend_mesh_settings
 from core.simulation_pipeline import PipelineInputs, SimulationCancelledError, run_pipeline
+from core.stl_loader import STLLoader
 from web.services.simulation_queue import SimulationQueueManager
 from web import repository as repo
 from web.payloads import (
@@ -268,6 +270,38 @@ def mesh_preview(project_id: str):
             "can_proceed": validation.can_proceed,
             "message": validation.message,
             "recommended_voxel_size": validation.recommended_voxel_size,
+        }
+    )
+
+
+@api_bp.route("/projects/<project_id>/ml-mesh", methods=["POST"])
+def ml_mesh(project_id: str):
+    if repo.get_project(database_path(), project_id) is None:
+        return jsonify({"error": "Project not found"}), 404
+    parts = repo.get_parts(database_path(), project_id)
+    if not parts:
+        return jsonify({"error": "No parts in project"}), 400
+    stl_filepath = str(parts[0].get("filepath") or "")
+    if not stl_filepath or not Path(stl_filepath).exists():
+        return jsonify({"error": "No CAD file uploaded for this project"}), 400
+    loader = STLLoader()
+    if not loader.load_stl(stl_filepath):
+        return jsonify({"error": "Failed to load CAD file"}), 400
+    target_accuracy = (request.json or {}).get("target_accuracy")
+    try:
+        recommendation: MeshRecommendation = recommend_mesh_settings(
+            loader, target_accuracy=target_accuracy
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(
+        {
+            "base_voxel_size": recommendation.base_voxel_size,
+            "refinement_level": recommendation.refinement_level,
+            "confidence": recommendation.confidence,
+            "reason": recommendation.reason,
+            "used_model": recommendation.used_model,
+            "warning": recommendation.warning,
         }
     )
 

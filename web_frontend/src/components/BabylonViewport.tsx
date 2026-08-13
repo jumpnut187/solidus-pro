@@ -14,6 +14,7 @@ import {
   MeshBuilder,
   PBRMaterial,
   ParticleSystem,
+  Plane,
   PointerEventTypes,
   Quaternion,
   Scene,
@@ -22,6 +23,7 @@ import {
   VertexData
 } from '@babylonjs/core';
 import type { ProjectPart, ResultFieldsPayload } from '../lib/api';
+import type { SectionState } from '../lib/uiPrefs';
 
 type Props = {
   parts: ProjectPart[];
@@ -32,10 +34,11 @@ type Props = {
   timePercent: number;
   modelOpacity: number;
   showModel: boolean;
-  theme: 'dark' | 'light';
+  showResults: boolean;
   cameraCommand: string | null;
   onCameraHandled: () => void;
-  projectionMode: 'perspective' | 'orthographic';
+  ortho: boolean;
+  section: SectionState;
   onPartSelected?: (partId: string | null) => void;
 };
 
@@ -83,10 +86,11 @@ export function BabylonViewport({
   timePercent,
   modelOpacity,
   showModel,
-  theme,
+  showResults,
   cameraCommand,
   onCameraHandled,
-  projectionMode,
+  ortho,
+  section,
   onPartSelected
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -128,6 +132,13 @@ export function BabylonViewport({
     const glow = new GlowLayer('molten-glow', scene);
     glow.intensity = 0.72;
 
+    const gizmoCanvas = canvasRef.current?.parentElement?.querySelector<HTMLCanvasElement>('.viewport-gizmo') ?? null;
+    const drawGizmo = () => {
+      if (!gizmoCanvas) return;
+      drawAxesGizmo(gizmoCanvas, camera);
+    };
+    scene.onBeforeRenderObservable.add(drawGizmo);
+
     const grid = MeshBuilder.CreateGround('shop-floor', { width: 240, height: 240, subdivisions: 48 }, scene);
     const gridMat = new StandardMaterial('floor-mat', scene);
     gridMat.diffuseColor = new Color3(0.035, 0.045, 0.045);
@@ -168,6 +179,7 @@ export function BabylonViewport({
 
     return () => {
       window.removeEventListener('resize', resize);
+      scene.onBeforeRenderObservable.removeCallback(drawGizmo);
       scene.onPointerObservable.remove(pointerObserver);
       engine.dispose();
       scene.dispose();
@@ -177,12 +189,6 @@ export function BabylonViewport({
       partMeshes.clear();
     };
   }, []);
-
-  useEffect(() => {
-    const scene = sceneRef.current;
-    if (!scene) return;
-    scene.clearColor = theme === 'dark' ? new Color4(0.015, 0.019, 0.023, 1) : new Color4(0.91, 0.93, 0.91, 1);
-  }, [theme]);
 
   useEffect(() => {
     const scene = sceneRef.current;
@@ -217,7 +223,8 @@ export function BabylonViewport({
       mesh.setEnabled(showModel && part.visible);
     }
     fitCamera(parts, cameraRef.current);
-  }, [parts, selectedPartId, modelOpacity, showModel, resultFields]);
+    applyClipping([...existing.values()], resultMeshRef.current, section);
+  }, [parts, selectedPartId, modelOpacity, showModel, resultFields, section]);
 
   useEffect(() => {
     const isLocalDebug = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
@@ -251,7 +258,7 @@ export function BabylonViewport({
       mesh.setEnabled(false);
       return;
     }
-    mesh.setEnabled(true);
+    mesh.setEnabled(showResults);
     const matrices = new Float32Array(activeSet.count * 16);
     const rotation = Quaternion.Identity();
     for (let i = 0; i < activeSet.indices.length; i += 1) {
@@ -278,7 +285,8 @@ export function BabylonViewport({
     mat.forceDepthWrite = true;
     mat.needDepthPrePass = false;
     mesh.material = mat;
-  }, [resultFields, resultMode, threshold, timePercent]);
+    applyClipping([...partMeshesRef.current.values()], mesh, section);
+  }, [resultFields, resultMode, threshold, timePercent, showResults, section]);
 
   useEffect(() => {
     const scene = sceneRef.current;
@@ -288,7 +296,7 @@ export function BabylonViewport({
       particleRef.current = null;
     }
     const activeSet = deriveActiveVoxels(resultFields, resultMode, threshold, timePercent);
-    if (!activeSet || !activeSet.count || resultMode !== 'fraction_liquid') return;
+    if (!activeSet || !activeSet.count || resultMode !== 'fraction_liquid' || !showResults) return;
     const particleSystem = new ParticleSystem('liquid-flow', 1400, scene);
     particleSystem.renderingGroupId = 3;
     particleSystem.particleTexture = createLiquidParticleTexture(scene);
@@ -314,11 +322,11 @@ export function BabylonViewport({
     particleSystem.updateSpeed = 0.012;
     particleSystem.start();
     particleRef.current = particleSystem;
-  }, [resultFields, resultMode, threshold, timePercent]);
+  }, [resultFields, resultMode, threshold, timePercent, showResults]);
 
   useEffect(() => {
-    if (!cameraCommand || !cameraRef.current) return;
     const camera = cameraRef.current;
+    if (!camera) return;
     const distance = camera.radius;
     if (cameraCommand === 'top') {
       camera.alpha = -Math.PI / 2;
@@ -329,20 +337,30 @@ export function BabylonViewport({
     } else if (cameraCommand === 'right') {
       camera.alpha = 0;
       camera.beta = Math.PI / 2;
+    } else if (cameraCommand === 'left') {
+      camera.alpha = Math.PI;
+      camera.beta = Math.PI / 2;
+    } else if (cameraCommand === 'bottom') {
+      camera.alpha = -Math.PI / 2;
+      camera.beta = Math.PI - 0.03;
     } else if (cameraCommand === 'iso') {
+      camera.alpha = -Math.PI / 4;
+      camera.beta = Math.PI / 3;
+    } else if (cameraCommand === 'home') {
+      fitCamera(parts, camera);
       camera.alpha = -Math.PI / 4;
       camera.beta = Math.PI / 3;
     }
     camera.radius = distance;
     onCameraHandled();
-  }, [cameraCommand, onCameraHandled]);
+  }, [cameraCommand, onCameraHandled, parts]);
 
   useEffect(() => {
     const camera = cameraRef.current;
     const engine = engineRef.current;
     if (!camera || !engine) return;
     const bounds = boundsFromParts(parts);
-    if (projectionMode === 'orthographic') {
+    if (ortho) {
       camera.mode = Camera.ORTHOGRAPHIC_CAMERA;
       if (bounds) {
         const size = bounds.max.subtract(bounds.min);
@@ -364,9 +382,126 @@ export function BabylonViewport({
     } else {
       camera.mode = Camera.PERSPECTIVE_CAMERA;
     }
-  }, [projectionMode, parts]);
+  }, [ortho, parts]);
 
-  return <canvas ref={canvasRef} className="viewport-canvas" />;
+  return (
+    <div className="viewport-wrap">
+      <canvas ref={canvasRef} className="viewport-canvas" />
+      <canvas className="viewport-gizmo" width={96} height={96} aria-hidden="true" />
+    </div>
+  );
+}
+
+const GIZMO_AXES: Array<{ dir: [number, number, number]; color: string; label: string }> = [
+  { dir: [1, 0, 0], color: '#ff3d33', label: 'X' },
+  { dir: [0, 1, 0], color: '#39e34d', label: 'Y' },
+  { dir: [0, 0, 1], color: '#3f78ff', label: 'Z' }
+];
+
+function drawAxesGizmo(canvas: HTMLCanvasElement, camera: ArcRotateCamera) {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const size = canvas.width;
+  const center = size / 2;
+  const len = size * 0.3;
+
+  ctx.clearRect(0, 0, size, size);
+
+  const camPos = camera.position;
+  const toTarget = camera.target.subtract(camPos);
+  const forward = toTarget.lengthSquared() > 1e-12 ? toTarget.normalize() : Vector3.Up();
+  const camPosDotF = Vector3.Dot(camPos, forward);
+
+  const world = camera.getWorldMatrix();
+  const right = new Vector3(world.m[0], world.m[1], world.m[2]);
+  const up = new Vector3(world.m[4], world.m[5], world.m[6]);
+
+  ctx.lineWidth = 3;
+  ctx.lineCap = 'round';
+  ctx.font = '600 15px Helvetica, Arial, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  for (const axis of GIZMO_AXES) {
+    const dir = new Vector3(axis.dir[0], axis.dir[1], axis.dir[2]);
+    if (Vector3.Dot(dir, forward) <= camPosDotF) continue;
+    const sx = Vector3.Dot(dir, right);
+    const sy = Vector3.Dot(dir, up);
+    const ex = center + sx * len;
+    const ey = center - sy * len;
+    if (Math.abs(sx) < 1e-4 && Math.abs(sy) < 1e-4) continue;
+
+    ctx.strokeStyle = axis.color;
+    ctx.fillStyle = axis.color;
+    ctx.beginPath();
+    ctx.moveTo(center, center);
+    ctx.lineTo(ex, ey);
+    ctx.stroke();
+    drawGizmoArrowHead(ctx, center, center, ex, ey);
+    ctx.fillText(axis.label, ex + sx * 10, ey - sy * 10);
+  }
+}
+
+function drawGizmoArrowHead(ctx: CanvasRenderingContext2D, x0: number, y0: number, x1: number, y1: number) {
+  const angle = Math.atan2(y1 - y0, x1 - x0);
+  const size = 6.5;
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x1 - size * Math.cos(angle - 0.42), y1 - size * Math.sin(angle - 0.42));
+  ctx.lineTo(x1 - size * Math.cos(angle + 0.42), y1 - size * Math.sin(angle + 0.42));
+  ctx.closePath();
+  ctx.fill();
+}
+
+function applyClipping(partMeshes: Mesh[], resultMesh: Mesh | null, section: SectionState) {
+  const planes = buildSectionPlanes(partMeshes, section);
+  for (const mesh of partMeshes) {
+    const mat = mesh.material as PBRMaterial | null;
+    if (!mat) continue;
+    mat.clipPlane = planes[0] ?? null;
+    mat.clipPlane2 = planes[1] ?? null;
+  }
+  const resultMat = resultMesh?.material as PBRMaterial | null;
+  if (resultMat) {
+    resultMat.clipPlane = planes[0] ?? null;
+    resultMat.clipPlane2 = planes[1] ?? null;
+  }
+}
+
+function buildSectionPlanes(partMeshes: Mesh[], section: SectionState): Plane[] {
+  if (!section.enabled || !partMeshes.length) return [];
+  let min = new Vector3(Infinity, Infinity, Infinity);
+  let max = new Vector3(-Infinity, -Infinity, -Infinity);
+  for (const mesh of partMeshes) {
+    const bb = mesh.getBoundingInfo().boundingBox;
+    min = Vector3.Minimize(min, bb.minimumWorld);
+    max = Vector3.Maximize(max, bb.maximumWorld);
+  }
+  if (!Number.isFinite(min.x)) return [];
+
+  const axisVec: Record<'x' | 'y' | 'z', Vector3> = {
+    x: new Vector3(1, 0, 0),
+    y: new Vector3(0, 1, 0),
+    z: new Vector3(0, 0, 1)
+  };
+  const normal = axisVec[section.axis] ?? axisVec.z;
+  const extent = max.subtract(min);
+  const axisExtent = normal.x * extent.x + normal.y * extent.y + normal.z * extent.z;
+  if (axisExtent <= 0) return [];
+  const axisMin = normal.x * min.x + normal.y * min.y + normal.z * min.z;
+
+  const invert = section.invert ? -1 : 1;
+
+  if (section.mode === 'slab') {
+    const center = axisMin + (section.position / 100) * axisExtent;
+    const halfThickness = Math.max((section.thickness / 100) * axisExtent, axisExtent * 0.01) / 2;
+    const innerPlane = Plane.FromPositionAndNormal(normal.scale(center - halfThickness), normal);
+    const outerPlane = Plane.FromPositionAndNormal(normal.scale(center + halfThickness), normal.scale(-1));
+    return invert === 1 ? [innerPlane, outerPlane] : [outerPlane, innerPlane];
+  }
+
+  const cut = axisMin + (section.position / 100) * axisExtent;
+  return [Plane.FromPositionAndNormal(normal.scale(cut), normal.scale(invert))];
 }
 
 function createLiquidParticleTexture(scene: Scene): DynamicTexture {
