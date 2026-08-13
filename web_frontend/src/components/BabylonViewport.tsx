@@ -102,6 +102,7 @@ export function BabylonViewport({
   const particleRef = useRef<ParticleSystem | null>(null);
   const onPartSelectedRef = useRef(onPartSelected);
   onPartSelectedRef.current = onPartSelected;
+  const orthoBaseRef = useRef<{ extent: number; radius: number } | null>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -117,10 +118,30 @@ export function BabylonViewport({
     camera.upVector = new Vector3(0, 0, 1);
     camera.lowerRadiusLimit = 0.5;
     camera.upperRadiusLimit = 4000;
-    camera.wheelDeltaPercentage = 0.015;
+    camera.wheelDeltaPercentage = 0.1;
     camera.minZ = 0.01;
     camera.maxZ = 20000;
     camera.attachControl(canvas, true);
+
+    const syncOrthoZoom = () => {
+      const base = orthoBaseRef.current;
+      if (!base || camera.mode !== Camera.ORTHOGRAPHIC_CAMERA) return;
+      const scale = camera.radius / Math.max(base.radius, 1e-6);
+      const extent = base.extent * scale;
+      const aspect = engine.getAspectRatio(camera);
+      if (aspect > 1) {
+        camera.orthoTop = extent;
+        camera.orthoBottom = -extent;
+        camera.orthoRight = extent * aspect;
+        camera.orthoLeft = -extent * aspect;
+      } else {
+        camera.orthoRight = extent;
+        camera.orthoLeft = -extent;
+        camera.orthoTop = extent / aspect;
+        camera.orthoBottom = -extent / aspect;
+      }
+    };
+    camera.onViewMatrixChangedObservable.add(syncOrthoZoom);
 
     const hemi = new HemisphericLight('shop-softbox', new Vector3(0.2, -0.4, 1), scene);
     hemi.intensity = 0.5;
@@ -181,6 +202,7 @@ export function BabylonViewport({
       window.removeEventListener('resize', resize);
       scene.onBeforeRenderObservable.removeCallback(drawGizmo);
       scene.onPointerObservable.remove(pointerObserver);
+      camera.onViewMatrixChangedObservable.removeCallback(syncOrthoZoom);
       engine.dispose();
       scene.dispose();
       sceneRef.current = null;
@@ -367,20 +389,23 @@ export function BabylonViewport({
         const maxDim = Math.max(size.x, size.y, size.z, 1);
         const aspect = engine.getAspectRatio(camera);
         const margin = 1.2;
+        const extent = (maxDim * margin) / 2;
+        orthoBaseRef.current = { extent, radius: camera.radius };
         if (aspect > 1) {
-          camera.orthoTop = (maxDim * margin) / 2;
-          camera.orthoBottom = -(maxDim * margin) / 2;
-          camera.orthoRight = (maxDim * margin * aspect) / 2;
-          camera.orthoLeft = -(maxDim * margin * aspect) / 2;
+          camera.orthoTop = extent;
+          camera.orthoBottom = -extent;
+          camera.orthoRight = extent * aspect;
+          camera.orthoLeft = -extent * aspect;
         } else {
-          camera.orthoRight = (maxDim * margin) / 2;
-          camera.orthoLeft = -(maxDim * margin) / 2;
-          camera.orthoTop = (maxDim * margin) / aspect / 2;
-          camera.orthoBottom = -(maxDim * margin) / aspect / 2;
+          camera.orthoRight = extent;
+          camera.orthoLeft = -extent;
+          camera.orthoTop = extent / aspect;
+          camera.orthoBottom = -extent / aspect;
         }
       }
     } else {
       camera.mode = Camera.PERSPECTIVE_CAMERA;
+      orthoBaseRef.current = null;
     }
   }, [ortho, parts]);
 
