@@ -40,6 +40,7 @@ class HardwareConfig:
         self.gpu_available = False
         self.neural_engine_available = False
         self.metal_available = False
+        self.thread_cap = None
         
         self._detect_hardware()
         HardwareConfig._initialized = True
@@ -166,32 +167,55 @@ class HardwareConfig:
         # GPU detection would require additional libraries (not implemented)
         self.gpu_available = False
     
+    def set_thread_cap(self, cap):
+        """
+        Set a process-local cap on compute thread counts.
+
+        Args:
+            cap: Maximum thread count, or None to remove the cap.
+                Values <= 0 are treated as "no cap".
+        """
+        self.thread_cap = cap if (cap is not None and cap > 0) else None
+
+    def _apply_thread_cap(self, count: int) -> int:
+        """Apply the configured thread cap to a computed thread count."""
+        if self.thread_cap is not None:
+            return max(1, min(count, self.thread_cap))
+        try:
+            env_cap = int(os.getenv("CASTSIM_THREAD_BUDGET", "") or 0)
+        except ValueError:
+            env_cap = 0
+        if env_cap > 0:
+            return max(1, min(count, env_cap))
+        return count
+
     def get_optimal_thread_count(self, task_type: str = 'compute') -> int:
         """
         Get optimal thread count for different task types
         Uses PHYSICAL CORES ONLY (no hyperthreading) to minimize memory usage
-        
+
         Args:
             task_type: 'compute' for CPU-intensive, 'io' for I/O-bound tasks
-        
+
         Returns:
             Number of threads to use
         """
         if task_type == 'compute':
             # Use physical cores only, leave 1 core for system if we have more than 2
             if self.physical_cores and self.physical_cores > 2:
-                return self.physical_cores - 1
+                count = self.physical_cores - 1
             elif self.physical_cores:
-                return self.physical_cores
+                count = self.physical_cores
             else:
                 # Fallback: assume half of logical cores are physical
-                return max((self.logical_cores // 2) - 1, 1)
+                count = max((self.logical_cores // 2) - 1, 1)
         elif task_type == 'io':
             # For I/O-bound tasks, can use more threads (but still prefer physical cores)
-            return self.physical_cores if self.physical_cores else max(self.logical_cores // 2, 1)
+            count = self.physical_cores if self.physical_cores else max(self.logical_cores // 2, 1)
         else:
             # Default: use half of physical cores
-            return max((self.physical_cores or (self.logical_cores // 2)) // 2, 1)
+            count = max((self.physical_cores or (self.logical_cores // 2)) // 2, 1)
+        return self._apply_thread_cap(count)
     
     def get_memory_limit(self, percentage: float = 0.7) -> int:
         """Get memory limit in bytes (default 70% of available)"""

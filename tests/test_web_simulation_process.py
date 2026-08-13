@@ -6,9 +6,11 @@ import multiprocessing
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from web.services.fair_share import compute_thread_share
 from web.services.simulation_queue import (
     QueueConfig,
     SimulationQueueManager,
@@ -103,6 +105,12 @@ class SimulationQueueProcessTests(unittest.TestCase):
             "user_simulation_counts",
             "queue_lock",
             "queued_simulations",
+            "thread_budget",
+            "sim_memory_mb",
+            "usable_cores",
+            "max_concurrent_simulations",
+            "reserve_memory_mb",
+            "min_sim_memory_mb",
         ]
         for req in required:
             self.assertIn(req, param_names)
@@ -203,6 +211,73 @@ class SimulationQueueCleanupTests(unittest.TestCase):
         status = manager.get_queue_status("127.0.0.1")
         self.assertEqual(status["running"], 0)
         self.assertEqual(status["max_concurrent"], 1)
+
+
+class SimulationQueueFairShareTests(unittest.TestCase):
+    """Fair-share thread budgeting and memory gating in the queue manager."""
+
+    def setUp(self) -> None:
+        self.manager = SimulationQueueManager(
+            QueueConfig(
+                max_concurrent_simulations=2,
+                max_simulations_per_user=1,
+                reserved_cores=1,
+                reserve_memory_mb=0,
+                min_sim_memory_mb=0,
+            )
+        )
+        self.manager._init_manager()
+        self.manager.set_paths("/tmp/test.db", "/tmp")
+        self.manager.set_worker(lambda *a, **k: None)
+
+    def tearDown(self) -> None:
+        self.manager._manager.shutdown() if self.manager._manager else None
+
+    def test_submit_updates_thread_budget_fair_share(self) -> None:
+        """Starting sims halves the thread share; finishing returns it."""
+        usable = self.manager._usable_cores()
+
+        with mock.patch.object(self.manager, "_start_running_simulation"):
+            first = self.manager.submit("sim-a", {}, [], "10.0.0.1")
+            self.assertEqual(first["status"], "started")
+            self.assertEqual(self.manager.thread_budget.value, compute_thread_share(usable, 1))
+
+            second = self.manager.submit("sim-b", {}, [], "10.0.0.2")
+            self.assertEqual(second["status"], "started")
+            self.assertEqual(self.manager.thread_budget.value, compute_thread_share(usable, 2))
+
+        self.manager.clear_tracking("sim-a")
+        self.manager.clear_tracking("sim-b")
+
+    def test_memory_gate_queues_when_headroom_low(self) -> None:
+        """A new sim is queued, not started, when RAM headroom is insufficient."""
+        self.manager.config.min_sim_memory_mb = 10**9  # effectively infinite floor
+
+        with mock.patch.object(self.manager, "_start_running_simulation"):
+            first = self.manager.submit("sim-mem-a", {}, [], "10.0.0.3")
+            self.assertEqual(first["status"], "started")
+            self.assertEqual(self.manager.running_count.value, 1)
+
+            second = self.manager.submit("sim-mem-b", {}, [], "10.0.0.4")
+            self.assertEqual(second["status"], "queued")
+            self.assertEqual(self.manager.running_count.value, 1)
+            self.assertEqual(second["queue_size"], 1)
+
+        self.manager.cancel("sim-mem-b")
+        self.manager.clear_tracking("sim-mem-a")
+
+    def test_queue_status_includes_fair_share_fields(self) -> None:
+        """Queue status exposes thread share and memory info."""
+        status = self.manager.get_queue_status("127.0.0.1")
+        for field in (
+            "thread_share",
+            "reserved_cores",
+            "memory_available_mb",
+            "active_memory_mb",
+        ):
+            self.assertIn(field, status)
+        self.assertEqual(status["reserved_cores"], 1)
+        self.assertEqual(status["active_memory_mb"], 0)
 
 
 if __name__ == "__main__":

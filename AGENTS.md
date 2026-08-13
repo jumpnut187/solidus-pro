@@ -51,6 +51,17 @@ Part-type assignment now supports explicit tuning controls for large CAST/RISER/
 - `performance.part_assignment_batch_size`: candidate points per containment batch
 - Environment overrides: `CASTSIM_PART_ASSIGNMENT_MODE`, `CASTSIM_PART_ASSIGNMENT_WORKERS`, `CASTSIM_PART_ASSIGNMENT_BATCH_SIZE`
 
+### Web Concurrent Simulation Fair-Share
+The web queue divides CPU cores evenly among concurrent simulations (live rebalanced as sims start/finish) and gates new sims by RAM headroom. Per-simulation processes receive a thread budget applied to Numba pools, voxelization/part-assignment workers, and spawned pool children.
+
+- `CASTSIM_MAX_CONCURRENT_SIMULATIONS`: concurrency cap (default `min(4, physical_cores // 4)`)
+- `CASTSIM_WEB_RESERVED_CORES`: logical cores kept for OS + web server (default `1`)
+- `CASTSIM_WEB_RESERVE_MEMORY_MB`: RAM floor never consumed by sims (default `max(2048, 10% of RAM)`)
+- `CASTSIM_WEB_MIN_SIM_MEMORY_MB`: RAM headroom required to start a new concurrent sim (default `2048`)
+- `CASTSIM_THREAD_BUDGET`: per-process thread cap (set internally by the queue; manual override possible)
+
+Policy math lives in `web/services/fair_share.py` (pure functions) and the shared budget/memory state in `web/services/simulation_queue.py`. `core/thread_budget.py` holds the process-local budget override consulted by `config/hardware_config.py`, `core/solidification_loop.py`, and `core/simulation_pipeline.py`.
+
 By design, GPU/backend detection and Numba thread banners are emitted by the main process only. Worker processes suppress those startup prints to keep logs readable during parallel runs.
 
 ### GPU Acceleration
@@ -63,24 +74,25 @@ The application supports GPU acceleration on Apple Silicon (M1/M2/M3/M4), NVIDIA
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **solidus-pro** (7890 symbols, 14208 relationships, 277 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **solidus-pro** (4539 symbols, 9073 relationships, 282 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
-> If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
+> Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
 ## Always Do
 
-- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `gitnexus_impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
-- **MUST run `gitnexus_detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows.
+- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
+- **MUST run `detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows. For regression review, compare against the default branch: `detect_changes({scope: "compare", base_ref: "main"})`.
 - **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
-- When exploring unfamiliar code, use `gitnexus_query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
-- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `gitnexus_context({name: "symbolName"})`.
+- When exploring unfamiliar code, use `query({search_query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
+- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `context({name: "symbolName"})`.
+- For security review, `explain({target: "fileOrSymbol"})` lists taint findings (source→sink flows; needs `analyze --pdg`).
 
 ## Never Do
 
-- NEVER edit a function, class, or method without first running `gitnexus_impact` on it.
+- NEVER edit a function, class, or method without first running `impact` on it.
 - NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
-- NEVER rename symbols with find-and-replace — use `gitnexus_rename` which understands the call graph.
-- NEVER commit changes without running `gitnexus_detect_changes()` to check affected scope.
+- NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
+- NEVER commit changes without running `detect_changes()` to check affected scope.
 
 ## Resources
 

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Any, Callable, Optional
 
 import numpy as np
 from config.hardware_config import hardware
+from core.thread_budget import resolve_thread_budget
 
 try:
     from numba import get_num_threads, jit, prange, set_num_threads
@@ -28,6 +30,7 @@ ProgressCallback = Optional[Callable[[int, int, str], None]]
 DEFAULT_SCHEDULE_CURVE_EXPONENT = 2.0
 THERMAL_COUPLED_SOLVER_MODE = "thermal_coupled"
 NIYAMA_EVAL_FRACTION_SOLID = 0.90
+THREAD_BUDGET_CHECK_INTERVAL = 2.0
 
 
 def _resolve_solidification_thread_target() -> int:
@@ -58,6 +61,10 @@ def _resolve_solidification_thread_target() -> int:
         except ValueError:
             target = logical_cores
 
+    budget = resolve_thread_budget()
+    if budget is not None:
+        target = min(target, max(1, budget))
+
     return max(1, min(int(target), max_threads))
 
 
@@ -70,6 +77,8 @@ def _configure_numba_threads_for_solidification(engine: Any, *, show_progress: b
     set_num_threads(target_threads)
     active_threads = int(get_num_threads())
     setattr(engine, "_solidification_numba_threads", active_threads)
+    if callable(getattr(engine, "_thread_budget_provider", None)):
+        setattr(engine, "_active_thread_budget", resolve_thread_budget())
 
     logical_cores = int(getattr(hardware, "logical_cores", 0) or (os.cpu_count() or active_threads))
     physical_cores = int(getattr(hardware, "physical_cores", 0) or logical_cores)
@@ -78,6 +87,37 @@ def _configure_numba_threads_for_solidification(engine: Any, *, show_progress: b
         f"Numba thread pool configured {active_threads}/{logical_cores} "
         f"(physical cores: {physical_cores})"
     )
+
+
+def _apply_live_thread_budget(engine: Any) -> None:
+    """
+    Re-apply the fair-share thread budget if it changed since the last check.
+
+    The budget is read through ``engine._thread_budget_provider`` (attached
+    by the web pipeline). The provider updates the process-local budget and
+    hardware cap; only the Numba thread count is re-applied here, from the
+    loop thread, and only when the budget actually changed. Numba applies
+    the new pool size at the next parallel region.
+    """
+    if not NUMBA_THREADING_AVAILABLE:
+        return
+    provider = getattr(engine, "_thread_budget_provider", None)
+    if not callable(provider):
+        return
+    budget = provider()
+    if budget is None:
+        return
+    if getattr(engine, "_active_thread_budget", None) == budget:
+        return
+    target_threads = _resolve_solidification_thread_target()
+    try:
+        set_num_threads(target_threads)
+        active_threads = int(get_num_threads())
+        setattr(engine, "_active_thread_budget", budget)
+        setattr(engine, "_solidification_numba_threads", active_threads)
+    except Exception:
+        # A thread-pool resize hiccup must never abort a running simulation.
+        pass
 
 
 def _least_squares_gradients_c_per_mm(
@@ -782,6 +822,7 @@ def _run_thermal_coupled_integration(
     iteration = 0
     max_iterations = int(engine.max_time / engine.time_step)
     last_progress_report = 0
+    last_budget_check = time.monotonic()
     last_snapshot_progress = -1.0
     progress_interval = 1.0
     history_capture_fn = getattr(engine, "_should_capture_fraction_history", None)
@@ -893,6 +934,10 @@ def _run_thermal_coupled_integration(
                 f"    Progress: {current_progress_pct:.1f}% solidified "
                 f"(t={engine.time:.1f}s, Tmin={np.min(temperatures):.1f}C, Tmax={np.max(temperatures):.1f}C)"
             )
+
+        if time.monotonic() - last_budget_check >= THREAD_BUDGET_CHECK_INTERVAL:
+            last_budget_check = time.monotonic()
+            _apply_live_thread_budget(engine)
 
     if capture_fraction_history:
         engine.fraction_liquid_history.append(np.asarray(engine.mesh.voxel_states, dtype=np.float32).copy())

@@ -4,10 +4,19 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import psutil
 import sys
 import time
 from collections import OrderedDict
 from typing import Any, Callable, Dict, Optional
+
+from config.hardware_config import hardware
+from web.services.fair_share import (
+    can_start_simulation,
+    compute_thread_share,
+    make_thread_budget_provider,
+    resolve_usable_cores,
+)
 
 if sys.platform == 'darwin':
     multiprocessing.set_start_method('spawn', force=True)
@@ -16,16 +25,62 @@ if sys.platform == 'darwin':
 TaskWorker = Callable[[str, Dict[str, Any], list[Dict[str, Any]]], None]
 
 
+def _env_int(name: str, default: int) -> int:
+    """Read an integer environment variable with a default fallback."""
+    raw_value = os.getenv(name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        return default
+
+
 class QueueConfig:
     def __init__(
         self,
         max_concurrent_simulations: int = 1,
         max_queue_size: int = 6,
         max_simulations_per_user: int = 1,
+        reserved_cores: int = 1,
+        reserve_memory_mb: int = 2048,
+        min_sim_memory_mb: int = 2048,
     ) -> None:
         self.max_concurrent_simulations = max_concurrent_simulations
         self.max_queue_size = max_queue_size
         self.max_simulations_per_user = max_simulations_per_user
+        self.reserved_cores = reserved_cores
+        self.reserve_memory_mb = reserve_memory_mb
+        self.min_sim_memory_mb = min_sim_memory_mb
+
+
+def default_queue_config() -> QueueConfig:
+    """
+    Build the queue configuration from environment variables and hardware.
+
+    Environment overrides:
+    - CASTSIM_MAX_CONCURRENT_SIMULATIONS (default: min(4, physical // 4))
+    - CASTSIM_WEB_RESERVED_CORES (default: 1)
+    - CASTSIM_WEB_RESERVE_MEMORY_MB (default: max(2048, 10% of RAM))
+    - CASTSIM_WEB_MIN_SIM_MEMORY_MB (default: 2048)
+    """
+    physical_cores = int(getattr(hardware, "physical_cores", 0) or (os.cpu_count() or 4))
+    auto_concurrency = max(1, min(4, physical_cores // 4))
+
+    try:
+        total_mb = psutil.virtual_memory().total / (1024 * 1024)
+    except Exception:
+        total_mb = 16384.0
+    auto_reserve_mb = int(max(2048.0, total_mb * 0.10))
+
+    return QueueConfig(
+        max_concurrent_simulations=_env_int(
+            "CASTSIM_MAX_CONCURRENT_SIMULATIONS", auto_concurrency
+        ),
+        reserved_cores=_env_int("CASTSIM_WEB_RESERVED_CORES", 1),
+        reserve_memory_mb=_env_int("CASTSIM_WEB_RESERVE_MEMORY_MB", auto_reserve_mb),
+        min_sim_memory_mb=_env_int("CASTSIM_WEB_MIN_SIM_MEMORY_MB", 2048),
+    )
 
 
 def _simulation_process_worker(
@@ -43,6 +98,12 @@ def _simulation_process_worker(
     queue_lock,
     queued_simulations: Dict[str, Any],
     max_simulations_per_user: int,
+    thread_budget,
+    sim_memory_mb: Dict[str, Any],
+    usable_cores: int,
+    max_concurrent_simulations: int,
+    reserve_memory_mb: int,
+    min_sim_memory_mb: int,
 ) -> None:
     """
     Standalone entry point for a simulation subprocess.
@@ -67,8 +128,26 @@ def _simulation_process_worker(
                 entry["message"] = message
                 active_simulations[sim_id] = entry
 
+    def _chain_memory_ok() -> bool:
+        """Return True when the next queued simulation may start now."""
+        try:
+            available_mb = psutil.virtual_memory().available / (1024 * 1024)
+        except Exception:
+            available_mb = float(reserve_memory_mb + min_sim_memory_mb)
+        return can_start_simulation(
+            running_count=max(0, int(running_count.value)),
+            max_concurrent=max_concurrent_simulations,
+            available_mb=available_mb,
+            active_memory_mb=float(sum(sim_memory_mb.values())),
+            reserve_mb=float(reserve_memory_mb),
+            min_sim_memory_mb=float(min_sim_memory_mb),
+        )
+
     try:
         _set_progress(4, "Loading assembly...")
+
+        with queue_lock:
+            sim_memory_mb[sim_id] = float(min_sim_memory_mb)
 
         from web.payloads import build_part_manager
         from core.simulation_pipeline import PipelineInputs, run_pipeline, SimulationCancelledError
@@ -92,6 +171,7 @@ def _simulation_process_worker(
             part_assignment_batch_size=int(performance.get("part_assignment_batch_size", 2500) or 2500),
             max_voxels_for_visualization=int(performance.get("max_voxels_for_visualization", 80_000) or 80_000),
             solidification_params=sim_data.get("solidification_params") or {},
+            thread_budget_provider=make_thread_budget_provider(thread_budget),
         )
 
         def progress_message(message: str) -> None:
@@ -120,6 +200,15 @@ def _simulation_process_worker(
             detailed_progress_callback=detailed_progress,
             cancel_callback=_check_cancelled,
         )
+
+        try:
+            mem_stats = result.voxel_mesh.get_memory_stats()
+            actual_mb = float(mem_stats.get("ram_mb", 0.0) or 0.0)
+            if actual_mb > 0.0:
+                with queue_lock:
+                    sim_memory_mb[sim_id] = actual_mb
+        except Exception:
+            pass
 
         from pathlib import Path
         from web.payloads import build_fork_artifact, write_artifact
@@ -160,13 +249,23 @@ def _simulation_process_worker(
                     user_simulation_counts.pop(user_ip, None)
             stop_flags.pop(sim_id, None)
             active_simulations.pop(sim_id, None)
+            sim_memory_mb.pop(sim_id, None)
 
             next_sim_id = None
             next_sim_info = None
             if queued_simulations:
                 next_sim_id, next_sim_info = next(iter(queued_simulations.items()))
                 del queued_simulations[next_sim_id]
-                running_count.value += 1
+                if _chain_memory_ok():
+                    running_count.value += 1
+                else:
+                    queued_simulations[next_sim_id] = next_sim_info
+                    next_sim_id = None
+                    next_sim_info = None
+
+            thread_budget.value = compute_thread_share(
+                usable_cores, max(1, running_count.value)
+            )
 
         if next_sim_id and next_sim_info:
             _simulation_process_worker(
@@ -184,6 +283,12 @@ def _simulation_process_worker(
                 queue_lock=queue_lock,
                 queued_simulations=queued_simulations,
                 max_simulations_per_user=max_simulations_per_user,
+                thread_budget=thread_budget,
+                sim_memory_mb=sim_memory_mb,
+                usable_cores=usable_cores,
+                max_concurrent_simulations=max_concurrent_simulations,
+                reserve_memory_mb=reserve_memory_mb,
+                min_sim_memory_mb=min_sim_memory_mb,
             )
 
 
@@ -205,7 +310,9 @@ class SimulationQueueManager:
         self.simulation_stop_flags: Optional[Dict[str, bool]] = None
         self.queued_simulations: Optional[Dict[str, Any]] = None
         self.user_simulation_counts: Optional[Dict[str, int]] = None
-        self.running_count: Optional[Any] = None
+        self.running_count: Any = None
+        self.thread_budget: Any = None
+        self.sim_memory_mb: Any = None
         self._worker: Optional[TaskWorker] = None
         self._db_path: Optional[str] = None
         self._base_dir: Optional[str] = None
@@ -222,6 +329,27 @@ class SimulationQueueManager:
         self.queued_simulations = self._manager.dict()
         self.user_simulation_counts = self._manager.dict()
         self.running_count = self._manager.Value('i', 0)
+        self.thread_budget = self._manager.Value('i', 0)
+        self.sim_memory_mb = self._manager.dict()
+    def _usable_cores(self) -> int:
+        """Logical cores minus those reserved for the OS/web server."""
+        logical = int(getattr(hardware, "logical_cores", 0) or (os.cpu_count() or 1))
+        return resolve_usable_cores(logical, self.config.reserved_cores)
+
+    def _memory_ok_to_start(self) -> bool:
+        """Return True when a new simulation may start given RAM headroom."""
+        try:
+            available_mb = psutil.virtual_memory().available / (1024 * 1024)
+        except Exception:
+            available_mb = float(self.config.reserve_memory_mb + self.config.min_sim_memory_mb)
+        return can_start_simulation(
+            running_count=int(self.running_count.value),
+            max_concurrent=self.config.max_concurrent_simulations,
+            available_mb=available_mb,
+            active_memory_mb=float(sum((self.sim_memory_mb or {}).values())),
+            reserve_mb=float(self.config.reserve_memory_mb),
+            min_sim_memory_mb=float(self.config.min_sim_memory_mb),
+        )
 
     def set_worker(self, worker: TaskWorker) -> None:
         self._worker = worker
@@ -260,6 +388,10 @@ class SimulationQueueManager:
     def get_queue_status(self, user_ip: str) -> Dict[str, int]:
         self._init_manager()
         with self.queue_lock:
+            try:
+                available_mb = psutil.virtual_memory().available / (1024 * 1024)
+            except Exception:
+                available_mb = 0.0
             return {
                 "running": self.running_count.value,
                 "max_concurrent": self.config.max_concurrent_simulations,
@@ -267,6 +399,10 @@ class SimulationQueueManager:
                 "max_queue": self.config.max_queue_size,
                 "your_simulations": self.user_simulation_counts.get(user_ip, 0),
                 "max_per_user": self.config.max_simulations_per_user,
+                "thread_share": self.thread_budget.value,
+                "reserved_cores": self.config.reserved_cores,
+                "memory_available_mb": int(available_mb),
+                "active_memory_mb": int(sum((self.sim_memory_mb or {}).values())),
             }
 
     def submit(
@@ -293,9 +429,15 @@ class SimulationQueueManager:
         self.increment_user_count(user_ip)
         should_rollback_user_count = False
         with self.queue_lock:
-            if self.running_count.value < self.config.max_concurrent_simulations:
+            can_run_now = (
+                self.running_count.value < self.config.max_concurrent_simulations
+                and self._memory_ok_to_start()
+            )
+            if can_run_now:
                 self.running_count.value += 1
-                can_run_now = True
+                self.thread_budget.value = compute_thread_share(
+                    self._usable_cores(), max(1, self.running_count.value)
+                )
             else:
                 if len(self.queued_simulations or {}) >= self.config.max_queue_size:
                     should_rollback_user_count = True
@@ -400,6 +542,12 @@ class SimulationQueueManager:
                 self.queue_lock,
                 self.queued_simulations,
                 self.config.max_simulations_per_user,
+                self.thread_budget,
+                self.sim_memory_mb,
+                self._usable_cores(),
+                self.config.max_concurrent_simulations,
+                self.config.reserve_memory_mb,
+                self.config.min_sim_memory_mb,
             ),
             # Not a daemon: simulation workers need to be able to spawn
             # additional child processes (e.g. part-assignment ProcessPool)

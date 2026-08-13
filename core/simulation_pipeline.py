@@ -27,11 +27,14 @@ from config.exceptions import (
     SimulationError,
     ValidationError,
 )
+from config.hardware_config import hardware
+from core.thread_budget import set_process_thread_budget
 
 
 ProgressMessageCallback = Callable[[str], None]
 DetailedProgressCallback = Callable[[int, int, str], None]
 CancelCallback = Callable[[], bool]
+ThreadBudgetProvider = Callable[[], Optional[int]]
 
 
 def _should_use_legacy_solver_default(options: Optional[Dict[str, Any]]) -> bool:
@@ -78,6 +81,7 @@ class PipelineInputs:
         max_voxels_for_visualization: int = 50_000,
         show_progress: bool = False,
         solidification_params: Optional[Dict[str, Any]] = None,
+        thread_budget_provider: Optional[ThreadBudgetProvider] = None,
     ) -> None:
         self.alloy_name = alloy_name
         self.voxel_size = voxel_size
@@ -93,6 +97,7 @@ class PipelineInputs:
         self.max_voxels_for_visualization = max_voxels_for_visualization
         self.show_progress = show_progress
         self.solidification_params = solidification_params
+        self.thread_budget_provider = thread_budget_provider
 
 
 class PipelineResult:
@@ -121,6 +126,25 @@ def _emit_message(callback: Optional[ProgressMessageCallback], message: str) -> 
 def _check_cancel(callback: Optional[CancelCallback]) -> None:
     if callback is not None and callback():
         raise SimulationCancelledError("Cancelled")
+
+
+def _apply_thread_budget(provider: Optional[ThreadBudgetProvider]) -> None:
+    """
+    Apply the current fair-share thread budget to this process.
+
+    Called at pipeline stage boundaries so every thread-count consumer in
+    the process (Numba pools, voxelization/part-assignment workers, and the
+    env var inherited by spawned worker pools) honors the same budget.
+    """
+    if provider is None:
+        return
+    budget = provider()
+    set_process_thread_budget(budget)
+    hardware.set_thread_cap(budget)
+    if budget is None:
+        os.environ.pop("CASTSIM_THREAD_BUDGET", None)
+    else:
+        os.environ["CASTSIM_THREAD_BUDGET"] = str(budget)
 
 
 def build_part_manager_from_parts(parts_data: Sequence[Dict[str, Any]]) -> PartManager:
@@ -420,6 +444,7 @@ def run_pipeline(
         if detailed_progress_callback is not None:
             detailed_progress_callback(current, total, stage)
 
+    _apply_thread_budget(inputs.thread_budget_provider)
     success = voxel_mesh.generate(
         mesh_to_use,
         bounds_to_use,
@@ -436,6 +461,7 @@ def run_pipeline(
     _check_cancel(cancel_callback)
     if parts_with_types:
         _emit_message(progress_message_callback, "Assigning part types (Cast/Riser/Chill)...")
+        _apply_thread_budget(inputs.thread_budget_provider)
         voxel_mesh.assign_part_types(parts_with_types)
 
     mem_stats = voxel_mesh.get_memory_stats()
@@ -477,8 +503,11 @@ def run_pipeline(
     #     analysis_options.solver_mode = SOLVER_MODE_SCHEDULE_LEGACY
 
     _emit_message(progress_message_callback, "Running solidification simulation...")
+    _apply_thread_budget(inputs.thread_budget_provider)
     engine = SolidificationEngine(voxel_mesh, alloy, analysis_options)
     engine.initialize()
+    if inputs.thread_budget_provider is not None:
+        engine._thread_budget_provider = inputs.thread_budget_provider
 
     def on_sim_progress(current: int, total: int, stage: str) -> None:
         _check_cancel(cancel_callback)

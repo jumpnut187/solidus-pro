@@ -121,6 +121,17 @@ def _print_startup_banner(port: int, app_module: str, worker_count: int, thread_
     except Exception:
         numba_active = "?"
 
+    try:
+        from web.services.simulation_queue import default_queue_config
+        from web.services.fair_share import compute_thread_share, resolve_usable_cores
+        queue_config = default_queue_config()
+        usable_cores = resolve_usable_cores(logical, queue_config.reserved_cores)
+        share = compute_thread_share(usable_cores, max(1, queue_config.max_concurrent_simulations))
+    except Exception:
+        queue_config = None
+        share = logical
+        usable_cores = logical
+
     print("=" * 60)
     print("  SOLIDUS REACT/BABYLON WEB APPLICATION")
     print(f"  API: http://localhost:{port}/api/health")
@@ -131,6 +142,15 @@ def _print_startup_banner(port: int, app_module: str, worker_count: int, thread_
     print(f"  Hardware threads   : {physical} physical / {logical} logical")
     print(f"  Numba threads      : {numba_target} [active: {numba_active}]")
     print(f"  CASTSIM_NUMBA_THREADS: {os.environ.get('CASTSIM_NUMBA_THREADS', '(default: all)')}")
+    if queue_config is not None:
+        print(
+            f"  Fair share         : {queue_config.max_concurrent_simulations} concurrent sims, "
+            f"{queue_config.reserved_cores} reserved core(s), ~{share} cores/sim at full load"
+        )
+        print(
+            f"  Memory reserve     : {queue_config.reserve_memory_mb} MB reserved, "
+            f"{queue_config.min_sim_memory_mb} MB min/sim"
+        )
     print("=" * 60 + "\n")
 
 

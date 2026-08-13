@@ -8,7 +8,7 @@ import os
 from flask import Flask, jsonify, send_from_directory
 from flask_cors import CORS
 
-from web.services.simulation_queue import QueueConfig, SimulationQueueManager
+from web.services.simulation_queue import QueueConfig, SimulationQueueManager, default_queue_config
 from web import repository as repo
 from web.routes import api_bp
 
@@ -37,13 +37,7 @@ def create_app() -> Flask:
     Path(app.config["TEMP_FOLDER"]).mkdir(parents=True, exist_ok=True)
     repo.init_db(Path(app.config["DATABASE"]))
 
-    queue_manager = SimulationQueueManager(
-        QueueConfig(
-            max_concurrent_simulations=1,
-            max_queue_size=6,
-            max_simulations_per_user=1,
-        )
-    )
+    queue_manager = SimulationQueueManager(default_queue_config())
     app.extensions["simulation_queue_manager"] = queue_manager
 
     database_path = Path(app.config["DATABASE"])
