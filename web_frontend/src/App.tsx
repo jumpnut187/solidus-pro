@@ -115,11 +115,17 @@ export function App() {
   }
 
   async function updateSelectedPart(patch: Partial<ProjectPart>) {
-    if (!selectedPartId || !projectId) return;
-    const current = parts.find((p) => p.id === selectedPartId);
+    if (!projectId) return;
+    const targetId = patch.id ?? selectedPartId;
+    if (!targetId) return;
+    const current = parts.find((p) => p.id === targetId);
     if (!current) return;
     const next = { ...current, ...patch };
+    if (patch.part_type && patch.part_type !== 'riser' && next.is_open_top) {
+      next.is_open_top = false;
+    }
     setParts((prev) => prev.map((part) => (part.id === next.id ? next : part)));
+    if (patch.id && selectedPartId !== patch.id) setSelectedPartId(patch.id);
     try {
       await api.updatePart(projectId, next);
     } catch (error) {
@@ -177,43 +183,6 @@ export function App() {
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Unable to duplicate part');
     }
-  }
-
-  function arrangeGrid() {
-    if (!parts.length || !projectId) return;
-    const count = parts.length;
-    const cols = Math.ceil(Math.sqrt(count));
-    const spacing = Math.max(
-      5,
-      parts.reduce((max, p) => Math.max(max, p.meshData?.bounds?.x[1] ?? 0, p.meshData?.bounds?.y[1] ?? 0), 0) * 2
-    );
-    const updates: Promise<unknown>[] = [];
-    parts.forEach((part, index) => {
-      const row = Math.floor(index / cols);
-      const col = index % cols;
-      const x = (col - (cols - 1) / 2) * spacing;
-      const y = (row - (Math.ceil(count / cols) - 1) / 2) * spacing;
-      const patch = { ...part, position_x: x, position_y: y };
-      setParts((current) => current.map((p) => (p.id === part.id ? patch : p)));
-      updates.push(api.updatePart(projectId, patch));
-    });
-    Promise.all(updates).catch(() => {});
-  }
-
-  function arrangeLine() {
-    if (!parts.length || !projectId) return;
-    const spacing = Math.max(
-      5,
-      parts.reduce((max, p) => Math.max(max, p.meshData?.bounds?.x[1] ?? 0, p.meshData?.bounds?.y[1] ?? 0), 0) * 2.5
-    );
-    const updates: Promise<unknown>[] = [];
-    parts.forEach((part, index) => {
-      const x = (index - (parts.length - 1) / 2) * spacing;
-      const patch = { ...part, position_x: x, position_y: 0 };
-      setParts((current) => current.map((p) => (p.id === part.id ? patch : p)));
-      updates.push(api.updatePart(projectId, patch));
-    });
-    Promise.all(updates).catch(() => {});
   }
 
   async function updateMeshPreview() {
@@ -376,8 +345,6 @@ export function App() {
           onRemovePart={(id) => void removePart(id)}
           onClearAll={() => void clearAllParts()}
           onDuplicatePart={(id) => void duplicatePart(id)}
-          onArrangeGrid={arrangeGrid}
-          onArrangeLine={arrangeLine}
           onClose={() => setActiveDrawer(null)}
         />
       )}

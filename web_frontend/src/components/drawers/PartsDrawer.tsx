@@ -1,5 +1,5 @@
 import { useRef } from 'react';
-import { Box, Copy, Grid3X3, Layers3, ListStart, Plus, Trash2, Upload, X } from 'lucide-react';
+import { Box, Copy, Layers3, Plus, Trash2, Upload, X } from 'lucide-react';
 
 import { ConfigDrawer } from '../ConfigDrawer';
 import type { ProjectPart } from '../../lib/api';
@@ -21,8 +21,6 @@ type Props = {
   onRemovePart: (id: string) => void;
   onClearAll: () => void;
   onDuplicatePart: (id: string) => void;
-  onArrangeGrid: () => void;
-  onArrangeLine: () => void;
   onClose: () => void;
 };
 
@@ -35,8 +33,6 @@ export function PartsDrawer({
   onRemovePart,
   onClearAll,
   onDuplicatePart,
-  onArrangeGrid,
-  onArrangeLine,
   onClose
 }: Props) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -82,6 +78,12 @@ export function PartsDrawer({
       ) : (
         <>
           <div className="parts-table">
+            <div className="parts-table-header">
+              <span className="parts-header-name">Part Name</span>
+              <span className="parts-header-type">Part Type</span>
+              <span className="parts-header-open-top">Open Top</span>
+              <span className="parts-header-spacer" />
+            </div>
             {parts.map((part) => (
               <div
                 key={part.id}
@@ -93,6 +95,13 @@ export function PartsDrawer({
                 </span>
                 <select
                   value={part.part_type}
+                  title={
+                    'Cast: Actual casting - analyzed for shrinkage/porosity\n' +
+                    'Riser: Feeder with exothermic effect - slows cooling\n' +
+                    'Riser Post: Riser neck/post connecting riser to casting\n' +
+                    'Chill: External chill - accelerates cooling\n' +
+                    'Core: Sand core - excluded from defect analysis'
+                  }
                   onClick={(e) => e.stopPropagation()}
                   onChange={(e) =>
                     onUpdatePart({ id: part.id, part_type: e.target.value as ProjectPart['part_type'] })
@@ -106,7 +115,10 @@ export function PartsDrawer({
                 </select>
                 <input
                   type="checkbox"
-                  title="Open top (riser)"
+                  title={
+                    'Open Top Riser: Atmospheric pressure pushes metal down for better feeding.\n' +
+                    'Blind Riser (unchecked): Enclosed, may form vacuum reducing feeding by ~20%.'
+                  }
                   checked={part.is_open_top}
                   disabled={part.part_type !== 'riser'}
                   onClick={(e) => e.stopPropagation()}
@@ -126,15 +138,6 @@ export function PartsDrawer({
               </div>
             ))}
           </div>
-          <p className="parts-meta">
-            {parts.length} part(s) loaded
-            {parts.some((p) => p.meshData) ? (
-              <span>
-                {' '}
-                — {parts.map((p) => `${p.name}: ${(p.meshData?.vertex_count ?? 0).toLocaleString()}v`).join(' · ')}
-              </span>
-            ) : null}
-          </p>
         </>
       )}
 
@@ -232,14 +235,6 @@ export function PartsDrawer({
         </button>
         <button className="ghost-button" disabled={!selectedPartId} onClick={() => onDuplicatePart(selectedPartId!)}>
           <Copy size={14} /> Duplicate
-        </button>
-      </div>
-      <div className="drawer-tool-row">
-        <button className="ghost-button" disabled={parts.length < 2} onClick={onArrangeGrid}>
-          <Grid3X3 size={14} /> Arrange Grid
-        </button>
-        <button className="ghost-button" disabled={parts.length < 2} onClick={onArrangeLine}>
-          <ListStart size={14} /> Arrange Line
         </button>
         <button className="ghost-button" disabled={!parts.length} onClick={onClearAll}>
           <X size={14} /> Clear All
