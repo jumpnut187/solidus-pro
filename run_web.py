@@ -154,9 +154,25 @@ def _print_startup_banner(port: int, app_module: str, worker_count: int, thread_
     print("=" * 60 + "\n")
 
 
+def _is_apple_system_python() -> bool:
+    """Detect Apple's Xcode-bundled Python, which cannot fork safely on
+    modern macOS (gunicorn workers segfault in CoreFoundation after fork)."""
+    return "Xcode.app" in str(sys.executable) or getattr(sys, "_framework", "") == "Python3"
+
+
 def _run_gunicorn(port: int, project_dir: Path) -> None:
     """Launch gunicorn production server."""
     os.environ.setdefault("CASTSIM_NUMBA_THREADS", "all")
+
+    if _is_apple_system_python():
+        print("=" * 60)
+        print("  ERROR: gunicorn cannot run on Apple's Xcode system Python.")
+        print("  Its fork() is unsafe on current macOS: every worker segfaults")
+        print("  in CoreFoundation at boot, causing an infinite crash loop.")
+        print("  Use the project venv (built on a Homebrew Python) instead:")
+        print("      source venv/bin/activate")
+        print("      python run_web.py")
+        sys.exit(1)
 
     if sys.platform == 'darwin':
         import multiprocessing
@@ -167,6 +183,7 @@ def _run_gunicorn(port: int, project_dir: Path) -> None:
     gunicorn_args = [
         sys.executable, "-m", "gunicorn",
         app_module,
+        "--config", str(project_dir / "web" / "gunicorn.conf.py"),
         "--bind", f"0.0.0.0:{port}",
         "--workers", "1",
         "--threads", "8",
