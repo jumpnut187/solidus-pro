@@ -733,6 +733,19 @@ body,
 
 /* ---------------- Drawer form styles ---------------- */
 
+.perf-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.form-hint {
+  font-size: 11px;
+  color: var(--text-faint);
+  line-height: 1.5;
+  margin: 0;
+}
+
 .drawer-body label {
   display: flex;
   flex-direction: column;
