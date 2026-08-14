@@ -3017,10 +3017,12 @@ class SolidificationEngine:
         valid_mask = valid_cast | valid_riser | valid_post
         # Always include feeding-blocked voxels regardless of geometry
         # thresholds.  An isolated liquid pocket that cannot be fed is a
-        # defect candidate even in thin / near-surface sections.
+        # defect candidate even in thin / near-surface sections. Chills are
+        # external cooling devices and can never be shrinkage candidates:
+        # keep them excluded even if the feeding tracer flags them blocked.
         feeding_blocked_arr = getattr(self, "feeding_blocked", None)
         if feeding_blocked_arr is not None:
-            valid_mask |= np.asarray(feeding_blocked_arr, dtype=bool)
+            valid_mask |= (np.asarray(feeding_blocked_arr, dtype=bool) & include_mask)
         
         # Get indices of valid voxels
         valid_indices = np.where(valid_mask)[0]
@@ -3160,6 +3162,10 @@ class SolidificationEngine:
             
             # Assign to result array
             self.shrinkage_risk[valid_indices] = final_risk.astype(np.float32)
+            # Chills are external cooling devices: never shrinkage candidates,
+            # even if a feeding-path edge case let one through the masks.
+            if len(chill_indices) > 0:
+                self.shrinkage_risk[chill_indices] = 0.0
             self.shrinkage_probability = self.shrinkage_risk
             
             # Debug output for first few qualifying voxels
@@ -4947,7 +4953,8 @@ class SolidificationEngine:
                 (local_times <= 0.0) & (end_times <= 0.0),
                 curve_exponent=self._schedule_curve_exponent,
             )
-            return 1.0 - fraction_solid
+            fraction_liquid = 1.0 - fraction_solid
+            return self._mask_non_cast_fraction_liquid(fraction_liquid)
 
         if not self.fraction_liquid_times or not self.fraction_liquid_history:
             return None
@@ -4956,9 +4963,11 @@ class SolidificationEngine:
         
         # Handle edge cases
         if time_seconds <= times[0]:
-            return 1.0 - self.fraction_liquid_history[0]
+            fraction_liquid = 1.0 - np.asarray(self.fraction_liquid_history[0], dtype=np.float32)
+            return self._mask_non_cast_fraction_liquid(fraction_liquid)
         if time_seconds >= times[-1]:
-            return 1.0 - self.fraction_liquid_history[-1]
+            fraction_liquid = 1.0 - np.asarray(self.fraction_liquid_history[-1], dtype=np.float32)
+            return self._mask_non_cast_fraction_liquid(fraction_liquid)
         
         # Find bracketing snapshots for interpolation
         idx_after = np.searchsorted(times, time_seconds)
@@ -4970,12 +4979,29 @@ class SolidificationEngine:
         alpha = (time_seconds - t_before) / (t_after - t_before) if t_after > t_before else 0.0
         
         # Interpolate between snapshots (states are fraction solid, we return fraction liquid)
-        state_before = self.fraction_liquid_history[idx_before]
-        state_after = self.fraction_liquid_history[idx_after]
+        state_before = np.asarray(self.fraction_liquid_history[idx_before], dtype=np.float32)
+        state_after = np.asarray(self.fraction_liquid_history[idx_after], dtype=np.float32)
         interpolated_state = state_before * (1 - alpha) + state_after * alpha
         
         # Fraction liquid = 1 - fraction solid
-        return 1.0 - interpolated_state
+        fraction_liquid = 1.0 - interpolated_state
+        return self._mask_non_cast_fraction_liquid(fraction_liquid)
+
+    def _mask_non_cast_fraction_liquid(self, fraction_liquid: np.ndarray) -> np.ndarray:
+        """
+        Force zero fraction liquid on non-casting parts (chills and tooling).
+
+        Chills are external cooling devices, pre-solid by definition. Their
+        bookkeeping (local solidification time == 0) normally yields zero
+        fraction liquid, but a partial/NaN bookkeeping edge case on a chill
+        surface voxel must never surface as liquid; mask them defensively.
+        """
+        part_types = getattr(self.mesh, "voxel_part_types", None)
+        if part_types is not None and len(part_types) == len(fraction_liquid):
+            non_cast = np.asarray(part_types, dtype=np.int32) == 2  # CHILL
+            fraction_liquid = np.asarray(fraction_liquid, dtype=np.float32).copy()
+            fraction_liquid[non_cast] = 0.0
+        return fraction_liquid
     
     def get_fraction_liquid_time_range(self) -> Tuple[float, float]:
         """
