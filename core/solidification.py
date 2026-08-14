@@ -18,6 +18,7 @@ Performance Optimizations:
 """
 
 import numpy as np
+import os
 import time
 import warnings
 from typing import Tuple, Dict, Optional, List
@@ -442,6 +443,31 @@ class SolidificationEngine:
             print("    Temperature-dependent properties: enabled")
             print("    Chill model: finite heat sink (graphite, ambient HTC)")
             print("    Air-gap HTC decay: enabled (floor factor)")
+
+        # Adaptive CFL timestep: the thermal loop advances by engine.time_step
+        # but the explicit scheme is only stable up to get_stable_timestep().
+        # On coarse meshes the CFL bound can be much larger than the fixed
+        # 0.1s default, so honoring it reduces iteration count without any
+        # physics change (the heat model still subdivides internally when a
+        # step exceeds the bound). On refined meshes the CFL bound is small
+        # and the fixed default is retained to avoid changing behavior.
+        # Disable with CASTSIM_THERMAL_ADAPTIVE_DT=0.
+        try:
+            adaptive_dt_enabled = os.getenv("CASTSIM_THERMAL_ADAPTIVE_DT", "1").strip().lower() not in ("0", "false", "no")
+        except Exception:
+            adaptive_dt_enabled = True
+        if adaptive_dt_enabled and self._thermal_heat_model is not None:
+            try:
+                dt_cfl = float(self._thermal_heat_model.get_stable_timestep())
+            except Exception:
+                dt_cfl = 0.0
+            if dt_cfl > 0.0 and np.isfinite(dt_cfl):
+                dt_cfl = float(np.clip(dt_cfl, 0.05, 2.0))
+                if dt_cfl >= 2.0 * self.time_step:
+                    self.time_step = float(f"{dt_cfl:.4g}")
+                    if show_progress:
+                        print(f"    Adaptive thermal timestep: {self.time_step:.4f}s (CFL)")
+                    self._thermal_adaptive_dt = self.time_step
 
     def _configure_thermal_boundaries(self, *, mold_temperature: float, chill_temperature: float) -> None:
         """Map current part types to simple thermal boundary conditions."""

@@ -920,7 +920,20 @@ def _run_thermal_coupled_integration(
                 # Already below solidus: release all remaining latent.
                 sel2 = liq_idx[below_sol]
                 remaining = 1.0 - fs_prev[sel2]
-                T_final[sel2] = T_post[sel2] + beta * np.clip(remaining, 0.0, 1.0)
+                # Recalescence must not push a completed voxel back above
+                # solidus. On a coarse step a voxel can cross below solidus
+                # with a large remaining latent fraction (fine steps cross
+                # with remaining ~ 0), and without this cap the temperature
+                # jump beta*remaining (tens of K) re-heats completed voxels
+                # into the mushy zone as permanent hot lumps, stalling their
+                # neighbors (observed: a dt=2s run frozen at ~98% while the
+                # dt=0.1s run finished at the same wall time). Capping at
+                # T_sol makes coarse-step crossings consistent with the
+                # fine-step limit.
+                T_final[sel2] = np.minimum(
+                    T_post[sel2] + beta * np.clip(remaining, 0.0, 1.0),
+                    T_sol,
+                )
         heat_model.temperatures[:] = T_final
 
         # Fraction solid and solidification-time tracking from the corrected

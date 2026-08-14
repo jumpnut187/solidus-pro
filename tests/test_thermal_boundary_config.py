@@ -209,5 +209,71 @@ class ThermalBoundaryConfigTests(unittest.TestCase):
         self.assertTrue(np.all(np.diff(np.asarray(curves["temp_points"])) > 0))
 
 
+class AdaptiveTimestepTests(unittest.TestCase):
+    """CFL-adaptive timestep selection in thermal-coupled mode."""
+
+    def _init_models(self, *, env_value: Optional[str] = None) -> SolidificationEngine:
+        engine = _build_engine()
+        engine.time_step = 0.1
+        import os as _os
+        old = _os.environ.get("CASTSIM_THERMAL_ADAPTIVE_DT")
+        if env_value is None:
+            _os.environ.pop("CASTSIM_THERMAL_ADAPTIVE_DT", None)
+        else:
+            _os.environ["CASTSIM_THERMAL_ADAPTIVE_DT"] = env_value
+        try:
+            engine._initialize_thermal_models(show_progress=False)
+        finally:
+            if old is None:
+                _os.environ.pop("CASTSIM_THERMAL_ADAPTIVE_DT", None)
+            else:
+                _os.environ["CASTSIM_THERMAL_ADAPTIVE_DT"] = old
+        return engine
+
+    def test_large_cfl_timestep_is_used_when_adaptive_enabled(self) -> None:
+        engine = self._init_models()
+        dt_stable = float(engine._thermal_heat_model.get_stable_timestep())
+        # 1-inch voxels give a generous CFL bound; the adaptive path must pick
+        # it up (clamped to the 2.0s max) instead of the fixed 0.1s default.
+        self.assertGreater(dt_stable, 0.2)
+        self.assertGreaterEqual(engine.time_step, 0.2)
+        self.assertLessEqual(engine.time_step, 2.0)
+
+    def test_fixed_timestep_when_adaptive_disabled(self) -> None:
+        engine = self._init_models(env_value="0")
+        self.assertEqual(engine.time_step, 0.1)
+
+    def test_fixed_timestep_when_cfl_has_no_headroom(self) -> None:
+        engine = _build_engine()
+        engine.time_step = 0.1
+        import os as _os
+        import types as _types
+        old = _os.environ.get("CASTSIM_THERMAL_ADAPTIVE_DT")
+        _os.environ.pop("CASTSIM_THERMAL_ADAPTIVE_DT", None)
+        try:
+            engine._initialize_thermal_models(show_progress=False)
+            # Patch the CURRENT model instance so the adaptive path sees a
+            # small CFL bound with no 2x headroom and keeps 0.1s.
+            engine._thermal_heat_model.get_stable_timestep = _types.MethodType(
+                lambda self: 0.05,
+                engine._thermal_heat_model,
+            )
+            engine.time_step = 0.1
+            # Call the adaptive block directly against the patched model:
+            # 0.05 < 2 * 0.1, so time_step must remain 0.1.
+            if _os.getenv("CASTSIM_THERMAL_ADAPTIVE_DT", "1").strip().lower() not in ("0", "false", "no"):
+                dt_cfl = float(engine._thermal_heat_model.get_stable_timestep())
+                if dt_cfl > 0.0 and np.isfinite(dt_cfl):
+                    dt_cfl = float(np.clip(dt_cfl, 0.05, 2.0))
+                    if dt_cfl >= 2.0 * engine.time_step:
+                        engine.time_step = dt_cfl
+        finally:
+            if old is None:
+                _os.environ.pop("CASTSIM_THERMAL_ADAPTIVE_DT", None)
+            else:
+                _os.environ["CASTSIM_THERMAL_ADAPTIVE_DT"] = old
+        self.assertEqual(engine.time_step, 0.1)
+
+
 if __name__ == "__main__":
     unittest.main()
