@@ -444,9 +444,15 @@ class HeatTransferModel:
             and not isinstance(alpha, np.ndarray)
             and self._rho_cp_overrides is None
         )
-        self._last_step_used_numba = use_numba_kernels
+        heterogeneous = isinstance(alpha, np.ndarray) or self._rho_cp_overrides is not None
+        use_heterogeneous_numba = bool(NUMBA_AVAILABLE and heterogeneous)
+        self._last_step_used_numba = use_numba_kernels or use_heterogeneous_numba
 
-        if use_numba_kernels:
+        if heterogeneous:
+            # The conservative two-point flux branch below rebuilds the stencil
+            # as a pair-conductivity sum; the uniform Laplacian is unused there.
+            laplacian = None
+        elif use_numba_kernels:
             laplacian = compute_laplacian_parallel(
                 T,
                 self.neighbors,
@@ -516,7 +522,6 @@ class HeatTransferModel:
         rho_cp = self._rho_cp_scalar
         source_term = self._heat_source / rho_cp
 
-        heterogeneous = isinstance(alpha, np.ndarray) or self._rho_cp_overrides is not None
         if heterogeneous:
             # Conservative two-point flux update. The plain "T += dt*alpha*lap"
             # form is only conservative when the diffusivity is uniform: each
@@ -533,47 +538,70 @@ class HeatTransferModel:
             if self._rho_cp_overrides is not None:
                 rcp_idx, rcp_vals = self._rho_cp_overrides
                 rho_cp_arr[rcp_idx] = rcp_vals
-            k_arr = alpha * rho_cp_arr
+            if use_heterogeneous_numba:
+                alpha_arr = (
+                    alpha
+                    if isinstance(alpha, np.ndarray)
+                    else np.full(self.n_voxels, alpha, dtype=np.float64)
+                )
+                T_new[:] = update_heterogeneous_parallel(
+                    T,
+                    self.neighbors,
+                    alpha_arr,
+                    rho_cp_arr,
+                    self._inv_dx2_arr,
+                    source_term,
+                    dt,
+                )
+            else:
+                # NumPy reference for the conservative two-point flux (used
+                # when Numba is unavailable; must stay numerically equivalent
+                # to ``update_heterogeneous_parallel``).
+                max_slot = self.neighbors.shape[1]
+                slot_pairs = [(0, 1), (2, 3), (4, 5)]
+                corner_start = min(18, max_slot)
+                corner_end = min(26, max_slot)
+                k_arr = alpha * rho_cp_arr
 
-            flux = np.zeros(self.n_voxels, dtype=np.float64)
-            k0 = k_arr
-            for j_a, j_b in slot_pairs:
-                if j_a >= max_slot or j_b >= max_slot:
-                    continue
-                n_a = self.neighbors[:, j_a]
-                n_b = self.neighbors[:, j_b]
-                v_a = n_a >= 0
-                v_b = n_b >= 0
-                k_a = np.where(v_a, k_arr[np.maximum(n_a, 0)], 0.0)
-                k_b = np.where(v_b, k_arr[np.maximum(n_b, 0)], 0.0)
-                k_ia = 2.0 * k0 * k_a / (k0 + k_a + 1e-30)
-                k_ib = 2.0 * k0 * k_b / (k0 + k_b + 1e-30)
-                dT_a = np.where(v_a, T[np.maximum(n_a, 0)] - T, 0.0)
-                dT_b = np.where(v_b, T[np.maximum(n_b, 0)] - T, 0.0)
-                flux += 0.5 * (k_ia * dT_a + k_ib * dT_b)
-            j = corner_start
-            while j < corner_end - 1:
-                n_a = self.neighbors[:, j]
-                n_b = self.neighbors[:, j + 1]
-                v_a = n_a >= 0
-                v_b = n_b >= 0
-                k_a = np.where(v_a, k_arr[np.maximum(n_a, 0)], 0.0)
-                k_b = np.where(v_b, k_arr[np.maximum(n_b, 0)], 0.0)
-                k_ia = 2.0 * k0 * k_a / (k0 + k_a + 1e-30)
-                k_ib = 2.0 * k0 * k_b / (k0 + k_b + 1e-30)
-                dT_a = np.where(v_a, T[np.maximum(n_a, 0)] - T, 0.0)
-                dT_b = np.where(v_b, T[np.maximum(n_b, 0)] - T, 0.0)
-                flux += 0.125 * (k_ia * dT_a + k_ib * dT_b)
-                j += 2
-            if j < corner_end:
-                n_j = self.neighbors[:, j]
-                valid = n_j >= 0
-                k_j = np.where(valid, k_arr[np.maximum(n_j, 0)], 0.0)
-                k_ij = 2.0 * k0 * k_j / (k0 + k_j + 1e-30)
-                dT_j = np.where(valid, T[np.maximum(n_j, 0)] - T, 0.0)
-                flux += 0.125 * (k_ij * dT_j)
+                flux = np.zeros(self.n_voxels, dtype=np.float64)
+                k0 = k_arr
+                for j_a, j_b in slot_pairs:
+                    if j_a >= max_slot or j_b >= max_slot:
+                        continue
+                    n_a = self.neighbors[:, j_a]
+                    n_b = self.neighbors[:, j_b]
+                    v_a = n_a >= 0
+                    v_b = n_b >= 0
+                    k_a = np.where(v_a, k_arr[np.maximum(n_a, 0)], 0.0)
+                    k_b = np.where(v_b, k_arr[np.maximum(n_b, 0)], 0.0)
+                    k_ia = 2.0 * k0 * k_a / (k0 + k_a + 1e-30)
+                    k_ib = 2.0 * k0 * k_b / (k0 + k_b + 1e-30)
+                    dT_a = np.where(v_a, T[np.maximum(n_a, 0)] - T, 0.0)
+                    dT_b = np.where(v_b, T[np.maximum(n_b, 0)] - T, 0.0)
+                    flux += 0.5 * (k_ia * dT_a + k_ib * dT_b)
+                j = corner_start
+                while j < corner_end - 1:
+                    n_a = self.neighbors[:, j]
+                    n_b = self.neighbors[:, j + 1]
+                    v_a = n_a >= 0
+                    v_b = n_b >= 0
+                    k_a = np.where(v_a, k_arr[np.maximum(n_a, 0)], 0.0)
+                    k_b = np.where(v_b, k_arr[np.maximum(n_b, 0)], 0.0)
+                    k_ia = 2.0 * k0 * k_a / (k0 + k_a + 1e-30)
+                    k_ib = 2.0 * k0 * k_b / (k0 + k_b + 1e-30)
+                    dT_a = np.where(v_a, T[np.maximum(n_a, 0)] - T, 0.0)
+                    dT_b = np.where(v_b, T[np.maximum(n_b, 0)] - T, 0.0)
+                    flux += 0.125 * (k_ia * dT_a + k_ib * dT_b)
+                    j += 2
+                if j < corner_end:
+                    n_j = self.neighbors[:, j]
+                    valid = n_j >= 0
+                    k_j = np.where(valid, k_arr[np.maximum(n_j, 0)], 0.0)
+                    k_ij = 2.0 * k0 * k_j / (k0 + k_j + 1e-30)
+                    dT_j = np.where(valid, T[np.maximum(n_j, 0)] - T, 0.0)
+                    flux += 0.125 * (k_ij * dT_j)
 
-            T_new[:] = T + dt * (flux * self._inv_dx2) / rho_cp_arr + dt * source_term
+                T_new[:] = T + dt * (flux * self._inv_dx2) / rho_cp_arr + dt * source_term
         else:
             # Update: T_new = T + dt * (α∇²T + Q/ρcp)
             if use_numba_kernels:
@@ -787,6 +815,94 @@ if NUMBA_AVAILABLE:
         for i in prange(n):
             T_new[i] = T[i] + dt * (alpha * laplacian[i] + source[i])
         
+        return T_new
+
+    @njit(parallel=True, fastmath=True, cache=True)
+    def update_heterogeneous_parallel(
+        T: FloatArray,
+        neighbors: IntArray,
+        alpha: FloatArray,
+        rho_cp: FloatArray,
+        inv_dx2: FloatArray,
+        source: FloatArray,
+        dt: float,
+    ) -> FloatArray:
+        """
+        Conservative two-point flux update for heterogeneous material layouts.
+
+        Replaces the NumPy branch of ``HeatTransferModel._step_internal`` used
+        when per-voxel diffusivities (chill overrides or temperature-dependent
+        properties) or per-voxel heat capacities are active:
+            T_new[i] = T[i] + dt/(rho_cp_i * dx_i^2)
+                       * sum_j w_j * k_ij * (T_j - T_i)
+                       + dt * source[i]
+            k_ij = 2 * k_i * k_j / (k_i + k_j)   (harmonic mean pair
+                                                  conductivity)
+
+        Slot weights match the canonical 27-point stencil: faces (slots 0-5)
+        weight 0.5, edges (slots 6-17) weight 0.0 (excluded), corners (slots
+        18-25) weight 0.125. Slots are iterated in symmetric pairs in the same
+        fixed order as the NumPy reference so the per-voxel float accumulation
+        order is identical.
+        """
+        n = len(T)
+        max_slot = neighbors.shape[1]
+        slot_face_end = min(6, max_slot)
+        slot_corner_start = min(18, max_slot)
+        slot_corner_end = min(26, max_slot)
+        T_new = np.empty(n, dtype=np.float64)
+
+        for i in prange(n):
+            t_i = T[i]
+            k_i = alpha[i] * rho_cp[i]
+            flux_sum = 0.0
+
+            # Faces (weight 0.5), summed in symmetric pairs (slots 0-5).
+            for j in range(0, slot_face_end - 1, 2):
+                x_a = 0.0
+                n_a = neighbors[i, j]
+                if n_a >= 0:
+                    k_a = alpha[n_a] * rho_cp[n_a]
+                    x_a = (2.0 * k_i * k_a) / (k_i + k_a + 1e-30) * (T[n_a] - t_i)
+                x_b = 0.0
+                n_b = neighbors[i, j + 1]
+                if n_b >= 0:
+                    k_b = alpha[n_b] * rho_cp[n_b]
+                    x_b = (2.0 * k_i * k_b) / (k_i + k_b + 1e-30) * (T[n_b] - t_i)
+                flux_sum += 0.5 * (x_a + x_b)
+
+            # Edge neighbors (slots 6-17) carry weight 0.0 and are skipped.
+
+            # Corners (weight 0.125), summed in symmetric pairs (slots 18-25).
+            j = slot_corner_start
+            while j < slot_corner_end - 1:
+                x_a = 0.0
+                n_a = neighbors[i, j]
+                if n_a >= 0:
+                    k_a = alpha[n_a] * rho_cp[n_a]
+                    x_a = (2.0 * k_i * k_a) / (k_i + k_a + 1e-30) * (T[n_a] - t_i)
+                x_b = 0.0
+                n_b = neighbors[i, j + 1]
+                if n_b >= 0:
+                    k_b = alpha[n_b] * rho_cp[n_b]
+                    x_b = (2.0 * k_i * k_b) / (k_i + k_b + 1e-30) * (T[n_b] - t_i)
+                flux_sum += 0.125 * (x_a + x_b)
+                j += 2
+            # Lone trailing corner slot for non-canonical shapes.
+            if j < slot_corner_end:
+                n_a = neighbors[i, j]
+                if n_a >= 0:
+                    k_a = alpha[n_a] * rho_cp[n_a]
+                    flux_sum += 0.125 * (
+                        (2.0 * k_i * k_a) / (k_i + k_a + 1e-30) * (T[n_a] - t_i)
+                    )
+
+            T_new[i] = (
+                t_i
+                + (dt * (flux_sum * inv_dx2[i]) / rho_cp[i])
+                + dt * source[i]
+            )
+
         return T_new
 
     @njit(parallel=True, cache=True)

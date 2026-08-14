@@ -267,6 +267,138 @@ class HeatTransferPhysicsTests(unittest.TestCase):
 
         np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1.0e-9)
 
+    @unittest.skipUnless(heat_transfer.NUMBA_AVAILABLE, "numba not installed")
+    def test_heterogeneous_numba_numpy_parity(self) -> None:
+        """Chill-override steps (diffusivity + rho_cp arrays) must be identical
+        whether the conservative flux runs through the Numba kernel or the
+        NumPy reference (the existing NumPy fallback)."""
+        n = 5
+        neighbors, n_vox, idx = _build_grid(n)
+        chill_mask = np.zeros(n_vox, dtype=bool)
+        for i in range(n):
+            for j in range(n):
+                chill_mask[idx(i, j, 0)] = True
+        chill_idx = np.flatnonzero(chill_mask).astype(np.int64)
+        T0 = np.full(n_vox, 1000.0, dtype=np.float64)
+        T0[chill_idx] = 20.0
+        source = np.full(n_vox, 5.0, dtype=np.float64)
+
+        def _build() -> heat_transfer.HeatTransferModel:
+            return heat_transfer.HeatTransferModel(
+                n_voxels=n_vox,
+                voxel_size=1.0,
+                neighbors=neighbors,
+                alloy=_FakeAlloy(),
+                diffusivity_overrides=(chill_idx, np.full(len(chill_idx), 10.4)),
+                rho_cp_overrides=(chill_idx, np.full(len(chill_idx), 0.296)),
+            )
+
+        def _run() -> np.ndarray:
+            model = _build()
+            model.set_initial_temperature(T0)
+            model.set_heat_source(source)
+            for _ in range(10):
+                model.step(1.0e-3)
+            return model.temperatures.copy()
+
+        # Activation assertion: the default path must use the Numba kernel.
+        expected_model = _build()
+        expected_model.set_initial_temperature(T0)
+        expected_model.set_heat_source(source)
+        for _ in range(10):
+            expected_model.step(1.0e-3)
+        self.assertTrue(expected_model.last_step_used_numba)
+        expected = expected_model.temperatures.copy()
+
+        with patch.object(heat_transfer, "NUMBA_AVAILABLE", False):
+            actual = _run()
+
+        np.testing.assert_allclose(actual, expected, rtol=1.0e-12, atol=1.0e-12)
+
+    @unittest.skipUnless(heat_transfer.NUMBA_AVAILABLE, "numba not installed")
+    def test_temperature_dependent_numba_numpy_parity(self) -> None:
+        """Temperature-dependent alpha steps must be identical whether the
+        conservative flux runs through the Numba kernel or the NumPy
+        reference."""
+        n = 5
+        neighbors, n_vox, _ = _build_grid(n)
+        curves = {
+            "temp_points": np.array([20.0, 600.0, 1000.0, 1200.0, 1450.0, 1500.0]),
+            "conductivity": np.array([35.0, 33.0, 30.0, 28.0, 26.0, 25.0]),
+            "specific_heat": np.array([500.0, 550.0, 600.0, 630.0, 660.0, 680.0]),
+            "density": np.array([7850.0, 7800.0, 7700.0, 7600.0, 7400.0, 7300.0]),
+        }
+        T0 = np.linspace(300.0, 1500.0, n_vox)
+
+        def _build() -> heat_transfer.HeatTransferModel:
+            return heat_transfer.HeatTransferModel(
+                n_voxels=n_vox,
+                voxel_size=1.0,
+                neighbors=neighbors,
+                alloy=_FakeAlloy(),
+                use_temperature_dependent=True,
+                property_curves=curves,
+            )
+
+        def _run() -> np.ndarray:
+            model = _build()
+            model.set_initial_temperature(T0)
+            for _ in range(10):
+                model.step(1.0e-4)
+            return model.temperatures.copy()
+
+        expected_model = _build()
+        expected_model.set_initial_temperature(T0)
+        for _ in range(10):
+            expected_model.step(1.0e-4)
+        self.assertTrue(expected_model.last_step_used_numba)
+        expected = expected_model.temperatures.copy()
+
+        with patch.object(heat_transfer, "NUMBA_AVAILABLE", False):
+            actual = _run()
+
+        np.testing.assert_allclose(actual, expected, rtol=1.0e-12, atol=1.0e-12)
+
+    @unittest.skipUnless(heat_transfer.NUMBA_AVAILABLE, "numba not installed")
+    def test_rho_cp_only_override_numba_numpy_parity(self) -> None:
+        """rho_cp overrides alone (scalar alpha promoted to an array for the
+        kernel) must match the NumPy reference."""
+        n = 5
+        neighbors, n_vox, idx = _build_grid(n)
+        override_idx = np.array([idx(2, 2, 2)], dtype=np.int64)
+        T0 = _quadratic_field(n)
+        source = np.full(n_vox, 1.0, dtype=np.float64)
+
+        def _build() -> heat_transfer.HeatTransferModel:
+            return heat_transfer.HeatTransferModel(
+                n_voxels=n_vox,
+                voxel_size=1.0,
+                neighbors=neighbors,
+                alloy=_FakeAlloy(),
+                rho_cp_overrides=(override_idx, np.array([4.0], dtype=np.float64)),
+            )
+
+        def _run() -> np.ndarray:
+            model = _build()
+            model.set_initial_temperature(T0)
+            model.set_heat_source(source)
+            for _ in range(10):
+                model.step(1.0e-4)
+            return model.temperatures.copy()
+
+        expected_model = _build()
+        expected_model.set_initial_temperature(T0)
+        expected_model.set_heat_source(source)
+        for _ in range(10):
+            expected_model.step(1.0e-4)
+        self.assertTrue(expected_model.last_step_used_numba)
+        expected = expected_model.temperatures.copy()
+
+        with patch.object(heat_transfer, "NUMBA_AVAILABLE", False):
+            actual = _run()
+
+        np.testing.assert_allclose(actual, expected, rtol=1.0e-12, atol=1.0e-12)
+
     def test_heterogeneous_interface_conserves_energy(self) -> None:
         """
         Regression: at a material interface (cast vs graphite chill) the
