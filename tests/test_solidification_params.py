@@ -176,7 +176,7 @@ class SolidificationParametersTests(unittest.TestCase):
     def test_chill_ambient_htc_default_and_clamp(self) -> None:
         params = SolidificationParameters()
 
-        self.assertAlmostEqual(params.thermal_boundary.chill_ambient_htc, 100.0)
+        self.assertAlmostEqual(params.thermal_boundary.chill_ambient_htc, 500.0)
 
         high = SolidificationParameters.from_dict(
             {"thermal_boundary": {"chill_ambient_htc": 50000.0}}
@@ -192,17 +192,41 @@ class SolidificationParametersTests(unittest.TestCase):
         original = SolidificationParameters.from_dict(
             {
                 "air_gap": {"htc_floor_fraction": 0.5},
-                "thermal_boundary": {"chill_ambient_htc": 250.0},
+                "thermal_boundary": {
+                    "chill_ambient_htc": 250.0,
+                    "mold_thermal_conductivity": 1.2,
+                    "mold_thermal_diffusivity": 5.0e-7,
+                },
             }
         )
         serialized = original.to_dict()
         self.assertIn("htc_floor_fraction", serialized["air_gap"])
         self.assertIn("chill_ambient_htc", serialized["thermal_boundary"])
+        self.assertIn("mold_thermal_conductivity", serialized["thermal_boundary"])
+        self.assertIn("mold_thermal_diffusivity", serialized["thermal_boundary"])
 
         round_tripped = SolidificationParameters.from_dict(serialized)
 
         self.assertAlmostEqual(round_tripped.air_gap.htc_floor_fraction, 0.5)
         self.assertAlmostEqual(round_tripped.thermal_boundary.chill_ambient_htc, 250.0)
+        self.assertAlmostEqual(round_tripped.thermal_boundary.mold_thermal_conductivity, 1.2)
+        self.assertAlmostEqual(round_tripped.thermal_boundary.mold_thermal_diffusivity, 5.0e-7)
+
+    def test_mold_penetration_params_default_and_clamp(self) -> None:
+        params = SolidificationParameters()
+        self.assertAlmostEqual(params.thermal_boundary.mold_thermal_conductivity, 0.6)
+        self.assertAlmostEqual(params.thermal_boundary.mold_thermal_diffusivity, 3.3e-7)
+
+        clamped = SolidificationParameters.from_dict(
+            {
+                "thermal_boundary": {
+                    "mold_thermal_conductivity": 0.0,
+                    "mold_thermal_diffusivity": 0.0,
+                }
+            }
+        )
+        self.assertAlmostEqual(clamped.thermal_boundary.mold_thermal_conductivity, 0.05)
+        self.assertAlmostEqual(clamped.thermal_boundary.mold_thermal_diffusivity, 1e-9)
 
 
 if __name__ == "__main__":

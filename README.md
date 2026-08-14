@@ -155,7 +155,7 @@ Multi-project management, FIFO job queue (1 concurrent, 6 queued), in-browser Ba
 | `schedule_legacy` | Blazing fast. Precomputed surface/chill/riser schedule. Geometry-driven. |
 | `thermal_coupled` (default) | Physics-rich. Solves the thermal diffusion field coupled to fraction-solid evolution. |
 
-The default `thermal_coupled` solver uses temperature-dependent k/cp/rho property curves, an isotropic weighted Laplacian stencil (exact on quadratic fields), and releases latent heat on the same time step it is computed. Mold interfaces use a Robin condition with exponential air-gap HTC decay; chills act as finite graphite heat sinks (diffusivity override + ambient-HTC boundary) rather than fixed-temperature pins. The `SCHEIL` fraction-solid option implements the true Scheil microsegregation equation using per-alloy solvent melting point and partition coefficient, with lever-rule solidus completion and an optional eutectic cap.
+The default `thermal_coupled` solver uses temperature-dependent k/cp/rho property curves, an isotropic weighted Laplacian stencil (exact on quadratic fields), and a conservative two-point-flux update with implicit (enthalpy) latent-heat release on the same time step. Mold interfaces use a Robin condition combining contact conductance with semi-infinite sand-mold penetration decay; chills act as finite graphite heat sinks (diffusivity + heat-capacity override, higher late-time HTC floor, since a rigid chill does not air-gap like the casting) rather than fixed-temperature pins. The `SCHEIL` fraction-solid option implements the true Scheil microsegregation equation using per-alloy solvent melting point and partition coefficient, with lever-rule solidus completion and an optional eutectic cap.
 
 ---
 

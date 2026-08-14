@@ -331,15 +331,25 @@ class SolidificationEngine:
             voxel_sizes_m = np.full(n_voxels, voxel_size_m, dtype=np.float64)
 
         # B4: chills act as finite graphite heat sinks via per-voxel diffusivity
-        # overrides (graphite: k=100 W/(m·K), rho=1800 kg/m³, cp=710 J/(kg·K) ->
-        # alpha = 7.83e-5 m²/s) instead of being pinned at a fixed temperature.
+        # and heat-capacity overrides (high-density graphite: k=150 W/(m·K),
+        # rho=1800 kg/m³, cp=710 J/(kg·K) -> alpha = 1.17e-4 m²/s, rho_cp =
+        # 1.28e6 J/(m³·K)) instead of being pinned at a fixed temperature.
+        # The conservative two-point-flux stencil in HeatTransferModel uses
+        # these per-voxel values so the cast/chill interface conserves energy.
         chill_indices = self._get_chill_voxel_indices()
-        chill_alpha = 7.83e-5
+        chill_alpha = 1.17e-4
+        chill_rho_cp = 1800.0 * 710.0
         diffusivity_overrides = None
+        rho_cp_overrides = None
         if len(chill_indices) > 0:
+            chill_idx_arr = chill_indices.astype(np.int64)
             diffusivity_overrides = (
-                chill_indices.astype(np.int64),
+                chill_idx_arr,
                 np.full(len(chill_indices), chill_alpha, dtype=np.float64),
+            )
+            rho_cp_overrides = (
+                chill_idx_arr,
+                np.full(len(chill_indices), chill_rho_cp, dtype=np.float64),
             )
 
         # B6: temperature-dependent material property curves (k, cp, rho) with
@@ -370,6 +380,7 @@ class SolidificationEngine:
             voxel_sizes=voxel_sizes_m,
             diffusivity_overrides=diffusivity_overrides,
             property_curves=property_curves,
+            rho_cp_overrides=rho_cp_overrides,
         )
         self._thermal_solidification_model = ThermalSolidificationModel(
             n_voxels=n_voxels,
@@ -439,19 +450,38 @@ class SolidificationEngine:
 
         tb = self.analysis_options.solidification_params.thermal_boundary
 
-        # B7: air-gap HTC decay on mold interfaces.
-        # h(t) = h0 * (floor + (1 - floor) * exp(-t / tau)); the floor fraction
-        # and time constant come from the air-gap settings with defensive
-        # defaults when the params are not yet wired in.
+        # Mold heat-absorption model: the effective interface HTC combines the
+        # contact conductance (h0) in series with the semi-infinite sand mold
+        # penetration resistance h_pen(t) = k_mold / sqrt(pi * alpha_mold * t).
+        # A constant h0 toward a constant sink temperature would flash-cool
+        # the casting (a 2" WCB block froze in ~12 s) because a real sand mold
+        # heats up; the penetration term reproduces that ~1/sqrt(t) decay.
+        # h_eff(t) = 1 / (1/h0 + 1/h_pen(t)), floored at the air-gap floor.
         ap = getattr(self.analysis_options.solidification_params, "air_gap", None)
         floor = float(getattr(ap, "htc_floor_fraction", 0.35))
-        tau = float(getattr(ap, "time_constant", 60.0))
+        mold_k = float(getattr(tb, "mold_thermal_conductivity", 0.6))
+        mold_alpha = float(getattr(tb, "mold_thermal_diffusivity", 3.3e-7))
 
-        def _air_gap_decay(h0: float):
-            """Return a time function anchored at h0: h(t) = h0*(floor + (1-floor)*exp(-t/tau))."""
-            return lambda t, h0=h0, floor=floor, tau=tau: h0 * (
-                floor + (1.0 - floor) * np.exp(-t / max(tau, 1.0))
-            )
+        def _mold_interface_decay(h0: float, floor: float = floor):
+            """
+            Time multiplier anchored at 1.0 for contact conductance h0.
+
+            The INTERFACE branch multiplies bc.htc by this function, so it
+            returns the RATIO h_eff(t)/h0:
+                h_eff(t) = 1 / (1/h0 + 1/h_pen(t))
+                h_pen(t) = k_mold / sqrt(pi * alpha_mold * t)
+            floored at the given floor fraction.
+            """
+            pen_prefactor = mold_k / np.sqrt(np.pi * max(mold_alpha, 1e-12))
+
+            def multiplier(t: float) -> float:
+                if t <= 0.0:
+                    return 1.0
+                h_pen = pen_prefactor / np.sqrt(max(t, 1e-9))
+                h_eff = 1.0 / (1.0 / max(h0, 1e-9) + 1.0 / max(h_pen, 1e-9))
+                return max(h_eff / max(h0, 1e-9), floor)
+
+            return multiplier
 
         surface_indices = np.asarray(self.mesh.get_surface_voxel_indices(), dtype=np.int32)
         if surface_indices.size == 0:
@@ -473,7 +503,7 @@ class SolidificationEngine:
                 BoundaryType.INTERFACE,
                 htc=tb.htc_cast_interface,
                 T_infinity=mold_temperature,
-                time_function=_air_gap_decay(tb.htc_cast_interface),
+                time_function=_mold_interface_decay(tb.htc_cast_interface),
             )
         if riser_post_surface.size > 0:
             self._thermal_heat_model.add_boundary(
@@ -481,7 +511,7 @@ class SolidificationEngine:
                 BoundaryType.INTERFACE,
                 htc=tb.htc_riser_post,
                 T_infinity=mold_temperature,
-                time_function=_air_gap_decay(tb.htc_riser_post),
+                time_function=_mold_interface_decay(tb.htc_riser_post),
             )
         if riser_surface.size > 0:
             self._thermal_heat_model.add_boundary(
@@ -489,18 +519,23 @@ class SolidificationEngine:
                 BoundaryType.INTERFACE,
                 htc=tb.htc_riser,
                 T_infinity=mold_temperature,
-                time_function=_air_gap_decay(tb.htc_riser),
+                time_function=_mold_interface_decay(tb.htc_riser),
             )
         # B4: chills are finite heat sinks, not fixed-temperature pins. Their
-        # exposed surface exchanges heat with the mold/ambient through an
-        # INTERFACE condition instead of being pinned at a constant value.
+        # exposed surface loses heat into the mold/ambient through the same
+        # penetration-limited INTERFACE condition, but with a HIGHER late-time
+        # floor: the rigid chill does not shrink away from the sand the way
+        # the air-gapped casting surfaces do.
         chill_surface = np.intersect1d(chill_indices, surface_indices)
         if chill_surface.size > 0:
+            chill_back_htc = float(getattr(tb, "chill_ambient_htc", 500.0))
+            chill_floor = float(getattr(tb, "chill_htc_floor_fraction", 0.7))
             self._thermal_heat_model.add_boundary(
                 chill_surface,
                 BoundaryType.INTERFACE,
-                htc=float(getattr(tb, "chill_ambient_htc", 100.0)),
+                htc=chill_back_htc,
                 T_infinity=mold_temperature,
+                time_function=_mold_interface_decay(chill_back_htc, chill_floor),
             )
     
     def _calculate_max_simulation_time(self):

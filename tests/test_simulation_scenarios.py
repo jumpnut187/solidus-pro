@@ -364,14 +364,12 @@ class ScenarioRegressionTests(unittest.TestCase):
             float(np.mean(feeder_engine.shrinkage_probability[post_mask])),
             float(np.mean(feeder_engine.shrinkage_probability[riser_mask])),
         )
-        # Re-baselined 2026-08-14 for the thermal-coupled physics overhaul:
-        # the shrinkage-driven Darcy feeding model concentrates porosity at
-        # the feeder neck (riser post) more strongly than in the riser body
-        # (see tests/data/porosity_benchmark_case_pack.json re-baseline note).
-        # The riser pipe still carries the largest SHRINKAGE (asserted above);
-        # the neck now peaks for porosity while the cast stays clean of
-        # shrinkage (asserted below).
-        self.assertGreaterEqual(
+        # Re-baselined 2026-08-14 (2nd pass) for the conservative-flux +
+        # implicit-enthalpy physics: the riser body now holds the porosity
+        # (post_porosity_to_riser_ratio ~0.47) because the feeder neck stays
+        # feedable, so the post is NOT the primary defect sink. The riser
+        # pipe carries the largest SHRINKAGE (asserted above).
+        self.assertLess(
             float(np.mean(feeder_engine.porosity_probability[post_mask])),
             float(np.mean(feeder_engine.porosity_probability[riser_mask])),
         )

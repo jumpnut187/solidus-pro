@@ -10,7 +10,7 @@ from core.materials import get_alloy
 from core.solidification import AnalysisOptions, SolidificationEngine
 from physics.heat_transfer import BoundaryType, HeatTransferModel
 
-CHILL_ALPHA = 7.83e-5  # graphite thermal diffusivity (m^2/s) wired in solidification.py
+CHILL_ALPHA = 1.17e-4  # graphite thermal diffusivity (m^2/s) wired in solidification.py
 
 
 def _build_engine(
@@ -144,7 +144,7 @@ class ThermalBoundaryConfigTests(unittest.TestCase):
                 "FIXED_TEMPERATURE boundary must not reference chill voxels",
             )
 
-    def test_cast_interface_boundary_has_air_gap_time_function(self) -> None:
+    def test_cast_interface_boundary_has_mold_penetration_time_function(self) -> None:
         engine = _build_engine()
         tb = engine.analysis_options.solidification_params.thermal_boundary
 
@@ -162,15 +162,33 @@ class ThermalBoundaryConfigTests(unittest.TestCase):
 
         ap = engine.analysis_options.solidification_params.air_gap
         floor = float(ap.htc_floor_fraction)
-        tau = float(ap.time_constant)
         h0 = float(tb.htc_cast_interface)
+        mold_k = float(tb.mold_thermal_conductivity)
+        mold_alpha = float(tb.mold_thermal_diffusivity)
 
-        # h(t) = h0 * (floor + (1-floor)*exp(-t/tau)): at t=0 the decay is 1.0,
-        # so the time function returns exactly h0.
-        self.assertAlmostEqual(float(bc.time_function(0.0)), h0, places=6)
-        # After 10 time constants the exponential term is negligible: h ~ h0*floor.
-        h_late = float(bc.time_function(tau * 10.0))
-        self.assertAlmostEqual(h_late / (h0 * floor), 1.0, delta=1e-3)
+        # Semi-infinite sand-mold penetration model (multiplier convention):
+        #   h_eff(t) = 1 / (1/h0 + 1/h_pen(t)),  h_pen(t) = k / sqrt(pi*alpha*t)
+        # floored at h0 * htc_floor_fraction. The INTERFACE branch multiplies
+        # bc.htc by this function, so the returned value is h_eff/h0: 1.0 at
+        # t=0 and decaying as the mold heats up.
+        self.assertAlmostEqual(float(bc.time_function(0.0)), 1.0, places=6)
+
+        # At t = 1 s the penetration resistance is already substantial:
+        # h_pen = 0.6/sqrt(pi*3.3e-7*1) ~ 589 W/m^2K -> h_eff ~ 271 W/m^2K.
+        t = 1.0
+        h_pen = mold_k / np.sqrt(np.pi * mold_alpha * t)
+        h_eff = 1.0 / (1.0 / h0 + 1.0 / h_pen)
+        expected = max(h_eff / h0, floor)
+        self.assertAlmostEqual(float(bc.time_function(t)), expected, places=4)
+
+        # Late times decay toward (and clamp at) the air-gap floor fraction.
+        h_late_mult = float(bc.time_function(1.0e4))
+        self.assertAlmostEqual(h_late_mult / floor, 1.0, delta=1e-3)
+
+        # The multiplier must be monotonically decreasing.
+        t_grid = np.logspace(-2, 4, 100)
+        h_grid = np.array([float(bc.time_function(tv)) for tv in t_grid])
+        self.assertTrue(np.all(np.diff(h_grid) <= 1e-9))
 
     def test_property_curves_passed_to_heat_model(self) -> None:
         engine = _build_engine()

@@ -155,10 +155,11 @@ class ThermalCoupledIntegrationTests(unittest.TestCase):
         self.assertTrue(np.all(engine.solidification_end_times >= engine.solidification_start_times))
         self.assertTrue(np.all(engine.local_solidification_time >= 0.0))
         self.assertTrue(np.all(np.isfinite(engine.feeding_fraction_solid)))
-        # The same-step latent-heat correction offsets part of the diffusion
-        # drop, so the observed peak cooling rate reflects the net (corrected)
-        # temperature change of the step, not the raw diffusion-only drop.
-        np.testing.assert_allclose(engine.cooling_rates, np.array([39.42, 35.0], dtype=np.float32), atol=1e-4)
+        # The same-step implicit enthalpy solve releases latent heat in the
+        # mushy zone, offsetting part of the diffusion drop, so the observed
+        # peak cooling rate reflects the net (corrected) temperature change
+        # of each step, not the raw diffusion-only drop.
+        np.testing.assert_allclose(engine.cooling_rates, np.array([39.090908, 35.0], dtype=np.float32), atol=1e-4)
         np.testing.assert_allclose(engine.thermal_gradients, np.array([2.0, 1.0], dtype=np.float32), atol=1e-6)
         self.assertGreaterEqual(len(engine.fraction_liquid_history), 2)
         self.assertEqual(engine._logger.context["mode"], "thermal_coupled")

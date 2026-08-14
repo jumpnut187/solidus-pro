@@ -186,6 +186,7 @@ class HeatTransferModel:
         voxel_sizes: Optional[np.ndarray] = None,
         diffusivity_overrides: Optional[tuple[np.ndarray, np.ndarray]] = None,
         property_curves: Optional[Dict[str, np.ndarray]] = None,
+        rho_cp_overrides: Optional[tuple[np.ndarray, np.ndarray]] = None,
     ):
         """
         Initialize heat transfer model.
@@ -203,6 +204,8 @@ class HeatTransferModel:
             property_curves: Optional dict with keys "temp_points" (°C),
                 "conductivity" (W/m·K), "specific_heat" (J/kg·K), "density"
                 (kg/m³) for temperature-dependent properties
+            rho_cp_overrides: Optional ``(indices, rho_cp_values)`` pair for
+                per-voxel volumetric heat capacity (e.g., graphite chills)
         """
         self.n_voxels = n_voxels
         self.voxel_size = voxel_size
@@ -214,6 +217,8 @@ class HeatTransferModel:
         )
         self._diffusivity_overrides = diffusivity_overrides
         self._property_curves = property_curves
+        self._rho_cp_scalar = alloy.density_liquid * alloy.specific_heat
+        self._rho_cp_overrides = rho_cp_overrides
         
         # Temperature field
         self._temperatures = np.zeros(n_voxels, dtype=np.float64)
@@ -357,6 +362,13 @@ class HeatTransferModel:
             override_idx, override_vals = self._diffusivity_overrides
             if len(override_idx) > 0:
                 alpha_max = max(alpha_max, float(np.max(override_vals)))
+        if self._rho_cp_overrides is not None:
+            # The conservative flux scheme bounds the pair conductivity by
+            # k_ij <= 2*min(k_i, k_j), so the effective diffusivity of any
+            # voxel is at most 2x its own alpha; reflect that in the CFL.
+            rcp_idx, rcp_vals = self._rho_cp_overrides
+            if len(rcp_idx) > 0:
+                alpha_max = 2.0 * alpha_max
         if not np.isfinite(alpha_max) or alpha_max <= 0.0:
             return float(self._alpha)
         return alpha_max
@@ -430,6 +442,7 @@ class HeatTransferModel:
         use_numba_kernels = bool(
             self._numba_parallel_eligible
             and not isinstance(alpha, np.ndarray)
+            and self._rho_cp_overrides is None
         )
         self._last_step_used_numba = use_numba_kernels
 
@@ -500,20 +513,79 @@ class HeatTransferModel:
             laplacian *= self._inv_dx2
         
         # Heat source term: Q / (ρ * cp)
-        rho_cp = self.alloy.density_liquid * self.alloy.specific_heat
+        rho_cp = self._rho_cp_scalar
         source_term = self._heat_source / rho_cp
-        
-        # Update: T_new = T + dt * (α∇²T + Q/ρcp)
-        if use_numba_kernels:
-            T_new[:] = update_temperatures_parallel(
-                T,
-                laplacian,
-                source_term,
-                float(alpha),
-                dt,
-            )
+
+        heterogeneous = isinstance(alpha, np.ndarray) or self._rho_cp_overrides is not None
+        if heterogeneous:
+            # Conservative two-point flux update. The plain "T += dt*alpha*lap"
+            # form is only conservative when the diffusivity is uniform: each
+            # voxel applies its OWN alpha to the shared interface gradient, so
+            # at a material interface (e.g. cast vs graphite chill) the high-
+            # diffusivity side gains energy at k_hi/k_lo times the rate the
+            # low side loses it (a numerical heat pump). The fix uses the
+            # harmonic-mean conductivity of each voxel pair and each voxel's
+            # own heat capacity:
+            #   T_new[i] = T[i] + dt/(rho_cp_i*dx²) * Σ_j w_j*k_ij*(T_j - T_i)
+            #   k_ij = 2*k_i*k_j/(k_i + k_j)
+            # which conserves energy exactly for any material layout.
+            rho_cp_arr = np.full(self.n_voxels, rho_cp, dtype=np.float64)
+            if self._rho_cp_overrides is not None:
+                rcp_idx, rcp_vals = self._rho_cp_overrides
+                rho_cp_arr[rcp_idx] = rcp_vals
+            k_arr = alpha * rho_cp_arr
+
+            flux = np.zeros(self.n_voxels, dtype=np.float64)
+            k0 = k_arr
+            for j_a, j_b in slot_pairs:
+                if j_a >= max_slot or j_b >= max_slot:
+                    continue
+                n_a = self.neighbors[:, j_a]
+                n_b = self.neighbors[:, j_b]
+                v_a = n_a >= 0
+                v_b = n_b >= 0
+                k_a = np.where(v_a, k_arr[np.maximum(n_a, 0)], 0.0)
+                k_b = np.where(v_b, k_arr[np.maximum(n_b, 0)], 0.0)
+                k_ia = 2.0 * k0 * k_a / (k0 + k_a + 1e-30)
+                k_ib = 2.0 * k0 * k_b / (k0 + k_b + 1e-30)
+                dT_a = np.where(v_a, T[np.maximum(n_a, 0)] - T, 0.0)
+                dT_b = np.where(v_b, T[np.maximum(n_b, 0)] - T, 0.0)
+                flux += 0.5 * (k_ia * dT_a + k_ib * dT_b)
+            j = corner_start
+            while j < corner_end - 1:
+                n_a = self.neighbors[:, j]
+                n_b = self.neighbors[:, j + 1]
+                v_a = n_a >= 0
+                v_b = n_b >= 0
+                k_a = np.where(v_a, k_arr[np.maximum(n_a, 0)], 0.0)
+                k_b = np.where(v_b, k_arr[np.maximum(n_b, 0)], 0.0)
+                k_ia = 2.0 * k0 * k_a / (k0 + k_a + 1e-30)
+                k_ib = 2.0 * k0 * k_b / (k0 + k_b + 1e-30)
+                dT_a = np.where(v_a, T[np.maximum(n_a, 0)] - T, 0.0)
+                dT_b = np.where(v_b, T[np.maximum(n_b, 0)] - T, 0.0)
+                flux += 0.125 * (k_ia * dT_a + k_ib * dT_b)
+                j += 2
+            if j < corner_end:
+                n_j = self.neighbors[:, j]
+                valid = n_j >= 0
+                k_j = np.where(valid, k_arr[np.maximum(n_j, 0)], 0.0)
+                k_ij = 2.0 * k0 * k_j / (k0 + k_j + 1e-30)
+                dT_j = np.where(valid, T[np.maximum(n_j, 0)] - T, 0.0)
+                flux += 0.125 * (k_ij * dT_j)
+
+            T_new[:] = T + dt * (flux * self._inv_dx2) / rho_cp_arr + dt * source_term
         else:
-            T_new[:] = T + dt * (alpha * laplacian + source_term)
+            # Update: T_new = T + dt * (α∇²T + Q/ρcp)
+            if use_numba_kernels:
+                T_new[:] = update_temperatures_parallel(
+                    T,
+                    laplacian,
+                    source_term,
+                    float(alpha),
+                    dt,
+                )
+            else:
+                T_new[:] = T + dt * (alpha * laplacian + source_term)
         
         # Apply boundary conditions
         self._apply_boundaries(T_new, T, dt)
@@ -531,7 +603,12 @@ class HeatTransferModel:
         The old treatment lumped the boundary cell as dx/2 (a factor-2 error)
         and evaluated the flux against the new temperature.
         """
-        rho_cp = self.alloy.density_liquid * self.alloy.specific_heat
+        rho_cp = self._rho_cp_scalar
+        rho_cp_arr = None
+        if self._rho_cp_overrides is not None:
+            rcp_idx, rcp_vals = self._rho_cp_overrides
+            rho_cp_arr = np.full(self.n_voxels, rho_cp, dtype=np.float64)
+            rho_cp_arr[rcp_idx] = rcp_vals
         for bc in self._boundaries:
             if bc.type == BoundaryType.FIXED_TEMPERATURE:
                 # Dirichlet: T = T_boundary
@@ -547,7 +624,8 @@ class HeatTransferModel:
                     if self._voxel_sizes is not None
                     else self.voxel_size
                 )
-                T_new[idx] -= dt * h * (T_old[idx] - T_inf) / (rho_cp * dx_i)
+                rc_i = rho_cp_arr[idx] if rho_cp_arr is not None else rho_cp
+                T_new[idx] -= dt * h * (T_old[idx] - T_inf) / (rc_i * dx_i)
                 
             elif bc.type == BoundaryType.INTERFACE:
                 # Mold-metal interface with IHTC
@@ -560,7 +638,8 @@ class HeatTransferModel:
                     if self._voxel_sizes is not None
                     else self.voxel_size
                 )
-                T_new[idx] -= dt * h * (T_old[idx] - T_mold) / (rho_cp * dx_i)
+                rc_i = rho_cp_arr[idx] if rho_cp_arr is not None else rho_cp
+                T_new[idx] -= dt * h * (T_old[idx] - T_mold) / (rc_i * dx_i)
                 
             elif bc.type == BoundaryType.ADIABATIC:
                 # No-flux boundary: ∂T/∂n = 0

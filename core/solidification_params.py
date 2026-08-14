@@ -132,15 +132,44 @@ class ThermalBoundaryParams:
     htc_cast_interface: float = 500.0
     htc_riser_post: float = 350.0
     htc_riser: float = 220.0
-    # W/(m^2*K) heat transfer from chill surfaces to ambient (finite-heat-sink chill model).
-    chill_ambient_htc: float = 100.0
+    # W/(m^2*K) heat transfer from chill surfaces into the surrounding mold
+    # sand (finite-heat-sink chill model). Same order as the casting-to-sand
+    # contact conductance: the chill back face is buried in the same sand.
+    chill_ambient_htc: float = 500.0
+    # Late-time HTC floor for chill surfaces. The chill is rigid and does not
+    # shrink away from the sand the way the casting does, so it keeps a much
+    # higher late-time contact conductance than the air-gapped casting faces.
+    chill_htc_floor_fraction: float = 0.7
+    # Semi-infinite mold heat-absorption model (silica-sand defaults): the
+    # effective interface HTC decays as the mold heats up,
+    # h_pen(t) = k / sqrt(pi * alpha * t).
+    mold_thermal_conductivity: float = 0.6     # W/(m·K)
+    mold_thermal_diffusivity: float = 3.3e-7   # m²/s (k/(rho*cp))
 
     def __post_init__(self) -> None:
         self.chill_ambient_htc = _clamp_float(
             self.chill_ambient_htc,
             1.0,
             10000.0,
-            100.0,
+            500.0,
+        )
+        self.chill_htc_floor_fraction = _clamp_float(
+            self.chill_htc_floor_fraction,
+            0.05,
+            1.0,
+            0.7,
+        )
+        self.mold_thermal_conductivity = _clamp_float(
+            self.mold_thermal_conductivity,
+            0.05,
+            500.0,
+            0.6,
+        )
+        self.mold_thermal_diffusivity = _clamp_float(
+            self.mold_thermal_diffusivity,
+            1e-9,
+            1e-3,
+            3.3e-7,
         )
 
 
@@ -150,7 +179,7 @@ class TimingParams:
     chvorinov_mold_constant: float = 280.0
     safety_factor_with_risers: float = 2.5
     safety_factor_no_risers: float = 1.5
-    min_simulation_time: float = 120.0
+    min_simulation_time: float = 600.0
     max_simulation_time: float = 14400.0
     sand_saturation_time: float = 30.0
     max_hot_sand_slowdown: float = 0.6
@@ -249,7 +278,25 @@ class SolidificationParameters:
             self.thermal_boundary.chill_ambient_htc,
             1.0,
             10000.0,
-            100.0,
+            500.0,
+        )
+        self.thermal_boundary.chill_htc_floor_fraction = _clamp_float(
+            self.thermal_boundary.chill_htc_floor_fraction,
+            0.05,
+            1.0,
+            0.7,
+        )
+        self.thermal_boundary.mold_thermal_conductivity = _clamp_float(
+            self.thermal_boundary.mold_thermal_conductivity,
+            0.05,
+            500.0,
+            0.6,
+        )
+        self.thermal_boundary.mold_thermal_diffusivity = _clamp_float(
+            self.thermal_boundary.mold_thermal_diffusivity,
+            1e-9,
+            1e-3,
+            3.3e-7,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -298,6 +345,9 @@ class SolidificationParameters:
                 'htc_riser_post': self.thermal_boundary.htc_riser_post,
                 'htc_riser': self.thermal_boundary.htc_riser,
                 'chill_ambient_htc': self.thermal_boundary.chill_ambient_htc,
+                'chill_htc_floor_fraction': self.thermal_boundary.chill_htc_floor_fraction,
+                'mold_thermal_conductivity': self.thermal_boundary.mold_thermal_conductivity,
+                'mold_thermal_diffusivity': self.thermal_boundary.mold_thermal_diffusivity,
             },
             'timing': {
                 'chvorinov_mold_constant': self.timing.chvorinov_mold_constant,

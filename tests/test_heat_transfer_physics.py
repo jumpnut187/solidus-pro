@@ -164,7 +164,12 @@ class HeatTransferPhysicsTests(unittest.TestCase):
         self.assertLessEqual(dT_dt, 6.6)
 
     def test_diffusivity_overrides(self) -> None:
-        """10x alpha override must produce ~10x dT/dt at that voxel."""
+        """A 10x alpha override voxel responds faster than base, bounded by
+        the conservative two-point flux: the interface conductance is the
+        harmonic mean of the pair (k_ij = 2*k_i*k_j/(k_i+k_j)), so an
+        overridden voxel surrounded by base voxels responds at most 2x the
+        true base rate (harmonic mean of 10 and 1 = 1.818), and never pumps
+        energy (the interface cannot exceed the slow-side conductance)."""
         n = 9
         neighbors, n_vox, idx = _build_grid(n)
         interior = idx(4, 4, 4)
@@ -182,10 +187,12 @@ class HeatTransferPhysicsTests(unittest.TestCase):
         dt = 1.0e-4
         model.step(dt)
 
-        neighbor = idx(4, 5, 4)  # +Y neighbor, un-overridden
+        # True base rate for the quadratic field is 6.0 K/s (alpha = 1).
         dT_dt_override = (model.temperatures[interior] - T0[interior]) / dt
-        dT_dt_base = (model.temperatures[neighbor] - T0[neighbor]) / dt
-        self.assertAlmostEqual(dT_dt_override / dT_dt_base, 10.0, delta=0.05)
+        self.assertGreater(dT_dt_override, 6.0)
+        self.assertLessEqual(dT_dt_override, 2.0 * 6.0 + 0.05)
+        # Harmonic mean of (10, 1) = 1.818 -> expected ~10.909 K/s.
+        self.assertAlmostEqual(dT_dt_override, 10.909, delta=0.05)
 
     def test_robin_boundary_direction(self) -> None:
         """Convection cools the boundary voxel only, by the explicit flux."""
@@ -259,6 +266,66 @@ class HeatTransferPhysicsTests(unittest.TestCase):
             actual = _run()
 
         np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1.0e-9)
+
+    def test_heterogeneous_interface_conserves_energy(self) -> None:
+        """
+        Regression: at a material interface (cast vs graphite chill) the
+        update must conserve energy. The old per-voxel-diffusivity scheme
+        applied each voxel's OWN alpha to the shared interface gradient, so
+        the high-diffusivity side gained energy at k_hi/k_lo times the rate
+        the low side lost it (a numerical heat pump that self-heated the
+        chill and insulated the casting). The conservative two-point flux
+        uses the harmonic-mean pair conductivity and per-voxel heat capacity.
+        """
+        n = 5
+        neighbors, n_vox, idx = _build_grid(n)
+        # Make the z=0 plane (indices with k == 0) a "chill" region.
+        chill_mask = np.zeros(n_vox, dtype=bool)
+        for i in range(n):
+            for j in range(n):
+                chill_mask[idx(i, j, 0)] = True
+        chill_idx = np.flatnonzero(chill_mask).astype(np.int64)
+
+        alpha_chill = 1.17e-4 / 1.12e-5  # ~10.4x steel diffusivity
+        rho_cp_chill = 1800.0 * 710.0 / (7200.0 * 600.0)  # graphite/steel ratio
+        model = heat_transfer.HeatTransferModel(
+            n_voxels=n_vox,
+            voxel_size=1.0,
+            neighbors=neighbors,
+            alloy=_FakeAlloy(),
+            diffusivity_overrides=(chill_idx, np.full(len(chill_idx), alpha_chill)),
+            rho_cp_overrides=(chill_idx, np.full(len(chill_idx), rho_cp_chill)),
+        )
+
+        T0 = np.full(n_vox, 1000.0, dtype=np.float64)
+        T0[chill_idx] = 20.0
+        model.set_initial_temperature(T0)
+        model.set_heat_source(np.zeros(n_vox))
+
+        rho_cp_cast = 1.0  # unit alloy
+        rho_cp_chill_scale = float(rho_cp_chill)  # graphite/steel ratio applied by the model
+        V = 1.0  # unit voxel volume (dx = 1)
+
+        def _total_energy(T: np.ndarray) -> float:
+            return float(
+                np.sum(T[~chill_mask] * rho_cp_cast * V)
+                + np.sum(T[chill_mask] * rho_cp_chill_scale * V)
+            )
+
+        E_before = _total_energy(model.temperatures)
+        for _ in range(200):
+            model.step(1.0e-3)
+        E_after = _total_energy(model.temperatures)
+
+        # Total energy must be conserved exactly: the cast voxels lose
+        # exactly what the chill voxels gain (each side booked with its own
+        # heat capacity, matching the model's per-voxel rho_cp overrides).
+        np.testing.assert_allclose(E_after, E_before, rtol=1e-9, atol=1e-9)
+
+        # And the system must have moved toward equilibrium (heat flowed
+        # from the hot cast into the cold chill).
+        self.assertLess(np.mean(model.temperatures[chill_mask]), 1000.0)
+        self.assertGreater(np.mean(model.temperatures[chill_mask]), 20.0)
 
     def test_stability_includes_diffusivity_overrides(self) -> None:
         """

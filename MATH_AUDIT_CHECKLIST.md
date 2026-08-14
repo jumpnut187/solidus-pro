@@ -468,16 +468,48 @@ covered by new regression tests.
 ### B. Physical model improvements
 
 - [x] **B4 — Chills are finite heat sinks.** Chill voxels receive a graphite
-  diffusivity override (k = 100 W/(m·K), rho = 1800 kg/m³, cp = 710
-  J/(kg·K) → alpha = 7.83e-5 m²/s) and an ambient-HTC interface boundary
+  diffusivity override (k = 150 W/(m·K), rho = 1800 kg/m³, cp = 710
+  J/(kg·K) → alpha = 1.17e-4 m²/s) and an ambient-HTC interface boundary
   instead of being pinned at a fixed temperature. Tunable via
   `thermal_boundary.chill_ambient_htc`. See `_initialize_thermal_models()`
   and `_configure_thermal_boundaries()` in `core/solidification.py`.
   Follow-up fix: the CFL stability bound (`get_stable_timestep`) now
   includes per-voxel diffusivity override values in `_get_alpha_max()`;
-  without it the explicit scheme ignored the ~7x graphite alpha, went
+  without it the explicit scheme ignored the ~10x graphite alpha, went
   unstable at the chill interface (+/-inf within ~300 steps, surfacing as
   NaN fraction solid and a ValueError in the progress callback).
+- [x] **B4b — Conservative two-point flux (energy-pump fix).** The per-voxel
+  `T += dt*alpha*lap` update is non-conservative at material interfaces:
+  each voxel applied its OWN diffusivity to the shared gradient, so the
+  graphite chill gained energy at k_chill/k_cast (~16x) times the rate the
+  casting lost it — a numerical heat pump that self-heated the chill to
+  casting temperature and made it an insulator (chill-side solidification
+  SLOWER than no chill). `HeatTransferModel._step_internal` now uses the
+  harmonic-mean pair conductivity `k_ij = 2 k_i k_j / (k_i + k_j)` and
+  per-voxel heat capacity (graphite rho_cp override) whenever properties
+  are heterogeneous; energy is conserved exactly (regression test
+  `test_heterogeneous_interface_conserves_energy`). Chill-side solidification
+  on a 4 in cube drops from 157 s to 65 s (vs 130 s baseline).
+- [x] **B4c — Implicit (enthalpy) latent-heat release.** The naive same-step
+  correction `T += L_vol*dfs/rho_cp` overshoots (the full-step latent of a
+  single temperature drop is ~8x the step's diffusion cooling), causing
+  on/off latent cycling at ~1/8 duty cycle and an ~8x artificial stall of
+  the mushy plateau. The loop now solves the enthalpy equation implicitly
+  (apparent-heat-capacity form): `T_final = (T_post + beta*(T_liq/dT - fs_prev)) /
+  (1 + beta/dT)` with solidus/liquidus branch handling — oscillation-free,
+  energy-conserving, and physical plateau rates (1 in cube ~200 s, 2 in cube
+  ~300 s; both complete within the raised `timing.min_simulation_time` = 600 s).
+- [x] **Mold penetration boundary.** The mold interface HTC now combines the
+  contact conductance in series with the semi-infinite sand-mold penetration
+  resistance `h_pen(t) = k_mold/sqrt(pi*alpha_mold*t)` (new params
+  `thermal_boundary.mold_thermal_conductivity`, `mold_thermal_diffusivity`),
+  floored at the air-gap fraction. Previously a constant 21 C sink at h=500
+  flash-cooled a 2 in block in ~12 s (unphysical; also masked chill effects).
+- [x] **Neighbor canonicalization nearest-wins.** The 2x search radius used
+  for part-interface bridging could place a 2-spacing voxel in a face slot
+  ahead of the true adjacent voxel (first-wins), making the stencil treat a
+  2*dx distance as dx (~4x local diffusivity error). `_canonicalize_neighbor_order`
+  and `_canonicalize_batch` now keep the nearest candidate per direction slot.
 - [x] **B5 — Darcy feed velocity is shrinkage-driven.** Feeding
   effectiveness uses `v = beta * R` with `beta = rho_s/rho_l - 1`
   (volumetric shrinkage) and `R = cooling_rate / |grad T|` (local

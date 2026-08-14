@@ -848,25 +848,75 @@ def _run_thermal_coupled_integration(
         previous_temperatures = np.asarray(heat_model.temperatures, dtype=np.float64).copy()
         heat_model.step(engine.time_step)  # pure diffusion only
 
-        # Latent heat is released from the SAME step's post-diffusion field and
-        # applied directly as a temperature correction below (instead of via a
-        # heat source, which would only take effect on the NEXT step). Applying
-        # it in-step conserves per-step energy; the heat source stays zeroed
-        # from initialization.
-        latent_heat_rate = solidification_model.update(
-            np.asarray(heat_model.temperatures, dtype=np.float64), engine.time_step
-        )
+        # Implicit (enthalpy) latent-heat release on the SAME step.
+        #
+        # The naive explicit correction  T += L_vol*dfs/rho_cp  overshoots:
+        # the full-step latent of a single temperature drop is ~8x larger
+        # than the step's diffusion cooling, so the field alternates between
+        # a latent pulse and pure diffusion at ~1/8 duty cycle, stalling the
+        # mushy plateau ~8x longer than the energy balance allows. Instead
+        # solve the enthalpy equation implicitly for T_final in the mushy
+        # zone:
+        #   T_final = T_post + beta * (fs(T_final) - fs_prev),
+        #   beta = L_vol/rho_cp,  fs(T) = (T_liq - T)/dT
+        # which has the closed-form solution
+        #   T_final = (T_post + beta*(T_liq/dT - fs_prev)) / (1 + beta/dT)
+        # with branch handling when T_final leaves the mushy zone. This is
+        # the classic apparent-heat-capacity formulation: oscillation-free,
+        # energy-conserving, and the plateau proceeds at the physical rate.
+        fs_prev = np.asarray(solidification_model.fraction_solid, dtype=np.float64).copy()
+        T_post = np.asarray(heat_model.temperatures, dtype=np.float64)
+        T_liq = float(engine.alloy.liquidus_temp)
+        T_sol = float(engine.alloy.solidus_temp)
+        dT = max(T_liq - T_sol, 1e-6)
         rho_cp = float(engine.alloy.density_liquid * engine.alloy.specific_heat)
-        correction = latent_heat_rate * engine.time_step / rho_cp
-        heat_model.temperatures[:] = heat_model.temperatures + correction
+        l_vol = float(
+            engine.alloy.latent_heat
+            * (engine.alloy.density_liquid + engine.alloy.density_solid)
+            / 2.0
+        )
+        beta = l_vol / rho_cp  # K of recalescence per unit fraction solid
+
+        below_liq = T_post < T_liq
+        T_final = T_post.copy()
+        if np.any(below_liq):
+            liq_idx = np.flatnonzero(below_liq)
+            fs_max = np.clip((T_liq - T_post[liq_idx]) / dT, 0.0, 1.0)  # fs(T_post)
+            active = (fs_max > fs_prev[liq_idx]) & (T_post[liq_idx] > T_sol)
+            if np.any(active):
+                sel = liq_idx[active]
+                T_mush = (T_post[sel] + beta * (T_liq / dT - fs_prev[sel])) / (1.0 + beta / dT)
+                # Branch: implicit solve leaves the mushy zone upward (would
+                # remelt -> no latent, keep T_post) or downward (all latent
+                # released at solidus -> recalesce by the remaining fraction).
+                remelt = T_mush >= T_liq
+                all_solid = T_mush <= T_sol
+                T_final[sel] = np.where(
+                    remelt,
+                    T_post[sel],
+                    np.where(
+                        all_solid,
+                        T_post[sel] + beta * (1.0 - fs_prev[sel]),
+                        T_mush,
+                    ),
+                )
+            below_sol = T_post[liq_idx] <= T_sol
+            if np.any(below_sol):
+                # Already below solidus: release all remaining latent.
+                sel2 = liq_idx[below_sol]
+                remaining = 1.0 - fs_prev[sel2]
+                T_final[sel2] = T_post[sel2] + beta * np.clip(remaining, 0.0, 1.0)
+        heat_model.temperatures[:] = T_final
+
+        # Fraction solid and solidification-time tracking from the corrected
+        # field; update() keeps fs monotone (irreversible).
+        latent_heat_rate = solidification_model.update(T_final, engine.time_step)
 
         # Re-read AFTER the correction so cooling rate, Niyama capture,
         # gradients, and progress all use the corrected field.
         temperatures = np.asarray(heat_model.temperatures, dtype=np.float64)
         cooling_rate_step = np.maximum(heat_model.get_cooling_rate(previous_temperatures, engine.time_step), 0.0)
 
-        # Fraction solid is computed from the pre-correction field (predictor
-        # step); update() with irreversibility keeps fraction solid monotone.
         current_states = np.asarray(solidification_model.fraction_solid, dtype=np.float32)
         engine.mesh.voxel_states[:] = current_states
         engine.time = heat_model.time

@@ -1240,6 +1240,7 @@ class AdaptiveVoxelMesh:
         any centered riser.
         """
         canonical = np.full(26, -1, dtype=np.int32)
+        best_dist = np.full(26, np.inf, dtype=np.float64)
         if not neighbor_indices:
             return canonical
 
@@ -1272,8 +1273,16 @@ class AdaptiveVoxelMesh:
             else:
                 slot = 18 + ((0 if sx > 0 else 4) | (0 if sy > 0 else 2) | (0 if sz > 0 else 1))
 
-            if canonical[slot] == -1:
+            # The search radius (2x voxel size, for part-interface bridging)
+            # can return voxels at 2 spacings along a direction in addition
+            # to the true adjacent voxel. Keep the NEAREST candidate per
+            # slot: a 2-spacing voxel in a face slot would otherwise make
+            # the finite-difference stencil treat a 2*dx distance as dx
+            # (4x diffusivity error, direction-dependent).
+            dist = float(diff[0] * diff[0] + diff[1] * diff[1] + diff[2] * diff[2])
+            if dist < best_dist[slot]:
                 canonical[slot] = np.int32(nidx)
+                best_dist[slot] = dist
 
         return canonical
 
@@ -1291,6 +1300,7 @@ class AdaptiveVoxelMesh:
         for i in range(n_voxels):
             row = raw_neighbors[i]
             own_center = centers_arr[i].astype(np.float64)
+            best_dist = np.full(26, np.inf, dtype=np.float64)
             for nidx in row:
                 if nidx < 0 or nidx == i:
                     continue
@@ -1316,8 +1326,14 @@ class AdaptiveVoxelMesh:
                 else:
                     slot = 18 + ((0 if sx > 0 else 4) | (0 if sy > 0 else 2) | (0 if sz > 0 else 1))
 
-                if canonical[i, slot] == -1:
+                # Keep the NEAREST candidate per direction slot (see
+                # _canonicalize_neighbor_order for why: the 2x search
+                # radius can return 2-spacing voxels ahead of the true
+                # adjacent one).
+                dist = float(diff[0] * diff[0] + diff[1] * diff[1] + diff[2] * diff[2])
+                if dist < best_dist[slot]:
                     canonical[i, slot] = np.int32(nidx)
+                    best_dist[slot] = dist
         return canonical
 
     def _identify_surface_voxels(self):

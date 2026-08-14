@@ -134,31 +134,35 @@ def _build_engine(
 
 class ThermalLoopRegressionTests(unittest.TestCase):
     def test_latent_heat_applied_same_step(self) -> None:
-        """The latent release from ``solidification_model.update`` must be
-        added to the SAME step's post-diffusion field, not deferred to the
-        next step via a heat source."""
-        engine = _build_engine(n_voxels=2, max_time=2.0, time_step=1.0)
+        """The latent release must be applied to the SAME step's post-diffusion
+        field via the implicit enthalpy solve (apparent-heat-capacity form),
+        not deferred to the next step via a heat source, and not as the naive
+        explicit correction that overshoots and stalls the mushy plateau."""
+        engine = _build_engine(n_voxels=1, max_time=2.0, time_step=1.0)
         heat_model = engine._thermal_heat_model
-        solidification_model = engine._thermal_solidification_model
-
-        # Constant volumetric latent heat release (W/m^3) returned by update.
-        rate = 3.0
-        solidification_model.update = lambda temperatures, dt: np.full(2, rate, dtype=np.float64)  # type: ignore[method-assign]
 
         _run_thermal_coupled_integration(engine, show_progress=False, progress_callback=None)
 
-        rho_cp = float(engine.alloy.density_liquid * engine.alloy.specific_heat)
-        expected_correction = rate * engine.time_step / rho_cp
-        self.assertEqual(len(heat_model.post_step_temperatures), 2)
+        # Dummy alloy: T_liq=100, T_sol=0, dT=100, latent=10, rho_l=rho_s=2,
+        # cp=1 -> beta = L_vol/rho_cp = (10*2)/(2*1) = 10 K per unit fs.
+        # Implicit mushy solve: T_final = (T_post + beta*(T_liq/dT - fs_prev)) / (1 + beta/dT)
+        # Step 1: T_post = 100 - 5 = 95, fs_prev = 0 -> T_final = (95 + 10)/1.1 = 95.4545...
+        # Step 2: T_post = 95.4545 - 5 = 90.4545, fs_prev = 0.04545
+        #         -> T_final = (90.4545 + 10*(1 - 0.04545))/1.1 = 90.9090...
+        expected = np.array([90.9090909090909], dtype=np.float64)
         np.testing.assert_allclose(
             heat_model._temperatures,
-            heat_model.post_step_temperatures[-1] + expected_correction,
-            atol=1e-9,
+            expected,
+            atol=1e-6,
             err_msg=(
-                "Latent heat must be applied to the SAME step's post-diffusion "
-                "field (diffusion result + rate*dt/rho_cp)"
+                "Latent heat must be applied in the same step through the "
+                "implicit enthalpy solve, not via a one-step-lagged source"
             ),
         )
+        # The correction is positive (latent released this step) even though
+        # the diffusion-only field dropped: same-step behavior.
+        self.assertGreater(float(heat_model._temperatures[0]), float(heat_model.post_step_temperatures[-1][0]))
+        self.assertEqual(heat_model.set_heat_source_calls, 0)
 
     def test_heat_source_not_set_in_loop(self) -> None:
         """The thermal loop must never call set_heat_source: latent heat is
