@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import trimesh
@@ -419,6 +420,60 @@ class WebApiTests(unittest.TestCase):
         fields_payload = fields_response.get_json()
         self.assertEqual(fields_payload["sample_count"], 64)
         self.assertIn("hot_tear", fields_payload["fields"])
+
+
+class ExecuteProjectTaskInputsTests(unittest.TestCase):
+    """Verify execute_project_task plumbs performance options into PipelineInputs."""
+
+    def _run_task(self, project: dict):
+        from core.simulation_pipeline import PipelineInputs
+        from web.routes import execute_project_task
+
+        captured = {}
+
+        def fake_run_pipeline(inputs, **kwargs):
+            captured["inputs"] = inputs
+            return MagicMock()
+
+        manager = MagicMock()
+        manager.should_cancel.return_value = False
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            app = Flask(__name__)
+            app.config["DATABASE"] = str(root / "web.db")
+            app.config["UPLOAD_FOLDER"] = str(root / "uploads")
+            app.config["TEMP_FOLDER"] = str(root / "temp")
+            with app.app_context():
+                with patch("web.routes.run_pipeline", side_effect=fake_run_pipeline):
+                    with patch("web.routes.build_part_manager", return_value=MagicMock()):
+                        with patch(
+                            "web.routes.build_fork_artifact",
+                            return_value={"summary": {}, "data": {}},
+                        ):
+                            with patch("web.routes.write_artifact"):
+                                with patch("web.routes.repo"):
+                                    execute_project_task(
+                                        "proj-1",
+                                        project,
+                                        [],
+                                        manager,
+                                        root / "web.db",
+                                    )
+
+        self.assertIn("inputs", captured)
+        self.assertIsInstance(captured["inputs"], PipelineInputs)
+        return captured["inputs"]
+
+    def test_use_gpu_option_reaches_pipeline_inputs(self) -> None:
+        """performance_options={'use_gpu': True} must reach PipelineInputs.use_gpu=True."""
+        inputs = self._run_task({"performance_options": {"use_gpu": True}, "alloy": "WCB"})
+        self.assertTrue(inputs.use_gpu)
+
+    def test_use_gpu_defaults_to_false_when_option_missing(self) -> None:
+        """Callers that omit use_gpu must keep the existing default of False."""
+        inputs = self._run_task({"alloy": "WCB"})
+        self.assertFalse(inputs.use_gpu)
 
 
 if __name__ == "__main__":

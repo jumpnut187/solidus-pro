@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import multiprocessing
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -161,6 +163,75 @@ class SimulationQueueProcessTests(unittest.TestCase):
         self.assertEqual(config.max_concurrent_simulations, 1)
         self.assertEqual(config.max_queue_size, 6)
         self.assertEqual(config.max_simulations_per_user, 1)
+
+
+class SimulationWorkerInputsTests(unittest.TestCase):
+    """Verify _simulation_process_worker plumbs performance options into PipelineInputs."""
+
+    def _run_worker(self, sim_data: dict) -> "PipelineInputs":
+        """Invoke _simulation_process_worker with mocked dependencies and return the
+        PipelineInputs instance passed to run_pipeline."""
+        from core.simulation_pipeline import PipelineInputs
+
+        captured = {}
+
+        def fake_run_pipeline(inputs, **kwargs):
+            captured["inputs"] = inputs
+            fake_result = mock.MagicMock()
+            fake_result.voxel_mesh.get_memory_stats.return_value = {"ram_mb": 0.0}
+            return fake_result
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch(
+                "web.payloads.build_part_manager", return_value=mock.MagicMock()
+            ):
+                with mock.patch(
+                    "core.simulation_pipeline.run_pipeline", side_effect=fake_run_pipeline
+                ):
+                    with mock.patch(
+                        "web.payloads.build_fork_artifact",
+                        return_value={"summary": {}, "data": {}},
+                    ):
+                        with mock.patch("web.payloads.write_artifact"):
+                            with mock.patch("web.repository.mark_project_completed"):
+                                _simulation_process_worker(
+                                    sim_id="test-gpu-sim",
+                                    sim_data=sim_data,
+                                    parts_data=[],
+                                    user_ip="127.0.0.1",
+                                    db_path=str(Path(tmpdir) / "web.db"),
+                                    base_dir=tmpdir,
+                                    active_simulations={},
+                                    simulation_results={},
+                                    stop_flags={},
+                                    running_count=SimpleNamespace(value=1),
+                                    user_simulation_counts={},
+                                    queue_lock=mock.MagicMock(),
+                                    queued_simulations={},
+                                    max_simulations_per_user=1,
+                                    thread_budget=SimpleNamespace(value=0),
+                                    sim_memory_mb={},
+                                    usable_cores=1,
+                                    max_concurrent_simulations=1,
+                                    reserve_memory_mb=0,
+                                    min_sim_memory_mb=0,
+                                )
+
+        self.assertIn("inputs", captured)
+        self.assertIsInstance(captured["inputs"], PipelineInputs)
+        return captured["inputs"]
+
+    def test_use_gpu_option_reaches_pipeline_inputs(self) -> None:
+        """performance_options={'use_gpu': True} must reach PipelineInputs.use_gpu=True."""
+        inputs = self._run_worker(
+            {"performance_options": {"use_gpu": True}, "alloy": "WCB"}
+        )
+        self.assertTrue(inputs.use_gpu)
+
+    def test_use_gpu_defaults_to_false_when_option_missing(self) -> None:
+        """Callers that omit use_gpu must keep the existing default of False."""
+        inputs = self._run_worker({"alloy": "WCB"})
+        self.assertFalse(inputs.use_gpu)
 
 
 class SimulationQueueCleanupTests(unittest.TestCase):
