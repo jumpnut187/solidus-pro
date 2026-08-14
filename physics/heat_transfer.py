@@ -343,7 +343,7 @@ class HeatTransferModel:
 
         Uses the current temperature field when temperature-dependent
         properties are active and ALWAYS includes per-voxel diffusivity
-        override values (e.g., copper chills). Missing the overrides here
+        override values (e.g., graphite chills). Missing the overrides here
         would under-estimate the CFL diffusivity and let the explicit
         scheme run unstable at the chill interface (observed as +/-inf
         blow-up within a few hundred steps).

@@ -330,11 +330,11 @@ class SolidificationEngine:
         else:
             voxel_sizes_m = np.full(n_voxels, voxel_size_m, dtype=np.float64)
 
-        # B4: chills act as finite copper heat sinks via per-voxel diffusivity
-        # overrides (copper: k=380 W/(m·K), rho=8960 kg/m³, cp=385 J/(kg·K) ->
-        # alpha = 1.10e-4 m²/s) instead of being pinned at a fixed temperature.
+        # B4: chills act as finite graphite heat sinks via per-voxel diffusivity
+        # overrides (graphite: k=100 W/(m·K), rho=1800 kg/m³, cp=710 J/(kg·K) ->
+        # alpha = 7.83e-5 m²/s) instead of being pinned at a fixed temperature.
         chill_indices = self._get_chill_voxel_indices()
-        chill_alpha = 1.10e-4
+        chill_alpha = 7.83e-5
         diffusivity_overrides = None
         if len(chill_indices) > 0:
             diffusivity_overrides = (
@@ -429,7 +429,7 @@ class SolidificationEngine:
             )
             print(f"    Thermal solver backend: {backend_label}")
             print("    Temperature-dependent properties: enabled")
-            print("    Chill model: finite heat sink (Cu, ambient HTC)")
+            print("    Chill model: finite heat sink (graphite, ambient HTC)")
             print("    Air-gap HTC decay: enabled (floor factor)")
 
     def _configure_thermal_boundaries(self, *, mold_temperature: float, chill_temperature: float) -> None:

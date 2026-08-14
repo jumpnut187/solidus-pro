@@ -263,7 +263,7 @@ class HeatTransferPhysicsTests(unittest.TestCase):
     def test_stability_includes_diffusivity_overrides(self) -> None:
         """
         Regression: get_stable_timestep() must account for per-voxel
-        diffusivity overrides (e.g., copper chills at ~10x the alloy alpha).
+        diffusivity overrides (e.g., graphite chills at ~10x the alloy alpha).
         Before this fix the CFL bound ignored the overrides, so the explicit
         scheme stepped at dt larger than the chill stability limit and the
         chill voxels blew up to +/-inf within a few hundred steps (which then

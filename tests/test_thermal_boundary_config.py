@@ -10,7 +10,7 @@ from core.materials import get_alloy
 from core.solidification import AnalysisOptions, SolidificationEngine
 from physics.heat_transfer import BoundaryType, HeatTransferModel
 
-CHILL_ALPHA = 1.10e-4  # copper thermal diffusivity (m^2/s) wired in solidification.py
+CHILL_ALPHA = 7.83e-5  # graphite thermal diffusivity (m^2/s) wired in solidification.py
 
 
 def _build_engine(
@@ -107,7 +107,7 @@ class ThermalBoundaryConfigTests(unittest.TestCase):
         chill_indices = np.where(np.asarray(engine.mesh.voxel_part_types) == 2)[0]
         self.assertEqual(len(chill_indices), 2)
 
-        # B4: per-voxel copper diffusivity overrides cover exactly the chills.
+        # B4: per-voxel graphite diffusivity overrides cover exactly the chills.
         overrides = model._diffusivity_overrides
         self.assertIsNotNone(overrides)
         override_idx, override_vals = overrides

@@ -114,7 +114,7 @@ curves per voxel, uses an isotropic weighted Laplacian stencil (exact on
 quadratic fields), and releases latent heat on the same time step it is
 computed (in-step temperature correction, no one-step lag). Mold interfaces
 use a Robin condition with exponential air-gap HTC decay; chills act as
-finite copper heat sinks (diffusivity override + ambient-HTC boundary)
+finite graphite heat sinks (diffusivity override + ambient-HTC boundary)
 rather than fixed-temperature pins. Fraction solid can use the lever rule
 or the true Scheil microsegregation equation with per-alloy solvent melting
 point and partition coefficient, lever-rule solidus completion, and an
@@ -203,7 +203,7 @@ The simulator calculates:
 ✅ Temperature-dependent k/cp/rho property curves
 ✅ Isotropic weighted Laplacian stencil (exact on quadratic fields)
 ✅ Mold-interface Robin boundaries with exponential air-gap HTC decay
-✅ Finite-heat-sink chills (copper diffusivity + ambient HTC)
+✅ Finite-heat-sink chills (graphite diffusivity + ambient HTC)
 ✅ Same-step latent heat release
 ✅ True Scheil microsegregation option
 ✅ Shrinkage-driven Darcy feeding velocity (v = β·R)

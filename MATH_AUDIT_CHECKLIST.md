@@ -467,15 +467,15 @@ covered by new regression tests.
 
 ### B. Physical model improvements
 
-- [x] **B4 — Chills are finite heat sinks.** Chill voxels receive a copper
-  diffusivity override (k = 380 W/(m·K), rho = 8960 kg/m³, cp = 385
-  J/(kg·K) → alpha = 1.10e-4 m²/s) and an ambient-HTC interface boundary
+- [x] **B4 — Chills are finite heat sinks.** Chill voxels receive a graphite
+  diffusivity override (k = 100 W/(m·K), rho = 1800 kg/m³, cp = 710
+  J/(kg·K) → alpha = 7.83e-5 m²/s) and an ambient-HTC interface boundary
   instead of being pinned at a fixed temperature. Tunable via
   `thermal_boundary.chill_ambient_htc`. See `_initialize_thermal_models()`
   and `_configure_thermal_boundaries()` in `core/solidification.py`.
   Follow-up fix: the CFL stability bound (`get_stable_timestep`) now
   includes per-voxel diffusivity override values in `_get_alpha_max()`;
-  without it the explicit scheme ignored the ~10x copper alpha, went
+  without it the explicit scheme ignored the ~7x graphite alpha, went
   unstable at the chill interface (+/-inf within ~300 steps, surfacing as
   NaN fraction solid and a ValueError in the progress callback).
 - [x] **B5 — Darcy feed velocity is shrinkage-driven.** Feeding
