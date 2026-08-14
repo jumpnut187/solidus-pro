@@ -7,6 +7,9 @@ Covers:
   the temperature-driven thermal loop.
 - B8: unfinished voxels get NaN end/solidification times (never 0.0, which
   would collide with chill/pre-solid semantics).
+- P1: the per-iteration thermal-gradient kernel and Niyama history sampler are
+  skipped when no downstream analysis (niyama/hot_tear/shrinkage/feeding_path)
+  consumes them.
 """
 from __future__ import annotations
 
@@ -299,6 +302,101 @@ class ThermalLoopRegressionTests(unittest.TestCase):
         # The correction always raises temperature (latent release is positive).
         self.assertTrue(np.all(correction >= 0.0))
         self.assertEqual(float(correction[2]), 0.0)
+
+    def _set_analysis_flags(
+        self,
+        engine: SimpleNamespace,
+        *,
+        fraction_liquid: bool = False,
+        niyama: bool = False,
+        hot_tear: bool = False,
+        shrinkage: bool = False,
+        feeding_path: bool = False,
+    ) -> None:
+        """Overwrite analysis_options with an explicit flag set (no hidden
+        defaults), keeping the thermal-coupled solver mode."""
+        engine.analysis_options = SimpleNamespace(
+            fraction_liquid=fraction_liquid,
+            niyama=niyama,
+            hot_tear=hot_tear,
+            shrinkage=shrinkage,
+            feeding_path=feeding_path,
+            solver_mode="thermal_coupled",
+            solidification_params=engine.analysis_options.solidification_params,
+        )
+
+    def test_thermal_history_skipped_when_all_analyses_disabled(self) -> None:
+        """With niyama/hot_tear/shrinkage/feeding_path all disabled, the loop
+        must skip both the per-iteration gradient kernel and the Niyama history
+        sampler: thermal_gradients/_thermal_latest_gradients keep their initial
+        None and no Niyama eval sample is recorded, even though the
+        integration itself completes and solidifies the field."""
+        engine = _build_engine(
+            n_voxels=2,
+            max_time=25.0,
+            time_step=1.0,
+            drop_per_step=5.0,
+        )
+        engine.mesh.voxel_centers = np.zeros((2, 3), dtype=np.float64)
+        # Give the Niyama sampler real target arrays: without the gate it
+        # would sample voxels as they cross late solidification.
+        engine._thermal_niyama_sampled = np.zeros(2, dtype=bool)
+        engine._thermal_niyama_gradient_at_eval = np.zeros(2, dtype=np.float32)
+        engine._thermal_niyama_cooling_rate_at_eval = np.zeros(2, dtype=np.float32)
+        engine._thermal_niyama_temperature_at_eval = np.zeros(2, dtype=np.float32)
+        engine._thermal_niyama_time_at_eval = np.zeros(2, dtype=np.float32)
+        engine._thermal_niyama_values_at_eval = np.full(2, np.inf, dtype=np.float32)
+        engine._thermal_niyama_quality = np.zeros(2, dtype=np.int8)
+        engine.niyama_eval_fraction_solid = 0.90
+        self._set_analysis_flags(engine)
+
+        run_time_integration(
+            engine,
+            chill_boost=np.ones(2, dtype=np.float32),
+            riser_slowdown=np.ones(2, dtype=np.float32),
+            show_progress=False,
+            progress_callback=None,
+        )
+
+        self.assertTrue(np.all(engine.mesh.voxel_states >= 0.99))
+        # Late solidification was crossed (fs starts 0.0 and reaches 1.0), so
+        # the sampler would have recorded samples if it had run.
+        self.assertFalse(np.any(engine._thermal_niyama_sampled))
+        self.assertIsNone(engine._thermal_latest_gradients)
+        self.assertIsNone(engine.thermal_gradients)
+        # The cheap latest-temperature snapshot is still maintained.
+        self.assertIsNotNone(engine._thermal_latest_temperatures)
+
+    def test_thermal_history_populated_when_shrinkage_enabled(self) -> None:
+        """With shrinkage enabled (the real AnalysisOptions default), the
+        gradient kernel must run: thermal_gradients and
+        _thermal_latest_gradients are populated and consistent after the
+        integration loop."""
+        engine = _build_engine(n_voxels=2, max_time=2.0, time_step=1.0)
+        self._set_analysis_flags(engine, shrinkage=True)
+
+        run_time_integration(
+            engine,
+            chill_boost=np.ones(2, dtype=np.float32),
+            riser_slowdown=np.ones(2, dtype=np.float32),
+            show_progress=False,
+            progress_callback=None,
+        )
+
+        self.assertGreater(engine.time, 0.0)
+        self.assertIsNotNone(engine._thermal_latest_gradients)
+        self.assertIsNotNone(engine.thermal_gradients)
+        self.assertTrue(np.all(np.isfinite(engine.thermal_gradients)))
+        # The recording heat model reports a uniform field -> zero gradient.
+        np.testing.assert_allclose(
+            engine.thermal_gradients,
+            np.zeros(2, dtype=np.float32),
+            atol=0.0,
+        )
+        np.testing.assert_array_equal(
+            engine.thermal_gradients,
+            engine._thermal_latest_gradients,
+        )
 
 
 if __name__ == "__main__":

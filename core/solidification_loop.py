@@ -840,6 +840,21 @@ def _run_thermal_coupled_integration(
         engine.fraction_liquid_history = [np.asarray(engine.mesh.voxel_states, dtype=np.float32).copy()]
         engine.fraction_liquid_times = [0.0]
 
+    # Thermal gradients feed shrinkage/feeding-effectiveness, hot-tear, and
+    # Niyama post-analysis; the Niyama history sampler feeds Niyama. When none
+    # of those analyses are enabled there is no consumer for either per-
+    # iteration product (hotspot, sand_burn_in, and fraction-liquid history do
+    # not read them), so gate both behind one flag computed before the loop
+    # and skip the full-voxel gradient kernel plus per-voxel lstsq sampling.
+    # Missing attributes fall back to the AnalysisOptions defaults so
+    # SimpleNamespace test doubles behave like the real engine.
+    needs_thermal_history = bool(
+        getattr(engine.analysis_options, "niyama", False)
+        or getattr(engine.analysis_options, "hot_tear", False)
+        or getattr(engine.analysis_options, "shrinkage", True)
+        or getattr(engine.analysis_options, "feeding_path", False)
+    )
+
     while iteration < max_iterations:
         previous_states = np.asarray(engine.mesh.voxel_states, dtype=np.float32).copy()
         if np.all(previous_states >= 0.99):
@@ -970,17 +985,22 @@ def _run_thermal_coupled_integration(
             )
             engine.cooling_rates = np.asarray(engine._thermal_peak_cooling_rates, dtype=np.float32).copy()
 
-        _capture_niyama_history_step(
-            engine,
-            previous_states=previous_states,
-            current_states=current_states,
-            previous_temperatures=previous_temperatures,
-            temperatures=temperatures,
-            cooling_rate_step=cooling_rate_step,
-        )
+        if needs_thermal_history:
+            _capture_niyama_history_step(
+                engine,
+                previous_states=previous_states,
+                current_states=current_states,
+                previous_temperatures=previous_temperatures,
+                temperatures=temperatures,
+                cooling_rate_step=cooling_rate_step,
+            )
 
         engine._thermal_latest_temperatures = temperatures.astype(np.float32, copy=True)
-        if getattr(engine, "_thermal_heat_model", None) is not None and getattr(engine, "_thermal_voxel_size_m", None):
+        if (
+            needs_thermal_history
+            and getattr(engine, "_thermal_heat_model", None) is not None
+            and getattr(engine, "_thermal_voxel_size_m", None)
+        ):
             neighbor_map = np.asarray(engine.mesh.voxel_neighbors, dtype=np.int32)
             if hasattr(heat_model, "get_gradient_magnitude"):
                 gradients_m = heat_model.get_gradient_magnitude(
