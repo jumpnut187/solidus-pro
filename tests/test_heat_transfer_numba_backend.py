@@ -41,10 +41,9 @@ class HeatTransferNumbaBackendTests(unittest.TestCase):
         def _fake_laplacian(
             temperatures: np.ndarray,
             neighbors: np.ndarray,
-            neighbor_counts: np.ndarray,
-            dx2: float,
+            inv_dx2: np.ndarray,
         ) -> np.ndarray:
-            del temperatures, neighbors, neighbor_counts, dx2
+            del temperatures, neighbors, inv_dx2
             return np.array([-1000.0, -1000.0], dtype=np.float64)
 
         def _fake_update(

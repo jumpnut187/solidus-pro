@@ -100,10 +100,25 @@ Create uniform grid → Detect features → Adaptive refinement → Build neighb
 ```
 Initialize surface → Time-step iteration → Update states → Record times
 ```
+
+**Legacy path (`schedule_legacy`):**
 - Starts at edges (surface voxels)
 - Progresses inward based on **geometric modulus**
 - Bottom solidifies faster (density effects)
 - Rate: `1 / (1 + modulus × 0.1)`
+
+**Default path (`thermal_coupled`):** the primary solver now integrates an
+explicit thermal diffusion field coupled to fraction-solid evolution. It
+applies temperature-dependent conductivity, specific heat, and density
+curves per voxel, uses an isotropic weighted Laplacian stencil (exact on
+quadratic fields), and releases latent heat on the same time step it is
+computed (in-step temperature correction, no one-step lag). Mold interfaces
+use a Robin condition with exponential air-gap HTC decay; chills act as
+finite copper heat sinks (diffusivity override + ambient-HTC boundary)
+rather than fixed-temperature pins. Fraction solid can use the lever rule
+or the true Scheil microsegregation equation with per-alloy solvent melting
+point and partition coefficient, lever-rule solidus completion, and an
+optional eutectic cap.
 
 #### Step 4: Calculate Defects
 ```
@@ -181,15 +196,24 @@ The simulator calculates:
 #### What's Modeled:
 ✅ Geometric modulus (volume/area)
 ✅ Feeding distance limits
-✅ Density-driven vertical flow
-✅ Edge-inward solidification
+✅ Density-driven vertical flow (legacy schedule path only)
+✅ Edge-inward solidification (legacy schedule path only)
 ✅ Material-specific shrinkage rates
-✅ Thermal properties
+✅ Explicit thermal diffusion (default `thermal_coupled` path)
+✅ Temperature-dependent k/cp/rho property curves
+✅ Isotropic weighted Laplacian stencil (exact on quadratic fields)
+✅ Mold-interface Robin boundaries with exponential air-gap HTC decay
+✅ Finite-heat-sink chills (copper diffusivity + ambient HTC)
+✅ Same-step latent heat release
+✅ True Scheil microsegregation option
+✅ Shrinkage-driven Darcy feeding velocity (v = β·R)
 
 #### Simplifications:
-⚠️ No temperature field calculation
+⚠️ No mold-filling simulation — castings start at a uniform pouring temperature
+⚠️ No explicit mold domain — constant-temperature sink + interface HTC
+⚠️ Diffusion stencil approximate on graded octree meshes (exact on uniform grids)
+⚠️ Shrinkage/porosity/hot-tear outputs are calibrated engineering risk scores (0–1), not first-principles porosity fractions
 ⚠️ Simplified convection model
-⚠️ No mold-metal interface
 ⚠️ No turbulence effects
 ⚠️ Steady-state assumptions
 
@@ -276,6 +300,13 @@ Solution: Add feeding channels or redesign
 # In UI or code:
 base_voxel_size = 2.0  # mm (smaller = more accurate, slower)
 refinement_level = 3   # 1-4 (higher = more detail)
+```
+
+#### Adjust Solidification Parameters:
+```python
+# In core/solidification_params.py (nested dataclasses):
+params.air_gap.htc_floor_fraction = 0.35            # 0.05-1.0; fraction of interface HTC remaining after the air gap forms
+params.thermal_boundary.chill_ambient_htc = 100.0   # 1-10000 W/(m^2*K); HTC from chill surfaces to mold/ambient (finite-heat-sink chills)
 ```
 
 #### Modify Materials:

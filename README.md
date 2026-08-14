@@ -153,9 +153,9 @@ Multi-project management, FIFO job queue (1 concurrent, 6 queued), in-browser Ba
 | Mode | Philosophy |
 |---|---|
 | `schedule_legacy` | Blazing fast. Precomputed surface/chill/riser schedule. Geometry-driven. |
-| `thermal_coupled` (default) | Physics-rich. Couples thermal diffusion with solidification. |
+| `thermal_coupled` (default) | Physics-rich. Solves the thermal diffusion field coupled to fraction-solid evolution. |
 
-SCHEIL fraction-solid option uses a bounded linearised Scheil surrogate.
+The default `thermal_coupled` solver uses temperature-dependent k/cp/rho property curves, an isotropic weighted Laplacian stencil (exact on quadratic fields), and releases latent heat on the same time step it is computed. Mold interfaces use a Robin condition with exponential air-gap HTC decay; chills act as finite copper heat sinks (diffusivity override + ambient-HTC boundary) rather than fixed-temperature pins. The `SCHEIL` fraction-solid option implements the true Scheil microsegregation equation using per-alloy solvent melting point and partition coefficient, with lever-rule solidus completion and an optional eutectic cap.
 
 ---
 
@@ -169,7 +169,10 @@ SCHEIL fraction-solid option uses a bounded linearised Scheil surrogate.
 
 ## Known Simplifications
 
-- Default solver is geometry-driven; a schedule proxy replaces a full thermal PDE
+- No mold-filling simulation — castings start at a uniform pouring temperature
+- No explicit mold domain — the mold is a constant-temperature sink with an interface HTC
+- The diffusion stencil is approximate on graded octree meshes (exact on uniform grids)
+- Shrinkage / porosity / hot-tear outputs are calibrated engineering risk scores (0–1), not first-principles porosity fractions
 - Feeding paths use traced riser connectivity where available; fall back to surface-distance otherwise
 - Niyama interpretation includes directional-solidification modifiers near chills
 - Stress, hot tearing, and microstructure are comparative guidance — not full FEA or CALPHAD

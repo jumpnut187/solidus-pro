@@ -50,6 +50,42 @@ class ScheilRegressionTests(unittest.TestCase):
         self.assertGreater(fractions[1], 0.05)
         self.assertLess(fractions[2], 0.95)
 
+    def test_true_scheil_matches_analytic_values(self) -> None:
+        # With the solvent melting point known, the Scheil option uses the
+        # true microsegregation equation, not the bounded surrogate. These are
+        # the analytic values for the WCB binary approximation (k = 0.17,
+        # T_f = 1538, T_L = 1460, T_S = 1399): the surrogate previously
+        # returned 0.194 / 0.558 here.
+        T_liq, T_sol, k, T_f = 1460.0, 1399.0, 0.17, 1538.0
+        self.assertEqual(
+            FractionSolidCalculator.scheil(1500.0, T_liq, T_sol, k, melting_point=T_f),
+            0.0,
+        )
+        self.assertAlmostEqual(
+            FractionSolidCalculator.scheil(1450.0, T_liq, T_sol, k, melting_point=T_f),
+            0.135,
+            delta=0.005,
+        )
+        self.assertAlmostEqual(
+            FractionSolidCalculator.scheil(1430.0, T_liq, T_sol, k, melting_point=T_f),
+            0.324,
+            delta=0.01,
+        )
+        # Raw Scheil leaves residual liquid at the solidus; the lever-rule
+        # floor completes the model to exactly 1.0 there.
+        self.assertEqual(
+            FractionSolidCalculator.scheil(1399.0, T_liq, T_sol, k, melting_point=T_f),
+            1.0,
+        )
+        # Bounded and monotone across the freezing range.
+        temps = np.linspace(T_liq, T_sol, 50)
+        fractions = [
+            FractionSolidCalculator.scheil(t, T_liq, T_sol, k, melting_point=T_f)
+            for t in temps
+        ]
+        self.assertTrue(all(0.0 <= value <= 1.0 for value in fractions))
+        self.assertTrue(all(a <= b for a, b in zip(fractions, fractions[1:])))
+
     def test_parallel_scheil_matches_scalar_reference(self) -> None:
         temperatures = np.array([100.0, 80.0, 60.0, 40.0, 20.0, 0.0], dtype=np.float64)
         expected = np.array(

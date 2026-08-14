@@ -417,3 +417,102 @@ These references informed the audit and should be used when implementing the fix
 - [x] Step 8: Re-run compile, tests, and mypy.
 - [x] Step 9: Re-check alloy-by-alloy simulation behavior.
 - [x] Step 10: Update docs to reflect what is truly physics-based versus heuristic.
+
+## 15. Round 2 Physics Audit (Aug 2026) — Completed
+
+Second audit pass over the thermal-coupled solver path
+(`core/solidification_loop.py`, `physics/heat_transfer.py`,
+`physics/solidification_physics.py`, `core/solidification.py`) and the
+supporting `core/solidification_params.py` tunables. Items A cover thermal
+solver correctness; items B cover physical model improvements. Each fix is
+covered by new regression tests.
+
+### A. Thermal solver correctness
+
+- [x] **A1 — Laplacian stencil fixed.** The old kernel was a 26-neighbor
+  equal-weight average normalized by neighbor count, which reduced the
+  effective diffusivity to roughly 0.35x the stated value and made the
+  error position-dependent. Replaced with an isotropic weighted stencil:
+  face neighbors 0.5, corner neighbors 0.125, edge neighbors excluded
+  (they cancel exactly in the weighted sum). The weighted difference form
+  is exact for all quadratic fields and no longer divides by neighbor
+  count. Implemented in `_step_internal()` and
+  `compute_laplacian_parallel()` in `physics/heat_transfer.py`.
+- [x] **A2 — Per-voxel cell sizes and diffusivity.** `HeatTransferModel`
+  now accepts `voxel_sizes` (per-voxel cell size) and
+  `diffusivity_overrides` (per-voxel thermal diffusivity), making the
+  solver octree-aware on graded meshes. The stencil remains approximate on
+  graded meshes (documented limitation); it is exact on uniform grids.
+- [x] **A3 — Same-step latent heat.** Latent heat is released in-step:
+  `_run_thermal_coupled_integration()` applies the latent-heat rate as a
+  direct temperature correction on the same step (predictor scheme) rather
+  than through a heat source that only takes effect on the next step. No
+  one-step lag; per-step energy is conserved.
+- [x] **A4 — Thermal-coupled mode is purely temperature-driven.** The
+  heuristic vertical solidification bias was removed from the
+  thermal-coupled path (`core/solidification_loop.py`); the legacy
+  schedule path is unchanged.
+- [x] **A5 — True Scheil implementation.** `_scheil()` and
+  `FractionSolidCalculator.scheil()` now implement the true Scheil
+  equation using per-alloy `melting_point_solvent` and
+  `partition_coefficient`, with a lever-rule solidus completion
+  (`f_s = 1` at/below solidus) and an optional eutectic cap. Falls back to
+  a bounded surrogate when the solvent melting point is unavailable and to
+  the lever rule for `k >= 1`. Module docstring corrected.
+- [x] **A6 — Robin boundary flux corrected.** Convection/interface
+  boundaries in `_apply_boundaries()` now evaluate the flux against the
+  PRE-update temperature and use the full cell size `dx` (previously the
+  boundary cell was lumped as `dx/2` and the flux used the new
+  temperature).
+
+### B. Physical model improvements
+
+- [x] **B4 — Chills are finite heat sinks.** Chill voxels receive a copper
+  diffusivity override (k = 380 W/(m·K), rho = 8960 kg/m³, cp = 385
+  J/(kg·K) → alpha = 1.10e-4 m²/s) and an ambient-HTC interface boundary
+  instead of being pinned at a fixed temperature. Tunable via
+  `thermal_boundary.chill_ambient_htc`. See `_initialize_thermal_models()`
+  and `_configure_thermal_boundaries()` in `core/solidification.py`.
+  Follow-up fix: the CFL stability bound (`get_stable_timestep`) now
+  includes per-voxel diffusivity override values in `_get_alpha_max()`;
+  without it the explicit scheme ignored the ~10x copper alpha, went
+  unstable at the chill interface (+/-inf within ~300 steps, surfacing as
+  NaN fraction solid and a ValueError in the progress callback).
+- [x] **B5 — Darcy feed velocity is shrinkage-driven.** Feeding
+  effectiveness uses `v = beta * R` with `beta = rho_s/rho_l - 1`
+  (volumetric shrinkage) and `R = cooling_rate / |grad T|` (local
+  solidification-front speed); falls back to a constant 0.5 mm/s when
+  thermal fields are unavailable. See `_calculate_feeding_effectiveness()`
+  in `core/solidification.py`.
+- [x] **B6 — Temperature-dependent properties.** The default thermal path
+  enables temperature-dependent k(T), cp(T), and rho(T) via
+  `property_curves` (reference points spanning room temperature through
+  above-liquidus). See `_initialize_thermal_models()` and
+  `_get_temperature_dependent_diffusivity()`.
+- [x] **B7 — Air-gap HTC decay.** Mold-interface HTC decays exponentially
+  on cast, riser, and riser-post surfaces:
+  `h(t) = h0 * (floor + (1 - floor) * exp(-t/tau))` with
+  `air_gap.htc_floor_fraction` defaulting to 0.35.
+- [x] **B8 — NaN handling for unfinished voxels.** Voxels still liquid at
+  the time cap carry NaN solidification times. Downstream analyses treat
+  NaN as max_time (last-to-freeze) in `_compute_shrinkage_base_risk()` and
+  `_calculate_isolation_score()`, and `_generate_statistics()` excludes
+  unfinished voxels from mean/max solidification-time statistics.
+
+### Supporting changes
+
+- [x] New tunable parameters: `air_gap.htc_floor_fraction` (default 0.35,
+  clamp 0.05–1.0) and `thermal_boundary.chill_ambient_htc` (default
+  100 W/(m²·K), clamp 1–10000) in `core/solidification_params.py`.
+- [x] New regression tests: `tests/test_scheil_regression.py`,
+  `tests/test_heat_transfer_physics.py`,
+  `tests/test_heat_transfer_numba_backend.py`,
+  `tests/test_thermal_loop_regressions.py`,
+  `tests/test_thermal_solver_curves.py`,
+  `tests/test_thermal_boundary_config.py`,
+  `tests/test_darcy_velocity.py`,
+  `tests/test_unfinished_voxel_masking.py`; updated
+  `tests/test_math_audit_regressions.py`,
+  `tests/test_thermal_coupled_integration.py`,
+  `tests/test_solidification_params.py`.
+- [x] Benchmark script: `tests/verify_thermal_benchmarks.py`.

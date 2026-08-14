@@ -158,6 +158,52 @@ class SolidificationParametersTests(unittest.TestCase):
             ),
         )
 
+    def test_air_gap_htc_floor_default_and_clamp(self) -> None:
+        params = SolidificationParameters()
+
+        self.assertAlmostEqual(params.air_gap.htc_floor_fraction, 0.35)
+
+        high = SolidificationParameters.from_dict(
+            {"air_gap": {"htc_floor_fraction": 2.0}}
+        )
+        low = SolidificationParameters.from_dict(
+            {"air_gap": {"htc_floor_fraction": 0.0}}
+        )
+
+        self.assertAlmostEqual(high.air_gap.htc_floor_fraction, 1.0)
+        self.assertAlmostEqual(low.air_gap.htc_floor_fraction, 0.05)
+
+    def test_chill_ambient_htc_default_and_clamp(self) -> None:
+        params = SolidificationParameters()
+
+        self.assertAlmostEqual(params.thermal_boundary.chill_ambient_htc, 100.0)
+
+        high = SolidificationParameters.from_dict(
+            {"thermal_boundary": {"chill_ambient_htc": 50000.0}}
+        )
+        low = SolidificationParameters.from_dict(
+            {"thermal_boundary": {"chill_ambient_htc": 0.0}}
+        )
+
+        self.assertAlmostEqual(high.thermal_boundary.chill_ambient_htc, 10000.0)
+        self.assertAlmostEqual(low.thermal_boundary.chill_ambient_htc, 1.0)
+
+    def test_air_gap_and_chill_ambient_round_trip(self) -> None:
+        original = SolidificationParameters.from_dict(
+            {
+                "air_gap": {"htc_floor_fraction": 0.5},
+                "thermal_boundary": {"chill_ambient_htc": 250.0},
+            }
+        )
+        serialized = original.to_dict()
+        self.assertIn("htc_floor_fraction", serialized["air_gap"])
+        self.assertIn("chill_ambient_htc", serialized["thermal_boundary"])
+
+        round_tripped = SolidificationParameters.from_dict(serialized)
+
+        self.assertAlmostEqual(round_tripped.air_gap.htc_floor_fraction, 0.5)
+        self.assertAlmostEqual(round_tripped.thermal_boundary.chill_ambient_htc, 250.0)
+
 
 if __name__ == "__main__":
     unittest.main()

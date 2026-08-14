@@ -8,12 +8,18 @@ Implements phase transformation physics:
 - Mushy zone modeling
 
 Key Equations:
-    Fraction Solid (Linear):
+    Fraction Solid (Linear / Lever Rule):
         fₛ = (T_liquidus - T) / (T_liquidus - T_solidus)
-    
-    Scheil Equation:
-        fₛ = 1 - [(T_liquidus - T) / (T_liquidus - T_melt)]^(1/(k-1))
-    
+
+    Scheil Equation (microsegregation, k < 1):
+        fₛ = 1 - ((T_f - T) / (T_f - T_L))^(1/(k-1))    for T < T_L, else 0
+
+    where T_f is the melting point of the pure solvent metal and T_L the
+    alloy liquidus. A linear lever-rule floor completes the model at the
+    solidus (fₛ = 1 at T_S, since the raw Scheil curve leaves residual
+    liquid there for k < 1); an optional eutectic reaction caps fₛ at
+    (1 - f_eutectic) at/below the eutectic temperature.
+
     Latent Heat Release:
         Q = ρ * L * (∂fₛ/∂t)
 
@@ -70,12 +76,20 @@ class SolidificationParameters:
     
     Attributes:
         partition_coefficient: Solute partition coefficient k = Cs/Cl
-        eutectic_fraction: Fraction solid at eutectic
+        melting_point_solvent: Melting point of the pure solvent metal
+            (T_f, °C). Required by the true Scheil equation; when None the
+            bounded liquidus/solidus surrogate is used instead.
+        eutectic_temperature: Eutectic reaction temperature (°C); None if the
+            alloy has no eutectic.
+        eutectic_fraction: Fraction solid at which the eutectic reaction
+            begins; 0 = no eutectic.
         back_diffusion_alpha: Clyne-Kurz back-diffusion parameter
         grain_refinement_factor: Modification to dendrite arm spacing
         cooling_rate_exponent: Exponent for cooling rate effect on DAS
     """
     partition_coefficient: float = 0.14  # For Al-Si
+    melting_point_solvent: Optional[float] = None  # °C; None = use surrogate
+    eutectic_temperature: Optional[float] = None  # °C
     eutectic_fraction: float = 0.0  # 0 = no eutectic
     back_diffusion_alpha: float = 0.0  # 0 = Scheil, 1 = lever rule
     grain_refinement_factor: float = 1.0
@@ -177,6 +191,18 @@ class SolidificationModel:
         self.alloy = alloy
         self.method = method
         self.params = params or SolidificationParameters()
+
+        # Override Scheil parameters from the alloy when it provides them.
+        # getattr with None defaults keeps the MaterialProperties protocol
+        # (and any plain dummy alloy) unbroken.
+        if getattr(alloy, "melting_point_solvent", None) is not None:
+            self.params.melting_point_solvent = alloy.melting_point_solvent
+        if getattr(alloy, "partition_coefficient", None) is not None:
+            self.params.partition_coefficient = alloy.partition_coefficient
+        if getattr(alloy, "eutectic_temperature", None) is not None:
+            self.params.eutectic_temperature = alloy.eutectic_temperature
+        if getattr(alloy, "eutectic_fraction", None) is not None:
+            self.params.eutectic_fraction = alloy.eutectic_fraction
         
         # State arrays
         self._fraction_solid = np.zeros(n_voxels, dtype=np.float64)
@@ -270,10 +296,17 @@ class SolidificationModel:
         
         # Track when solidification starts (fs first exceeds 0)
         starting = (self._fraction_solid_prev < 0.01) & (self._fraction_solid >= 0.01)
-        self._solidification_start[starting] = self.time
+        ending = (self._fraction_solid_prev < 0.99) & (self._fraction_solid >= 0.99)
+        # A voxel that jumps from liquid to (essentially) solid within a single
+        # step would otherwise get a degenerate start == end interval
+        # (local_solidification_time == 0.0), which downstream schedule
+        # evaluation reads as "never solidified". Anchor such crossings at the
+        # step beginning so the interval spans at least one step.
+        single_step_crossing = starting & ending
+        self._solidification_start[starting & ~single_step_crossing] = self.time
+        self._solidification_start[single_step_crossing] = self.time - dt
         
         # Track when solidification ends (fs reaches 1)
-        ending = (self._fraction_solid_prev < 0.99) & (self._fraction_solid >= 0.99)
         self._solidification_end[ending] = self.time
         
         # Calculate latent heat release
@@ -300,36 +333,53 @@ class SolidificationModel:
     
     def _scheil(self, T: FloatArray) -> FloatArray:
         """
-        Calculate fraction solid using a bounded linearized Scheil surrogate.
+        Calculate fraction solid with the Scheil equation.
 
-        This project does not carry a full phase-diagram/CALPHAD path, so the
-        Scheil option uses a normalized binary-alloy surrogate anchored to the
-        alloy liquidus and solidus. The formulation preserves the expected
-        qualitative behavior without relying on clipping to hide invalid values:
+        For k < 1 with the solvent melting point (T_f) known, the true Scheil
+        microsegregation curve is used:
 
-            θ = (T - T_solidus) / (T_liquidus - T_solidus)
-            f_s = 1 - θ^(1 / (1 - k))    for k < 1
+            f_s = 1 - ((T_f - T) / (T_f - T_liq)) ** (1 / (k - 1))   for T < T_liq
 
-        which gives:
-        - f_s = 0 at liquidus
-        - f_s = 1 at solidus
-        - monotonic increase as temperature decreases
+        The raw curve leaves residual liquid at the solidus (e.g.
+        f_s(T_sol) ~ 0.50 for WCB, k = 0.17), so a linear lever-rule floor
+        completes the model there: f_s = max(scheil_raw, lever_rule) pins the
+        fraction to 1.0 at/below T_sol while the mushy-zone values keep the
+        analytic Scheil shape. An optional eutectic reaction caps f_s at
+        (1 - f_eutectic) at/below the eutectic temperature.
+
+        Falls back to the bounded liquidus/solidus surrogate when T_f is
+        unavailable; uses the lever rule for k >= 1. The eutectic cap is
+        applied last so it also bounds the completion value at/below T_sol.
         """
         k = self.params.partition_coefficient
         T_liq = self.T_liq
         T_sol = self.T_sol
-        if abs(k - 1.0) < 1e-6:
-            fs = (T_liq - T) / max(T_liq - T_sol, 1e-12)
-            return np.clip(fs, 0.0, 1.0)
-        theta = (T - T_sol) / max(T_liq - T_sol, 1e-12)
-        theta = np.clip(theta, 0.0, 1.0)
-        if abs(k - 1.0) < 1e-6:
-            exponent = 1.0
-        elif k < 1.0:
+        T_f = self.params.melting_point_solvent
+        if abs(k - 1.0) < 1e-6 or k > 1.0:
+            fs = self._lever_rule(T)
+        elif T_f is None:
+            # Bounded surrogate anchored to liquidus/solidus (no T_f known).
+            theta = (T - T_sol) / max(T_liq - T_sol, 1e-12)
+            theta = np.clip(theta, 0.0, 1.0)
             exponent = 1.0 / max(1.0 - k, 1e-6)
+            fs = 1.0 - np.power(theta, exponent)
         else:
-            exponent = max(k, 1.0)
-        return 1.0 - np.power(theta, exponent)
+            # True Scheil equation (k < 1, T_f known).
+            with np.errstate(invalid="ignore", divide="ignore"):
+                ratio = (T_f - T) / max(T_f - T_liq, 1e-12)
+                fs = 1.0 - np.power(ratio, 1.0 / (k - 1.0))
+            # Liquidus/solidus bounds. The raw curve reaches 0 at T_liq;
+            # below T_sol it would leave residual liquid, so the lever-rule
+            # floor (1.0 at/below T_sol) completes the model.
+            fs = np.where(T >= T_liq, 0.0, fs)
+            fs = np.where(T <= T_sol, 1.0, fs)
+        # Eutectic cap: remaining liquid freezes isothermally at the eutectic.
+        e_frac = self.params.eutectic_fraction
+        e_temp = self.params.eutectic_temperature
+        if e_frac > 0.0 and e_temp is not None:
+            fs = np.where(T <= e_temp, np.minimum(fs, 1.0 - e_frac), fs)
+        # Defensive clamp only; the formula is naturally bounded below T_liq.
+        return np.clip(fs, 0.0, 1.0)
     
     def _back_diffusion(self, T: FloatArray) -> FloatArray:
         """
@@ -380,23 +430,59 @@ class FractionSolidCalculator:
             return (T_liq - T) / (T_liq - T_sol)
     
     @staticmethod
-    def scheil(T: float, T_liq: float, T_sol: float, k: float) -> float:
-        """Scheil equation calculation"""
+    def scheil(
+        T: float,
+        T_liq: float,
+        T_sol: float,
+        k: float,
+        melting_point: Optional[float] = None,
+        eutectic_temperature: Optional[float] = None,
+        eutectic_fraction: float = 0.0,
+    ) -> float:
+        """
+        Scheil equation calculation.
+
+        For k < 1 with the solvent melting point (T_f) known, the true Scheil
+        microsegregation curve is used:
+
+            f_s = 1 - ((T_f - T) / (T_f - T_liq)) ** (1 / (k - 1))
+
+        The raw curve leaves residual liquid at the solidus, so a linear
+        lever-rule floor completes the model there (f_s = 1 at/below T_sol).
+        An optional eutectic reaction caps f_s at (1 - eutectic_fraction)
+        at/below the eutectic temperature.
+
+        Falls back to the bounded liquidus/solidus surrogate when
+        ``melting_point`` is None; uses the lever rule for k >= 1. The
+        eutectic cap is applied last so it also bounds the completion value
+        at/below T_sol.
+        """
         if T >= T_liq:
             return 0.0
-        if T <= T_sol:
-            return 1.0
-        if abs(k - 1.0) < 1e-6:
-            return FractionSolidCalculator.lever_rule(T, T_liq, T_sol)
-        theta = (T - T_sol) / max(T_liq - T_sol, 1e-12)
-        theta = min(max(theta, 0.0), 1.0)
-        if abs(k - 1.0) < 1e-6:
-            exponent = 1.0
-        elif k < 1.0:
+        if abs(k - 1.0) < 1e-6 or k > 1.0:
+            fs = FractionSolidCalculator.lever_rule(T, T_liq, T_sol)
+        elif T <= T_sol:
+            # Solidus completion: the raw Scheil curve leaves residual liquid
+            # here (e.g. f_s(T_sol) ~ 0.50 for WCB, k = 0.17), so the
+            # lever-rule floor (1.0 at/below T_sol) completes the model.
+            fs = 1.0
+        elif melting_point is None:
+            # Bounded surrogate anchored to liquidus/solidus (no T_f known).
+            theta = (T - T_sol) / max(T_liq - T_sol, 1e-12)
+            theta = min(max(theta, 0.0), 1.0)
             exponent = 1.0 / max(1.0 - k, 1e-6)
+            fs = 1.0 - theta ** exponent
         else:
-            exponent = max(k, 1.0)
-        return float(1.0 - theta ** exponent)
+            # True Scheil equation (k < 1, T_f known).
+            denom = max(melting_point - T_liq, 1e-12)
+            fs = 1.0 - ((melting_point - T) / denom) ** (1.0 / (k - 1.0))
+        if (
+            eutectic_fraction > 0.0
+            and eutectic_temperature is not None
+            and T <= eutectic_temperature
+        ):
+            fs = min(fs, 1.0 - eutectic_fraction)
+        return float(min(max(fs, 0.0), 1.0))
 
     @staticmethod
     def equilibrium_path(
@@ -439,28 +525,51 @@ if NUMBA_AVAILABLE:
         T: FloatArray,
         T_liq: float,
         T_sol: float,
-        k: float
+        k: float,
+        melting_point: Optional[float] = None,
+        eutectic_temperature: Optional[float] = None,
+        eutectic_fraction: float = 0.0,
     ) -> FloatArray:
-        """Parallel normalized Scheil surrogate calculation"""
+        """Parallel Scheil equation calculation.
+
+        Mirrors FractionSolidCalculator.scheil element-wise: true Scheil for
+        k < 1 with the solvent melting point known, bounded liquidus/solidus
+        surrogate fallback when it is None, lever rule for k >= 1, lever-rule
+        floor completing the model at the solidus, and an optional eutectic cap.
+        """
         n = len(T)
         fs = np.empty(n, dtype=np.float64)
-        dT = T_liq - T_sol
-        if abs(k - 1.0) < 1e-6:
-            exp = 1.0
-        elif k < 1.0:
-            exp = 1.0 / max(1.0 - k, 1e-6)
+        dT = max(T_liq - T_sol, 1e-12)
+        if abs(k - 1.0) < 1e-6 or k > 1.0:
+            use_lever = True
         else:
-            exp = max(k, 1.0)
-        
+            use_lever = False
+            exp = 1.0 / max(1.0 - k, 1e-6)
+
         for i in prange(n):
             if T[i] >= T_liq:
                 fs[i] = 0.0
             elif T[i] <= T_sol:
                 fs[i] = 1.0
-            else:
+            elif use_lever:
+                fs[i] = (T_liq - T[i]) / dT
+            elif melting_point is None:
+                # Bounded surrogate anchored to liquidus/solidus (no T_f).
                 theta = (T[i] - T_sol) / dT
                 fs[i] = 1.0 - theta ** exp
-        
+            else:
+                # True Scheil equation (k < 1, T_f known).
+                ratio = (melting_point - T[i]) / max(melting_point - T_liq, 1e-12)
+                fs[i] = 1.0 - ratio ** (1.0 / (k - 1.0))
+            if (
+                eutectic_fraction > 0.0
+                and eutectic_temperature is not None
+                and T[i] <= eutectic_temperature
+            ):
+                cap = 1.0 - eutectic_fraction
+                if fs[i] > cap:
+                    fs[i] = cap
+
         return fs
     
 

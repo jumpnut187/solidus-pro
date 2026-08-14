@@ -27,6 +27,7 @@ class _DummyAlloy:
     latent_heat = 10.0
     density_liquid = 2.0
     density_solid = 2.0
+    specific_heat = 1.0
     critical_fraction_solid = 0.5
 
 
@@ -154,7 +155,10 @@ class ThermalCoupledIntegrationTests(unittest.TestCase):
         self.assertTrue(np.all(engine.solidification_end_times >= engine.solidification_start_times))
         self.assertTrue(np.all(engine.local_solidification_time >= 0.0))
         self.assertTrue(np.all(np.isfinite(engine.feeding_fraction_solid)))
-        self.assertTrue(np.all(engine.cooling_rates >= np.array([40.0, 35.0], dtype=np.float32)))
+        # The same-step latent-heat correction offsets part of the diffusion
+        # drop, so the observed peak cooling rate reflects the net (corrected)
+        # temperature change of the step, not the raw diffusion-only drop.
+        np.testing.assert_allclose(engine.cooling_rates, np.array([39.42, 35.0], dtype=np.float32), atol=1e-4)
         np.testing.assert_allclose(engine.thermal_gradients, np.array([2.0, 1.0], dtype=np.float32), atol=1e-6)
         self.assertGreaterEqual(len(engine.fraction_liquid_history), 2)
         self.assertEqual(engine._logger.context["mode"], "thermal_coupled")
@@ -291,7 +295,15 @@ def _build_bias_engine(*, feeding_bias: float, with_risers: bool) -> SimpleNames
 
 
 class FeedingZoneBiasTests(unittest.TestCase):
-    """Regression tests for the feeding_zone_vertical_bias in the thermal_coupled path."""
+    """Regression tests for feeding_zone_vertical_bias in the thermal_coupled
+    path.
+
+    The thermal-coupled loop is purely temperature-driven: the heuristic
+    vertical solidification bias is DISABLED there, so results must be
+    identical for any slider value. The bias helpers themselves
+    (``_apply_feeding_zone_bias`` and friends) still apply the legacy
+    directional bias and are exercised directly by the helper tests below.
+    """
 
     def test_compute_feeding_zone_mask_flags_riser_and_neighbors(self) -> None:
         part_types = np.array([0, 1, 0, 1], dtype=np.int32)
@@ -322,12 +334,15 @@ class FeedingZoneBiasTests(unittest.TestCase):
         self.assertFalse(bool(mask[0]))
         self.assertTrue(bool(mask[1]))  # riser voxel itself
 
-    def test_apply_feeding_zone_bias_changes_bottom_voxel_timing(self) -> None:
+    def test_thermal_mode_ignores_feeding_zone_bias_slider(self) -> None:
+        """Thermal-coupled results are IDENTICAL whether the
+        feeding_zone_vertical_bias slider is 0.0 or 2.0: the temperature-driven
+        solver no longer applies the heuristic vertical solidification bias."""
         weak_engine = _build_bias_engine(feeding_bias=0.0, with_risers=True)
         strong_engine = _build_bias_engine(feeding_bias=2.0, with_risers=True)
         # Drop 15 degC/step and stop after 3 iterations so the simulation
-        # ends mid-solidification and the per-step bias delta accumulates
-        # visibly instead of saturating at 1.0 for every voxel.
+        # ends mid-solidification and any (removed) bias delta would have
+        # accumulated visibly instead of saturating at 1.0 for every voxel.
         for engine in (weak_engine, strong_engine):
             engine._thermal_heat_model = _Uniform5DropHeatModel(
                 n_voxels=4, drop_per_step=15.0
@@ -350,27 +365,34 @@ class FeedingZoneBiasTests(unittest.TestCase):
             progress_callback=None,
         )
 
-        self.assertGreater(
-            float(strong_engine.mesh.voxel_states[0]),
-            float(weak_engine.mesh.voxel_states[0]),
-            "Stronger feeding-zone bias must advance bottom CAST fraction_solid",
-        )
-        # The bias must leave the top CAST voxel unchanged (h == 1 → factor is 0).
-        self.assertAlmostEqual(
-            float(strong_engine.mesh.voxel_states[2]),
-            float(weak_engine.mesh.voxel_states[2]),
-            places=6,
-            msg=(
-                "Top feeding-zone voxel (h == 1) must be unaffected by the bias; "
-                f"got strong={strong_engine.mesh.voxel_states[2]} vs "
-                f"weak={weak_engine.mesh.voxel_states[2]}"
+        np.testing.assert_allclose(
+            strong_engine.mesh.voxel_states,
+            weak_engine.mesh.voxel_states,
+            atol=1e-6,
+            err_msg=(
+                "Thermal-coupled mode is purely temperature-driven; the "
+                "feeding_zone_vertical_bias slider must not change fraction solid"
             ),
         )
+        np.testing.assert_allclose(
+            strong_engine.solidification_end_times,
+            weak_engine.solidification_end_times,
+            atol=1e-6,
+            err_msg=(
+                "Thermal-coupled mode must ignore feeding_zone_vertical_bias "
+                "when writing solidification end times"
+            ),
+        )
+        np.testing.assert_allclose(
+            strong_engine.solidification_start_times,
+            weak_engine.solidification_start_times,
+            atol=1e-6,
+        )
 
-    def test_apply_feeding_zone_baseline_applies_without_risers(self) -> None:
-        """The baseline directional bias must apply to every liquid voxel
-        even when no RISER voxels are present, so a bare cast part still
-        solidifies bottom-up."""
+    def test_thermal_mode_bias_slider_ignored_without_risers(self) -> None:
+        """The feeding_zone_vertical_bias slider must not change the simulation
+        even when no RISER voxels are present: thermal-coupled mode is purely
+        temperature-driven and applies no heuristic vertical bias."""
         zero_engine = _build_bias_engine(feeding_bias=0.0, with_risers=False)
         max_engine = _build_bias_engine(feeding_bias=2.0, with_risers=False)
         for engine in (zero_engine, max_engine):
@@ -395,14 +417,14 @@ class FeedingZoneBiasTests(unittest.TestCase):
             progress_callback=None,
         )
 
-        # Baseline (0.3) makes the casting solidify bottom-up regardless of
-        # the riser-feed bias slider; both engines must show identical state.
+        # Thermal-coupled mode ignores the bias slider entirely; both engines
+        # must show identical state.
         np.testing.assert_allclose(
             max_engine.solidification_end_times,
             zero_engine.solidification_end_times,
             err_msg=(
                 "Without RISER voxels, the feeding_zone_vertical_bias slider "
-                "must not change the simulation (baseline 0.3 still applies)"
+                "must not change the simulation (bias disabled in thermal mode)"
             ),
         )
         np.testing.assert_allclose(

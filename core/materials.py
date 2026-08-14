@@ -98,6 +98,17 @@ class AlloyProperties:
     # 1.0 °C/s is a reasonable foundry reference (sand casting of a small block).
     btr_btr_cooling_rate_ref: float = 1.0
 
+    # Scheil solidification parameters (approximate binary-system values; see
+    # each alloy entry for the solvent metal and partition coefficient).
+    # melting_point_solvent: melting point of the pure solvent metal (°C).
+    # partition_coefficient: solute partition coefficient k = Cs/Cl.
+    # eutectic_temperature: eutectic reaction temperature (°C); None = none.
+    # eutectic_fraction: fraction solid at which the eutectic reaction starts.
+    melting_point_solvent: Optional[float] = None  # °C; None = surrogate fallback
+    partition_coefficient: float = 0.17  # Cs/Cl
+    eutectic_temperature: Optional[float] = None  # °C
+    eutectic_fraction: float = 0.0  # 0 = no eutectic
+
     # Critical fraction solid: point where interdendritic feeding stops
     # Below this threshold, liquid can flow freely through mushy zone
     # Above this threshold, dendrites block flow (coherency point)
@@ -451,6 +462,9 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         btr_fraction_solid_start=0.90,  # BTR starts at 90% solid
         btr_fraction_solid_end=0.98,    # BTR ends at 98% solid
         btr_cooling_rate_exponent=0.05,  # Mild BTR-widening with cooling rate
+        # Scheil (binary approx.): pure Fe solvent, C in austenite k ~0.13-0.2
+        melting_point_solvent=1538,  # °C pure Fe
+        partition_coefficient=0.17,  # C in austenite ~0.13-0.2
         # Feeding/permeability properties
         critical_fraction_solid=0.52,  # Coherency point for carbon steel
         dendrite_arm_spacing=80.0,  # μm - typical for sand casting cooling rates
@@ -487,6 +501,9 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         btr_fraction_solid_start=0.85,  # Earlier onset due to alloy segregation
         btr_fraction_solid_end=0.99,    # Extended BTR due to wide freezing range
         btr_cooling_rate_exponent=0.08,  # Moderate BTR-widening (segregation-driven)
+        # Scheil (binary approx.): pure Fe solvent, austenitic Ni/Cr system
+        melting_point_solvent=1538,  # °C pure Fe
+        partition_coefficient=0.7,  # alloying elements partition weakly
         # Feeding/permeability properties - stainless has narrower feeding window
         critical_fraction_solid=0.48,  # Lower coherency due to wide freezing range
         dendrite_arm_spacing=60.0,  # μm - finer structure due to alloying
@@ -556,6 +573,9 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         btr_fraction_solid_start=0.92,
         btr_fraction_solid_end=0.97,
         btr_cooling_rate_exponent=0.05,  # Mild BTR-widening (good ductility)
+        # Scheil (binary approx.): pure Cu solvent, Al partitions in bronze
+        melting_point_solvent=1084.6,  # °C pure Cu
+        partition_coefficient=0.7,  # Al in Cu-rich alpha
         # Feeding/permeability — NAB has excellent feeding; CDA "Fluidity:
         # Medium" but "Shrinkage in Solidification: HIGH" — feeding range
         # extends further than most bronzes before coherency.
@@ -620,6 +640,10 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         btr_fraction_solid_start=0.89,
         btr_fraction_solid_end=0.97,
         btr_cooling_rate_exponent=0.06,  # Mild BTR-widening
+        # Scheil (binary approx.): pure Cu solvent; Cu-Ni is isomorphous and
+        # does not partition, so k = 1 reduces the Scheil path to the lever rule.
+        melting_point_solvent=1084.6,  # °C pure Cu
+        partition_coefficient=1.0,  # isomorphous Cu-Ni, no partitioning
         critical_fraction_solid=0.56,
         dendrite_arm_spacing=95.0,  # µm — typical 70/30 Cu-Ni sand-cast
         # CDA "Sand burn-in" susceptibility falls between bronze (high) and
@@ -657,6 +681,9 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         btr_fraction_solid_start=0.87,
         btr_fraction_solid_end=0.98,
         btr_cooling_rate_exponent=0.05,  # Mild BTR-widening
+        # Scheil (binary approx.): pure Fe solvent, C in austenite k ~0.13-0.2
+        melting_point_solvent=1538,  # °C pure Fe
+        partition_coefficient=0.17,  # C in austenite ~0.13-0.2
         # Feeding/permeability properties
         critical_fraction_solid=0.54,
         dendrite_arm_spacing=78.0,  # μm
@@ -693,6 +720,9 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         btr_fraction_solid_start=0.86,  # Wider/earlier BTR than mild steel
         btr_fraction_solid_end=0.98,
         btr_cooling_rate_exponent=0.10,  # Strong BTR-widening (Ni-base alloys)
+        # Scheil (binary approx.): pure Ni solvent, Cu partitions moderately
+        melting_point_solvent=1455,  # °C pure Ni
+        partition_coefficient=0.3,  # Cu in Ni-rich matrix
         # Feeding/permeability properties
         critical_fraction_solid=0.53,  # Moderate coherency point
         dendrite_arm_spacing=85.0,  # μm
@@ -729,6 +759,9 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         btr_fraction_solid_start=0.84,  # Earlier onset with wider BTR
         btr_fraction_solid_end=0.99,
         btr_cooling_rate_exponent=0.10,  # Strong BTR-widening (Ni-base)
+        # Scheil (binary approx.): pure Ni solvent, Nb/Mo partition in 625
+        melting_point_solvent=1455,  # °C pure Ni
+        partition_coefficient=0.5,  # refractory solutes in Ni matrix
         # Feeding/permeability properties
         critical_fraction_solid=0.50,  # Lower coherency due to restricted feeding
         dendrite_arm_spacing=70.0,  # μm

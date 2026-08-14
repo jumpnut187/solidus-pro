@@ -182,7 +182,10 @@ class HeatTransferModel:
         voxel_size: float,
         neighbors: IntArray,
         alloy: MaterialThermalProperties,
-        use_temperature_dependent: bool = False
+        use_temperature_dependent: bool = False,
+        voxel_sizes: Optional[np.ndarray] = None,
+        diffusivity_overrides: Optional[tuple[np.ndarray, np.ndarray]] = None,
+        property_curves: Optional[Dict[str, np.ndarray]] = None,
     ):
         """
         Initialize heat transfer model.
@@ -193,12 +196,24 @@ class HeatTransferModel:
             neighbors: Neighbor connectivity array (n_voxels x max_neighbors)
             alloy: Material thermal properties
             use_temperature_dependent: Use temperature-dependent k, cp
+            voxel_sizes: Optional per-voxel size in meters (default: scalar
+                ``voxel_size`` applied uniformly)
+            diffusivity_overrides: Optional ``(indices, alpha_values)`` pair
+                for per-voxel thermal diffusivity (e.g., chill regions)
+            property_curves: Optional dict with keys "temp_points" (°C),
+                "conductivity" (W/m·K), "specific_heat" (J/kg·K), "density"
+                (kg/m³) for temperature-dependent properties
         """
         self.n_voxels = n_voxels
         self.voxel_size = voxel_size
         self.neighbors = neighbors
         self.alloy = alloy
         self.use_temperature_dependent = use_temperature_dependent
+        self._voxel_sizes = (
+            np.asarray(voxel_sizes, dtype=np.float64) if voxel_sizes is not None else None
+        )
+        self._diffusivity_overrides = diffusivity_overrides
+        self._property_curves = property_curves
         
         # Temperature field
         self._temperatures = np.zeros(n_voxels, dtype=np.float64)
@@ -216,10 +231,23 @@ class HeatTransferModel:
         # Precompute constants
         self._alpha = alloy.thermal_diffusivity  # m²/s
         self._dx2 = voxel_size ** 2
+        # Per-voxel inverse squared voxel size (1/dx_i²). Stored as a scalar
+        # for uniform grids and as an array when per-voxel sizes are supplied.
+        if self._voxel_sizes is not None:
+            self._inv_dx2 = 1.0 / (self._voxel_sizes ** 2)
+        else:
+            self._inv_dx2 = 1.0 / (voxel_size ** 2)
+        # Always-array form for the Numba parallel Laplacian kernel.
+        self._inv_dx2_arr = (
+            self._inv_dx2
+            if isinstance(self._inv_dx2, np.ndarray)
+            else np.full(n_voxels, self._inv_dx2, dtype=np.float64)
+        )
         self._numba_parallel_eligible = bool(NUMBA_AVAILABLE and not use_temperature_dependent)
         self._last_step_used_numba = False
         
-        # Count neighbors for each voxel
+        # Count neighbors for each voxel (kept for API compatibility; the
+        # weighted 27-point Laplacian no longer normalizes by neighbor count).
         self._neighbor_counts = np.sum(neighbors >= 0, axis=1).astype(np.float64)
 
     @property
@@ -295,11 +323,43 @@ class HeatTransferModel:
     def get_stable_timestep(self) -> float:
         """
         Calculate maximum stable time step for explicit scheme.
-        
-        Stability criterion (3D):
-            dt < dx² / (6α)
+
+        Stability criterion (3D, isotropic 27-point weighted stencil):
+            dt < dx² / (4α)
+        The stencil's spectral radius is bounded by
+        (0.5 * 6 + 0.125 * 8) / dx² = 4 / dx², so 4α/dx² is the correct
+        diffusion bound. Uses the smallest per-voxel size and the largest
+        per-voxel diffusivity when those vary.
         """
-        return 0.9 * self._dx2 / (6.0 * self._alpha)
+        if isinstance(self._inv_dx2, np.ndarray):
+            min_dx2 = 1.0 / float(np.max(self._inv_dx2))
+        else:
+            min_dx2 = 1.0 / float(self._inv_dx2)
+        return 0.9 * min_dx2 / (4.0 * self._get_alpha_max())
+
+    def _get_alpha_max(self) -> float:
+        """
+        Return the maximum thermal diffusivity over all voxels.
+
+        Uses the current temperature field when temperature-dependent
+        properties are active and ALWAYS includes per-voxel diffusivity
+        override values (e.g., copper chills). Missing the overrides here
+        would under-estimate the CFL diffusivity and let the explicit
+        scheme run unstable at the chill interface (observed as +/-inf
+        blow-up within a few hundred steps).
+        """
+        if self.use_temperature_dependent:
+            alpha = self._get_temperature_dependent_diffusivity(self._temperatures)
+            alpha_max = float(np.max(alpha))
+        else:
+            alpha_max = float(self._alpha)
+        if self._diffusivity_overrides is not None:
+            override_idx, override_vals = self._diffusivity_overrides
+            if len(override_idx) > 0:
+                alpha_max = max(alpha_max, float(np.max(override_vals)))
+        if not np.isfinite(alpha_max) or alpha_max <= 0.0:
+            return float(self._alpha)
+        return alpha_max
 
     def get_gradient_magnitude(self, neighbors: IntArray, voxel_size: float) -> FloatArray:
         """Return gradient magnitude from the current thermal field without copying."""
@@ -359,6 +419,14 @@ class HeatTransferModel:
             alpha = self._get_temperature_dependent_diffusivity(T)
         else:
             alpha = self._alpha
+
+        # Apply per-voxel diffusivity overrides (e.g., chill regions).
+        if self._diffusivity_overrides is not None:
+            if not isinstance(alpha, np.ndarray):
+                alpha = np.full(self.n_voxels, alpha, dtype=np.float64)
+            override_idx, override_vals = self._diffusivity_overrides
+            alpha[override_idx] = override_vals
+
         use_numba_kernels = bool(
             self._numba_parallel_eligible
             and not isinstance(alpha, np.ndarray)
@@ -369,17 +437,21 @@ class HeatTransferModel:
             laplacian = compute_laplacian_parallel(
                 T,
                 self.neighbors,
-                self._neighbor_counts,
-                self._dx2,
+                self._inv_dx2_arr,
             )
         else:
-            # Compute Laplacian using neighbor stencil (vectorized)
-            # ∇²T ≈ Σ(T_neighbor - T_i) / (n * dx²)
-            #
+            # Compute Laplacian using an isotropic 27-point weighted stencil.
             # Slot layout (set by core/voxel_mesh.py._canonicalize_neighbor_order):
-            #   0 = +X, 1 = -X, 2 = +Y, 3 = -Y, 4 = +Z, 5 = -Z
-            #   6..17 = 12 edge neighbors, 18..25 = 8 corner neighbors.
-            # Summing in slot pairs (face, then edge, then corner) keeps the
+            #   0-5   = face neighbors  [+X, -X, +Y, -Y, +Z, -Z]: weight 0.5
+            #   6-17  = edge neighbors: weight 0.0 (excluded; they cancel
+            #          exactly in the weighted sum)
+            #   18-25 = corner neighbors: weight 0.125
+            # laplacian[i] = Σ_present w_j * (T_nb_j - T_i) * (1/dx_i²)
+            #
+            # This weighted difference form is exact for all quadratic fields
+            # (faces 0.5*6 + corners 0.125*24 = 6) with isotropic 4th-order
+            # truncation error; it does NOT divide by neighbor count. Summing
+            # in slot pairs (face pairs, then corner pairs) keeps the
             # accumulation order symmetric between geometrically symmetric
             # voxels and removes the per-step floating-point bias that would
             # otherwise compound over thousands of time steps.
@@ -390,6 +462,7 @@ class HeatTransferModel:
             laplacian = np.zeros(self.n_voxels, dtype=np.float64)
             max_slot = self.neighbors.shape[1]
 
+            # Faces (weight 0.5), summed in symmetric pairs.
             slot_pairs = [(0, 1), (2, 3), (4, 5)]
             for j_a, j_b in slot_pairs:
                 if j_a >= max_slot or j_b >= max_slot:
@@ -400,28 +473,31 @@ class HeatTransferModel:
                 v_b = n_b >= 0
                 dT_a = np.where(v_a, T[np.maximum(n_a, 0)] - T, 0.0)
                 dT_b = np.where(v_b, T[np.maximum(n_b, 0)] - T, 0.0)
-                laplacian += dT_a + dT_b
+                laplacian += 0.5 * (dT_a + dT_b)
 
-            edge_start = min(6, max_slot)
-            edge_end = min(18, max_slot)
-            for j in range(edge_start, edge_end):
-                n_j = self.neighbors[:, j]
-                valid = n_j >= 0
-                laplacian += np.where(valid, T[np.maximum(n_j, 0)] - T, 0.0)
+            # Edge neighbors (slots 6-17) carry weight 0.0 and are skipped.
 
+            # Corners (weight 0.125), summed in symmetric pairs.
             corner_start = min(18, max_slot)
             corner_end = min(26, max_slot)
-            for j in range(corner_start, corner_end):
+            j = corner_start
+            while j < corner_end - 1:
+                n_a = self.neighbors[:, j]
+                n_b = self.neighbors[:, j + 1]
+                v_a = n_a >= 0
+                v_b = n_b >= 0
+                dT_a = np.where(v_a, T[np.maximum(n_a, 0)] - T, 0.0)
+                dT_b = np.where(v_b, T[np.maximum(n_b, 0)] - T, 0.0)
+                laplacian += 0.125 * (dT_a + dT_b)
+                j += 2
+            # Handle a lone trailing corner slot for non-canonical shapes.
+            if j < corner_end:
                 n_j = self.neighbors[:, j]
                 valid = n_j >= 0
-                laplacian += np.where(valid, T[np.maximum(n_j, 0)] - T, 0.0)
+                laplacian += 0.125 * np.where(valid, T[np.maximum(n_j, 0)] - T, 0.0)
 
-            # Normalize by neighbor count and dx²
-            laplacian = np.where(
-                self._neighbor_counts > 0,
-                laplacian / (self._neighbor_counts * self._dx2),
-                0.0
-            )
+            # Normalize by the per-voxel 1/dx_i² (no neighbor-count division).
+            laplacian *= self._inv_dx2
         
         # Heat source term: Q / (ρ * cp)
         rho_cp = self.alloy.density_liquid * self.alloy.specific_heat
@@ -436,52 +512,55 @@ class HeatTransferModel:
                 float(alpha),
                 dt,
             )
-        elif isinstance(alpha, np.ndarray):
-            T_new[:] = T + dt * (alpha * laplacian + source_term)
         else:
             T_new[:] = T + dt * (alpha * laplacian + source_term)
         
         # Apply boundary conditions
-        self._apply_boundaries(T_new, dt)
+        self._apply_boundaries(T_new, T, dt)
         
         # Swap arrays
         self._temperatures, self._temperatures_new = self._temperatures_new, self._temperatures
     
-    def _apply_boundaries(self, T: FloatArray, dt: float) -> None:
-        """Apply all boundary conditions"""
+    def _apply_boundaries(self, T_new: FloatArray, T_old: FloatArray, dt: float) -> None:
+        """
+        Apply all boundary conditions.
+
+        Robin (convection/interface) fluxes are evaluated explicitly against
+        the PRE-update field and applied to the post-update field:
+            T_new[i] -= dt * h * (T_old[i] - T_inf) / (rho_cp * dx_i)
+        The old treatment lumped the boundary cell as dx/2 (a factor-2 error)
+        and evaluated the flux against the new temperature.
+        """
+        rho_cp = self.alloy.density_liquid * self.alloy.specific_heat
         for bc in self._boundaries:
             if bc.type == BoundaryType.FIXED_TEMPERATURE:
                 # Dirichlet: T = T_boundary
-                T[bc.indices] = bc.get_effective_value(self.time)
+                T_new[bc.indices] = bc.get_effective_value(self.time)
                 
             elif bc.type == BoundaryType.CONVECTION:
                 # Convective boundary: -k∂T/∂n = h(T - T_inf)
-                # Implemented as source term
                 h = bc.htc
                 T_inf = bc.T_infinity
-                k = self.alloy.thermal_conductivity
-                
-                # Heat loss rate: h * (T - T_inf) / (dx/2) ~ boundary flux
-                # Apply as temperature change
-                T_boundary = T[bc.indices]
-                flux = h * (T_boundary - T_inf)  # W/m²
-                dT = -flux * dt / (self.alloy.density_liquid * 
-                                   self.alloy.specific_heat * 
-                                   self.voxel_size / 2)
-                T[bc.indices] += dT
+                idx = bc.indices
+                dx_i = (
+                    self._voxel_sizes[idx]
+                    if self._voxel_sizes is not None
+                    else self.voxel_size
+                )
+                T_new[idx] -= dt * h * (T_old[idx] - T_inf) / (rho_cp * dx_i)
                 
             elif bc.type == BoundaryType.INTERFACE:
                 # Mold-metal interface with IHTC
                 # Similar to convection but may have time-dependent htc
                 h = bc.htc * (bc.time_function(self.time) if bc.time_function else 1.0)
                 T_mold = bc.T_infinity
-                
-                T_boundary = T[bc.indices]
-                flux = h * (T_boundary - T_mold)
-                dT = -flux * dt / (self.alloy.density_liquid * 
-                                   self.alloy.specific_heat * 
-                                   self.voxel_size / 2)
-                T[bc.indices] += dT
+                idx = bc.indices
+                dx_i = (
+                    self._voxel_sizes[idx]
+                    if self._voxel_sizes is not None
+                    else self.voxel_size
+                )
+                T_new[idx] -= dt * h * (T_old[idx] - T_mold) / (rho_cp * dx_i)
                 
             elif bc.type == BoundaryType.ADIABATIC:
                 # No-flux boundary: ∂T/∂n = 0
@@ -491,9 +570,22 @@ class HeatTransferModel:
     def _get_temperature_dependent_diffusivity(self, T: FloatArray) -> FloatArray:
         """
         Get temperature-dependent thermal diffusivity.
-        
-        Simple linear interpolation between solid and liquid values.
+
+        When ``property_curves`` were supplied to the constructor, the
+        diffusivity is computed vectorized from the conductivity, specific
+        heat, and density curves:
+            alpha(T) = k(T) / (rho(T) * cp(T))
+        Otherwise fall back to a simple linear blend between solid and
+        liquid values.
         """
+        curves = self._property_curves
+        if curves is not None:
+            temp_points = np.asarray(curves["temp_points"], dtype=np.float64)
+            k = np.interp(T, temp_points, np.asarray(curves["conductivity"], dtype=np.float64))
+            rho = np.interp(T, temp_points, np.asarray(curves["density"], dtype=np.float64))
+            cp = np.interp(T, temp_points, np.asarray(curves["specific_heat"], dtype=np.float64))
+            return k / (rho * cp)
+
         T_solidus = self.alloy.solidus_temp
         T_liquidus = self.alloy.liquidus_temp
         
@@ -549,27 +641,33 @@ if NUMBA_AVAILABLE:
     def compute_laplacian_parallel(
         T: FloatArray,
         neighbors: IntArray,
-        neighbor_counts: FloatArray,
-        dx2: float
+        inv_dx2: FloatArray,
     ) -> FloatArray:
         """
         Compute discrete Laplacian in parallel.
 
-        Uses Numba for acceleration.
+        Uses Numba for acceleration. Applies an isotropic 27-point weighted
+        stencil:
+            faces  (slots 0-5):  weight 0.5
+            edges  (slots 6-17): weight 0.0 (excluded)
+            corners(slots 18-25): weight 0.125
+            laplacian[i] = Σ_present w_j * (T_nb_j - T_i) * inv_dx2[i]
+
+        The weighted difference form is exact for all quadratic fields
+        (faces 0.5*6 + corners 0.125*24 = 6) with isotropic 4th-order
+        truncation error; it does NOT divide by neighbor count.
 
         Slots follow the canonical layout set by
         ``core/voxel_mesh.py._canonicalize_neighbor_order``: slots 0-5
         are face neighbors in [+X, -X, +Y, -Y, +Z, -Z] order, slots
-        6-17 are edges, slots 18-25 are corners. Summing in slot pairs
-        (face-pair, edge-row, corner-row) keeps the float-summation
-        order consistent between geometrically symmetric voxels.
+        6-17 are edges, slots 18-25 are corners. Iterating the slots in
+        fixed order keeps the float-summation order consistent between
+        geometrically symmetric voxels.
         """
         n = len(T)
         laplacian = np.zeros(n, dtype=np.float64)
         max_slot = neighbors.shape[1]
         slot_face_end = min(6, max_slot)
-        slot_edge_start = min(6, max_slot)
-        slot_edge_end = min(18, max_slot)
         slot_corner_start = min(18, max_slot)
         slot_corner_end = min(26, max_slot)
 
@@ -580,20 +678,16 @@ if NUMBA_AVAILABLE:
             for j in range(slot_face_end):
                 neighbor_idx = neighbors[i, j]
                 if neighbor_idx >= 0:
-                    sum_dT += T[neighbor_idx] - t_i
+                    sum_dT += 0.5 * (T[neighbor_idx] - t_i)
 
-            for j in range(slot_edge_start, slot_edge_end):
-                neighbor_idx = neighbors[i, j]
-                if neighbor_idx >= 0:
-                    sum_dT += T[neighbor_idx] - t_i
+            # Edge neighbors (slots 6-17) carry weight 0.0 and are skipped.
 
             for j in range(slot_corner_start, slot_corner_end):
                 neighbor_idx = neighbors[i, j]
                 if neighbor_idx >= 0:
-                    sum_dT += T[neighbor_idx] - t_i
+                    sum_dT += 0.125 * (T[neighbor_idx] - t_i)
 
-            if neighbor_counts[i] > 0:
-                laplacian[i] = sum_dT / (neighbor_counts[i] * dx2)
+            laplacian[i] = sum_dT * inv_dx2[i]
 
         return laplacian
     

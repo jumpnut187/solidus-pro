@@ -112,6 +112,16 @@ class AirGapParams:
     time_constant: float = 60.0
     surface_influence_depth: float = 0.5
     max_slowdown: float = 0.75
+    # Fraction of initial interface HTC remaining after the air gap fully forms.
+    htc_floor_fraction: float = 0.35
+
+    def __post_init__(self) -> None:
+        self.htc_floor_fraction = _clamp_float(
+            self.htc_floor_fraction,
+            0.05,
+            1.0,
+            0.35,
+        )
 
 
 @dataclass
@@ -122,6 +132,16 @@ class ThermalBoundaryParams:
     htc_cast_interface: float = 500.0
     htc_riser_post: float = 350.0
     htc_riser: float = 220.0
+    # W/(m^2*K) heat transfer from chill surfaces to ambient (finite-heat-sink chill model).
+    chill_ambient_htc: float = 100.0
+
+    def __post_init__(self) -> None:
+        self.chill_ambient_htc = _clamp_float(
+            self.chill_ambient_htc,
+            1.0,
+            10000.0,
+            100.0,
+        )
 
 
 @dataclass
@@ -219,6 +239,18 @@ class SolidificationParameters:
         if bias != bias:
             bias = 0.5
         self.feeding.feeding_zone_vertical_bias = max(0.0, min(2.0, bias))
+        self.air_gap.htc_floor_fraction = _clamp_float(
+            self.air_gap.htc_floor_fraction,
+            0.05,
+            1.0,
+            0.35,
+        )
+        self.thermal_boundary.chill_ambient_htc = _clamp_float(
+            self.thermal_boundary.chill_ambient_htc,
+            1.0,
+            10000.0,
+            100.0,
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -257,6 +289,7 @@ class SolidificationParameters:
                 'time_constant': self.air_gap.time_constant,
                 'surface_influence_depth': self.air_gap.surface_influence_depth,
                 'max_slowdown': self.air_gap.max_slowdown,
+                'htc_floor_fraction': self.air_gap.htc_floor_fraction,
             },
             'thermal_boundary': {
                 'mold_temperature': self.thermal_boundary.mold_temperature,
@@ -264,6 +297,7 @@ class SolidificationParameters:
                 'htc_cast_interface': self.thermal_boundary.htc_cast_interface,
                 'htc_riser_post': self.thermal_boundary.htc_riser_post,
                 'htc_riser': self.thermal_boundary.htc_riser,
+                'chill_ambient_htc': self.thermal_boundary.chill_ambient_htc,
             },
             'timing': {
                 'chvorinov_mold_constant': self.timing.chvorinov_mold_constant,

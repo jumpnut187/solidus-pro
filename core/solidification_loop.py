@@ -846,20 +846,33 @@ def _run_thermal_coupled_integration(
             break
 
         previous_temperatures = np.asarray(heat_model.temperatures, dtype=np.float64).copy()
-        heat_model.step(engine.time_step)
+        heat_model.step(engine.time_step)  # pure diffusion only
 
+        # Latent heat is released from the SAME step's post-diffusion field and
+        # applied directly as a temperature correction below (instead of via a
+        # heat source, which would only take effect on the NEXT step). Applying
+        # it in-step conserves per-step energy; the heat source stays zeroed
+        # from initialization.
+        latent_heat_rate = solidification_model.update(
+            np.asarray(heat_model.temperatures, dtype=np.float64), engine.time_step
+        )
+        rho_cp = float(engine.alloy.density_liquid * engine.alloy.specific_heat)
+        correction = latent_heat_rate * engine.time_step / rho_cp
+        heat_model.temperatures[:] = heat_model.temperatures + correction
+
+        # Re-read AFTER the correction so cooling rate, Niyama capture,
+        # gradients, and progress all use the corrected field.
         temperatures = np.asarray(heat_model.temperatures, dtype=np.float64)
         cooling_rate_step = np.maximum(heat_model.get_cooling_rate(previous_temperatures, engine.time_step), 0.0)
-        latent_heat_rate = solidification_model.update(temperatures, engine.time_step)
-        heat_model.set_heat_source(latent_heat_rate)
 
+        # Fraction solid is computed from the pre-correction field (predictor
+        # step); update() with irreversibility keeps fraction solid monotone.
         current_states = np.asarray(solidification_model.fraction_solid, dtype=np.float32)
         engine.mesh.voxel_states[:] = current_states
         engine.time = heat_model.time
         iteration += 1
 
-        feeding_bias = _resolve_feeding_zone_bias(engine)
-        _apply_feeding_zone_bias(engine, solidification_model, feeding_bias)
+        # thermal-coupled mode is purely temperature-driven; no heuristic vertical solidification bias
 
         start_times = np.asarray(solidification_model.solidification_time, dtype=np.float64)
         end_times = np.asarray(solidification_model._solidification_end, dtype=np.float64)
@@ -870,11 +883,13 @@ def _run_thermal_coupled_integration(
         finite_local = np.isfinite(local_times)
 
         engine.solidification_start_times[:] = np.where(finite_start, start_times, 0.0).astype(np.float32)
-        engine.solidification_end_times[:] = np.where(finite_end, end_times, 0.0).astype(np.float32)
+        # Unfinished voxels get NaN (not 0.0) so they cannot collide with
+        # chill/pre-solid semantics downstream.
+        engine.solidification_end_times[:] = np.where(finite_end, end_times, np.nan).astype(np.float32)
         engine.local_solidification_time[:] = np.where(
             finite_local,
             local_times,
-            np.where(finite_start, np.maximum(engine.time - start_times, engine.time_step), 0.0),
+            np.where(finite_start, np.maximum(engine.time - start_times, engine.time_step), np.nan),
         ).astype(np.float32)
         engine.solidification_times[:] = engine.solidification_end_times
 
@@ -885,7 +900,18 @@ def _run_thermal_coupled_integration(
                 & (current_states >= critical_fs)
                 & np.isnan(engine.feeding_fraction_solid)
             )
-            engine.feeding_fraction_solid[crossed_feeding_limit] = current_states[crossed_feeding_limit]
+            # With same-step latent heat most voxels cross from liquid to fully
+            # solid within one step; recording current_states (=1.0) for those
+            # makes the feeding-path tracer treat them as unreachable and
+            # collapses feeding paths. The meaningful value at the coherency
+            # cutoff is the critical fraction solid itself; record that for
+            # degenerate single-step crossings and the observed overshoot
+            # otherwise (matches legacy multi-step behavior).
+            full_solid_crossing = crossed_feeding_limit & (current_states >= 0.99)
+            engine.feeding_fraction_solid[full_solid_crossing] = critical_fs
+            engine.feeding_fraction_solid[crossed_feeding_limit & ~full_solid_crossing] = (
+                current_states[crossed_feeding_limit & ~full_solid_crossing]
+            )
 
         if getattr(engine, "_thermal_peak_cooling_rates", None) is not None:
             engine._thermal_peak_cooling_rates[:] = np.maximum(
@@ -942,6 +968,13 @@ def _run_thermal_coupled_integration(
     if capture_fraction_history:
         engine.fraction_liquid_history.append(np.asarray(engine.mesh.voxel_states, dtype=np.float32).copy())
         engine.fraction_liquid_times.append(engine.time)
+
+    # Voxels still liquid at the cap never finished: write NaN (not 0.0) so
+    # they cannot collide with chill/pre-solid semantics downstream. Chill
+    # voxels (pre-solid, states == 1.0 with times 0.0) keep 0.0.
+    unfinished = np.asarray(engine.mesh.voxel_states, dtype=np.float32) < 0.99
+    engine.solidification_end_times[unfinished] = np.nan
+    engine.solidification_times[unfinished] = np.nan
 
     if getattr(engine, "feeding_fraction_solid", None) is not None:
         unresolved = np.isnan(engine.feeding_fraction_solid)

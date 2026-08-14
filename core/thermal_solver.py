@@ -83,6 +83,44 @@ class ThermalProperties:
         cp = self.get_specific_heat(temperature)
         return k / (rho * cp)
     
+    def get_diffusivity_array(self, temperatures: np.ndarray) -> np.ndarray:
+        """
+        Get thermal diffusivity for an array of temperatures (vectorized).
+        
+        Computes α = k/(ρcₚ) element-wise using np.interp per property,
+        so the result is consistent with calling get_diffusivity(t) for
+        each temperature t within the table range.
+        
+        Args:
+            temperatures: Temperature at each point (°C)
+        
+        Returns:
+            Thermal diffusivity at each temperature (m²/s), float64 array
+        """
+        temperatures = np.asarray(temperatures, dtype=np.float64)
+        k = np.interp(temperatures, self.temp_points, self.conductivity_values)
+        rho = np.interp(temperatures, self.temp_points, self.density_values)
+        cp = np.interp(temperatures, self.temp_points, self.specific_heat_values)
+        return k / (rho * cp)
+    
+    def to_curves_dict(self) -> dict:
+        """
+        Export the temperature-point property tables as a dictionary.
+        
+        The key names are consumed by physics/heat_transfer.py to build
+        temperature-dependent property curves for the alternative engine.
+        
+        Returns:
+            Dict with keys "temp_points", "conductivity", "specific_heat",
+            and "density" mapping to the raw table arrays.
+        """
+        return {
+            "temp_points": self.temp_points,
+            "conductivity": self.conductivity_values,
+            "specific_heat": self.specific_heat_values,
+            "density": self.density_values,
+        }
+    
     def get_fraction_solid(self, temperature: float) -> float:
         """
         Get fraction solid based on temperature using lever rule.
@@ -115,8 +153,10 @@ def create_thermal_properties_from_alloy(alloy) -> ThermalProperties:
         alloy.liquidus_temp + 100      # Superheated liquid
     ])
     
-    # Thermal conductivity typically decreases with temperature
-    # Liquid has lower conductivity than solid
+    # Thermal conductivity typically decreases with temperature.
+    # Liquid/solid conductivity ratio of 0.7: molten metal has lower
+    # thermal conductivity than the solid due to reduced phonon coupling
+    # and disrupted lattice structure in the liquid phase.
     k_solid = alloy.thermal_conductivity
     k_liquid = alloy.thermal_conductivity * 0.7  # Liquid ~70% of solid
     conductivity_values = np.array([

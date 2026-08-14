@@ -322,12 +322,54 @@ class SolidificationEngine:
         voxel_size_m = max(voxel_size_in * 0.0254, 1e-6)
         self._thermal_voxel_size_m = voxel_size_m
 
+        # A2: pass per-voxel sizes (inches -> meters) so the heat model uses
+        # the true local cell size instead of a single representative scalar.
+        mesh_voxel_sizes = getattr(self.mesh, "voxel_sizes", None)
+        if mesh_voxel_sizes is not None and len(mesh_voxel_sizes) == n_voxels:
+            voxel_sizes_m = np.asarray(mesh_voxel_sizes, dtype=np.float64) * 0.0254
+        else:
+            voxel_sizes_m = np.full(n_voxels, voxel_size_m, dtype=np.float64)
+
+        # B4: chills act as finite copper heat sinks via per-voxel diffusivity
+        # overrides (copper: k=380 W/(m·K), rho=8960 kg/m³, cp=385 J/(kg·K) ->
+        # alpha = 1.10e-4 m²/s) instead of being pinned at a fixed temperature.
+        chill_indices = self._get_chill_voxel_indices()
+        chill_alpha = 1.10e-4
+        diffusivity_overrides = None
+        if len(chill_indices) > 0:
+            diffusivity_overrides = (
+                chill_indices.astype(np.int64),
+                np.full(len(chill_indices), chill_alpha, dtype=np.float64),
+            )
+
+        # B6: temperature-dependent material property curves (k, cp, rho) with
+        # reference points spanning room temperature through above-liquidus.
+        solidus = float(self.alloy.solidus_temp)
+        liquidus = float(self.alloy.liquidus_temp)
+        k_s = float(self.alloy.thermal_conductivity)
+        cp = float(self.alloy.specific_heat)
+        rho_s = float(self.alloy.density_solid)
+        rho_l = float(self.alloy.density_liquid)
+        property_curves = {
+            "temp_points": np.array(
+                [20.0, 0.5 * solidus, solidus, (solidus + liquidus) / 2, liquidus, liquidus + 100]
+            ),
+            "conductivity": k_s * np.array([1.0, 0.95, 0.85, 0.77, 0.70, 0.665]),
+            "specific_heat": cp * np.array([0.85, 0.92, 1.0, 1.05, 1.10, 1.15]),
+            "density": np.array(
+                [rho_s, 0.98 * rho_s, 0.96 * rho_s, (rho_s + rho_l) / 2, rho_l, 0.98 * rho_l]
+            ),
+        }
+
         self._thermal_heat_model = HeatTransferModel(
             n_voxels=n_voxels,
             voxel_size=voxel_size_m,
             neighbors=np.asarray(self.mesh.voxel_neighbors, dtype=np.int32),
             alloy=self.alloy,
-            use_temperature_dependent=False,
+            use_temperature_dependent=True,
+            voxel_sizes=voxel_sizes_m,
+            diffusivity_overrides=diffusivity_overrides,
+            property_curves=property_curves,
         )
         self._thermal_solidification_model = ThermalSolidificationModel(
             n_voxels=n_voxels,
@@ -346,7 +388,6 @@ class SolidificationEngine:
         mold_temperature = boundary_params.mold_temperature
         chill_temperature = boundary_params.chill_temperature
         initial_temperatures = np.full(n_voxels, self.alloy.pouring_temp, dtype=np.float64)
-        chill_indices = self._get_chill_voxel_indices()
         if len(chill_indices) > 0:
             initial_temperatures[chill_indices] = chill_temperature
 
@@ -387,6 +428,9 @@ class SolidificationEngine:
                 else "NumPy/vectorized kernels"
             )
             print(f"    Thermal solver backend: {backend_label}")
+            print("    Temperature-dependent properties: enabled")
+            print("    Chill model: finite heat sink (Cu, ambient HTC)")
+            print("    Air-gap HTC decay: enabled (floor factor)")
 
     def _configure_thermal_boundaries(self, *, mold_temperature: float, chill_temperature: float) -> None:
         """Map current part types to simple thermal boundary conditions."""
@@ -394,6 +438,20 @@ class SolidificationEngine:
             return
 
         tb = self.analysis_options.solidification_params.thermal_boundary
+
+        # B7: air-gap HTC decay on mold interfaces.
+        # h(t) = h0 * (floor + (1 - floor) * exp(-t / tau)); the floor fraction
+        # and time constant come from the air-gap settings with defensive
+        # defaults when the params are not yet wired in.
+        ap = getattr(self.analysis_options.solidification_params, "air_gap", None)
+        floor = float(getattr(ap, "htc_floor_fraction", 0.35))
+        tau = float(getattr(ap, "time_constant", 60.0))
+
+        def _air_gap_decay(h0: float):
+            """Return a time function anchored at h0: h(t) = h0*(floor + (1-floor)*exp(-t/tau))."""
+            return lambda t, h0=h0, floor=floor, tau=tau: h0 * (
+                floor + (1.0 - floor) * np.exp(-t / max(tau, 1.0))
+            )
 
         surface_indices = np.asarray(self.mesh.get_surface_voxel_indices(), dtype=np.int32)
         if surface_indices.size == 0:
@@ -415,6 +473,7 @@ class SolidificationEngine:
                 BoundaryType.INTERFACE,
                 htc=tb.htc_cast_interface,
                 T_infinity=mold_temperature,
+                time_function=_air_gap_decay(tb.htc_cast_interface),
             )
         if riser_post_surface.size > 0:
             self._thermal_heat_model.add_boundary(
@@ -422,6 +481,7 @@ class SolidificationEngine:
                 BoundaryType.INTERFACE,
                 htc=tb.htc_riser_post,
                 T_infinity=mold_temperature,
+                time_function=_air_gap_decay(tb.htc_riser_post),
             )
         if riser_surface.size > 0:
             self._thermal_heat_model.add_boundary(
@@ -429,12 +489,18 @@ class SolidificationEngine:
                 BoundaryType.INTERFACE,
                 htc=tb.htc_riser,
                 T_infinity=mold_temperature,
+                time_function=_air_gap_decay(tb.htc_riser),
             )
-        if chill_indices.size > 0:
+        # B4: chills are finite heat sinks, not fixed-temperature pins. Their
+        # exposed surface exchanges heat with the mold/ambient through an
+        # INTERFACE condition instead of being pinned at a constant value.
+        chill_surface = np.intersect1d(chill_indices, surface_indices)
+        if chill_surface.size > 0:
             self._thermal_heat_model.add_boundary(
-                chill_indices,
-                BoundaryType.FIXED_TEMPERATURE,
-                value=chill_temperature,
+                chill_surface,
+                BoundaryType.INTERFACE,
+                htc=float(getattr(tb, "chill_ambient_htc", 100.0)),
+                T_infinity=mold_temperature,
             )
     
     def _calculate_max_simulation_time(self):
@@ -2088,7 +2154,10 @@ class SolidificationEngine:
 
         This implements the physics from Info.md:
         - P_ferro = ρ * g * h (driving force from riser height)
-        - ΔP = (μ * L * v) / K (resistance from mushy zone, Darcy's Law)
+        - ΔP = (μ * L * v) / K (resistance from mushy zone, Darcy's Law),
+          with shrinkage-driven feed velocity v = β·R where β = ρs/ρl − 1
+          (volume shrinkage on solidification) and R = Ṫ/|∇T| (cooling rate
+          over thermal gradient, i.e. the local solidification-front speed)
         - Feeding is effective when P_ferro > ΔP
 
         The effectiveness ratio determines shrinkage reduction:
@@ -2123,7 +2192,26 @@ class SolidificationEngine:
         local_cooling_rates = getattr(self, "cooling_rates", None)
         local_sdas = getattr(self, "sdas", None)
 
-        base_velocity = 0.0005  # m/s
+        # Shrinkage-driven interdendritic feed velocity: v = beta * R, where
+        # beta = rho_s/rho_l - 1 (volume shrinkage on solidification) and
+        # R = cooling_rate / |grad T| is the local solidification-front speed
+        # (m/s). This replaces the former constant feed-velocity assumption.
+        beta = float(self.alloy.density_change_ratio - 1.0)
+        local_gradients = getattr(self, "thermal_gradients", None)
+        if (
+            local_cooling_rates is not None
+            and local_gradients is not None
+            and len(local_cooling_rates) == n_voxels
+            and len(local_gradients) == n_voxels
+        ):
+            grad_c_per_m = np.asarray(local_gradients, dtype=np.float64) * 1000.0  # °C/mm -> °C/m
+            front_speed = np.asarray(local_cooling_rates, dtype=np.float64) / np.maximum(
+                grad_c_per_m, 1e-6
+            )  # m/s
+            velocity_arr = np.clip(beta * front_speed, 1e-6, 1e-2)
+        else:
+            # Fallback when thermal field data is unavailable: constant feed velocity.
+            velocity_arr = np.full(n_voxels, 5.0e-4, dtype=np.float64)
 
         print(f"  Calculating feeding effectiveness (P_ferro vs ΔP_darcy)...")
         print(f"    Material: {self.alloy.name}")
@@ -2195,14 +2283,10 @@ class SolidificationEngine:
 
             perm_arr = self.alloy.vectorized_permeability(fs_proc, sdas_arr)
             dist_m_arr = dist_proc * 0.0254
-            pd_arr = self.alloy.vectorized_pressure_drop(
-                fs_proc,
-                base_velocity,
-                vis_arr,
-                dist_m_arr,
-                sdas_arr,
-                feeder_neck_factors[idx_arr],
+            pd_arr = (
+                vis_arr * dist_m_arr * velocity_arr[idx_arr] / np.maximum(perm_arr, 1e-20)
             )
+            pd_arr = np.where(perm_arr < 1e-20, 1e10, pd_arr) * feeder_neck_factors[idx_arr]
 
             p_ferro_proc = ferrostatic_pressure[idx_arr]
 
@@ -2267,6 +2351,10 @@ class SolidificationEngine:
                     f"    Darcy pressure-drop range: {np.min(positive_drop):.0f} - "
                     f"{np.max(positive_drop):.0f} Pa"
                 )
+            print(
+                f"    Feed velocity range: {np.min(velocity_arr[idx_arr]) * 1000.0:.4f} - "
+                f"{np.max(velocity_arr[idx_arr]) * 1000.0:.4f} mm/s"
+            )
             positive_visc = vis_arr[vis_arr > 0.0]
             if len(positive_visc) > 0:
                 print(
@@ -2411,7 +2499,13 @@ class SolidificationEngine:
         heights = normalized_heights[valid_indices]
         moduli = self.mesh.voxel_moduli[valid_indices]
         thicknesses = local_section_size[valid_indices]
-        times = self.solidification_times[valid_indices]
+        # NaN = unfinished at max_time cap; treat as last-to-freeze.
+        times = np.asarray(self.solidification_times, dtype=np.float32)
+        max_time = getattr(self, "max_time", None)
+        if max_time is None or not np.isfinite(max_time) or max_time <= 0:
+            max_time = np.nanmax(times) if np.any(np.isfinite(times)) else 0.0
+        times = np.where(np.isnan(times), float(max_time), times)
+        times = times[valid_indices]
         is_riser = riser_mask[valid_indices]
         is_riser_post = riser_post_mask[valid_indices]
 
@@ -3334,7 +3428,13 @@ class SolidificationEngine:
         self.hotspot_intensity = np.zeros(n_voxels, dtype=np.float32)
         
         # Get solidification time stats
-        max_solid_time = np.max(self.solidification_times)
+        # NaN = unfinished at max_time cap; treat as last-to-freeze.
+        times = np.asarray(self.solidification_times, dtype=np.float32)
+        max_time = getattr(self, "max_time", None)
+        if max_time is None or not np.isfinite(max_time) or max_time <= 0:
+            max_time = np.nanmax(times) if np.any(np.isfinite(times)) else 0.0
+        times = np.where(np.isnan(times), float(max_time), times)
+        max_solid_time = np.max(times)
         if max_solid_time <= 0:
             print("  Warning: No solidification time data for hot spot analysis")
             return
@@ -3345,7 +3445,7 @@ class SolidificationEngine:
         
         # Get normalized values for each factor
         # Factor 1: Solidification time (higher = later = hotter)
-        normalized_time = self.solidification_times / max_solid_time
+        normalized_time = times / max_solid_time
         
         # Factor 2: Distance from surface (feeding distance)
         surface_distances = self.surface_distances
@@ -3414,6 +3514,13 @@ class SolidificationEngine:
         n_voxels = len(self.mesh.voxel_centers)
         neighbors = np.ascontiguousarray(self.mesh.voxel_neighbors, dtype=np.int32)
         solid_times = np.ascontiguousarray(self.solidification_times, dtype=np.float32)
+        # NaN = unfinished at max_time cap; treat as last-to-freeze.
+        max_time = getattr(self, "max_time", None)
+        if max_time is None or not np.isfinite(max_time) or max_time <= 0:
+            max_time = np.nanmax(solid_times) if np.any(np.isfinite(solid_times)) else 0.0
+        solid_times = np.ascontiguousarray(
+            np.where(np.isnan(solid_times), float(max_time), solid_times)
+        )
 
         isolation_score = compute_isolation_score_parallel(solid_times, neighbors)
 
@@ -3504,9 +3611,21 @@ class SolidificationEngine:
 
             # ===== COOLING RATE CALCULATION =====
             min_cooling_rate_value = 0.01  # °C/s - minimum to avoid division by zero
+            # NaN = unfinished at max_time cap; treat as last-to-freeze.
+            solidification_times = np.asarray(self.solidification_times, dtype=np.float32)
+            max_time = getattr(self, "max_time", None)
+            if max_time is None or not np.isfinite(max_time) or max_time <= 0:
+                max_time = (
+                    np.nanmax(solidification_times)
+                    if np.any(np.isfinite(solidification_times))
+                    else 0.0
+                )
+            solidification_times = np.where(
+                np.isnan(solidification_times), float(max_time), solidification_times
+            )
             time_factor = np.where(
-                self.solidification_times > 0,
-                1.0 / np.maximum(self.solidification_times, 0.1),
+                solidification_times > 0,
+                1.0 / np.maximum(solidification_times, 0.1),
                 1.0
             )
             self.cooling_rates = (temp_range * time_factor + min_cooling_rate_value).astype(np.float32)
@@ -4574,6 +4693,26 @@ class SolidificationEngine:
     
     def _generate_statistics(self):
         """Generate simulation statistics"""
+        # NaN = unfinished at max_time cap; treat as last-to-freeze.
+        solidification_times = np.asarray(self.solidification_times, dtype=np.float32)
+        finished = np.isfinite(solidification_times) & (solidification_times > 0)
+        statistics: Dict[str, object] = {
+            "mean_solidification_time": (
+                float(np.mean(solidification_times[finished])) if np.any(finished) else 0.0
+            ),
+            "max_solidification_time": (
+                float(np.max(solidification_times[finished])) if np.any(finished) else 0.0
+            ),
+        }
+        n_voxels = len(solidification_times)
+        part_types = getattr(self.mesh, "voxel_part_types", None)
+        if part_types is not None:
+            cast_mask = np.asarray(part_types, dtype=np.int32) == 0
+        else:
+            # Without part types every voxel counts as cast (non-chill).
+            cast_mask = np.ones(n_voxels, dtype=bool)
+        statistics["unfinished_voxel_count"] = int(np.sum(~finished & cast_mask))
+
         # Lower threshold to catch more potential shrinkage
         shrinkage_threshold = 0.20  # 20% probability (was 30%)
         
@@ -4630,6 +4769,8 @@ class SolidificationEngine:
             riser_voxels = np.sum(self.mesh.voxel_part_types == 1)
             chill_voxels = np.sum(self.mesh.voxel_part_types == 2)
             print(f"  Part breakdown: CAST={cast_voxels:,}, RISER={riser_voxels:,}, CHILL={chill_voxels:,}")
+
+        return statistics
     
     def _get_normalized_heights(self) -> np.ndarray:
         """
@@ -4986,13 +5127,22 @@ class SolidificationEngine:
         n_voxels = len(self.mesh.voxel_centers)
         
         # Combined shrinkage/porosity mask
+        # NaN = unfinished at max_time cap; treat as last-to-freeze.
         if self.shrinkage_probability is not None and self.porosity_probability is not None:
-            defect_mask = (self.shrinkage_probability > threshold) | \
-                          (self.porosity_probability > threshold)
-            combined_prob = np.maximum(self.shrinkage_probability, self.porosity_probability)
+            shrinkage_prob = np.nan_to_num(
+                np.asarray(self.shrinkage_probability, dtype=np.float32), nan=0.0
+            )
+            porosity_prob = np.nan_to_num(
+                np.asarray(self.porosity_probability, dtype=np.float32), nan=0.0
+            )
+            defect_mask = (shrinkage_prob > threshold) | (porosity_prob > threshold)
+            combined_prob = np.maximum(shrinkage_prob, porosity_prob)
         elif self.shrinkage_probability is not None:
-            defect_mask = self.shrinkage_probability > threshold
-            combined_prob = self.shrinkage_probability
+            shrinkage_prob = np.nan_to_num(
+                np.asarray(self.shrinkage_probability, dtype=np.float32), nan=0.0
+            )
+            defect_mask = shrinkage_prob > threshold
+            combined_prob = shrinkage_prob
         else:
             return {'total_volume_in3': 0.0, 'defect_count': 0, 'casting_volume_in3': 0.0}
         
