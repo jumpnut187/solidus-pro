@@ -58,6 +58,7 @@ class SimulationWorker(QThread):
         mesh_generation_time = None
         simulation_time = None
         try:
+            use_gpu = bool(self.performance_options.get("use_gpu", False))
             use_chunked = bool(self.performance_options.get("chunked_voxelization", False))
             use_incremental = bool(self.performance_options.get("incremental_solidification", False))
             part_assignment_mode = str(self.performance_options.get("part_assignment_mode", "auto"))
@@ -79,6 +80,7 @@ class SimulationWorker(QThread):
                 refinement_level=self.refinement_level,
                 memory_mode=self.memory_mode,
                 analysis_options=self.analysis_options,
+                use_gpu=use_gpu,
                 use_incremental=use_incremental,
                 use_chunked_voxelization=use_chunked,
                 part_assignment_mode=part_assignment_mode,

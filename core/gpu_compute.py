@@ -1083,6 +1083,19 @@ class GPUComputeManager:
 gpu_compute = GPUComputeManager()
 
 
+def get_gpu_compute() -> GPUComputeManager:
+    """
+    Return the module-global GPU compute manager instance.
+
+    This is the accessor used by package-level imports (``core``) so the
+    manager singleton can be obtained without importing the module directly.
+
+    Returns:
+        The global ``GPUComputeManager`` singleton.
+    """
+    return gpu_compute
+
+
 def compute_distances_accelerated(points: np.ndarray,
                                   reference_points: np.ndarray) -> np.ndarray:
     """

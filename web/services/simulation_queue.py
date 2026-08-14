@@ -164,6 +164,7 @@ def _simulation_process_worker(
             refinement_level=int(sim_data.get("refinement_level", 3)),
             memory_mode=str(sim_data.get("memory_mode", "auto")),
             analysis_options=analysis,
+            use_gpu=bool(performance.get("use_gpu", False)),
             use_incremental=bool(performance.get("use_incremental", False)),
             use_chunked_voxelization=bool(performance.get("use_chunked_voxelization", False)),
             part_assignment_mode=str(performance.get("part_assignment_mode", "auto")),
