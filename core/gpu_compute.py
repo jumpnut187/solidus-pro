@@ -324,6 +324,24 @@ class GPUComputeManager:
                 np.ascontiguousarray(reference_points, dtype=np.float32)
             )
     
+    def _get_distance_chunk_size(self) -> int:
+        """
+        Return the configured GPU distance-compute chunk size.
+
+        Reads ``performance.gpu_distance_chunk_size`` from the global settings
+        (configurable via ``CASTSIM_GPU_DISTANCE_CHUNK_SIZE`` env var or the
+        desktop Simulation menu). Clamped to a sane minimum.
+
+        Returns:
+            Number of points processed per chunk (>= 1).
+        """
+        try:
+            from config.settings import get_settings
+            chunk_size = int(get_settings().performance.gpu_distance_chunk_size)
+        except Exception:
+            chunk_size = 10000
+        return max(1, chunk_size)
+
     def _compute_distances_cuda(self, points: np.ndarray, 
                                 reference_points: np.ndarray) -> np.ndarray:
         """CUDA implementation using CuPy"""
@@ -338,7 +356,7 @@ class GPUComputeManager:
         
         # Compute distances using broadcasting (GPU-optimized)
         # For very large arrays, process in chunks to avoid memory issues
-        chunk_size = min(10000, n_points)
+        chunk_size = min(self._get_distance_chunk_size(), n_points)
         min_distances = cp.empty(n_points, dtype=cp.float32)
         
         for start in range(0, n_points, chunk_size):
@@ -432,7 +450,7 @@ class GPUComputeManager:
         refs = np.ascontiguousarray(reference_points, dtype=np.float32)
         
         n_points = len(pts)
-        chunk_size = min(10000, n_points)
+        chunk_size = min(self._get_distance_chunk_size(), n_points)
         min_distances = np.empty(n_points, dtype=np.float32)
         
         for start in range(0, n_points, chunk_size):

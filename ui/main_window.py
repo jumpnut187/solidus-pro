@@ -19,7 +19,8 @@ from PyQt5.QtWidgets import (
     QMessageBox, QSplitter, QGridLayout, QListWidget, QListWidgetItem,
     QInputDialog, QMenu, QAction, QDialog, QDialogButtonBox, QFrame,
     QTextEdit, QApplication, QSpinBox, QTabWidget, QScrollArea,
-    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
+    QWidgetAction
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QPoint, QObject, QTimer
 from PyQt5.QtGui import QFont, QCursor, QTextCursor
@@ -2200,7 +2201,7 @@ class MainWindow(QMainWindow):
             'shrinkage': True,
             'hotspot': True,
             'niyama': False,
-            'fraction_liquid': False,
+            'fraction_liquid': True,
             'sand_restraint_index': 0.5,
         }
         
@@ -2384,6 +2385,14 @@ class MainWindow(QMainWindow):
         performance_action.setStatusTip("Configure GPU and optimization settings")
         performance_action.triggered.connect(self._open_performance_dialog)
         sim_menu.addAction(performance_action)
+
+        # GPU Distance Chunk Size (popover)
+        gpu_chunk_action = QAction("🖥 GPU Distance Chunk Size...", self)
+        gpu_chunk_action.setStatusTip(
+            "Tune the chunk size for GPU distance computations (RAM vs speed)"
+        )
+        gpu_chunk_action.triggered.connect(self._open_gpu_chunk_popover)
+        sim_menu.addAction(gpu_chunk_action)
 
         # Solidification Parameters
         solidification_action = QAction("🔧 Solidification Parameters...", self)
@@ -2938,6 +2947,126 @@ class MainWindow(QMainWindow):
         self.performance_dialog.show()
         self.performance_dialog.raise_()
     
+    # GPU distance chunk values exposed by the popover slider
+    GPU_CHUNK_VALUES = (500, 1000, 2000, 4000, 8000, 10000)
+    
+    def _get_gpu_chunk_reference_count(self) -> int:
+        """Return reference (surface voxel) count from the last sim, or a default."""
+        try:
+            simulation = self.simulation_worker.simulation
+            mesh = simulation.mesh
+            surface = mesh.surface_voxels
+            if surface is not None and len(surface) > 0:
+                count = int(np.sum(surface))
+                if count > 0:
+                    return count
+        except Exception:
+            pass
+        return 15000
+    
+    def _gpu_chunk_peak_gb(self, chunk_size: int, refs: int) -> float:
+        """Estimate peak GPU/unified memory per chunk (diff + sq + sum + sqrt)."""
+        return chunk_size * refs * 32 / (1024 ** 3)
+    
+    def _open_gpu_chunk_popover(self):
+        """Show a popover to tune the GPU distance computation chunk size."""
+        from config.settings import get_settings as _get_settings
+        settings = _get_settings()
+        current = max(1, int(getattr(settings.performance, 'gpu_distance_chunk_size', 10000)))
+        
+        # Snap current value to the closest slider stop.
+        current_idx = 0
+        for i, val in enumerate(self.GPU_CHUNK_VALUES):
+            if abs(val - current) <= abs(self.GPU_CHUNK_VALUES[current_idx] - current):
+                current_idx = i
+        
+        refs = self._get_gpu_chunk_reference_count()
+        default_refs = refs >= 15000 and refs <= 16000
+        initial_idx = current_idx
+        changed = {"value": False}
+        
+        menu = QMenu(self)
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(12, 10, 12, 10)
+        
+        title = QLabel("GPU Distance Chunk Size")
+        title.setStyleSheet("font-weight: bold;")
+        layout.addWidget(title)
+        
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(0, len(self.GPU_CHUNK_VALUES) - 1)
+        slider.setValue(current_idx)
+        slider.setTickPosition(QSlider.TicksBelow)
+        slider.setTickInterval(1)
+        layout.addWidget(slider)
+        
+        value_label = QLabel("")
+        value_label.setStyleSheet("font-size: 11px; color: #eee;")
+        layout.addWidget(value_label)
+        
+        gb_label = QLabel("")
+        gb_label.setStyleSheet("font-size: 11px; color: #8cf;")
+        layout.addWidget(gb_label)
+        
+        note_label = QLabel("")
+        note_label.setStyleSheet("font-size: 10px; color: #888;")
+        note_label.setWordWrap(True)
+        layout.addWidget(note_label)
+        
+        reset_btn = QPushButton("Reset to Default (10,000)")
+        reset_btn.setStyleSheet("font-size: 10px; padding: 3px 8px;")
+        layout.addWidget(reset_btn)
+        
+        def update_labels(idx):
+            value = self.GPU_CHUNK_VALUES[idx]
+            peak_gb = self._gpu_chunk_peak_gb(value, refs)
+            value_label.setText(
+                f"Chunk size: {value:,} points per chunk  "
+                f"(smaller = less RAM, slightly slower)"
+            )
+            if default_refs:
+                ref_text = f"at ~{refs:,} reference points (typical last-run value)"
+            else:
+                ref_text = f"at {refs:,} reference points from your last simulation"
+            gb_label.setText(f"Peak GPU memory per chunk: ~{peak_gb:.2f} GB ({ref_text})")
+            note_label.setText(
+                "Smaller chunk = less RAM but more kernel launches. "
+                "Results are identical at any size. Applies to the next simulation."
+            )
+            if idx != initial_idx:
+                changed["value"] = True
+            apply_gpu_chunk_size(value, idx)
+        
+        def apply_gpu_chunk_size(value, idx):
+            settings.performance.gpu_distance_chunk_size = value
+            if changed["value"]:
+                try:
+                    settings.save_user_override("performance", "gpu_distance_chunk_size", value)
+                except Exception as e:
+                    logger.error(f"Could not persist GPU chunk size: {e}")
+            self._update_performance_summary()
+        
+        def on_reset():
+            reset_btn.setEnabled(False)
+            default_idx = self.GPU_CHUNK_VALUES.index(10000)
+            slider.setValue(default_idx)
+            update_labels(default_idx)
+            QTimer.singleShot(800, lambda: reset_btn.setEnabled(True))
+        
+        slider.valueChanged.connect(update_labels)
+        reset_btn.clicked.connect(on_reset)
+        
+        update_labels(current_idx)
+        
+        action = QWidgetAction(menu)
+        action.setDefaultWidget(widget)
+        menu.addAction(action)
+        menu.setStyleSheet(
+            "QMenu { padding: 4px; }"
+        )
+        menu.exec_(QCursor.pos())
+
     def _toggle_console(self):
         """Toggle the console output window visibility"""
         if self.console_window.isVisible():
@@ -3530,6 +3659,13 @@ class MainWindow(QMainWindow):
             parts.append("Chunk")
         if self._performance_options.get('incremental_solidification', False):
             parts.append("Incr")
+        try:
+            from config.settings import get_settings as _get_settings
+            chunk = int(_get_settings().performance.gpu_distance_chunk_size)
+            if chunk > 0 and chunk != 10000:
+                parts.append(f"DistChunk {chunk:,}")
+        except Exception:
+            pass
         self.performance_summary_label.setText(", ".join(parts))
         self.performance_summary_label.setStyleSheet(
             f"font-size: 10px; color: {color}; margin-left: 10px;"

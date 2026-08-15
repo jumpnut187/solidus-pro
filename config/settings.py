@@ -156,6 +156,7 @@ class PerformanceSettings:
     # GPU settings
     gpu_backend: str = "auto"           # "auto", "metal", "cuda", "opencl", "cpu"
     gpu_memory_limit_mb: float = 0      # 0 = auto
+    gpu_distance_chunk_size: int = 10000  # Points per chunk for GPU min-distance compute (Metal/CUDA)
 
 
 @dataclass
@@ -351,6 +352,7 @@ class Settings:
             # Performance settings
             f"{env_prefix}MAX_WORKERS": ("performance", "max_workers", int),
             f"{env_prefix}GPU_BACKEND": ("performance", "gpu_backend", str),
+            f"{env_prefix}GPU_DISTANCE_CHUNK_SIZE": ("performance", "gpu_distance_chunk_size", int),
             f"{env_prefix}PART_ASSIGNMENT_MODE": ("performance", "part_assignment_mode", str),
             f"{env_prefix}PART_ASSIGNMENT_WORKERS": ("performance", "part_assignment_workers", int),
             f"{env_prefix}PART_ASSIGNMENT_BATCH_SIZE": ("performance", "part_assignment_batch_size", int),
@@ -475,6 +477,73 @@ class Settings:
                 f"Unsupported format: {suffix}",
                 suggestion="Use .yaml, .yml, .toml, or .json"
             )
+
+    def save_user_override(self, section: str, field: str, value: Any) -> Path:
+        """
+        Persist a single setting to the user config file (~/.castsim/config.yaml)
+        without clobbering any other keys already stored there.
+
+        Args:
+            section: Config section name, e.g. "performance"
+            field: Field name within the section, e.g. "gpu_distance_chunk_size"
+            value: Value to persist
+
+        Returns:
+            The path of the config file written.
+        """
+        user_config_dir = Path(self.paths.user_config_dir)
+        filepath = None
+
+        # Prefer the existing user config file regardless of format.
+        for filename in ["config.yaml", "config.yml", "config.toml", "config.json"]:
+            candidate = user_config_dir / filename
+            if candidate.exists():
+                filepath = candidate
+                break
+
+        if filepath is None:
+            filepath = user_config_dir / "config.yaml"
+
+        data = {}
+        if filepath.exists():
+            try:
+                suffix = filepath.suffix.lower()
+                if suffix in (".yaml", ".yml"):
+                    data = self._load_yaml(filepath)
+                elif suffix == ".toml":
+                    data = self._load_toml(filepath)
+                elif suffix == ".json":
+                    with open(filepath, 'r') as f:
+                        data = json.load(f)
+            except Exception as e:
+                raise ConfigFileError(str(filepath), str(e))
+
+        if not isinstance(data, dict):
+            data = {}
+        section_data = data.get(section)
+        if not isinstance(section_data, dict):
+            section_data = {}
+        section_data[field] = value
+        data[section] = section_data
+
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        suffix = filepath.suffix.lower()
+        if suffix in (".yaml", ".yml"):
+            import yaml
+            with open(filepath, 'w') as f:
+                yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+        elif suffix == ".toml":
+            import toml
+            with open(filepath, 'w') as f:
+                toml.dump(data, f)
+        else:
+            with open(filepath, 'w') as f:
+                json.dump(data, f, indent=2)
+
+        if str(filepath) not in self._config_files_loaded:
+            self._config_files_loaded.append(str(filepath))
+        return filepath
+
 
 
 # ============================================================================
