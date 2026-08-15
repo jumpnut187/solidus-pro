@@ -19,11 +19,12 @@ from PyQt5.QtWidgets import (
     QMessageBox, QSplitter, QGridLayout, QListWidget, QListWidgetItem,
     QInputDialog, QMenu, QAction, QDialog, QDialogButtonBox, QFrame,
     QTextEdit, QApplication, QSpinBox, QTabWidget, QScrollArea,
+    QPlainTextEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QWidgetAction
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QPoint, QObject, QTimer
-from PyQt5.QtGui import QFont, QCursor, QTextCursor
+from PyQt5.QtGui import QFont, QCursor
 import json
 import sys
 import os
@@ -67,6 +68,13 @@ FRACTION_LIQUID_TIME_SLIDER_MAX = 1000
 FRACTION_LIQUID_PLAYBACK_INTERVAL_MS = 90
 FRACTION_LIQUID_PLAYBACK_BASE_STEP = 10
 FRACTION_LIQUID_PLAYBACK_SPEEDS = (0.5, 1.0, 2.0, 4.0)
+
+# Playback debug prints every Nth tick; the per-tick lines otherwise flood
+# the console and slow the QPlainTextEdit document as it grows.
+FRACTION_LIQUID_DEBUG_PRINT_INTERVAL = 10
+
+# Cap console history so append cost stays flat during long playback sessions.
+CONSOLE_MAX_BLOCKS = 5000
 
 
 def should_use_console_translucency(platform: str = sys.platform) -> bool:
@@ -1443,12 +1451,15 @@ class ConsoleWindow(QDialog):
         layout = QVBoxLayout()
         layout.setContentsMargins(5, 5, 5, 5)
         
-        # Console text area
-        self.console_text = QTextEdit()
+        # Console text area (QPlainTextEdit: fast plain-text layout with a
+        # bounded block count so appends stay cheap during long playback)
+        self.console_text = QPlainTextEdit()
         self.console_text.setReadOnly(True)
+        self.console_text.setMaximumBlockCount(CONSOLE_MAX_BLOCKS)
+        self.console_text.document().setUndoRedoEnabled(False)
         self.console_text.setFont(QFont("Monaco", 11) if sys.platform == "darwin" else QFont("Consolas", 10))
         self.console_text.setStyleSheet("""
-            QTextEdit {
+            QPlainTextEdit {
                 background-color: rgba(30, 30, 30, 220);
                 color: #d4d4d4;
                 border: 1px solid rgba(80, 80, 80, 200);
@@ -1523,14 +1534,10 @@ class ConsoleWindow(QDialog):
     
     def _append_text(self, text):
         """Append text to the console"""
-        # Move cursor to end
-        cursor = self.console_text.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        self.console_text.setTextCursor(cursor)
-        
-        # Insert the text
-        self.console_text.insertPlainText(text)
-        
+        # appendPlainText appends at the end without cursor churn or reflow of
+        # the whole document; the block cap drops the oldest output.
+        self.console_text.appendPlainText(text)
+
         # Auto-scroll if enabled
         if self.scroll_lock_check.isChecked():
             scrollbar = self.console_text.verticalScrollBar()
@@ -2229,6 +2236,7 @@ class MainWindow(QMainWindow):
         self._fraction_liquid_playback_timer.timeout.connect(self._on_fraction_liquid_playback_tick)
         self._is_playing_fraction_liquid = False
         self._fraction_liquid_playback_speed = 1.0
+        self._fraction_liquid_render_count = 0
 
         # Progress tracking
         self.slice_start_times = []
@@ -3574,12 +3582,14 @@ class MainWindow(QMainWindow):
         fraction_liquid = sim.get_fraction_liquid_at_time(time_value)
         mean_liquid, max_liquid, visible_liquid = self._get_fraction_liquid_stats(fraction_liquid)
 
-        # Debug output
-        print(
-            f"DEBUG: SliderRaw={value}, Slider={slider_fraction * 100:.1f}%, Time={time_value:.1f}s, "
-            f"Snapshots={len(sim.fraction_liquid_times)}, TimeRange=[{min_time:.1f}, {max_time:.1f}], "
-            f"LiquidMean={mean_liquid:.4f}, LiquidMax={max_liquid:.4f}, LiquidVoxels>1%={visible_liquid}"
-        )
+        # Throttled debug output (playback advances 10 slider steps per tick,
+        # so print roughly every 10th tick rather than every tick)
+        if value % (FRACTION_LIQUID_PLAYBACK_BASE_STEP * FRACTION_LIQUID_DEBUG_PRINT_INTERVAL) == 0:
+            print(
+                f"DEBUG: SliderRaw={value}, Slider={slider_fraction * 100:.1f}%, Time={time_value:.1f}s, "
+                f"Snapshots={len(sim.fraction_liquid_times)}, TimeRange=[{min_time:.1f}, {max_time:.1f}], "
+                f"LiquidMean={mean_liquid:.4f}, LiquidMax={max_liquid:.4f}, LiquidVoxels>1%={visible_liquid}"
+            )
 
         # Show descriptive label based on actual liquid field
         state_desc = self._get_fraction_liquid_state_label(fraction_liquid)
@@ -3587,13 +3597,15 @@ class MainWindow(QMainWindow):
         self.time_label.setText(f"{time_value:.1f}s - {state_desc}")
 
         # Update visualization (pass pre-computed array to avoid querying twice)
-        self._update_fraction_liquid_visualization(time_value, fraction_liquid=fraction_liquid)
+        self._update_fraction_liquid_visualization(
+            time_value, fraction_liquid=fraction_liquid, slider_value=value
+        )
 
         # Capture frame if animation recording is active
         if hasattr(self.visualizer, '_is_recording') and self.visualizer._is_recording:
             self._capture_animation_frame()
     
-    def _update_fraction_liquid_visualization(self, time_seconds, fraction_liquid=None):
+    def _update_fraction_liquid_visualization(self, time_seconds, fraction_liquid=None, slider_value=None):
         """Update fraction liquid visualization at given time"""
         if self.simulation_worker is None or self.simulation_worker.simulation is None:
             return
@@ -3608,19 +3620,23 @@ class MainWindow(QMainWindow):
             fraction_liquid = sim.get_fraction_liquid_at_time(time_seconds)
 
         if fraction_liquid is not None:
-            mean_liquid, max_liquid, visible_liquid = self._get_fraction_liquid_stats(fraction_liquid)
-            _, max_time = sim.get_fraction_liquid_time_range()
-            print(
-                f"DEBUG: Fraction liquid render Time={time_seconds:.1f}s, MaxTime={max_time:.1f}s, "
-                f"LiquidMean={mean_liquid:.4f}, LiquidMax={max_liquid:.4f}, LiquidVoxels>1%={visible_liquid}"
-            )
+            self._fraction_liquid_render_count += 1
+            if self._fraction_liquid_render_count % FRACTION_LIQUID_DEBUG_PRINT_INTERVAL == 0:
+                mean_liquid, max_liquid, visible_liquid = self._get_fraction_liquid_stats(fraction_liquid)
+                _, max_time = sim.get_fraction_liquid_time_range()
+                print(
+                    f"DEBUG: Fraction liquid render Time={time_seconds:.1f}s, MaxTime={max_time:.1f}s, "
+                    f"LiquidMean={mean_liquid:.4f}, LiquidMax={max_liquid:.4f}, LiquidVoxels>1%={visible_liquid}"
+                )
             self.visualizer.load_fraction_liquid(
                 voxel_mesh.voxel_centers,
                 voxel_mesh.voxel_sizes,
-                fraction_liquid
+                fraction_liquid,
+                cache_key=slider_value,
             )
-            # Update legend
-            self.visualizer.update_legend("Fraction Liquid", 0.0, 1.0)
+            # Update legend without a second full render (load_fraction_liquid
+            # already rendered this tick).
+            self.visualizer.update_legend("Fraction Liquid", 0.0, 1.0, render=False)
     
     def _on_mesh_settings_confirmed(self, voxel_size, refinement, memory_mode):
         """Handle mesh settings confirmation from dialog"""
@@ -4766,7 +4782,9 @@ class MainWindow(QMainWindow):
                 min_time,
                 max_time,
             )
-            self._update_fraction_liquid_visualization(time_value)
+            self._update_fraction_liquid_visualization(
+                time_value, slider_value=self.time_slider.value()
+            )
         # Advanced analysis visualizations
         elif self._current_vis_mode == 'feeding_quality':
             self._visualize_feeding_quality(simulation, voxel_mesh, threshold)
@@ -5346,7 +5364,9 @@ class MainWindow(QMainWindow):
                     min_time,
                     max_time,
                 )
-                self._update_fraction_liquid_visualization(time_value)
+                self._update_fraction_liquid_visualization(
+                    time_value, slider_value=self.time_slider.value()
+                )
     
     def _toggle_mesh_visibility(self, state):
         """Toggle mesh visibility"""

@@ -20,6 +20,7 @@ from PyQt5.QtWidgets import QWidget, QVBoxLayout
 from PyQt5.QtCore import QTimer, pyqtSignal
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Tuple, Callable, Set
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
@@ -856,6 +857,13 @@ class CastingVisualizer(QWidget):
     MAX_CACHED_THRESHOLD_LEVELS = 4
     MAX_CACHED_DISPLAY_VOXELS = 20_000
 
+    # Fraction liquid playback caches rendered frame geometry per slider frame.
+    # Bounded by frame count and total glyph points to cap unified-memory use
+    # (a glyph cube has 24 points per voxel).
+    FRACTION_LIQUID_CACHE_MAX_FRAMES = 64
+    FRACTION_LIQUID_CACHE_MAX_POINTS = 20_000_000
+    FRACTION_LIQUID_LOAD_PRINT_INTERVAL = 10
+
     def __init__(self, parent=None):
         super().__init__(parent)
         
@@ -919,6 +927,13 @@ class CastingVisualizer(QWidget):
         self._hot_tear_cache: Dict[float, vtk.vtkPolyData] = {}
         self._sand_burn_in_cache: Dict[float, vtk.vtkPolyData] = {}
         self._gas_porosity_cache: Dict[float, vtk.vtkPolyData] = {}
+
+        # Fraction liquid frame cache: slider frame value -> rendered polydata.
+        # Playback is deterministic per slider value, so repeats can reuse the
+        # geometry instead of rebuilding the full glyph every tick.
+        self._fraction_liquid_cache: OrderedDict[int, vtk.vtkPolyData] = OrderedDict()
+        self._fraction_liquid_cache_point_count = 0
+        self._fraction_liquid_load_count = 0
         
         # ==================== NEW FEATURES ====================
         
@@ -1193,7 +1208,7 @@ class CastingVisualizer(QWidget):
         self.info_text_actor.SetPosition(0.02, 0.95)
         self.renderer.AddActor2D(self.info_text_actor)
         
-    def update_legend(self, title: str, min_val: float, max_val: float, units: str = ""):
+    def update_legend(self, title: str, min_val: float, max_val: float, units: str = "", render: bool = True):
         """
         Update the legend title and scale
         
@@ -1202,6 +1217,9 @@ class CastingVisualizer(QWidget):
             min_val: Minimum value for scale
             max_val: Maximum value for scale
             units: Units string (e.g., "MPa", "μm")
+            render: Whether to trigger a render after updating. Callers that
+                already render (e.g. per-tick playback) pass False to avoid a
+                second full scene render.
         """
         self._legend_title = title
         
@@ -1225,7 +1243,8 @@ class CastingVisualizer(QWidget):
         self.lut.SetRange(min_val, max_val)
         self.scalar_bar_actor.SetVisibility(True)
         
-        self.render_window.Render()
+        if render:
+            self.render_window.Render()
         
     def update_info_text(self, material: str, time_s: float):
         """Update simulation info text overlay"""
@@ -1896,6 +1915,24 @@ class CastingVisualizer(QWidget):
         self._hot_tear_cache.clear()
         self._sand_burn_in_cache.clear()
         self._gas_porosity_cache.clear()
+        self._fraction_liquid_cache.clear()
+        self._fraction_liquid_cache_point_count = 0
+
+    def _store_fraction_liquid_cache(self, key: int, polydata: vtk.vtkPolyData) -> None:
+        """Store a rendered fraction-liquid frame under an LRU, point-budgeted cache."""
+        if key in self._fraction_liquid_cache:
+            self._fraction_liquid_cache.move_to_end(key)
+            return
+
+        self._fraction_liquid_cache[key] = polydata
+        self._fraction_liquid_cache_point_count += polydata.GetNumberOfPoints()
+
+        while (
+            len(self._fraction_liquid_cache) > self.FRACTION_LIQUID_CACHE_MAX_FRAMES
+            or self._fraction_liquid_cache_point_count > self.FRACTION_LIQUID_CACHE_MAX_POINTS
+        ) and len(self._fraction_liquid_cache) > 1:
+            _, oldest = self._fraction_liquid_cache.popitem(False)  # oldest entry
+            self._fraction_liquid_cache_point_count -= oldest.GetNumberOfPoints()
 
     def _get_shrinkage_threshold_levels(self, current_threshold: float) -> List[float]:
         """Return nearby threshold levels that should be pre-built."""
@@ -2601,7 +2638,8 @@ class CastingVisualizer(QWidget):
     def load_fraction_liquid(self, voxel_centers: np.ndarray,
                              voxel_sizes: np.ndarray,
                              fraction_liquid: np.ndarray,
-                             threshold: float = 0.01):
+                             threshold: float = 0.01,
+                             cache_key: Optional[int] = None):
         """
         Load and display fraction liquid visualization.
         Shows currently liquid regions during solidification.
@@ -2611,6 +2649,9 @@ class CastingVisualizer(QWidget):
             voxel_sizes: N array of voxel sizes
             fraction_liquid: N array of liquid fraction (0-1)
             threshold: Minimum liquid fraction to display
+            cache_key: Deterministic slider frame value used to reuse the
+                previously rendered geometry for the same frame. When None the
+                geometry is always rebuilt.
         """
         # Remove old fraction liquid actor
         if self.fraction_liquid_actor is not None:
@@ -2618,12 +2659,22 @@ class CastingVisualizer(QWidget):
         
         # Store data
         self.current_fraction_liquid_data = (voxel_centers, voxel_sizes, fraction_liquid)
-        self._clear_result_caches()
         
-        # Build geometry
-        polydata = self._build_fraction_liquid_geometry(
-            voxel_centers, voxel_sizes, fraction_liquid, threshold
-        )
+        # Build geometry (or reuse the cached polydata for this frame)
+        polydata = None
+        if cache_key is not None and cache_key in self._fraction_liquid_cache:
+            polydata = self._fraction_liquid_cache[cache_key]
+            self._fraction_liquid_cache.move_to_end(cache_key)
+        else:
+            polydata = self._build_fraction_liquid_geometry(
+                voxel_centers, voxel_sizes, fraction_liquid, threshold
+            )
+            if (
+                polydata is not None
+                and cache_key is not None
+                and polydata.GetNumberOfPoints() > 0
+            ):
+                self._store_fraction_liquid_cache(cache_key, polydata)
         
         if polydata is None or polydata.GetNumberOfPoints() == 0:
             print("No liquid voxels to display")
@@ -2645,9 +2696,11 @@ class CastingVisualizer(QWidget):
         self.renderer.AddActor(self.fraction_liquid_actor)
         self.render_window.Render()
         
-        # Count voxels displayed
-        num_displayed = polydata.GetNumberOfCells() // 6
-        print(f"Displayed {num_displayed:,} liquid voxels")
+        # Count voxels displayed (throttled; the playback path prints per tick)
+        self._fraction_liquid_load_count += 1
+        if self._fraction_liquid_load_count % self.FRACTION_LIQUID_LOAD_PRINT_INTERVAL == 0:
+            num_displayed = polydata.GetNumberOfCells() // 6
+            print(f"Displayed {num_displayed:,} liquid voxels")
     
     def _build_fraction_liquid_geometry(self, voxel_centers: np.ndarray,
                                          voxel_sizes: np.ndarray,

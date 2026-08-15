@@ -3,6 +3,7 @@ import sys
 import threading
 import types
 import unittest
+from collections import OrderedDict
 
 import numpy as np
 
@@ -10,6 +11,38 @@ import numpy as np
 class _DummyVTKClass:
     def __init__(self, *args, **kwargs):
         pass
+
+    def __getattr__(self, name):
+        def _method(*args, **kwargs):
+            return None
+        return _method
+
+
+class _PointCountDummy:
+    """VTK stand-in whose polydata reports a real point count for cache budgets."""
+
+    def __init__(self, points: int = 0):
+        self._points = points
+
+    def GetNumberOfPoints(self):
+        return self._points
+
+    def __getattr__(self, name):
+        def _method(*args, **kwargs):
+            return None
+        return _method
+
+
+class _ActorDummy:
+    """VTK actor stand-in with a mutable property object."""
+
+    def __init__(self):
+        self._property = _DummyVTKClass()
+        self._property.SetOpacity = lambda *a: None
+        self._property.SetInterpolationToFlat = lambda *a: None
+
+    def GetProperty(self):
+        return self._property
 
     def __getattr__(self, name):
         def _method(*args, **kwargs):
@@ -145,11 +178,17 @@ class VisualizerColormapTests(unittest.TestCase):
         viz._niyama_cache = {}
         viz._hot_tear_cache = {}
         viz._sand_burn_in_cache = {}
+        viz._gas_porosity_cache = {}
+        viz._fraction_liquid_cache = OrderedDict()
+        viz._fraction_liquid_cache_point_count = 0
+        viz._fraction_liquid_load_count = 0
+        viz.feed_modulus_leader = None
         viz.shrinkage_actor = None
         viz.hotspot_actor = None
         viz.niyama_actor = None
         viz.hot_tear_actor = None
         viz.sand_burn_in_actor = None
+        viz.gas_porosity_actor = None
         viz.fraction_liquid_actor = None
         viz.renderer = _DummyVTKClass()
         viz.render_window = _DummyVTKClass()
@@ -191,6 +230,9 @@ class VisualizerColormapTests(unittest.TestCase):
         viz._niyama_cache[0.5] = _DummyVTKClass()
         viz._hot_tear_cache[0.5] = _DummyVTKClass()
         viz._sand_burn_in_cache[0.5] = _DummyVTKClass()
+        viz._gas_porosity_cache[0.5] = _DummyVTKClass()
+        viz._fraction_liquid_cache[10] = _DummyVTKClass()
+        viz._fraction_liquid_cache_point_count = 6
 
         viz.clear_result_actors()
 
@@ -199,6 +241,66 @@ class VisualizerColormapTests(unittest.TestCase):
         self.assertEqual(viz._niyama_cache, {})
         self.assertEqual(viz._hot_tear_cache, {})
         self.assertEqual(viz._sand_burn_in_cache, {})
+        self.assertEqual(viz._gas_porosity_cache, {})
+        self.assertEqual(viz._fraction_liquid_cache, {})
+        self.assertEqual(viz._fraction_liquid_cache_point_count, 0)
+
+    def test_fraction_liquid_frame_cache_reuses_stored_polydata(self) -> None:
+        # Requires the stubbed vtk environment; when another test module has
+        # already imported the real ui.visualizer, skip instead of exercising
+        # real VTK objects against dummies.
+        vtk_module = sys.modules.get("vtk")
+        if not (isinstance(vtk_module, types.ModuleType) and hasattr(vtk_module, "__getattr__")):
+            self.skipTest("stubbed vtk environment not installed")
+        viz = self._bare_visualizer()
+        voxel_centers = np.zeros((10, 3), dtype=np.float32)
+        voxel_sizes = np.ones(10, dtype=np.float32)
+        fraction_liquid = np.ones(10, dtype=np.float32)
+
+        built = []
+
+        def _build(*args):
+            polydata = _PointCountDummy(points=1)
+            built.append(polydata)
+            return polydata
+
+        viz._build_fraction_liquid_geometry = _build
+        # load_fraction_liquid creates a fresh vtkActor; stub it with a dummy
+        # whose GetProperty() returns a mutable property object.
+        sys.modules["vtk"].vtkActor = _ActorDummy
+
+        viz.load_fraction_liquid(voxel_centers, voxel_sizes, fraction_liquid, cache_key=42)
+        viz.load_fraction_liquid(voxel_centers, voxel_sizes, fraction_liquid, cache_key=42)
+
+        self.assertEqual(len(built), 1, "cache hit must not rebuild geometry")
+        self.assertEqual(viz._fraction_liquid_cache[42], built[0])
+        self.assertEqual(viz._fraction_liquid_cache_point_count, 1)
+
+        viz.load_fraction_liquid(voxel_centers, voxel_sizes, fraction_liquid)
+        self.assertEqual(len(built), 2, "no cache key must always rebuild")
+
+    def test_fraction_liquid_frame_cache_respects_frame_budget(self) -> None:
+        viz = self._bare_visualizer()
+        for key in range(viz.FRACTION_LIQUID_CACHE_MAX_FRAMES + 20):
+            viz._store_fraction_liquid_cache(key, _PointCountDummy(points=1))
+
+        self.assertLessEqual(len(viz._fraction_liquid_cache), viz.FRACTION_LIQUID_CACHE_MAX_FRAMES)
+        newest = list(viz._fraction_liquid_cache.keys())
+        self.assertEqual(
+            newest,
+            list(range(20, viz.FRACTION_LIQUID_CACHE_MAX_FRAMES + 20)),
+            "oldest frames must be evicted first (LRU)",
+        )
+        self.assertEqual(viz._fraction_liquid_cache_point_count, viz.FRACTION_LIQUID_CACHE_MAX_FRAMES)
+
+    def test_fraction_liquid_frame_cache_respects_point_budget(self) -> None:
+        viz = self._bare_visualizer()
+        big_points = viz.FRACTION_LIQUID_CACHE_MAX_POINTS // 3 + 1
+        for key in range(5):
+            viz._store_fraction_liquid_cache(key, _PointCountDummy(points=big_points))
+
+        self.assertLessEqual(viz._fraction_liquid_cache_point_count, viz.FRACTION_LIQUID_CACHE_MAX_POINTS)
+        self.assertLessEqual(len(viz._fraction_liquid_cache), 3)
 
 
 if __name__ == "__main__":
