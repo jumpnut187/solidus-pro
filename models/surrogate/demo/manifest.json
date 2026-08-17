@@ -1,0 +1,64 @@
+{
+  "name": "Reference Chvorinov Model",
+  "version": "1.0.0",
+  "kind": "numpy_demo",
+  "backend": "numpy",
+  "grid_resolution": 64,
+  "channels": [
+    "occupancy",
+    "part_type",
+    "surface_distance",
+    "local_modulus",
+    "normalized_height",
+    "chill_boost",
+    "riser_slowdown"
+  ],
+  "outputs": [
+    "solidification_start_times",
+    "solidification_end_times",
+    "local_solidification_time"
+  ],
+  "alloy_features": [
+    "liquidus_temp",
+    "solidus_temp",
+    "pouring_temp",
+    "density_liquid",
+    "density_solid",
+    "thermal_conductivity",
+    "specific_heat",
+    "latent_heat",
+    "critical_fraction_solid",
+    "linear_shrinkage",
+    "niyama_threshold",
+    "hot_tear_susceptibility",
+    "partition_coefficient",
+    "melting_point_solvent",
+    "eutectic_fraction"
+  ],
+  "config_features": [
+    "max_dim",
+    "voxel_size",
+    "feeding_zone_vertical_bias",
+    "chvorinov_mold_constant",
+    "safety_factor_no_risers",
+    "safety_factor_with_risers",
+    "min_simulation_time",
+    "max_simulation_time"
+  ],
+  "supported_analyses": [
+    "shrinkage",
+    "porosity",
+    "hotspot",
+    "niyama",
+    "sand_burn_in",
+    "gas_porosity",
+    "fraction_liquid",
+    "chvorinov"
+  ],
+  "alloy_coverage": [],
+  "accuracy": {},
+  "trained_on": "",
+  "units": "inches/seconds/celsius",
+  "notes": "Deterministic physics-derived reference; no learned weights.",
+  "artifact_path": ""
+}

@@ -380,21 +380,27 @@ def build_visualization_payload(
     return result_data, visualization_data
 
 
-def run_pipeline(
+def prepare_mesh_and_geometry(
     inputs: PipelineInputs,
     *,
-    part_manager: Optional[PartManager] = None,
-    stl_loader: Any = None,
+    part_manager: Optional[PartManager],
+    stl_loader: Any,
     progress_message_callback: Optional[ProgressMessageCallback] = None,
     detailed_progress_callback: Optional[DetailedProgressCallback] = None,
     cancel_callback: Optional[CancelCallback] = None,
-) -> PipelineResult:
+) -> Tuple[Any, Any, float, Sequence[Any], AdaptiveVoxelMesh, Dict[str, Any]]:
     """
-    Execute the full simulation pipeline.
+    Resolve the geometry source and generate the adaptive voxel mesh.
+
+    Shared by the traditional pipeline (:func:`run_pipeline`) and the
+    surrogate pipeline (``core.surrogate.pipeline``) so both paths perform
+    identical geometry work.
+
+    Returns:
+        ``(mesh_to_use, bounds_to_use, total_volume, parts_with_types,
+        voxel_mesh, mem_stats)``.
     """
     _check_cancel(cancel_callback)
-    _emit_message(progress_message_callback, f"Loading material properties: {inputs.alloy_name}")
-    alloy = get_alloy(inputs.alloy_name)
 
     mesh_to_use = None
     bounds_to_use = None
@@ -472,6 +478,33 @@ def run_pipeline(
             f"Disk={mem_stats['disk_mb']:.1f}MB, "
             f"Available={mem_stats['available_gb']:.1f}GB"
         ),
+    )
+    return mesh_to_use, bounds_to_use, total_volume, parts_with_types, voxel_mesh, mem_stats
+
+
+def run_pipeline(
+    inputs: PipelineInputs,
+    *,
+    part_manager: Optional[PartManager] = None,
+    stl_loader: Any = None,
+    progress_message_callback: Optional[ProgressMessageCallback] = None,
+    detailed_progress_callback: Optional[DetailedProgressCallback] = None,
+    cancel_callback: Optional[CancelCallback] = None,
+) -> PipelineResult:
+    """
+    Execute the full simulation pipeline.
+    """
+    _check_cancel(cancel_callback)
+    _emit_message(progress_message_callback, f"Loading material properties: {inputs.alloy_name}")
+    alloy = get_alloy(inputs.alloy_name)
+
+    mesh_to_use, bounds_to_use, total_volume, parts_with_types, voxel_mesh, mem_stats = prepare_mesh_and_geometry(
+        inputs,
+        part_manager=part_manager,
+        stl_loader=stl_loader,
+        progress_message_callback=progress_message_callback,
+        detailed_progress_callback=detailed_progress_callback,
+        cancel_callback=cancel_callback,
     )
 
     analysis_options = create_analysis_options(

@@ -51,7 +51,8 @@ from .visualizer import CastingVisualizer, COLOR_MAPS
 from .custom_slider import MarkedSlider
 from .dialogs import AnalysisOptionsDialog, DraggableDialog, PartsDialog
 from .project_state import build_project_state, load_project_state
-from .workers import MeshSuggestionWorker, SimulationWorker
+from .workers import MeshSuggestionWorker, SimulationWorker, SurrogateTrainWorker, SurrogateWorker
+from .surrogate_dialog import SurrogateModelInfoDialog
 from config.hardware_config import hardware
 from core.mesh_ml import MeshRecommendation
 from core.solidification_params import SolidificationParameters
@@ -2248,6 +2249,7 @@ class MainWindow(QMainWindow):
         
         self._init_ui()
         self._create_menu_bar()
+        self._autoload_surrogate_model()
         self._show_hardware_info()
     
     def _init_ui(self):
@@ -2407,6 +2409,54 @@ class MainWindow(QMainWindow):
         solidification_action.setStatusTip("Configure feeding distances, chill reduction, exothermic sleeve timing, and more")
         solidification_action.triggered.connect(self._open_solidification_params_dialog)
         sim_menu.addAction(solidification_action)
+
+        # ==================== Surrogate Menu ====================
+        surrogate_menu = menubar.addMenu("&Surrogate")
+
+        self.surrogate_model = None
+        self.surrogate_worker = None
+
+        # Load Model
+        self.surrogate_load_action = QAction("📥 Load Surrogate Model...", self)
+        self.surrogate_load_action.setStatusTip("Load a trained surrogate solidification model (.mlmodel / .npz / .json)")
+        self.surrogate_load_action.triggered.connect(self._load_surrogate_model)
+        surrogate_menu.addAction(self.surrogate_load_action)
+
+        # Model Info
+        self.surrogate_info_action = QAction("ℹ️ Model Info...", self)
+        self.surrogate_info_action.setStatusTip("Show the loaded surrogate model manifest")
+        self.surrogate_info_action.triggered.connect(self._show_surrogate_model_info)
+        self.surrogate_info_action.setEnabled(False)
+        surrogate_menu.addAction(self.surrogate_info_action)
+
+        # Settings
+        surrogate_settings_action = QAction("⚙️ Surrogate Settings...", self)
+        surrogate_settings_action.setStatusTip("Configure the surrogate backend and training-data capture")
+        surrogate_settings_action.triggered.connect(self._open_surrogate_settings_dialog)
+        surrogate_menu.addAction(surrogate_settings_action)
+
+        # Retrain from captured data
+        self.surrogate_train_action = QAction("🔁 Retrain Surrogate Model...", self)
+        self.surrogate_train_action.setStatusTip("Train the surrogate model from captured simulation data")
+        self.surrogate_train_action.triggered.connect(self._open_surrogate_train_dialog)
+        surrogate_menu.addAction(self.surrogate_train_action)
+
+        surrogate_menu.addSeparator()
+
+        # Run Surrogate
+        self.run_surrogate_action = QAction("▶ Run Surrogate Simulation", self)
+        self.run_surrogate_action.setShortcut("Ctrl+Alt+S")
+        self.run_surrogate_action.setStatusTip("Run the surrogate (NPU/ML) solidification simulation")
+        self.run_surrogate_action.triggered.connect(self._run_surrogate)
+        self.run_surrogate_action.setEnabled(False)
+        surrogate_menu.addAction(self.run_surrogate_action)
+
+        # Stop Surrogate
+        self.stop_surrogate_action = QAction("■ Stop Surrogate", self)
+        self.stop_surrogate_action.setStatusTip("Cancel the active surrogate simulation")
+        self.stop_surrogate_action.triggered.connect(self._cancel_surrogate)
+        self.stop_surrogate_action.setEnabled(False)
+        surrogate_menu.addAction(self.stop_surrogate_action)
 
         # ==================== Tools Menu ====================
         tools_menu = menubar.addMenu("&Tools")
@@ -4043,6 +4093,7 @@ class MainWindow(QMainWindow):
             self.riser_design_action.setEnabled(True)  # Enable riser design tool
             self.mesh_dialog.apply_ml_button.setEnabled(True)
             self.parts_dialog.clear_parts_btn.setEnabled(True)
+            self._refresh_surrogate_enabled()
         
         # Update stl_loader for backwards compatibility
         self.stl_loader._update_legacy_properties()
@@ -4166,6 +4217,13 @@ class MainWindow(QMainWindow):
         self.run_sim_action.setEnabled(can_run)
         self.stop_sim_btn.setEnabled(running)
         self.stop_sim_action.setEnabled(running)
+
+        self._refresh_surrogate_enabled()
+        self.run_surrogate_action.setEnabled(can_run and self.surrogate_model is not None)
+        self.stop_surrogate_action.setEnabled(running)
+        self.surrogate_load_action.setEnabled(not running)
+        self.surrogate_train_action.setEnabled(not running)
+        self.surrogate_info_action.setEnabled((not running) and self.surrogate_model is not None)
 
         for control in (
             self.add_part_action,
@@ -4676,7 +4734,304 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Simulation failed")
             self.progress_bar.setFormat("Failed")
             QMessageBox.critical(self, "Error", "Simulation failed. Check console for details.")
-    
+
+    # ------------------------------------------------------------------
+    # Surrogate simulation handlers
+    # ------------------------------------------------------------------
+    def _load_surrogate_model(self) -> None:
+        """Load a surrogate model artifact (.json manifest or model dir)."""
+        from config.settings import get_settings
+
+        settings = get_settings()
+        model_dir = str(getattr(settings.surrogate, "model_dir", "models/surrogate"))
+        start_dir = os.path.abspath(model_dir)
+        if not os.path.isdir(start_dir):
+            start_dir = os.path.abspath("models")
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Surrogate Model",
+            start_dir,
+            "Surrogate models (*.json *.npz *.mlmodel *.mlx);;All files (*.*)",
+        )
+        if not path:
+            return
+
+        # STEP/STL are CAD geometry for File > Add Part, not surrogate models.
+        if path.lower().endswith((".stl", ".step", ".stp")):
+            QMessageBox.information(
+                self,
+                "Surrogate Model",
+                "STEP/STL files are CAD geometry — load them via File > Add Part, "
+                "not as a surrogate model.\n\n"
+                "The surrogate model is a trained artifact (a folder with "
+                "manifest.json, or a .json manifest). Bundled models:\n"
+                "  • models/surrogate/demo\n"
+                "  • models/surrogate/trained",
+            )
+            return
+
+        from core import surrogate
+
+        result = surrogate.load_model(path)
+        if result.error or result.model is None:
+            QMessageBox.critical(self, "Surrogate Model", f"Failed to load model:\n{result.error}")
+            return
+
+        self.surrogate_model = result.model
+        self._persist_surrogate_model_path(path)
+        backend = self.surrogate_model.backend
+        device = surrogate.backend_device_name(backend)
+        self.surrogate_info_action.setEnabled(True)
+        self._refresh_surrogate_enabled()
+        logger.info("Surrogate model loaded", context={
+            'name': self.surrogate_model.manifest.name,
+            'backend': backend.value,
+        })
+        QMessageBox.information(
+            self,
+            "Surrogate Model Loaded",
+            f"Loaded: {self.surrogate_model.manifest.name}\n"
+            f"Backend: {backend.value} ({device})\n\n"
+            f"{surrogate.format_metrics(self.surrogate_model.manifest.accuracy)}",
+        )
+
+    def _show_surrogate_model_info(self) -> None:
+        dialog = SurrogateModelInfoDialog(self.surrogate_model, self)
+        dialog.exec_()
+
+    def _open_surrogate_settings_dialog(self) -> None:
+        from ui.surrogate_dialog import SurrogateSettingsDialog
+
+        dialog = SurrogateSettingsDialog(self)
+        dialog.exec_()
+
+    def _autoload_surrogate_model(self) -> None:
+        """Restore the last-used surrogate model at startup (no dialogs).
+
+        Preference order:
+        1. The model path persisted from the last load/train (if it exists).
+        2. ``<model_dir>/trained`` (most recent training output).
+        3. ``<model_dir>/demo`` (bundled reference model).
+        """
+        try:
+            from config.settings import get_settings
+            from core import surrogate
+
+            settings = get_settings()
+            model_dir = os.path.abspath(str(getattr(settings.surrogate, "model_dir", "models/surrogate")))
+
+            candidates = []
+            last = str(getattr(settings.surrogate, "last_model_path", "") or "")
+            if last and os.path.exists(last):
+                candidates.append(last)
+            for name in ("trained", "demo"):
+                path = os.path.join(model_dir, name)
+                if os.path.isdir(path) and os.path.exists(os.path.join(path, "manifest.json")):
+                    candidates.append(path)
+
+            for path in candidates:
+                result = surrogate.load_model(path)
+                if result.model is None:
+                    continue
+                self.surrogate_model = result.model
+                self.surrogate_info_action.setEnabled(True)
+                self._refresh_surrogate_enabled()
+                self.status_label.setText(
+                    f"Surrogate model loaded: {result.model.manifest.name} ({result.model.manifest.backend})"
+                )
+                return
+            self.status_label.setText("Surrogate: no model found — use Surrogate > Load or Retrain")
+        except Exception:
+            pass
+
+    def _persist_surrogate_model_path(self, path: str) -> None:
+        """Remember the last-used model so it auto-loads next launch."""
+        try:
+            from config.settings import get_settings
+
+            settings = get_settings()
+            settings.surrogate.last_model_path = str(path)
+            settings.save_user_override("surrogate", "last_model_path", str(path))
+        except Exception:
+            pass
+
+    def _open_surrogate_train_dialog(self) -> None:
+        """Ask for training options, then train in a background thread."""
+        from config.settings import get_settings
+        from core.surrogate.dataset import DEFAULT_DATASET_DIR
+        from core.surrogate.training import DEFAULT_MODEL_OUTPUT
+        from ui.surrogate_dialog import SurrogateTrainDialog
+
+        if self.surrogate_worker is not None and self.surrogate_worker.isRunning():
+            QMessageBox.information(self, "Surrogate Model", "A surrogate run is in progress.")
+            return
+
+        dialog = SurrogateTrainDialog(self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        options = dialog.options()
+
+        settings = get_settings()
+        model_dir = str(getattr(settings.surrogate, "model_dir", "models/surrogate"))
+        output_dir = os.path.join(os.path.abspath(model_dir), "trained")
+
+        self._set_simulation_running(True)
+        self._stop_fraction_liquid_playback()
+        self.status_label.setText("Training surrogate model...")
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setFormat("Training...")
+
+        self.surrogate_train_worker = SurrogateTrainWorker(
+            data_dir=DEFAULT_DATASET_DIR,
+            output_dir=output_dir,
+            grid_resolution=int(getattr(settings.surrogate, "grid_resolution", 64) or 64),
+            generate_first=options["generate_first"],
+            model_name="Trained Linear Surrogate",
+        )
+        self.surrogate_train_worker.progress.connect(self._on_simulation_progress)
+        self.surrogate_train_worker.detailed_progress.connect(self._on_detailed_progress)
+        self.surrogate_train_worker.finished.connect(
+            lambda success, status, summary: self._on_surrogate_train_finished(
+                success, status, summary, load_model=options["load_model"]
+            )
+        )
+        self.surrogate_train_worker.start()
+
+    def _on_surrogate_train_finished(self, success: bool, status: str, summary: dict, load_model: bool = True) -> None:
+        """Handle surrogate training completion."""
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(100 if success else 0)
+        self._set_simulation_running(False)
+
+        if not success:
+            self.status_label.setText("Surrogate training failed")
+            self.progress_bar.setFormat("Failed")
+            if status == "cancelled":
+                self.status_label.setText("Surrogate training cancelled")
+                self.progress_bar.setFormat("Cancelled")
+            return
+
+        headline = (summary or {}).get("headline", {})
+        records = (summary or {}).get("records", 0)
+        train = (summary or {}).get("train", 0)
+        test = (summary or {}).get("test", 0)
+        saved_to = (summary or {}).get("saved_to", "")
+
+        lines = [
+            f"Surrogate model trained from {records} run(s) ({train} train / {test} test).",
+            "",
+            f"  RMSE: {headline.get('rmse_s', 0):.1f}s",
+            f"  MAE:  {headline.get('mae_s', 0):.1f}s",
+            f"  Confidence: {headline.get('confidence', 0):.2f}",
+            "",
+            f"Saved to: {saved_to}",
+        ]
+
+        loaded_name = None
+        if load_model and saved_to:
+            from core import surrogate
+
+            result = surrogate.load_model(saved_to)
+            if result.model is not None:
+                self.surrogate_model = result.model
+                self._persist_surrogate_model_path(saved_to)
+                self._refresh_surrogate_enabled()
+                loaded_name = result.model.manifest.name
+
+        if loaded_name:
+            lines.append("")
+            lines.append(f"The new model is loaded and ready: {loaded_name}")
+
+        self.status_label.setText("✓ Surrogate model trained")
+        self.progress_bar.setFormat("Complete")
+        QMessageBox.information(self, "Surrogate Model Trained", "\n".join(lines))
+
+    def _refresh_surrogate_enabled(self) -> None:
+        has_parts = self._has_loaded_parts()
+        has_model = self.surrogate_model is not None
+        self.run_surrogate_action.setEnabled(has_parts and has_model)
+        self.surrogate_info_action.setEnabled(has_model)
+
+    def _run_surrogate(self) -> None:
+        """Run the surrogate solidification simulation in a background thread."""
+        from core import surrogate
+
+        if not self.stl_loader.is_valid():
+            QMessageBox.warning(self, "Surrogate Simulation", "Please load a CAD file first.")
+            return
+        if self.surrogate_model is None:
+            QMessageBox.warning(self, "Surrogate Simulation", "Please load a surrogate model first.")
+            return
+
+        self._set_simulation_running(True)
+        self._stop_fraction_liquid_playback()
+        self._purge_previous_simulation_memory()
+
+        combined_mesh = self.part_manager.get_combined_mesh()
+        if combined_mesh is not None:
+            self.visualizer.load_mesh(combined_mesh.vertices, combined_mesh.faces)
+        else:
+            self.visualizer.load_mesh(self.stl_loader.get_vertices(), self.stl_loader.get_faces())
+
+        voxel_size = self._current_voxel_size
+        self.status_label.setText("Starting surrogate simulation...")
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setFormat("Starting...")
+
+        self.surrogate_worker = SurrogateWorker(
+            self.stl_loader,
+            self.surrogate_model,
+            self._current_alloy,
+            voxel_size,
+            int(self._current_refinement),
+            memory_mode=self._current_memory_mode,
+            part_manager=self.part_manager,
+            analysis_options=self._get_effective_analysis_options(),
+            solidification_params=self._solidification_params,
+        )
+        self.surrogate_worker.progress.connect(self._on_simulation_progress)
+        self.surrogate_worker.detailed_progress.connect(self._on_detailed_progress)
+        self.surrogate_worker.finished.connect(self._on_surrogate_finished)
+        self.simulation_start_time = time.time()
+        self.surrogate_worker.start()
+
+    def _cancel_surrogate(self) -> None:
+        if self.surrogate_worker is not None and self.surrogate_worker.isRunning():
+            self.surrogate_worker.cancel()
+            self.status_label.setText("Cancelling surrogate simulation...")
+
+    def _on_surrogate_finished(self, success: bool, status: str) -> None:
+        """Handle surrogate simulation completion."""
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(100 if success else 0)
+        self._set_simulation_running(False)
+
+        if not success:
+            self.current_results = None
+            self.status_label.setText("Surrogate simulation failed")
+            self.progress_bar.setFormat("Failed")
+            if status != "cancelled":
+                QMessageBox.critical(self, "Surrogate Simulation", "Surrogate simulation failed. Check console for details.")
+            return
+
+        # Reuse the traditional result pipeline by pointing simulation_worker
+        # at the surrogate worker's outputs.
+        self.simulation_worker = self.surrogate_worker
+        simulation = self.simulation_worker.simulation
+        self.current_results = simulation.export_results()
+        self._setup_result_type_options()
+        self._update_results_visualization()
+
+        badge = f"Surrogate ({self.surrogate_model.manifest.backend}) · {self.surrogate_model.manifest.name}"
+        confidence = getattr(simulation, "surrogate_confidence", 0.0)
+        if confidence > 0:
+            badge += f" · conf {confidence:.2f}"
+        if getattr(simulation, "surrogate_disabled_analyses", None):
+            badge += " · disabled: " + ", ".join(simulation.surrogate_disabled_analyses)
+        self.status_label.setText(f"✓ {badge}")
+        self.progress_bar.setFormat("Complete")
+
     def _setup_result_type_options(self):
         """Configure result type combo based on available analyses"""
         self.result_type_combo.setEnabled(True)

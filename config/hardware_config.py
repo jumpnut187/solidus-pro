@@ -231,12 +231,19 @@ class HardwareConfig:
     
     def should_use_neural_engine(self) -> bool:
         """
-        Check if Neural Engine should be used
-        
-        Note: Neural Engine is for ML inference, not numerical simulation.
-        Returns False as current physics engine doesn't use ML models.
+        Check if the Apple Neural Engine should be used for ML inference.
+
+        The Neural Engine is only reachable through Core ML models, so this
+        is True only when the surrogate backend detects a usable Core ML
+        runtime on Apple Silicon.
         """
-        return False
+        if not self.neural_engine_available:
+            return False
+        try:
+            from core.surrogate.backend import is_coreml_active
+            return is_coreml_active()
+        except Exception:
+            return False
     
     def get_chunk_size(self, total_size: int) -> int:
         """Calculate optimal chunk size for parallel processing"""

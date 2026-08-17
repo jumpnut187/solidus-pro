@@ -201,6 +201,17 @@ class PluginSettings:
     disabled_plugins: List[str] = field(default_factory=list)
 
 
+@dataclass
+class SurrogateSettings:
+    """Surrogate solidification backend settings"""
+    enabled: bool = False
+    backend: str = "auto"            # auto, coreml, mlx, numpy
+    model_dir: str = "models/surrogate"
+    grid_resolution: int = 64        # grid per axis for model input/output
+    auto_capture: bool = True        # capture training data after traditional sims
+    last_model_path: str = ""        # last model loaded/trained; auto-loaded on startup
+
+
 # ============================================================================
 # Main Settings Container
 # ============================================================================
@@ -221,6 +232,7 @@ class Settings:
     paths: PathSettings = field(default_factory=PathSettings)
     report: ReportSettings = field(default_factory=ReportSettings)
     plugins: PluginSettings = field(default_factory=PluginSettings)
+    surrogate: SurrogateSettings = field(default_factory=SurrogateSettings)
     solidification_params: Any = field(default=None)
     
     # Metadata
@@ -324,6 +336,7 @@ class Settings:
             "paths": self.paths,
             "report": self.report,
             "plugins": self.plugins,
+            "surrogate": self.surrogate,
         }
 
         for section_name, section_data in data.items():
@@ -359,6 +372,13 @@ class Settings:
 
             # UI settings
             f"{env_prefix}THEME": ("ui", "theme", str),
+
+            # Surrogate settings
+            f"{env_prefix}SURROGATE_ENABLED": ("surrogate", "enabled", self._parse_bool),
+            f"{env_prefix}SURROGATE_BACKEND": ("surrogate", "backend", str),
+            f"{env_prefix}SURROGATE_MODEL_DIR": ("surrogate", "model_dir", str),
+            f"{env_prefix}SURROGATE_GRID_RESOLUTION": ("surrogate", "grid_resolution", int),
+            f"{env_prefix}SURROGATE_AUTO_CAPTURE": ("surrogate", "auto_capture", self._parse_bool),
         }
 
         section_mapping = {
@@ -366,6 +386,7 @@ class Settings:
             "simulation": self.simulation,
             "performance": self.performance,
             "ui": self.ui,
+            "surrogate": self.surrogate,
         }
 
         for env_var, (section_name, attr_name, converter) in env_mapping.items():
@@ -434,6 +455,7 @@ class Settings:
             "paths": asdict(self.paths),
             "report": asdict(self.report),
             "plugins": asdict(self.plugins),
+            "surrogate": asdict(self.surrogate),
         }
     
     def save_to_file(self, filepath: Union[str, Path]) -> None:
@@ -614,6 +636,14 @@ ui:
   theme: dark
   console_visible: true
 
+surrogate:
+  enabled: false
+  backend: auto         # auto, coreml, mlx, numpy
+  model_dir: models/surrogate
+  grid_resolution: 64
+  auto_capture: true
+  last_model_path: ""
+
 report:
   default_format: html
   include_screenshots: true
@@ -654,6 +684,14 @@ part_assignment_batch_size = 2500
 [ui]
 theme = "dark"
 console_visible = true
+
+[surrogate]
+enabled = false
+backend = "auto"
+model_dir = "models/surrogate"
+grid_resolution = 64
+auto_capture = true
+last_model_path = ""
 
 [report]
 default_format = "html"

@@ -54,6 +54,29 @@ class SimulationWorker(QThread):
         """Request cancellation for the active simulation."""
         self._cancel_requested.set()
 
+    def _maybe_capture_surrogate_training_data(self) -> None:
+        """Opt-in capture of this run as surrogate training data."""
+        try:
+            from config.settings import get_settings
+
+            settings = get_settings()
+            if not settings.surrogate.auto_capture:
+                return
+            if self.simulation is None:
+                return
+            from core.surrogate.dataset import DEFAULT_DATASET_DIR, capture_run
+
+            captured = capture_run(
+                self.simulation,
+                voxel_size=self.voxel_size,
+                resolution=int(getattr(settings.surrogate, "grid_resolution", 64) or 64),
+                out_dir=DEFAULT_DATASET_DIR,
+            )
+            if captured:
+                self.progress.emit("✓ Surrogate training data captured")
+        except Exception:
+            pass
+
     def run(self) -> None:
         mesh_generation_time = None
         simulation_time = None
@@ -110,6 +133,8 @@ class SimulationWorker(QThread):
             self.finished.emit(True, "completed")
 
             voxel_count = self.voxel_mesh.get_voxel_count() if self.voxel_mesh is not None else 0
+
+            self._maybe_capture_surrogate_training_data()
 
             log_mesh_training_example(
                 self.stl_loader,
@@ -184,3 +209,137 @@ class MeshSuggestionWorker(QThread):
             self.result_ready.emit(recommendation)
         except Exception as exc:
             self.error.emit(str(exc))
+
+
+class SurrogateTrainWorker(QThread):
+    """Background worker that trains a surrogate model from captured data."""
+
+    progress = pyqtSignal(str)
+    detailed_progress = pyqtSignal(int, int, str)  # current, total, stage
+    finished = pyqtSignal(bool, str, object)  # success, status, summary
+
+    def __init__(
+        self,
+        data_dir: str,
+        output_dir: str,
+        grid_resolution: int = 64,
+        generate_first: bool = False,
+        model_name: str = "Trained Linear Surrogate",
+    ) -> None:
+        super().__init__()
+        self.data_dir = data_dir
+        self.output_dir = output_dir
+        self.grid_resolution = int(grid_resolution)
+        self.generate_first = bool(generate_first)
+        self.model_name = model_name
+        self._cancel_requested = threading.Event()
+
+    def cancel(self) -> None:
+        """Request cancellation for the active training run."""
+        self._cancel_requested.set()
+
+    def run(self) -> None:
+        try:
+            from core.surrogate.training import (
+                TrainingCancelledError,
+                retrain_from_dataset,
+                synthetic_geometries,
+            )
+
+            def _detailed(current: int, total: int) -> None:
+                self.detailed_progress.emit(current, total, "Training")
+
+            summary = retrain_from_dataset(
+                data_dir=self.data_dir,
+                output_dir=self.output_dir,
+                grid=self.grid_resolution,
+                name=self.model_name,
+                generate_first=self.generate_first,
+                progress_cb=self.progress.emit,
+                detailed_cb=_detailed,
+                cancel_cb=self._cancel_requested.is_set,
+            )
+            self.progress.emit("✓ Surrogate model trained!")
+            self.finished.emit(True, "completed", summary)
+        except TrainingCancelledError:
+            self.progress.emit("Training cancelled")
+            self.finished.emit(False, "cancelled", None)
+        except Exception as exc:
+            self.progress.emit(f"Error: {str(exc)}")
+            self.finished.emit(False, "failed", None)
+
+
+class SurrogateWorker(QThread):
+    """Background worker that runs a surrogate (NPU/ML) simulation."""
+
+    progress = pyqtSignal(str)
+    detailed_progress = pyqtSignal(int, int, str)  # current, total, stage
+    finished = pyqtSignal(bool, str)
+
+    def __init__(
+        self,
+        stl_loader: Any,
+        model: Any,
+        alloy_name: str,
+        voxel_size: float,
+        refinement_level: int,
+        memory_mode: str = "auto",
+        part_manager: Any = None,
+        analysis_options: Optional[dict] = None,
+        solidification_params: Optional[dict] = None,
+    ) -> None:
+        super().__init__()
+        self.stl_loader = stl_loader
+        self.model = model
+        self.alloy_name = alloy_name
+        self.voxel_size = voxel_size
+        self.refinement_level = refinement_level
+        self.memory_mode = memory_mode
+        self.part_manager = part_manager
+        self.analysis_options = analysis_options or {}
+        self.solidification_params = solidification_params or {}
+        self.voxel_mesh: Any = None
+        self.simulation: Any = None
+        self._cancel_requested = threading.Event()
+
+    def cancel(self) -> None:
+        """Request cancellation for the active surrogate run."""
+        self._cancel_requested.set()
+
+    def _progress_callback(self, current: int, total: int, stage: str) -> None:
+        self.detailed_progress.emit(current, total, stage)
+
+    def run(self) -> None:
+        try:
+            from core.surrogate import run_surrogate_pipeline
+
+            inputs = PipelineInputs(
+                alloy_name=self.alloy_name,
+                voxel_size=self.voxel_size,
+                refinement_level=self.refinement_level,
+                memory_mode=self.memory_mode,
+                analysis_options=self.analysis_options,
+                use_gpu=False,
+                use_incremental=False,
+                show_progress=True,
+                solidification_params=self.solidification_params,
+            )
+            result = run_surrogate_pipeline(
+                inputs,
+                model=self.model,
+                part_manager=self.part_manager,
+                stl_loader=self.stl_loader,
+                progress_message_callback=self.progress.emit,
+                detailed_progress_callback=self._progress_callback,
+                cancel_callback=self._cancel_requested.is_set,
+            )
+            self.voxel_mesh = result.voxel_mesh
+            self.simulation = result.engine
+            self.progress.emit("✓ Surrogate simulation complete!")
+            self.finished.emit(True, "completed")
+        except SimulationCancelledError:
+            self.progress.emit("Surrogate simulation cancelled")
+            self.finished.emit(False, "cancelled")
+        except Exception as exc:
+            self.progress.emit(f"Error: {str(exc)}")
+            self.finished.emit(False, "failed")
