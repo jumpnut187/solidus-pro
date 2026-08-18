@@ -26,6 +26,11 @@ class Backend(Enum):
     NUMPY = "numpy"
     MLX = "mlx"
     COREML = "coreml"
+    # Deep-model backend (core/deep_model): manifests of kind="torch_unet"
+    # carry backend="torch" so SurrogateModel.backend can construct.  NOT in
+    # _PREFERENCE_ORDER — the numpy-surrogate ladder is untouched; deep
+    # backend selection lives in core/deep_model/backend.py.
+    TORCH = "torch"
 
 
 _BACKEND_STATE: Dict[str, bool] = {}
@@ -60,10 +65,24 @@ def _probe_numpy() -> Tuple[bool, str]:
     return True, "NumPy reference"
 
 
+def _probe_torch() -> Tuple[bool, str]:
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        return False, "torch not installed (pip install torch)"
+    try:
+        if torch.backends.mps.is_available():
+            return True, "PyTorch (MPS on Apple GPU)"
+        return True, "PyTorch (CPU)"
+    except Exception as exc:  # pragma: no cover - defensive
+        return False, f"torch probe failed: {exc}"
+
+
 _PROBES = {
     Backend.COREML: _probe_coreml,
     Backend.MLX: _probe_mlx,
     Backend.NUMPY: _probe_numpy,
+    Backend.TORCH: _probe_torch,
 }
 
 _PREFERENCE_ORDER = [Backend.COREML, Backend.MLX, Backend.NUMPY]

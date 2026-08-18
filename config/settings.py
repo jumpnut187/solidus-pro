@@ -212,6 +212,39 @@ class SurrogateSettings:
     last_model_path: str = ""        # last model loaded/trained; auto-loaded on startup
 
 
+@dataclass
+class DeepModelSettings:
+    """Deep learning solidification surrogate settings (core/deep_model).
+
+    The 3D U-Net requires grid resolutions divisible by 16, so the setting
+    is restricted to {16, 32, 64, 128}.  All features are optional — torch is
+    only imported lazily, and auto-train skips cleanly when it is absent.
+    """
+    enabled: bool = False            # deep auto-train + autoload
+    min_records: int = 4             # minimum dataset size to train
+    cooldown_seconds: int = 300      # wait after a completed train before retrain
+    epochs: int = 100
+    batch_size: int = 4
+    learning_rate: float = 1e-3
+    grid_resolution: int = 32        # restricted to {16, 32, 64, 128}
+    model_dir: str = "models/deep_model"
+    export_dir: str = "models/deep_model/export"
+    last_model_path: str = ""        # last deep model loaded/trained
+
+    def __post_init__(self) -> None:
+        self.normalize()
+
+    def normalize(self) -> None:
+        """Clamp/validate fields; called at construction and after load."""
+        if self.grid_resolution not in (16, 32, 64, 128):
+            self.grid_resolution = 32
+        self.epochs = max(1, int(self.epochs))
+        self.batch_size = max(1, int(self.batch_size))
+        self.learning_rate = max(1e-8, float(self.learning_rate))
+        self.min_records = max(1, int(self.min_records))
+        self.cooldown_seconds = max(0, int(self.cooldown_seconds))
+
+
 # ============================================================================
 # Main Settings Container
 # ============================================================================
@@ -233,6 +266,7 @@ class Settings:
     report: ReportSettings = field(default_factory=ReportSettings)
     plugins: PluginSettings = field(default_factory=PluginSettings)
     surrogate: SurrogateSettings = field(default_factory=SurrogateSettings)
+    deep: DeepModelSettings = field(default_factory=DeepModelSettings)
     solidification_params: Any = field(default=None)
     
     # Metadata
@@ -337,6 +371,7 @@ class Settings:
             "report": self.report,
             "plugins": self.plugins,
             "surrogate": self.surrogate,
+            "deep": self.deep,
         }
 
         for section_name, section_data in data.items():
@@ -379,6 +414,17 @@ class Settings:
             f"{env_prefix}SURROGATE_MODEL_DIR": ("surrogate", "model_dir", str),
             f"{env_prefix}SURROGATE_GRID_RESOLUTION": ("surrogate", "grid_resolution", int),
             f"{env_prefix}SURROGATE_AUTO_CAPTURE": ("surrogate", "auto_capture", self._parse_bool),
+
+            # Deep model settings
+            f"{env_prefix}DEEP_ENABLED": ("deep", "enabled", self._parse_bool),
+            f"{env_prefix}DEEP_MIN_RECORDS": ("deep", "min_records", int),
+            f"{env_prefix}DEEP_COOLDOWN_SECONDS": ("deep", "cooldown_seconds", int),
+            f"{env_prefix}DEEP_EPOCHS": ("deep", "epochs", int),
+            f"{env_prefix}DEEP_BATCH_SIZE": ("deep", "batch_size", int),
+            f"{env_prefix}DEEP_LEARNING_RATE": ("deep", "learning_rate", float),
+            f"{env_prefix}DEEP_GRID_RESOLUTION": ("deep", "grid_resolution", int),
+            f"{env_prefix}DEEP_MODEL_DIR": ("deep", "model_dir", str),
+            f"{env_prefix}DEEP_EXPORT_DIR": ("deep", "export_dir", str),
         }
 
         section_mapping = {
@@ -387,6 +433,7 @@ class Settings:
             "performance": self.performance,
             "ui": self.ui,
             "surrogate": self.surrogate,
+            "deep": self.deep,
         }
 
         for env_var, (section_name, attr_name, converter) in env_mapping.items():
@@ -436,7 +483,10 @@ class Settings:
                     print(f"Warning: Invalid value for {env_var}: {env_val} ({e})")
 
         self.solidification_params = solid_params if solid_params else None
-    
+
+        # Re-normalize loaded sections (file + env values are set post-init).
+        self.deep.normalize()
+        
     @staticmethod
     def _parse_bool(value: str) -> bool:
         """Parse boolean from string"""
@@ -456,6 +506,7 @@ class Settings:
             "report": asdict(self.report),
             "plugins": asdict(self.plugins),
             "surrogate": asdict(self.surrogate),
+            "deep": asdict(self.deep),
         }
     
     def save_to_file(self, filepath: Union[str, Path]) -> None:
@@ -644,6 +695,18 @@ surrogate:
   auto_capture: true
   last_model_path: ""
 
+deep:
+  enabled: false                  # deep auto-train + autoload (optional torch module)
+  min_records: 4
+  cooldown_seconds: 300           # wait between completed train and auto-retrain
+  epochs: 100
+  batch_size: 4
+  learning_rate: 0.001
+  grid_resolution: 32             # restricted to {16, 32, 64, 128}
+  model_dir: models/deep_model
+  export_dir: models/deep_model/export
+  last_model_path: ""
+
 report:
   default_format: html
   include_screenshots: true
@@ -691,6 +754,18 @@ backend = "auto"
 model_dir = "models/surrogate"
 grid_resolution = 64
 auto_capture = true
+last_model_path = ""
+
+[deep]
+enabled = false
+min_records = 4
+cooldown_seconds = 300
+epochs = 100
+batch_size = 4
+learning_rate = 0.001
+grid_resolution = 32
+model_dir = "models/deep_model"
+export_dir = "models/deep_model/export"
 last_model_path = ""
 
 [report]

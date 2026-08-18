@@ -415,12 +415,17 @@ def load_model(path: Union[str, os.PathLike]) -> ModelLoadResult:
             return ModelLoadResult(model=model)
         except Exception as exc:
             return ModelLoadResult(error=f"Failed to load weights.npz: {exc}")
+    if manifest.kind == "torch_unet":
+        from core.deep_model.inference import load_deep_model
+
+        return load_deep_model(directory)
     if manifest.kind in ("coreml", "mlx"):
         return ModelLoadResult(
             error=(
                 f"Model kind '{manifest.kind}' is not available yet. "
-                "Phase 0 ships the NumPy backend; Core ML / MLX artifacts are "
-                "produced by the trainer in the next phase."
+                "The Core ML / MLX artifact path is superseded by the deep "
+                "learning module (core/deep_model) — load a torch_unet model "
+                "instead."
             )
         )
     return ModelLoadResult(error=f"Unknown model kind: {manifest.kind}")

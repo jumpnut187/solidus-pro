@@ -343,3 +343,228 @@ class SurrogateWorker(QThread):
         except Exception as exc:
             self.progress.emit(f"Error: {str(exc)}")
             self.finished.emit(False, "failed")
+
+
+class DeepTrainWorker(QThread):
+    """Background worker that trains the deep 3D U-Net surrogate."""
+
+    progress = pyqtSignal(str)
+    detailed_progress = pyqtSignal(int, int, str)  # current, total, stage
+    finished = pyqtSignal(bool, str, object)  # success, status, summary
+
+    def __init__(
+        self,
+        data_dir: str,
+        output_dir: str,
+        grid_resolution: int = 32,
+        epochs: int = 100,
+        batch_size: int = 4,
+        learning_rate: float = 1e-3,
+        min_records: int = 4,
+        model_name: str = "Trained Deep Surrogate (3D U-Net)",
+    ) -> None:
+        super().__init__()
+        self.data_dir = data_dir
+        self.output_dir = output_dir
+        self.grid_resolution = int(grid_resolution)
+        self.epochs = int(epochs)
+        self.batch_size = int(batch_size)
+        self.learning_rate = float(learning_rate)
+        self.min_records = int(min_records)
+        self.model_name = model_name
+        self._cancel_requested = threading.Event()
+
+    def cancel(self) -> None:
+        """Request cancellation for the active training run."""
+        self._cancel_requested.set()
+
+    def run(self) -> None:
+        try:
+            from core.deep_model.training import (
+                DeepTrainingCancelledError,
+                train_deep_model,
+            )
+            from core.deep_model.autotrain import (
+                AutoTrainState,
+                dataset_signature,
+                save_state,
+            )
+
+            def _detailed(current: int, total: int) -> None:
+                self.detailed_progress.emit(current, total, "Training")
+
+            summary = train_deep_model(
+                data_dir=self.data_dir,
+                output_dir=self.output_dir,
+                grid=self.grid_resolution,
+                epochs=self.epochs,
+                batch_size=self.batch_size,
+                learning_rate=self.learning_rate,
+                name=self.model_name,
+                min_records=self.min_records,
+                progress_cb=self.progress.emit,
+                detailed_cb=_detailed,
+                cancel_cb=self._cancel_requested.is_set,
+            )
+            # Refresh the auto-train state so cooldown applies after a manual train.
+            signature = dataset_signature(self.data_dir)
+            state = AutoTrainState(
+                signature_count=signature[0] if signature else 0,
+                signature_mtimes=signature[1] if signature else (),
+                last_completed_at=time.time(),
+                model_exists=True,
+            )
+            save_state(self.output_dir, state)
+            self.progress.emit("✓ Deep model trained!")
+            self.finished.emit(True, "completed", summary)
+        except DeepTrainingCancelledError:
+            self.progress.emit("Training cancelled")
+            self.finished.emit(False, "cancelled", None)
+        except Exception as exc:
+            self.progress.emit(f"Error: {str(exc)}")
+            self.finished.emit(False, "failed", None)
+
+
+class DeepExportWorker(QThread):
+    """Background worker that exports the deep model to an NPU target."""
+
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(bool, str, object)  # success, status, result
+
+    def __init__(self, model_dir: str, target: str, out_dir: str) -> None:
+        super().__init__()
+        self.model_dir = model_dir
+        self.target = target
+        self.out_dir = out_dir
+        self._cancel_requested = threading.Event()
+
+    def cancel(self) -> None:
+        """Request cancellation for the active export run."""
+        self._cancel_requested.set()
+
+    def run(self) -> None:
+        try:
+            from core.deep_model.export import export_for_target
+
+            result = export_for_target(
+                self.model_dir,
+                self.target,
+                out_dir=self.out_dir,
+                progress_cb=self.progress.emit,
+                cancel_cb=self._cancel_requested.is_set,
+            )
+            self.progress.emit(f"✓ {self.target.upper()} export complete")
+            self.finished.emit(True, "completed", result)
+        except Exception as exc:
+            self.progress.emit(f"Error: {str(exc)}")
+            self.finished.emit(False, "failed", None)
+
+
+class DeepAutoTrainWorker(QThread):
+    """Background worker that evaluates the retrain policy, then trains.
+
+    Watcher-driven (the main window owns the ``QFileSystemWatcher`` on the
+    dataset directory): this worker applies the policy (min records, cooldown,
+    dataset-changed, torch present, no other training/export) and either skips
+    (emitting a reason) or retrains on the entire accumulated dataset.
+    """
+
+    progress = pyqtSignal(str)
+    detailed_progress = pyqtSignal(int, int, str)  # current, total, stage
+    finished = pyqtSignal(bool, str, object)  # success, status, summary
+    skipped = pyqtSignal(str)
+
+    def __init__(
+        self,
+        data_dir: str,
+        output_dir: str,
+        grid_resolution: int = 32,
+        epochs: int = 100,
+        batch_size: int = 4,
+        learning_rate: float = 1e-3,
+        min_records: int = 4,
+        cooldown_seconds: int = 300,
+        state: Any = None,
+        export_in_progress: bool = False,
+    ) -> None:
+        super().__init__()
+        self.data_dir = data_dir
+        self.output_dir = output_dir
+        self.grid_resolution = int(grid_resolution)
+        self.epochs = int(epochs)
+        self.batch_size = int(batch_size)
+        self.learning_rate = float(learning_rate)
+        self.min_records = int(min_records)
+        self.cooldown_seconds = int(cooldown_seconds)
+        self.state = state  # AutoTrainState; updated + persisted on completion
+        self.export_in_progress = bool(export_in_progress)
+        self._cancel_requested = threading.Event()
+
+    def cancel(self) -> None:
+        """Request cancellation for the active auto-train run."""
+        self._cancel_requested.set()
+
+    def run(self) -> None:
+        try:
+            from core.deep_model.autotrain import (
+                AutoTrainState,
+                dataset_signature,
+                save_state,
+                should_retrain,
+            )
+            from core.deep_model.training import (
+                DeepTrainingCancelledError,
+                train_deep_model,
+            )
+
+            torch_available = True
+            try:
+                import torch  # noqa: F401
+            except ImportError:
+                torch_available = False
+
+            signature = dataset_signature(self.data_dir)
+            should_run, reason = should_retrain(
+                enabled=True,
+                torch_available=torch_available,
+                training_active=False,
+                export_in_progress=self.export_in_progress,
+                current_signature=signature,
+                state=self.state,
+                min_records=self.min_records,
+                cooldown_seconds=self.cooldown_seconds,
+            )
+            if not should_run:
+                self.skipped.emit(reason)
+                self.finished.emit(False, "skipped", None)
+                return
+
+            self.progress.emit(reason)
+            summary = train_deep_model(
+                data_dir=self.data_dir,
+                output_dir=self.output_dir,
+                grid=self.grid_resolution,
+                epochs=self.epochs,
+                batch_size=self.batch_size,
+                learning_rate=self.learning_rate,
+                name="Trained Deep Surrogate (3D U-Net)",
+                min_records=self.min_records,
+                progress_cb=self.progress.emit,
+                detailed_cb=lambda c, t: self.detailed_progress.emit(c, t, "Auto-Train"),
+                cancel_cb=self._cancel_requested.is_set,
+            )
+            state = AutoTrainState(
+                signature_count=signature[0] if signature else 0,
+                signature_mtimes=signature[1] if signature else (),
+                last_completed_at=time.time(),
+                model_exists=True,
+            )
+            save_state(self.output_dir, state)
+            self.progress.emit("✓ Auto-train complete")
+            self.finished.emit(True, "completed", summary)
+        except DeepTrainingCancelledError:
+            self.progress.emit("Auto-train cancelled")
+            self.finished.emit(False, "cancelled", None)
+        except Exception as exc:
+            self.progress.emit(f"Error: {str(exc)}")
+            self.finished.emit(False, "failed", None)

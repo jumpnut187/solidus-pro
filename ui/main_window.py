@@ -23,7 +23,7 @@ from PyQt5.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QWidgetAction
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QPoint, QObject, QTimer
+from PyQt5.QtCore import Qt, pyqtSignal, QPoint, QObject, QTimer, QFileSystemWatcher
 from PyQt5.QtGui import QFont, QCursor
 import json
 import sys
@@ -51,7 +51,15 @@ from .visualizer import CastingVisualizer, COLOR_MAPS
 from .custom_slider import MarkedSlider
 from .dialogs import AnalysisOptionsDialog, DraggableDialog, PartsDialog
 from .project_state import build_project_state, load_project_state
-from .workers import MeshSuggestionWorker, SimulationWorker, SurrogateTrainWorker, SurrogateWorker
+from .workers import (
+    DeepAutoTrainWorker,
+    DeepExportWorker,
+    DeepTrainWorker,
+    MeshSuggestionWorker,
+    SimulationWorker,
+    SurrogateTrainWorker,
+    SurrogateWorker,
+)
 from .surrogate_dialog import SurrogateModelInfoDialog
 from config.hardware_config import hardware
 from core.mesh_ml import MeshRecommendation
@@ -2250,6 +2258,7 @@ class MainWindow(QMainWindow):
         self._init_ui()
         self._create_menu_bar()
         self._autoload_surrogate_model()
+        self._setup_deep_autotrain()
         self._show_hardware_info()
     
     def _init_ui(self):
@@ -2457,6 +2466,45 @@ class MainWindow(QMainWindow):
         self.stop_surrogate_action.triggered.connect(self._cancel_surrogate)
         self.stop_surrogate_action.setEnabled(False)
         surrogate_menu.addAction(self.stop_surrogate_action)
+
+        # ==================== Deep Model Menu ====================
+        # Optional torch module (core/deep_model).  Loading a deep model sets
+        # self.surrogate_model so the existing Surrogate run path works
+        # unchanged.  Auto-train watches data/surrogate_dataset for new runs.
+        deep_menu = menubar.addMenu("&Deep Model")
+
+        self.deep_worker = None  # shared by manual + auto training (mutual exclusion)
+        self.deep_export_worker = None
+        self.deep_exporting = False
+        self.deep_dataset_watcher = None
+        self.deep_debounce_timer = QTimer(self)
+        self.deep_debounce_timer.setSingleShot(True)
+        self.deep_debounce_timer.setInterval(10_000)
+        self.deep_debounce_timer.timeout.connect(self._start_deep_auto_train)
+
+        self.deep_train_action = QAction("🧠 Train Deep Model...", self)
+        self.deep_train_action.setStatusTip("Train the 3D U-Net surrogate from captured runs (requires torch)")
+        self.deep_train_action.triggered.connect(self._open_deep_train_dialog)
+        deep_menu.addAction(self.deep_train_action)
+
+        self.deep_load_action = QAction("📥 Load Deep Model...", self)
+        self.deep_load_action.setStatusTip("Load a trained deep model (models/deep_model/trained)")
+        self.deep_load_action.triggered.connect(self._load_deep_model)
+        deep_menu.addAction(self.deep_load_action)
+
+        self.deep_export_action = QAction("📦 Export for NPU...", self)
+        self.deep_export_action.setStatusTip("Export the trained model to Apple ANE / Snapdragon / Google Tensor")
+        self.deep_export_action.triggered.connect(self._export_deep_model)
+        deep_menu.addAction(self.deep_export_action)
+
+        self.deep_autotrain_action = QAction("🔁 Auto-Train on New Captures", self)
+        self.deep_autotrain_action.setCheckable(True)
+        self.deep_autotrain_action.setStatusTip(
+            "Watch data/surrogate_dataset and retrain the deep model after new captures "
+            "(cooldown + change detection; never erases captured data)"
+        )
+        self.deep_autotrain_action.toggled.connect(self._toggle_deep_autotrain)
+        deep_menu.addAction(self.deep_autotrain_action)
 
         # ==================== Tools Menu ====================
         tools_menu = menubar.addMenu("&Tools")
@@ -4813,6 +4861,8 @@ class MainWindow(QMainWindow):
         1. The model path persisted from the last load/train (if it exists).
         2. ``<model_dir>/trained`` (most recent training output).
         3. ``<model_dir>/demo`` (bundled reference model).
+        When the deep model feature is enabled, ``models/deep_model/trained``
+        is also a candidate (checked before the numpy demo model).
         """
         try:
             from config.settings import get_settings
@@ -4829,6 +4879,15 @@ class MainWindow(QMainWindow):
                 path = os.path.join(model_dir, name)
                 if os.path.isdir(path) and os.path.exists(os.path.join(path, "manifest.json")):
                     candidates.append(path)
+            if bool(getattr(settings.deep, "enabled", False)):
+                deep_trained = os.path.join(
+                    os.path.abspath(str(getattr(settings.deep, "model_dir", "models/deep_model"))),
+                    "trained",
+                )
+                if os.path.isdir(deep_trained) and os.path.exists(
+                    os.path.join(deep_trained, "manifest.json")
+                ):
+                    candidates.insert(0, deep_trained)
 
             for path in candidates:
                 result = surrogate.load_model(path)
@@ -4952,6 +5011,321 @@ class MainWindow(QMainWindow):
         has_model = self.surrogate_model is not None
         self.run_surrogate_action.setEnabled(has_parts and has_model)
         self.surrogate_info_action.setEnabled(has_model)
+
+    # ------------------------------------------------------------------
+    # Deep model handlers (core/deep_model — optional torch module)
+    # ------------------------------------------------------------------
+    def _deep_worker_busy(self) -> bool:
+        """True when a deep train or export worker is active."""
+        train_busy = self.deep_worker is not None and self.deep_worker.isRunning()
+        export_busy = self.deep_export_worker is not None and self.deep_export_worker.isRunning()
+        return bool(train_busy or export_busy)
+
+    def _open_deep_train_dialog(self) -> None:
+        """Ask for hyperparameters, then train in a background thread."""
+        from config.settings import get_settings
+        from core.deep_model.autotrain import load_state
+        from core.surrogate.dataset import DEFAULT_DATASET_DIR
+        from core.deep_model.training import DEFAULT_MODEL_OUTPUT
+        from ui.deep_model_dialog import DeepTrainDialog
+
+        if self._deep_worker_busy():
+            QMessageBox.information(self, "Deep Model", "A deep training or export is already in progress.")
+            return
+
+        dialog = DeepTrainDialog(self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        options = dialog.options()
+
+        settings = get_settings()
+        model_dir = str(getattr(settings.deep, "model_dir", "models/deep_model"))
+        output_dir = os.path.join(os.path.abspath(model_dir), "trained")
+
+        self._set_simulation_running(True)
+        self._stop_fraction_liquid_playback()
+        self.status_label.setText("Training deep model...")
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setFormat("Training...")
+
+        self.deep_worker = DeepTrainWorker(
+            data_dir=DEFAULT_DATASET_DIR,
+            output_dir=output_dir,
+            grid_resolution=options["grid_resolution"],
+            epochs=options["epochs"],
+            batch_size=options["batch_size"],
+            learning_rate=options["learning_rate"],
+            min_records=int(getattr(settings.deep, "min_records", 4) or 4),
+            model_name="Trained Deep Surrogate (3D U-Net)",
+        )
+        self.deep_worker.progress.connect(self._on_simulation_progress)
+        self.deep_worker.detailed_progress.connect(self._on_detailed_progress)
+        self.deep_worker.finished.connect(
+            lambda success, status, summary: self._on_deep_train_finished(
+                success, status, summary, load_model=options["load_model"]
+            )
+        )
+        self.deep_worker.start()
+
+    def _on_deep_train_finished(self, success: bool, status: str, summary: dict, load_model: bool = True) -> None:
+        """Handle deep training completion (manual or auto-train path)."""
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(100 if success else 0)
+        self._set_simulation_running(False)
+
+        if not success:
+            self.status_label.setText("Deep training failed")
+            self.progress_bar.setFormat("Failed")
+            if status == "cancelled":
+                self.status_label.setText("Deep training cancelled")
+                self.progress_bar.setFormat("Cancelled")
+            return
+
+        headline = (summary or {}).get("headline", {})
+        records = (summary or {}).get("records", 0)
+        train = (summary or {}).get("train", 0)
+        test = (summary or {}).get("test", 0)
+        saved_to = (summary or {}).get("saved_to", "")
+
+        lines = [
+            f"Deep model trained from {records} run(s) ({train} train / {test} test).",
+            "",
+            f"  RMSE: {headline.get('rmse_s', 0):.1f}s",
+            f"  MAE:  {headline.get('mae_s', 0):.1f}s",
+            f"  Confidence: {headline.get('confidence', 0):.2f}",
+            "",
+            f"Saved to: {saved_to}",
+        ]
+
+        loaded_name = None
+        if load_model and saved_to:
+            from core import surrogate
+
+            result = surrogate.load_model(saved_to)
+            if result.model is not None:
+                self.surrogate_model = result.model
+                self._persist_deep_model_path(saved_to)
+                self._refresh_surrogate_enabled()
+                loaded_name = result.model.manifest.name
+
+        if loaded_name:
+            lines.append("")
+            lines.append(f"The new deep model is loaded and ready: {loaded_name}")
+
+        self.status_label.setText("✓ Deep model trained")
+        self.progress_bar.setFormat("Complete")
+        QMessageBox.information(self, "Deep Model Trained", "\n".join(lines))
+
+    def _persist_deep_model_path(self, path: str) -> None:
+        """Remember the last-used deep model so it auto-loads next launch."""
+        try:
+            from config.settings import get_settings
+
+            settings = get_settings()
+            settings.deep.last_model_path = str(path)
+            settings.save_user_override("deep", "last_model_path", str(path))
+        except Exception:
+            pass
+
+    def _load_deep_model(self) -> None:
+        """Load a deep model artifact directory into the surrogate slot."""
+        from config.settings import get_settings
+
+        settings = get_settings()
+        model_dir = str(getattr(settings.deep, "model_dir", "models/deep_model"))
+        start_dir = os.path.abspath(model_dir)
+        if not os.path.isdir(start_dir):
+            start_dir = os.path.abspath("models")
+
+        path = QFileDialog.getExistingDirectory(
+            self, "Load Deep Model (directory with manifest.json)", start_dir
+        )
+        if not path:
+            return
+
+        from core import surrogate
+
+        result = surrogate.load_model(path)
+        if result.error or result.model is None:
+            QMessageBox.critical(self, "Deep Model", f"Failed to load model:\n{result.error}")
+            return
+
+        self.surrogate_model = result.model
+        self._persist_deep_model_path(path)
+        self.surrogate_info_action.setEnabled(True)
+        self._refresh_surrogate_enabled()
+        QMessageBox.information(
+            self,
+            "Deep Model Loaded",
+            f"Loaded: {self.surrogate_model.manifest.name}\n"
+            f"Backend: torch (deep 3D U-Net)\n\n"
+            f"{surrogate.format_metrics(self.surrogate_model.manifest.accuracy)}\n\n"
+            "Run it with Surrogate > Run Surrogate Simulation.",
+        )
+
+    def _export_deep_model(self) -> None:
+        """Pick an NPU target and export the trained deep model."""
+        from config.settings import get_settings
+        from ui.deep_model_dialog import DeepExportDialog
+
+        if self._deep_worker_busy():
+            QMessageBox.information(self, "Deep Model", "A deep training or export is already in progress.")
+            return
+
+        settings = get_settings()
+        model_dir = os.path.join(
+            os.path.abspath(str(getattr(settings.deep, "model_dir", "models/deep_model"))),
+            "trained",
+        )
+        if not os.path.isdir(model_dir):
+            QMessageBox.information(
+                self,
+                "Deep Model",
+                "No trained deep model found. Train one first (Deep Model > Train Deep Model...).",
+            )
+            return
+
+        dialog = DeepExportDialog(self, model_dir=model_dir)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        options = dialog.options()
+
+        self.deep_exporting = True
+        self.status_label.setText(f"Exporting deep model for {options['target']}...")
+        self.deep_export_worker = DeepExportWorker(
+            model_dir=options["model_dir"],
+            target=options["target"],
+            out_dir=options["out_dir"],
+        )
+        self.deep_export_worker.progress.connect(self._on_simulation_progress)
+        self.deep_export_worker.finished.connect(self._on_deep_export_finished)
+        self.deep_export_worker.start()
+
+    def _on_deep_export_finished(self, success: bool, status: str, result: dict) -> None:
+        self.deep_exporting = False
+        if not success:
+            self.status_label.setText("Deep model export failed")
+            return
+        lines = [
+            f"Export complete: {str(result.get('target', '')).upper()}",
+            "",
+            f"  Artifact: {result.get('artifact_path', '')}",
+            f"  Quantization: {result.get('quantization', '')}",
+            f"  Validated: {'yes' if result.get('validated') else 'no'}",
+        ]
+        note = result.get("note", "")
+        if note:
+            lines.append("")
+            lines.append(note)
+        self.status_label.setText("✓ Deep model export complete")
+        QMessageBox.information(self, "Deep Model Export", "\n".join(lines))
+
+    def _setup_deep_autotrain(self) -> None:
+        """Set up the dataset watcher + initial policy check when enabled."""
+        try:
+            from config.settings import get_settings
+
+            settings = get_settings()
+            self.deep_autotrain_action.setChecked(bool(settings.deep.enabled))
+            if settings.deep.enabled:
+                self._start_deep_dataset_watcher()
+                self._start_deep_auto_train()
+        except Exception:
+            pass
+
+    def _toggle_deep_autotrain(self, checked: bool) -> None:
+        """Enable/disable the auto-train watcher from the menu."""
+        try:
+            from config.settings import get_settings
+
+            settings = get_settings()
+            settings.deep.enabled = bool(checked)
+            settings.save_user_override("deep", "enabled", settings.deep.enabled)
+            if checked:
+                self._start_deep_dataset_watcher()
+                self.status_label.setText("Deep auto-train enabled — watching captured runs")
+                self._start_deep_auto_train()
+            else:
+                self._stop_deep_dataset_watcher()
+                self.status_label.setText("Deep auto-train disabled")
+        except Exception:
+            pass
+
+    def _start_deep_dataset_watcher(self) -> None:
+        """Watch the surrogate dataset directory for new captured runs."""
+        try:
+            from core.surrogate.dataset import DEFAULT_DATASET_DIR
+
+            if self.deep_dataset_watcher is None:
+                self.deep_dataset_watcher = QFileSystemWatcher(self)
+                self.deep_dataset_watcher.directoryChanged.connect(
+                    lambda _path: self.deep_debounce_timer.start()
+                )
+            if not self.deep_dataset_watcher.directories():
+                os.makedirs(DEFAULT_DATASET_DIR, exist_ok=True)
+                self.deep_dataset_watcher.addPath(DEFAULT_DATASET_DIR)
+        except Exception:
+            pass
+
+    def _stop_deep_dataset_watcher(self) -> None:
+        if self.deep_dataset_watcher is not None:
+            self.deep_dataset_watcher.removePaths(self.deep_dataset_watcher.directories())
+        self.deep_debounce_timer.stop()
+
+    def _start_deep_auto_train(self) -> None:
+        """Run the auto-train policy in a background thread (debounced)."""
+        if self._deep_worker_busy():
+            return
+        try:
+            from config.settings import get_settings
+            from core.deep_model.autotrain import load_state
+            from core.surrogate.dataset import DEFAULT_DATASET_DIR
+
+            settings = get_settings()
+            if not settings.deep.enabled:
+                return
+            model_dir = str(getattr(settings.deep, "model_dir", "models/deep_model"))
+            output_dir = os.path.join(os.path.abspath(model_dir), "trained")
+            state = load_state(output_dir)
+
+            self.deep_worker = DeepAutoTrainWorker(
+                data_dir=DEFAULT_DATASET_DIR,
+                output_dir=output_dir,
+                grid_resolution=int(getattr(settings.deep, "grid_resolution", 32) or 32),
+                epochs=int(getattr(settings.deep, "epochs", 100) or 100),
+                batch_size=int(getattr(settings.deep, "batch_size", 4) or 4),
+                learning_rate=float(getattr(settings.deep, "learning_rate", 1e-3) or 1e-3),
+                min_records=int(getattr(settings.deep, "min_records", 4) or 4),
+                cooldown_seconds=int(getattr(settings.deep, "cooldown_seconds", 300) or 300),
+                state=state,
+                export_in_progress=self.deep_exporting,
+            )
+            self.deep_worker.progress.connect(self._on_simulation_progress)
+            self.deep_worker.detailed_progress.connect(self._on_detailed_progress)
+            self.deep_worker.skipped.connect(
+                lambda reason: self.status_label.setText(f"Deep auto-train: {reason}")
+            )
+            self.deep_worker.finished.connect(
+                lambda success, status, summary: self._on_deep_autotrain_finished(
+                    success, status, summary
+                )
+            )
+            self.deep_worker.start()
+        except Exception:
+            pass
+
+    def _on_deep_autotrain_finished(self, success: bool, status: str, summary: dict) -> None:
+        """Handle auto-train completion — the active model is left untouched."""
+        if not success:
+            if status != "skipped":
+                self.status_label.setText("Deep auto-train failed")
+            return
+        records = (summary or {}).get("records", 0)
+        saved_to = (summary or {}).get("saved_to", "")
+        self.status_label.setText(
+            f"✓ Deep auto-train complete: {records} records -> {saved_to}"
+        )
+
 
     def _run_surrogate(self) -> None:
         """Run the surrogate solidification simulation in a background thread."""

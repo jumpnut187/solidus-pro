@@ -85,3 +85,21 @@ scikit-learn>=1.3.0        # ML models (GradientBoostingRegressor, preprocessing
 # PDF report generation (optional - requires system dependencies)
 # weasyprint>=60.0  # HTML to PDF conversion (requires GTK3 on Linux)
 # pdfkit>=1.0.0     # Alternative: Requires wkhtmltopdf installed separately
+
+# ============================================================================
+# DEEP LEARNING MODULE (optional; core/deep_model/)
+# ============================================================================
+# Required for the 3D U-Net solidification surrogate, its NPU exports
+# (Apple ANE / Snapdragon / Google Tensor), and background auto-training.
+# torch is imported lazily — the app launches without it, and auto-train
+# skips cleanly when it is absent.
+# Install with: venv/bin/pip install torch coremltools onnx onnxruntime
+torch>=2.6.0               # Training + inference (MPS on Apple Silicon; 2.6+ for Python 3.13)
+coremltools>=8.3           # Apple ANE export (.mlpackage)
+onnx>=1.16.0               # Snapdragon/ONNX export + graph validation
+onnxruntime>=1.18.0        # ONNX CPU EP validation
+onnxscript>=0.1.0          # torch ONNX exporter dependency (torch >= 2.12)
+onnx2tf>=1.22.0            # Google Tensor TFLite export (torch -> ONNX -> tflite)
+tflite-runtime>=2.14.0     # TFLite interpreter validation
+# NOTE: onnx2tf may not yet publish Python 3.13 / arm64 wheels — the TFLite
+# export fails with a clear message instead of crashing in that case.
