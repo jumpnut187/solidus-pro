@@ -72,7 +72,6 @@ def _build_config(inputs: PipelineInputs, bounds_to_use: Any, analysis_options: 
 def _apply_schedule_to_engine(
     engine: SolidificationEngine,
     start: np.ndarray,
-    end: np.ndarray,
     local: np.ndarray,
 ) -> None:
     """Write the predicted schedule into the engine and synthesize states."""
@@ -86,23 +85,27 @@ def _apply_schedule_to_engine(
     active = (local > 0.0) & ~chill_mask
 
     start = np.asarray(start, dtype=np.float32).copy()
-    end = np.asarray(end, dtype=np.float32).copy()
     local = np.asarray(local, dtype=np.float32).copy()
 
     start[chill_mask] = 0.0
-    end[chill_mask] = 0.0
     local[chill_mask] = 0.0
     engine.mesh.voxel_states[chill_mask] = 1.0
 
     if np.any(active):
-        final_time = float(np.max(end[active]))
+        # The timeline is defined by the schedule itself (start + local),
+        # matching how every fraction-solid computation and the traditional
+        # pipeline derive completion.  Trusting the predicted end field
+        # directly lets a stray end head inflate the fraction-liquid window
+        # (and solidification_times) far past the true completion time.
+        completion = start + local
+        final_time = float(np.max(completion[active]))
     else:
         final_time = float(engine.max_time or 0.0)
     engine.time = final_time
 
     engine.solidification_start_times[:] = start
-    engine.solidification_end_times[:] = end
-    engine.solidification_times[:] = end
+    engine.solidification_end_times[:] = completion
+    engine.solidification_times[:] = completion
     engine.local_solidification_time[:] = local
 
     pre_solid = np.asarray(engine.mesh.voxel_states, dtype=np.float32) >= 1.0
@@ -217,11 +220,10 @@ def run_surrogate_pipeline(
 
     centers = np.asarray(voxel_mesh.voxel_centers, dtype=np.float64)
     start = unproject_grid(prediction[0], centers, meta)
-    end = unproject_grid(prediction[1], centers, meta)
     local = unproject_grid(prediction[2], centers, meta)
 
     _emit_message(progress_message_callback, "Running post analyses...")
-    _apply_schedule_to_engine(engine, start, end, local)
+    _apply_schedule_to_engine(engine, start, local)
     engine.stage_timings = {}
     run_post_analyses(engine, show_progress=inputs.show_progress)
     _check_cancel(cancel_callback)

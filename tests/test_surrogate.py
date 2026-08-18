@@ -309,5 +309,37 @@ class PipelineTests(unittest.TestCase):
         self.assertLess(m["relative_rmse"], 1.0)
 
 
+    def test_fraction_liquid_window_matches_schedule_completion(self):
+        # The fraction-liquid timeline must span exactly the schedule-defined
+        # completion (max(start + local)), never the predicted end field —
+        # an incoherent end head used to stretch the slider past completion.
+        box = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
+        loader = _loader_for(box)
+        inputs = PipelineInputs(
+            alloy_name="WCB",
+            voxel_size=0.5,
+            refinement_level=1,
+            memory_mode="ram",
+            analysis_options={"fraction_liquid": True},
+            max_voxels_for_visualization=50_000,
+            show_progress=False,
+        )
+        model = load_model(os.path.join(os.path.dirname(os.path.dirname(__file__)), "models", "surrogate", "demo")).model
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = run_surrogate_pipeline(inputs, model=model, stl_loader=loader)
+        eng = result.engine
+        start = np.asarray(eng.solidification_start_times, dtype=np.float64)
+        local = np.asarray(eng.local_solidification_time, dtype=np.float64)
+        active = local > 0.0
+        expected_max = float(np.max((start + local)[active]))
+        self.assertAlmostEqual(eng.time, expected_max, delta=1e-3)
+        self.assertAlmostEqual(eng.get_fraction_liquid_time_range()[1], expected_max, delta=1e-3)
+        self.assertAlmostEqual(
+            float(np.max(eng.solidification_times)),
+            expected_max,
+            delta=1e-3,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

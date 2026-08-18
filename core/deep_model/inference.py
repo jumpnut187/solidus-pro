@@ -8,13 +8,15 @@ unchanged.  Prediction is backend-aware:
 2. PyTorch MPS — Apple GPU.
 3. PyTorch CPU — universal fallback.
 
-End times are predicted in log space and converted back with a
-``[0.1, max_simulation_time]`` clamp (mirrors the numpy surrogate).
+The schedule is reconstructed so ``end == start + local`` (bounded by
+``max_simulation_time``), the same invariant the numpy surrogate enforces.
+Without reconstruction, the independently-trained end head drifts from the
+start/local heads and inflates the fraction-liquid timeline with outlier end
+times far past the true solidification completion.
 """
 
 from __future__ import annotations
 
-import math
 import os
 from typing import Any, Dict, Optional
 
@@ -26,13 +28,6 @@ from core.surrogate.conditioning import Conditioning, raw_from_conditioning
 from core.surrogate.model import ModelLoadResult, ModelManifest, SurrogateModel
 
 END_TIME_FLOOR = 0.1
-
-
-def _clamp_log_end(log_end: np.ndarray, max_time: float) -> np.ndarray:
-    """Recover end time from log space with a physical clamp."""
-    end = np.exp(np.asarray(log_end, dtype=np.float64))
-    end = np.clip(end, END_TIME_FLOOR, max(max_time, END_TIME_FLOOR))
-    return end.astype(np.float32)
 
 
 class DeepSurrogateModel(SurrogateModel):
@@ -121,13 +116,25 @@ class DeepSurrogateModel(SurrogateModel):
         raw = raw_from_conditioning(conditioning)
         max_time = float(raw.get("max_simulation_time", 14400.0))
         start = pred[0].astype(np.float32)
-        end = _clamp_log_end(pred[1], max_time)
         local = pred[2].astype(np.float32)
 
         active = channels[0] > 0.5
-        start = np.where(active, np.maximum(start, 0.0), 0.0)
-        end = np.where(active, end, 0.0)
+        start = np.where(active, np.clip(start, 0.0, max_time), 0.0)
         local = np.where(active, np.maximum(local, 0.0), 0.0)
+
+        # Reconstruct the schedule so end == start + local (the invariant the
+        # numpy surrogate enforces and every fraction-solid computation relies
+        # on). The three heads are trained independently; trusting the raw end
+        # head lets outliers inflate the fraction-liquid timeline far past the
+        # true completion time, so the end head is only used as a lower bound
+        # for the completion time via local.
+        end = np.minimum(start + local, max_time)
+        end = np.maximum(end, END_TIME_FLOOR)
+        local = np.maximum(end - start, 0.0)
+
+        start[~active] = 0.0
+        end[~active] = 0.0
+        local[~active] = 0.0
         return np.stack([start, end, local]).astype(np.float32)
 
     def _predict_torch(self, channels: np.ndarray, conditioning: Conditioning) -> np.ndarray:

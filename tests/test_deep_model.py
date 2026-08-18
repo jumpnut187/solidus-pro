@@ -272,6 +272,36 @@ class InferenceTests(unittest.TestCase):
             self.assertTrue(np.all(np.isfinite(pred)))
             self.assertTrue(np.all(pred >= 0.0))
 
+    def test_predict_reconstructs_coherent_schedule(self):
+        # Regression: end must equal start + local on active cells (bounded by
+        # max_simulation_time). An incoherent end head inflates the
+        # fraction-liquid timeline far past the true completion time.
+        with tempfile.TemporaryDirectory() as tmp:
+            saved_to = self._train_small_model(tmp)
+            result = load_model(saved_to)
+            self.assertEqual(result.error, "")
+
+            rng = np.random.default_rng(0)
+            channels = np.zeros((7, 8, 8, 8), dtype=np.float32)
+            channels[0, 2:6, 2:6, 2:6] = 1.0
+            channels[1, 2:6, 2:6, 2:6] = 0.0
+            channels[2] = 0.5
+            channels[3] = 0.5
+            channels[4] = np.linspace(0, 1, 8)[None, None, :] * np.ones((8, 8, 1))
+            cond = _conditioning()
+            from core.surrogate.conditioning import raw_from_conditioning
+
+            max_time = float(raw_from_conditioning(cond).get("max_simulation_time", 14400.0))
+
+            pred = result.model.predict(channels, cond)
+            start, end, local = pred[0], pred[1], pred[2]
+            active = channels[0] > 0.5
+            self.assertTrue(np.any(active))
+            np.testing.assert_allclose(end[active], start[active] + local[active], rtol=1e-5, atol=1e-4)
+            self.assertTrue(np.all(end[active] <= max_time + 1e-3))
+            self.assertTrue(np.all((start >= 0) & (local >= 0) & (end >= 0)))
+            self.assertTrue(np.all(end[~active] == 0.0))
+
     def test_pipeline_end_to_end(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = os.path.join(tmp, "data")
