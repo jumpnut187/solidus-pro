@@ -69,20 +69,27 @@ def resample_record(
         return channels, start, end, local
 
     def _scatter_like(arr: np.ndarray) -> np.ndarray:
-        """Average over occupied subcells, binary occupancy for channel 0."""
+        """Average over occupied subcells, binary occupancy for channel 0.
+
+        Only the multi-channel ``channels`` array re-binarizes its occupancy
+        channel after pooling; single-field schedule grids (``start``/``end``/
+        ``local``, passed as ``(1, R, R, R)``) must keep their pooled values.
+        """
         arr = np.asarray(arr, dtype=np.float32)
+        is_channels = arr.ndim == 4 and arr.shape[0] > 1
         if src % target == 0:
             factor = src // target
             count = _block_sum(channels[0][None], factor)[0]
             out = _block_sum(arr, factor) / np.maximum(count[None], 1)
             if arr.ndim == 4:
                 out[:, count == 0] = 0.0
-                out[0] = (count > 0).astype(np.float32)
+                if is_channels:
+                    out[0] = (count > 0).astype(np.float32)
             else:
                 out[count == 0] = 0.0
             return out.astype(np.float32)
         out = _zoom(arr[None], target)[0] if arr.ndim == 3 else _zoom(arr, target)
-        if arr.ndim == 4:
+        if is_channels:
             out[0] = (out[0] > 0.5).astype(np.float32)
         return out.astype(np.float32)
 

@@ -182,6 +182,63 @@ class TrainingTests(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_TORCH, "torch not installed")
+class DatasetResampleTests(unittest.TestCase):
+    """Resampling must preserve schedule field values (regression: the
+    occupancy re-binarization overwrote start/end/local with the occupancy
+    mask, collapsing every training target to constant 1.0 on occupied
+    cells and producing degenerate fraction-liquid playback)."""
+
+    def _record(self) -> dict:
+        from core.deep_model.dataset import resample_record
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write_synthetic_record(tmp, 0, resolution=8)
+            with np.load(path, allow_pickle=True) as npz:
+                channels = np.asarray(npz["channels"], dtype=np.float32)
+                start = np.asarray(npz["solidification_start_times"], dtype=np.float32).reshape(8, 8, 8)
+                end = np.asarray(npz["solidification_end_times"], dtype=np.float32).reshape(8, 8, 8)
+                local = np.asarray(npz["local_solidification_time"], dtype=np.float32).reshape(8, 8, 8)
+            return resample_record(channels, start, end, local, 4)
+
+    def test_resample_preserves_schedule_values(self):
+        channels, start, end, local = self._record()
+        for field in (start, end, local):
+            self.assertEqual(field.shape, (4, 4, 4))
+        self.assertAlmostEqual(float(end.max()), 300.0, places=4)
+        self.assertAlmostEqual(float(np.median(end[end > 0])), 300.0, places=4)
+        self.assertAlmostEqual(float(start[start > 0].max()), 180.0, places=4)
+        self.assertAlmostEqual(float(np.median(start[start > 0])), 180.0, places=4)
+        self.assertAlmostEqual(float(np.median(local[local > 0])), 120.0, places=4)
+        self.assertEqual(set(np.unique(channels[0])).issubset({0.0, 1.0}), True)
+
+    def test_resample_not_collapsed_to_occupancy(self):
+        # Regression guard: fields must not be replaced by the 0/1 occupancy mask.
+        channels, start, end, local = self._record()
+        for field in (start, end, local):
+            active = field[field > 0]
+            self.assertGreater(active.size, 0)
+            self.assertGreater(float(active.max()), 1.0)
+
+    def test_deep_dataset_items_carry_real_targets(self):
+        from core.deep_model.dataset import DeepDataset
+        from core.surrogate.dataset import load_dataset
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = os.path.join(tmp, "data")
+            _write_synthetic_record(data_dir, 0, resolution=64)
+            _write_synthetic_record(data_dir, 1, resolution=64)
+            ds = DeepDataset(load_dataset(data_dir), resolution=32, split="all")
+            for item in ds:
+                for field in (item.start, item.end, item.local):
+                    values = field.numpy()
+                    active = values[values > 0]
+                    self.assertGreater(active.size, 0)
+                    self.assertGreater(float(active.max()), 1.0)
+                self.assertTrue((item.end.numpy() > 0).any())
+
+
+
+@unittest.skipUnless(HAVE_TORCH, "torch not installed")
 class InferenceTests(unittest.TestCase):
     def _train_small_model(self, tmp: str) -> str:
         data_dir = _two_record_dataset(tmp)

@@ -97,6 +97,27 @@ class FieldsCodecTests(unittest.TestCase):
         self.assertTrue(np.any(occ > 0.5))
         self.assertEqual(set(np.unique(occ)).issubset({0.0, 1.0}), True)
 
+    def test_unproject_uses_scatter_cell_not_rounding(self):
+        # Regression: unprojection must fetch the cell the voxel was scattered
+        # into (floor), not round to the neighbour cell — rounding drops voxels
+        # in the upper half of a cell onto empty cells.
+        engine = _fake_engine(n=20)
+        centers = np.asarray(engine.mesh.voxel_centers, dtype=np.float64)
+        boost = np.ones(len(centers), dtype=np.float32)
+        slow = np.ones(len(centers), dtype=np.float32)
+        channels, meta = encode_channels(engine, boost, slow, resolution=16)
+        cell = meta.cell_size
+        bmin = meta.bbox[:, 0]
+        res = meta.resolution
+        grid = np.zeros((res, res, res), dtype=np.float32)
+        floor_idx = np.floor((centers - bmin) / cell).astype(np.int64)
+        floor_idx = np.clip(floor_idx, 0, res - 1)
+        flat = floor_idx[:, 0] + res * (floor_idx[:, 1] + res * floor_idx[:, 2])
+        grid.reshape(-1)[flat] = 1.0
+        back = unproject_grid(grid, centers, meta)
+        self.assertTrue(np.all(back == 1.0),
+                        f"{int(np.sum(back == 0))}/{len(centers)} voxels dropped by rounding")
+
 
 class ModelTests(unittest.TestCase):
     def test_demo_predict(self):

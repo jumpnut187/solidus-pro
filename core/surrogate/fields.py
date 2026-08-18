@@ -165,6 +165,11 @@ def unproject_grid(
 ) -> np.ndarray:
     """Map a grid prediction back to the native voxel mesh.
 
+    Uses the same floor-based cell mapping as :func:`encode_channels`
+    (``_scatter``), so each voxel fetches the exact cell its features were
+    averaged into — a round-based lookup would read the neighbouring cell
+    for voxels in the upper half of a cell and silently drop them.
+
     Args:
         grid: Shape ``(C, R, R, R)`` or ``(R, R, R)``.
         centers: Voxel centers, shape ``(n_voxels, 3)``.
@@ -175,7 +180,7 @@ def unproject_grid(
     """
     r = meta.resolution
     bmin = meta.bbox[:, 0]
-    idx = np.round((np.asarray(centers, dtype=np.float64) - bmin) / meta.cell_size).astype(np.int64)
+    idx = np.floor((np.asarray(centers, dtype=np.float64) - bmin) / meta.cell_size).astype(np.int64)
     idx = np.clip(idx, 0, r - 1)
     flat = idx[:, 0] + r * (idx[:, 1] + r * idx[:, 2])
     if grid.ndim == 3:
