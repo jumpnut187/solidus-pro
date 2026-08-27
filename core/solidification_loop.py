@@ -9,6 +9,7 @@ from typing import Any, Callable, Optional
 import numpy as np
 from config.hardware_config import hardware
 from core.thread_budget import resolve_thread_budget
+from core.part_manager import PART_TYPE_RISER
 from physics.units import inches_to_mm
 
 try:
@@ -351,7 +352,7 @@ def _apply_feeding_zone_bias(
     part_types_raw = getattr(engine.mesh, "voxel_part_types", None)
     if part_types_raw is not None and float(feeding_bias) > 0.0:
         part_types = np.ascontiguousarray(part_types_raw, dtype=np.int32)
-        if int(np.sum(part_types == 1)) > 0:
+        if int(np.sum(part_types == PART_TYPE_RISER)) > 0:
             neighbors_raw = getattr(engine.mesh, "voxel_neighbors", None)
             if neighbors_raw is not None:
                 neighbors = np.ascontiguousarray(neighbors_raw, dtype=np.int32)

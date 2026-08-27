@@ -108,6 +108,80 @@ class PartType(Enum):
         return self.value.replace('_', ' ').title()
 
 
+# ---------------------------------------------------------------------------
+# Voxel part-type codes
+# ---------------------------------------------------------------------------
+# AdaptiveVoxelMesh.voxel_part_types is an int32 array, not an array of
+# PartType, because it is consumed by Numba kernels. These names exist so the
+# codes are greppable and self-describing instead of appearing as bare integers
+# at ~45 comparison sites across core/.
+
+PART_TYPE_CAST = 0
+PART_TYPE_RISER = 1
+PART_TYPE_CHILL = 2
+PART_TYPE_RISER_POST = 3
+PART_TYPE_CORE = 4
+
+#: Authoritative PartType -> voxel code mapping.
+PART_TYPE_TO_CODE = {
+    PartType.CAST: PART_TYPE_CAST,
+    PartType.RISER: PART_TYPE_RISER,
+    PartType.CHILL: PART_TYPE_CHILL,
+    PartType.RISER_POST: PART_TYPE_RISER_POST,
+    PartType.CORE: PART_TYPE_CORE,
+}
+
+CODE_TO_PART_TYPE = {code: part_type for part_type, code in PART_TYPE_TO_CODE.items()}
+
+# --- Semantic groupings -----------------------------------------------------
+# Add a new part type to the group(s) it belongs to here, once, rather than
+# revisiting every comparison site. A mold-filling stage will introduce SPRUE,
+# RUNNER, GATE and POUR_CUP, which are metal-filled and are flow paths, but are
+# not part of the casting and must not be scored for shrinkage defects.
+
+#: Codes that hold molten metal and therefore participate in solidification.
+METAL_PART_CODES = (PART_TYPE_CAST, PART_TYPE_RISER, PART_TYPE_RISER_POST)
+
+#: Codes that feed the casting rather than forming it.
+FEEDER_PART_CODES = (PART_TYPE_RISER, PART_TYPE_RISER_POST)
+
+#: Codes that are mold material, not metal.
+MOLD_PART_CODES = (PART_TYPE_CHILL, PART_TYPE_CORE)
+
+
+def _code_mask(part_types: "np.ndarray", codes) -> "np.ndarray":
+    arr = np.asarray(part_types)
+    mask = np.zeros(arr.shape, dtype=bool)
+    for code in codes:
+        mask |= arr == code
+    return mask
+
+
+def is_metal(part_types: "np.ndarray") -> "np.ndarray":
+    """Voxels holding molten metal (cast, riser, riser post)."""
+    return _code_mask(part_types, METAL_PART_CODES)
+
+
+def is_feeder(part_types: "np.ndarray") -> "np.ndarray":
+    """Voxels that feed the casting (riser, riser post)."""
+    return _code_mask(part_types, FEEDER_PART_CODES)
+
+
+def is_mold(part_types: "np.ndarray") -> "np.ndarray":
+    """Voxels that are mold material rather than metal (chill, core)."""
+    return _code_mask(part_types, MOLD_PART_CODES)
+
+
+def is_cast(part_types: "np.ndarray") -> "np.ndarray":
+    """Voxels belonging to the casting itself."""
+    return _code_mask(part_types, (PART_TYPE_CAST,))
+
+
+def is_chill(part_types: "np.ndarray") -> "np.ndarray":
+    """Chill voxels."""
+    return _code_mask(part_types, (PART_TYPE_CHILL,))
+
+
 # Part type colors for visualization
 PART_TYPE_COLORS = {
     PartType.CAST: (0.7, 0.75, 0.8),    # Default grey-blue (steel appearance)
@@ -642,19 +716,12 @@ class PartManager:
             - transformed_mesh: The part's transformed trimesh
             - part_type_int: 0=CAST, 1=RISER, 2=CHILL, 3=RISER_POST, 4=CORE
         """
-        type_map = {
-            PartType.CAST: 0, 
-            PartType.RISER: 1, 
-            PartType.CHILL: 2,
-            PartType.RISER_POST: 3,  # Distinct type for hot sand saturation effect
-            PartType.CORE: 4  # Sand core - excluded from defect analysis
-        }
         result = []
-        
+
         for part in self.get_all_parts():
             if part.visible:
                 mesh = part.get_transformed_mesh()
-                type_code = type_map.get(part.part_type, 0)
+                type_code = PART_TYPE_TO_CODE.get(part.part_type, PART_TYPE_CAST)
                 result.append((mesh, type_code))
         
         return result

@@ -15,6 +15,13 @@ Performance Optimizations:
 import numpy as np
 from typing import Tuple, List, Dict, Optional, Union, Sequence
 import trimesh
+from core.part_manager import (
+    PART_TYPE_CAST,
+    PART_TYPE_CHILL,
+    PART_TYPE_RISER,
+    PART_TYPE_RISER_POST,
+    is_mold,
+)
 from scipy.spatial import cKDTree
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
 import multiprocessing
@@ -1503,10 +1510,10 @@ class AdaptiveVoxelMesh:
                     self.voxel_part_types[inside_global_indices[override_mask]] = part_type
         
         # Count voxels by type
-        cast_count = np.sum(self.voxel_part_types == 0)
-        riser_count = np.sum(self.voxel_part_types == 1)
-        chill_count = np.sum(self.voxel_part_types == 2)
-        riser_post_count = np.sum(self.voxel_part_types == 3)
+        cast_count = np.sum(self.voxel_part_types == PART_TYPE_CAST)
+        riser_count = np.sum(self.voxel_part_types == PART_TYPE_RISER)
+        chill_count = np.sum(self.voxel_part_types == PART_TYPE_CHILL)
+        riser_post_count = np.sum(self.voxel_part_types == PART_TYPE_RISER_POST)
         print(f"    Part types assigned: CAST={cast_count:,}, RISER={riser_count:,}, CHILL={chill_count:,}, RISER_POST={riser_post_count:,}")
         
         # Warn if expected parts have no voxels (likely containment check failure)
@@ -1552,10 +1559,10 @@ class AdaptiveVoxelMesh:
         voxel_sizes_array = np.asarray(self.voxel_sizes)
         
         # Find voxels of each type
-        cast_indices = np.where(self.voxel_part_types == 0)[0]
-        riser_indices = np.where(self.voxel_part_types == 1)[0]
-        chill_indices = np.where(self.voxel_part_types == 2)[0]
-        riser_post_indices = np.where(self.voxel_part_types == 3)[0]
+        cast_indices = np.where(self.voxel_part_types == PART_TYPE_CAST)[0]
+        riser_indices = np.where(self.voxel_part_types == PART_TYPE_RISER)[0]
+        chill_indices = np.where(self.voxel_part_types == PART_TYPE_CHILL)[0]
+        riser_post_indices = np.where(self.voxel_part_types == PART_TYPE_RISER_POST)[0]
         
         bridges_added = 0
         
@@ -1905,7 +1912,7 @@ class AdaptiveVoxelMesh:
             return geometric
 
         part_types = np.asarray(part_types)
-        if not np.any((part_types == 2) | (part_types == 4)):
+        if not np.any(is_mold(part_types)):
             self._material_surface_indices = geometric
             return geometric
 

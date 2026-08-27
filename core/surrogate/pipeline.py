@@ -31,6 +31,7 @@ from core.simulation_pipeline import (
     prepare_mesh_and_geometry,
 )
 from core.solidification import SOLVER_MODE_SCHEDULE_LEGACY, SolidificationEngine
+from core.part_manager import is_chill
 from core.solidification_loop import build_schedule_fraction_history, compute_schedule_fraction_solid
 from core.surrogate.conditioning import Conditioning, build_conditioning_vector
 from core.surrogate.fields import encode_channels, unproject_grid
@@ -80,7 +81,7 @@ def _apply_schedule_to_engine(
     if part_types is None:
         part_types = np.zeros(n_voxels, dtype=np.int32)
     part_types = np.asarray(part_types, dtype=np.int32)
-    chill_mask = part_types == 2
+    chill_mask = is_chill(part_types)
 
     active = (local > 0.0) & ~chill_mask
 

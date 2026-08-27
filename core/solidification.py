@@ -34,6 +34,15 @@ from core.solidification_params import (
 from dataclasses import dataclass, field
 from physics.heat_transfer import BoundaryType, HeatTransferModel
 from physics.units import GRAVITY_M_S2, inches_to_meters, inches_to_mm
+from core.part_manager import (
+    PART_TYPE_CAST,
+    PART_TYPE_CHILL,
+    PART_TYPE_CORE,
+    PART_TYPE_RISER,
+    PART_TYPE_RISER_POST,
+    is_feeder,
+    is_metal,
+)
 from physics.solidification_physics import SolidificationModel as ThermalSolidificationModel
 from core.acceleration import (
     update_solidification_with_part_types_parallel,
@@ -749,9 +758,9 @@ class SolidificationEngine:
         
         # Report part types if available
         if self.mesh.voxel_part_types is not None:
-            cast_count = np.sum(self.mesh.voxel_part_types == 0)
-            riser_count = np.sum(self.mesh.voxel_part_types == 1)
-            chill_count = np.sum(self.mesh.voxel_part_types == 2)
+            cast_count = np.sum(self.mesh.voxel_part_types == PART_TYPE_CAST)
+            riser_count = np.sum(self.mesh.voxel_part_types == PART_TYPE_RISER)
+            chill_count = np.sum(self.mesh.voxel_part_types == PART_TYPE_CHILL)
             print(f"Part types: CAST={cast_count:,}, RISER={riser_count:,}, CHILL={chill_count:,}")
         
         # Calculate dynamic max_time based on geometry using Chvorinov's Rule
@@ -986,7 +995,7 @@ class SolidificationEngine:
 
         fp = self.analysis_options.solidification_params.feeding
         part_types = np.asarray(self.mesh.voxel_part_types, dtype=np.int32)
-        riser_indices = np.where(part_types == 1)[0]
+        riser_indices = np.where(part_types == PART_TYPE_RISER)[0]
         if len(riser_indices) == 0:
             return schedule_slowdown
 
@@ -995,14 +1004,14 @@ class SolidificationEngine:
         )
         schedule_slowdown[riser_indices] = avg_riser_factor
 
-        riser_post_indices = np.where(part_types == 3)[0]
+        riser_post_indices = np.where(part_types == PART_TYPE_RISER_POST)[0]
         if len(riser_post_indices) > 0:
             avg_post_factor = self._average_riser_post_factor_over_duration(
                 float(np.max(base_completion_times[riser_post_indices]))
             )
             schedule_slowdown[riser_post_indices] = avg_post_factor
 
-        cast_indices = np.where(part_types == 0)[0]
+        cast_indices = np.where(part_types == PART_TYPE_CAST)[0]
         if len(cast_indices) == 0:
             return schedule_slowdown
 
@@ -1049,10 +1058,10 @@ class SolidificationEngine:
         else:
             part_types = np.asarray(self.mesh.voxel_part_types, dtype=np.int32)
 
-        cast_mask = part_types == 0
-        riser_mask = part_types == 1
-        chill_mask = part_types == 2
-        riser_post_mask = part_types == 3
+        cast_mask = part_types == PART_TYPE_CAST
+        riser_mask = part_types == PART_TYPE_RISER
+        chill_mask = part_types == PART_TYPE_CHILL
+        riser_post_mask = part_types == PART_TYPE_RISER_POST
         active_mask = cast_mask | riser_mask | riser_post_mask
 
         start_times = np.zeros(n_voxels, dtype=np.float32)
@@ -1351,7 +1360,7 @@ class SolidificationEngine:
         """Get indices of voxels that are part of chills"""
         if self.mesh.voxel_part_types is None:
             return np.array([], dtype=int)
-        return np.where(self.mesh.voxel_part_types == 2)[0]  # 2 = CHILL
+        return np.where(self.mesh.voxel_part_types == PART_TYPE_CHILL)[0]
 
     def _get_orphan_metal_mask(self) -> np.ndarray:
         """Phantom "metal" voxels that are not real casting metal.
@@ -1391,7 +1400,7 @@ class SolidificationEngine:
             return orphan
 
         part_types = np.asarray(part_types)
-        metal = (part_types == 0) | (part_types == 1) | (part_types == 3)
+        metal = is_metal(part_types)
         n_metal = int(np.sum(metal))
         if n_metal == 0:
             self._orphan_metal_mask = orphan
@@ -1471,20 +1480,20 @@ class SolidificationEngine:
         """Get indices of voxels that are part of feeder necks / riser posts."""
         if self.mesh.voxel_part_types is None:
             return np.array([], dtype=int)
-        return np.where(self.mesh.voxel_part_types == 3)[0]  # 3 = RISER_POST
+        return np.where(self.mesh.voxel_part_types == PART_TYPE_RISER_POST)[0]
     
     def _get_riser_voxel_indices(self) -> np.ndarray:
         """Get indices of voxels that are part of risers"""
         if self.mesh.voxel_part_types is None:
             return np.array([], dtype=int)
-        return np.where(self.mesh.voxel_part_types == 1)[0]  # 1 = RISER
+        return np.where(self.mesh.voxel_part_types == PART_TYPE_RISER)[0]
 
     def _get_feeder_voxel_indices(self) -> np.ndarray:
         """Get indices of all feeder-system voxels (riser body + riser post)."""
         if self.mesh.voxel_part_types is None:
             return np.array([], dtype=int)
         return np.where(
-            (self.mesh.voxel_part_types == 1) | (self.mesh.voxel_part_types == 3)
+            is_feeder(self.mesh.voxel_part_types)
         )[0]
 
     def _get_connected_feeder_mask(self) -> np.ndarray:
@@ -1674,7 +1683,7 @@ class SolidificationEngine:
             self._chill_centers = np.ascontiguousarray(self.mesh.voxel_centers[chill_indices], dtype=np.float32)
             
             # Find chill surface voxels for point-based EDT
-            chill_mask = (self.mesh.voxel_part_types == 2)
+            chill_mask = (self.mesh.voxel_part_types == PART_TYPE_CHILL)
             # A chill voxel is on the surface if it's marked as surface_voxel OR 
             # if it has a non-chill neighbor (simplified: use mesh.surface_voxels bitmask)
             chill_surface_mask = chill_mask & self.mesh.surface_voxels
@@ -1888,7 +1897,7 @@ class SolidificationEngine:
         # The sand around riser posts becomes heat-saturated over time,
         # keeping the post liquid longer than normal casting would solidify.
         # This is a time-dependent effect - sand takes time to heat up.
-        riser_post_indices = np.where(self.mesh.voxel_part_types == 3)[0]
+        riser_post_indices = np.where(self.mesh.voxel_part_types == PART_TYPE_RISER_POST)[0]
         if len(riser_post_indices) > 0:
             # Hot sand saturation parameters
             sand_saturation_time_constant = tp.sand_saturation_time
@@ -1907,7 +1916,7 @@ class SolidificationEngine:
         
         # Calculate riser influence on nearby CAST voxels
         # This creates directional solidification TOWARD the risers
-        cast_indices = np.where(self.mesh.voxel_part_types == 0)[0]
+        cast_indices = np.where(self.mesh.voxel_part_types == PART_TYPE_CAST)[0]
         
         if len(cast_indices) > 0:
             # Build KD-tree for riser centers
@@ -2006,7 +2015,7 @@ class SolidificationEngine:
         
         # Get CAST voxel indices (only casting voxels get shrinkage reduction, not risers)
         if self.mesh.voxel_part_types is not None:
-            cast_mask = self.mesh.voxel_part_types == 0
+            cast_mask = self.mesh.voxel_part_types == PART_TYPE_CAST
         else:
             cast_mask = np.ones(n_voxels, dtype=bool)
         
@@ -2085,8 +2094,8 @@ class SolidificationEngine:
 
         if self.mesh.voxel_part_types is not None:
             part_types = np.asarray(self.mesh.voxel_part_types, dtype=np.int32)
-            cast_mask = part_types == 0
-            riser_post_mask = part_types == 3
+            cast_mask = part_types == PART_TYPE_CAST
+            riser_post_mask = part_types == PART_TYPE_RISER_POST
         else:
             cast_mask = np.ones(n_voxels, dtype=bool)
             riser_post_mask = np.zeros(n_voxels, dtype=bool)
@@ -3454,10 +3463,10 @@ class SolidificationEngine:
         part_types = getattr(mesh, "voxel_part_types", None) if mesh is not None else None
         if part_types is not None:
             part_types = np.asarray(part_types, dtype=np.int32)
-            cast_mask = part_types == 0
-            riser_mask = part_types == 1
-            chill_mask = part_types == 2
-            riser_post_mask = part_types == 3
+            cast_mask = part_types == PART_TYPE_CAST
+            riser_mask = part_types == PART_TYPE_RISER
+            chill_mask = part_types == PART_TYPE_CHILL
+            riser_post_mask = part_types == PART_TYPE_RISER_POST
         else:
             cast_mask = np.ones(n_voxels, dtype=bool)
             riser_mask = np.zeros(n_voxels, dtype=bool)
@@ -4207,7 +4216,7 @@ class SolidificationEngine:
         # Part type convention (per part_manager._PART_TYPE_KEY_MAP):
         # 0=CAST, 1=RISER, 2=CHILL, 3=RISER_POST, 4=CORE
         # Hot tears are cast-metal defects; exclude risers, chills, riser posts, cores.
-        cast_mask = (part_types == 0)
+        cast_mask = (part_types == PART_TYPE_CAST)
         if not np.any(cast_mask):
             cast_mask = np.ones(n_voxels, dtype=bool)
 
@@ -4216,10 +4225,10 @@ class SolidificationEngine:
         surface_mask[surface_indices] = True
 
         exclude_mask = np.zeros(n_voxels, dtype=bool)
-        exclude_mask |= part_types == 1   # RISER
-        exclude_mask |= part_types == 3   # RISER_POST
-        exclude_mask |= part_types == 2   # CHILL
-        exclude_mask |= part_types == 4   # CORE
+        exclude_mask |= part_types == PART_TYPE_RISER
+        exclude_mask |= part_types == PART_TYPE_RISER_POST
+        exclude_mask |= part_types == PART_TYPE_CHILL
+        exclude_mask |= part_types == PART_TYPE_CORE
         exclude_mask |= surface_mask      # M3: surface voxels kept in analysis;
                                           # the previous exclusion was a pre-existing
                                           # issue. Phase 3.3 reverses this.
@@ -4413,7 +4422,7 @@ class SolidificationEngine:
         global_restraint = 0.25 * (0.6 * mold_restraint + 0.4 * friction)
         restraint_index = np.maximum(restraint_index, global_restraint)
 
-        core_voxels = (part_types == 4)
+        core_voxels = (part_types == PART_TYPE_CORE)
         if np.any(core_voxels):
             core_centers = voxel_centers[core_voxels]
             if len(core_centers) > 0:
@@ -5039,9 +5048,9 @@ class SolidificationEngine:
         
         # Report part type breakdown
         if self.mesh.voxel_part_types is not None:
-            cast_voxels = np.sum(self.mesh.voxel_part_types == 0)
-            riser_voxels = np.sum(self.mesh.voxel_part_types == 1)
-            chill_voxels = np.sum(self.mesh.voxel_part_types == 2)
+            cast_voxels = np.sum(self.mesh.voxel_part_types == PART_TYPE_CAST)
+            riser_voxels = np.sum(self.mesh.voxel_part_types == PART_TYPE_RISER)
+            chill_voxels = np.sum(self.mesh.voxel_part_types == PART_TYPE_CHILL)
             print(f"  Part breakdown: CAST={cast_voxels:,}, RISER={riser_voxels:,}, CHILL={chill_voxels:,}")
 
         return statistics
