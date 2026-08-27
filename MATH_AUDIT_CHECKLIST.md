@@ -280,6 +280,20 @@ Why this matters:
   - migrate analyses onto the thermal and phase-field modules
 - [x] Remove or clearly demote dead-end math modules if they are not used by the application.
 
+**Resolved 2026-08-27.** The decision recorded above was made but the removal had
+not happened; the second thermal stack was still on disk. Deleted:
+`core/thermal_solver.py`, `core/thermal_simulation.py`, `core/convection.py`,
+`core/mold_interface.py` (~2,700 LOC), none of which had a production caller.
+
+The answer to "one thermal model or two" is now **one**: `physics/heat_transfer.py`
+plus `physics/solidification_physics.py`, driven by `core/solidification_loop.py`.
+Note that `physics/` is the live path -- `core/solidification.py:35-36` imports it
+at module scope -- which is the opposite of what `AGENT.md:113` implies.
+
+Two of the listed `physics/` modules no longer exist: `physics/shrinkage.py` and
+`physics/niyama.py` were deleted in f2f6662, so the references to them at lines
+15-16, 212 and 368-369 are stale.
+
 Why this matters:
 
 - Right now the codebase mixes a heuristic solidification engine with more physics-like modules.

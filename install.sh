@@ -76,8 +76,11 @@ echo "================================================================"
 echo ""
 
 # Test hardware detection
+# config.hardware_config prints its detection summary on import. This replaces a
+# call to a test_hardware.py that does not exist in the repo, which made the
+# check always fail and always take the "Setup Incomplete" branch below.
 echo "Testing hardware detection..."
-python3 test_hardware.py
+python3 -c "import config.hardware_config"
 
 if [ $? -eq 0 ]; then
     echo ""
