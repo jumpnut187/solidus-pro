@@ -4,26 +4,22 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict, cast
-import traceback
 
 from flask import Blueprint, current_app, jsonify, request, send_from_directory
 
 from core.materials import get_all_alloy_names, get_alloy
 from core.memory_limits import estimate_voxel_count, validate_mesh_parameters
 from core.mesh_ml import MeshRecommendation, recommend_mesh_settings
-from core.simulation_pipeline import PipelineInputs, SimulationCancelledError, run_pipeline
 from core.stl_loader import STLLoader
 from web.services.simulation_queue import SimulationQueueManager
 from web import repository as repo
 from web.payloads import (
-    build_fork_artifact,
     build_fork_surface_payload,
     build_part_manager,
     build_result_fields_payload,
     build_volume_payload,
     read_artifact,
     upload_cad_file,
-    write_artifact,
 )
 
 
@@ -38,12 +34,6 @@ def upload_folder() -> Path:
     return Path(current_app.config["UPLOAD_FOLDER"])
 
 
-def artifact_folder() -> Path:
-    folder = Path(current_app.config["TEMP_FOLDER"]) / "artifacts"
-    folder.mkdir(parents=True, exist_ok=True)
-    return folder
-
-
 def queue_manager() -> SimulationQueueManager:
     manager = current_app.extensions.get("simulation_queue_manager")
     if manager is None:
@@ -56,81 +46,6 @@ def user_ip() -> str:
     if forwarded:
         return str(forwarded.split(",")[0].strip())
     return request.remote_addr or "unknown"
-
-
-def execute_project_task(
-    project_id: str,
-    project: Dict[str, Any],
-    parts: list[Dict[str, Any]],
-    manager: SimulationQueueManager,
-    db_path: Path,
-) -> None:
-    def check_cancelled() -> bool:
-        return manager.should_cancel(project_id)
-
-    try:
-        manager.set_progress(project_id, 4, "Loading assembly...")
-        part_manager = build_part_manager(parts)
-        if check_cancelled():
-            raise SimulationCancelledError("Cancelled")
-
-        performance = project.get("performance_options") or {}
-        analysis = project.get("analysis_options") or {}
-        inputs = PipelineInputs(
-            alloy_name=str(project.get("alloy", "WCB")),
-            voxel_size=float(project.get("voxel_size", 0.1)),
-            refinement_level=int(project.get("refinement_level", 3)),
-            memory_mode=str(project.get("memory_mode", "auto")),
-            analysis_options=analysis,
-            use_gpu=bool(performance.get("use_gpu", False)),
-            use_incremental=bool(performance.get("use_incremental", False)),
-            use_chunked_voxelization=bool(performance.get("use_chunked_voxelization", False)),
-            part_assignment_mode=str(performance.get("part_assignment_mode", "auto")),
-            part_assignment_workers=int(performance.get("part_assignment_workers", 0) or 0),
-            part_assignment_batch_size=int(performance.get("part_assignment_batch_size", 2500) or 2500),
-            max_voxels_for_visualization=int(performance.get("max_voxels_for_visualization", 80_000) or 80_000),
-            solidification_params=project.get("solidification_params") or {},
-        )
-
-        def progress_message(message: str) -> None:
-            if message.startswith("Generating adaptive voxel mesh"):
-                manager.set_progress(project_id, 15, "Generating adaptive voxel mesh...")
-            elif message.startswith("Assigning part types"):
-                manager.set_progress(project_id, 42, "Assigning cast, riser, chill, and riser-post voxels...")
-            elif message.startswith("Running solidification simulation"):
-                manager.set_progress(project_id, 55, "Running solidification physics...")
-            else:
-                manager.set_progress(project_id, 82, message)
-
-        def detailed_progress(current: int, total: int, stage: str) -> None:
-            stage_l = stage.lower()
-            if stage_l.startswith("solid"):
-                progress = 55 + int((current / max(total, 1)) * 32)
-                manager.set_progress(project_id, progress, f"Solidifying: {current}%")
-            else:
-                progress = 15 + int((current / max(total, 1)) * 25)
-                manager.set_progress(project_id, progress, f"Voxelizing: {stage} ({current}/{total})")
-
-        result = run_pipeline(
-            inputs,
-            part_manager=part_manager,
-            progress_message_callback=progress_message,
-            detailed_progress_callback=detailed_progress,
-            cancel_callback=check_cancelled,
-        )
-        artifact = build_fork_artifact(result)
-        artifact_path = artifact_folder() / f"{project_id}.json"
-        write_artifact(artifact_path, artifact)
-        repo.mark_project_completed(db_path, project_id, artifact["summary"], str(artifact_path))
-        manager.save_result(project_id, artifact)
-        manager.set_status(project_id, "completed", "Simulation complete", 100)
-    except SimulationCancelledError:
-        manager.set_status(project_id, "cancelled", "Simulation cancelled", 0)
-        repo.mark_project_status(db_path, project_id, "cancelled")
-    except Exception as exc:
-        traceback.print_exc()
-        manager.set_status(project_id, "error", str(exc), 0)
-        repo.mark_project_status(db_path, project_id, "error")
 
 
 @api_bp.route("/health")

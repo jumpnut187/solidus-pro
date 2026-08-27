@@ -422,58 +422,75 @@ class WebApiTests(unittest.TestCase):
         self.assertIn("hot_tear", fields_payload["fields"])
 
 
-class ExecuteProjectTaskInputsTests(unittest.TestCase):
-    """Verify execute_project_task plumbs performance options into PipelineInputs."""
+class BuildPipelineInputsTests(unittest.TestCase):
+    """Verify the web layer plumbs stored options into PipelineInputs.
 
-    def _run_task(self, project: dict):
-        from core.simulation_pipeline import PipelineInputs
-        from web.routes import execute_project_task
+    Targets web.services.simulation_queue.build_pipeline_inputs, which is the
+    mapping the live queued-simulation path actually uses. These assertions
+    previously ran against web.routes.execute_project_task -- a dead duplicate
+    of the same mapping that nothing but this test called, so drift between the
+    two copies could not have been caught.
+    """
 
-        captured = {}
+    def _build(self, project: dict):
+        from web.services.simulation_queue import build_pipeline_inputs
 
-        def fake_run_pipeline(inputs, **kwargs):
-            captured["inputs"] = inputs
-            return MagicMock()
-
-        manager = MagicMock()
-        manager.should_cancel.return_value = False
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            app = Flask(__name__)
-            app.config["DATABASE"] = str(root / "web.db")
-            app.config["UPLOAD_FOLDER"] = str(root / "uploads")
-            app.config["TEMP_FOLDER"] = str(root / "temp")
-            with app.app_context():
-                with patch("web.routes.run_pipeline", side_effect=fake_run_pipeline):
-                    with patch("web.routes.build_part_manager", return_value=MagicMock()):
-                        with patch(
-                            "web.routes.build_fork_artifact",
-                            return_value={"summary": {}, "data": {}},
-                        ):
-                            with patch("web.routes.write_artifact"):
-                                with patch("web.routes.repo"):
-                                    execute_project_task(
-                                        "proj-1",
-                                        project,
-                                        [],
-                                        manager,
-                                        root / "web.db",
-                                    )
-
-        self.assertIn("inputs", captured)
-        self.assertIsInstance(captured["inputs"], PipelineInputs)
-        return captured["inputs"]
+        return build_pipeline_inputs(project)
 
     def test_use_gpu_option_reaches_pipeline_inputs(self) -> None:
         """performance_options={'use_gpu': True} must reach PipelineInputs.use_gpu=True."""
-        inputs = self._run_task({"performance_options": {"use_gpu": True}, "alloy": "WCB"})
+        inputs = self._build({"performance_options": {"use_gpu": True}, "alloy": "WCB"})
         self.assertTrue(inputs.use_gpu)
 
     def test_use_gpu_defaults_to_false_when_option_missing(self) -> None:
         """Callers that omit use_gpu must keep the existing default of False."""
-        inputs = self._run_task({"alloy": "WCB"})
+        inputs = self._build({"alloy": "WCB"})
         self.assertFalse(inputs.use_gpu)
+
+    def test_performance_options_are_plumbed_through(self) -> None:
+        """Every performance key the queue reads must land on PipelineInputs."""
+        inputs = self._build(
+            {
+                "alloy": "CF8",
+                "voxel_size": 0.25,
+                "refinement_level": 2,
+                "memory_mode": "conservative",
+                "performance_options": {
+                    "use_incremental": True,
+                    "use_chunked_voxelization": True,
+                    "part_assignment_mode": "parallel",
+                    "part_assignment_workers": 4,
+                    "part_assignment_batch_size": 1000,
+                    "max_voxels_for_visualization": 12345,
+                },
+            }
+        )
+
+        self.assertEqual(inputs.alloy_name, "CF8")
+        self.assertEqual(inputs.voxel_size, 0.25)
+        self.assertEqual(inputs.refinement_level, 2)
+        self.assertEqual(inputs.memory_mode, "conservative")
+        self.assertTrue(inputs.use_incremental)
+        self.assertTrue(inputs.use_chunked_voxelization)
+        self.assertEqual(inputs.part_assignment_mode, "parallel")
+        self.assertEqual(inputs.part_assignment_workers, 4)
+        self.assertEqual(inputs.part_assignment_batch_size, 1000)
+        self.assertEqual(inputs.max_voxels_for_visualization, 12345)
+
+    def test_analysis_and_solidification_params_pass_through(self) -> None:
+        """Nested option dicts travel opaquely, so new keys need no queue change."""
+        inputs = self._build(
+            {
+                "analysis_options": {"hot_tear": True},
+                "solidification_params": {"feeding": {"base_feeding_distance": 8.0}},
+            }
+        )
+
+        self.assertEqual(inputs.analysis_options, {"hot_tear": True})
+        self.assertEqual(
+            inputs.solidification_params,
+            {"feeding": {"base_feeding_distance": 8.0}},
+        )
 
 
 if __name__ == "__main__":

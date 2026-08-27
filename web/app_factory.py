@@ -43,11 +43,6 @@ def create_app() -> Flask:
     database_path = Path(app.config["DATABASE"])
     queue_manager.set_paths(str(database_path), str(repo_root))
 
-    def worker(project_id: str, project, parts) -> None:
-        pass
-
-    queue_manager.set_worker(worker)
-
     @app.errorhandler(413)
     def request_entity_too_large(error):
         return jsonify({"error": "File too large. Maximum size is 500MB"}), 413

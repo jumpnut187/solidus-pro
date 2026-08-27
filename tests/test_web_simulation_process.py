@@ -51,7 +51,6 @@ class SimulationQueueProcessTests(unittest.TestCase):
         manager = SimulationQueueManager(QueueConfig(max_concurrent_simulations=1))
         manager._init_manager()
         manager.set_paths("/tmp/test.db", "/tmp")
-        manager.set_worker(lambda *a, **k: None)
 
         sim_id = "test-process-sim"
         sim_data = {"alloy": "WCB", "voxel_size": 0.1, "refinement_level": 1}
@@ -78,7 +77,6 @@ class SimulationQueueProcessTests(unittest.TestCase):
         manager = SimulationQueueManager(QueueConfig(max_concurrent_simulations=1))
         manager._init_manager()
         manager.set_paths("/tmp/test.db", "/tmp")
-        manager.set_worker(lambda *a, **k: None)
 
         sim_id = "test-daemon-sim"
         manager.submit(sim_id, {}, [], "127.0.0.1")
@@ -122,7 +120,6 @@ class SimulationQueueProcessTests(unittest.TestCase):
         manager = SimulationQueueManager(QueueConfig(max_concurrent_simulations=1))
         manager._init_manager()
         manager.set_paths("/tmp/test.db", "/tmp")
-        manager.set_worker(lambda *a, **k: None)
 
         sim_id = "test-cancel-sim"
 
@@ -142,7 +139,6 @@ class SimulationQueueProcessTests(unittest.TestCase):
         manager = SimulationQueueManager(QueueConfig(max_concurrent_simulations=1))
         manager._init_manager()
         manager.set_paths("/tmp/test.db", "/tmp")
-        manager.set_worker(lambda *a, **k: None)
 
         sim_id = "test-status-sim"
 
@@ -242,7 +238,6 @@ class SimulationQueueCleanupTests(unittest.TestCase):
         manager = SimulationQueueManager(QueueConfig(max_concurrent_simulations=1))
         manager._init_manager()
         manager.set_paths("/tmp/test.db", "/tmp")
-        manager.set_worker(lambda *a, **k: None)
 
         sim_id = "test-cleanup-sim"
 
@@ -259,7 +254,6 @@ class SimulationQueueCleanupTests(unittest.TestCase):
         manager = SimulationQueueManager(QueueConfig(max_concurrent_simulations=1))
         manager._init_manager()
         manager.set_paths("/tmp/test.db", "/tmp")
-        manager.set_worker(lambda *a, **k: None)
 
         user_ip = "192.168.1.100"
 
@@ -299,7 +293,6 @@ class SimulationQueueFairShareTests(unittest.TestCase):
         )
         self.manager._init_manager()
         self.manager.set_paths("/tmp/test.db", "/tmp")
-        self.manager.set_worker(lambda *a, **k: None)
 
     def tearDown(self) -> None:
         self.manager._manager.shutdown() if self.manager._manager else None

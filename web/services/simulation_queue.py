@@ -22,7 +22,6 @@ if sys.platform == 'darwin':
     multiprocessing.set_start_method('spawn', force=True)
 
 
-TaskWorker = Callable[[str, Dict[str, Any], list[Dict[str, Any]]], None]
 
 
 def _env_int(name: str, default: int) -> int:
@@ -80,6 +79,44 @@ def default_queue_config() -> QueueConfig:
         reserved_cores=_env_int("CASTSIM_WEB_RESERVED_CORES", 1),
         reserve_memory_mb=_env_int("CASTSIM_WEB_RESERVE_MEMORY_MB", auto_reserve_mb),
         min_sim_memory_mb=_env_int("CASTSIM_WEB_MIN_SIM_MEMORY_MB", 2048),
+    )
+
+
+def build_pipeline_inputs(
+    sim_data: Dict[str, Any],
+    *,
+    thread_budget_provider: Any = None,
+) -> Any:
+    """Map a stored project row onto :class:`PipelineInputs`.
+
+    Kept as a module-level pure function so the web layer has exactly one place
+    that translates persisted ``analysis_options`` / ``performance_options``
+    dicts into solver inputs, and so it can be tested without standing up a
+    simulation subprocess and its twenty Manager proxies.
+
+    A second, drifted copy of this mapping used to live in
+    ``web/routes.py::execute_project_task``; it was dead code that only the test
+    suite called, which is how the drift went unnoticed.
+    """
+    from core.simulation_pipeline import PipelineInputs
+
+    performance = sim_data.get("performance_options") or {}
+    analysis = sim_data.get("analysis_options") or {}
+    return PipelineInputs(
+        alloy_name=str(sim_data.get("alloy", "WCB")),
+        voxel_size=float(sim_data.get("voxel_size", 0.1)),
+        refinement_level=int(sim_data.get("refinement_level", 3)),
+        memory_mode=str(sim_data.get("memory_mode", "auto")),
+        analysis_options=analysis,
+        use_gpu=bool(performance.get("use_gpu", False)),
+        use_incremental=bool(performance.get("use_incremental", False)),
+        use_chunked_voxelization=bool(performance.get("use_chunked_voxelization", False)),
+        part_assignment_mode=str(performance.get("part_assignment_mode", "auto")),
+        part_assignment_workers=int(performance.get("part_assignment_workers", 0) or 0),
+        part_assignment_batch_size=int(performance.get("part_assignment_batch_size", 2500) or 2500),
+        max_voxels_for_visualization=int(performance.get("max_voxels_for_visualization", 80_000) or 80_000),
+        solidification_params=sim_data.get("solidification_params") or {},
+        thread_budget_provider=thread_budget_provider,
     )
 
 
@@ -150,28 +187,14 @@ def _simulation_process_worker(
             sim_memory_mb[sim_id] = float(min_sim_memory_mb)
 
         from web.payloads import build_part_manager
-        from core.simulation_pipeline import PipelineInputs, run_pipeline, SimulationCancelledError
+        from core.simulation_pipeline import run_pipeline, SimulationCancelledError
 
         part_manager = build_part_manager(parts_data)
         if _check_cancelled():
             raise SimulationCancelledError("Cancelled")
 
-        performance = sim_data.get("performance_options") or {}
-        analysis = sim_data.get("analysis_options") or {}
-        inputs = PipelineInputs(
-            alloy_name=str(sim_data.get("alloy", "WCB")),
-            voxel_size=float(sim_data.get("voxel_size", 0.1)),
-            refinement_level=int(sim_data.get("refinement_level", 3)),
-            memory_mode=str(sim_data.get("memory_mode", "auto")),
-            analysis_options=analysis,
-            use_gpu=bool(performance.get("use_gpu", False)),
-            use_incremental=bool(performance.get("use_incremental", False)),
-            use_chunked_voxelization=bool(performance.get("use_chunked_voxelization", False)),
-            part_assignment_mode=str(performance.get("part_assignment_mode", "auto")),
-            part_assignment_workers=int(performance.get("part_assignment_workers", 0) or 0),
-            part_assignment_batch_size=int(performance.get("part_assignment_batch_size", 2500) or 2500),
-            max_voxels_for_visualization=int(performance.get("max_voxels_for_visualization", 80_000) or 80_000),
-            solidification_params=sim_data.get("solidification_params") or {},
+        inputs = build_pipeline_inputs(
+            sim_data,
             thread_budget_provider=make_thread_budget_provider(thread_budget),
         )
 
@@ -314,7 +337,6 @@ class SimulationQueueManager:
         self.running_count: Any = None
         self.thread_budget: Any = None
         self.sim_memory_mb: Any = None
-        self._worker: Optional[TaskWorker] = None
         self._db_path: Optional[str] = None
         self._base_dir: Optional[str] = None
 
@@ -352,8 +374,6 @@ class SimulationQueueManager:
             min_sim_memory_mb=float(self.config.min_sim_memory_mb),
         )
 
-    def set_worker(self, worker: TaskWorker) -> None:
-        self._worker = worker
 
     def set_paths(self, db_path: str, base_dir: str) -> None:
         self._db_path = db_path
@@ -413,9 +433,6 @@ class SimulationQueueManager:
         parts_data: list[Dict[str, Any]],
         user_ip: str,
     ) -> Dict[str, Any]:
-        if self._worker is None:
-            raise RuntimeError("Simulation queue worker is not configured")
-
         self._init_manager()
 
         if not self.can_user_submit(user_ip):
