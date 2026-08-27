@@ -34,38 +34,67 @@ This is a professional-grade casting solidification simulator that predicts **sh
 
 ### 📁 Project Structure
 
+> The structural sections of this file drifted badly for a long time; the
+> tree below was corrected 2026-08-27. For the live call path, layer
+> contracts and unit zones see `docs/ARCHITECTURE.md`, and for day-to-day
+> facts see `AGENT.md`. The "What's Modeled / Simplifications" section
+> further down has been maintained and is reliable.
+
+
 ```
-untitled folder/
+Python_Cast_Sim/
 │
-├── main.py                    # Application entry point
-├── run.py                     # Setup checker and launcher
-├── install.sh                 # Automated installation script
-├── requirements.txt           # Python dependencies
+├── main.py                    # Desktop entry point (PyQt5 + VTK)
+├── run_web.py                 # Web entry point (Flask + React/Babylon)
+├── run.py                     # Dependency check, then launches main.py
+├── install.sh                 # Installation script
+├── requirements.txt
 │
+├── AGENT.md                   # Authoritative notes; read this first
 ├── README.md                  # Full documentation
-├── QUICKSTART.md             # Quick start guide
-├── PROJECT_OVERVIEW.md       # This file
+├── QUICKSTART.md
+├── MATH_AUDIT_CHECKLIST.md    # Known-weak formulas
+├── PROJECT_OVERVIEW.md        # This file
 │
-├── config/
-│   ├── __init__.py
-│   └── hardware_config.py    # M3 chip detection and optimization
+├── config/                    # Settings, hardware detection, exceptions
+│   ├── settings.py            # Settings singleton; castsim.yaml / CASTSIM_* env
+│   ├── hardware_config.py
+│   └── exceptions.py
 │
-├── core/
-│   ├── __init__.py
-│   ├── materials.py          # WCB, CF8, Bronze properties
-│   ├── stl_loader.py         # STL import (inches → mm)
-│   ├── voxel_mesh.py         # Adaptive voxelization
-│   ├── solidification.py     # Physics simulation engine
-│   └── acceleration.py       # Multi-core/GPU acceleration
+├── core/                      # Orchestration; knows the mesh and part types
+│   ├── simulation_pipeline.py # run_pipeline -- the one entry both UIs use
+│   ├── solidification.py      # SolidificationEngine (large; see ARCHITECTURE)
+│   ├── solidification_loop.py # Time integration
+│   ├── solidification_params.py
+│   ├── analysis_strategies.py # Post-analysis dispatch
+│   ├── voxel_mesh.py          # AdaptiveVoxelMesh
+│   ├── part_manager.py        # PartType, part-type codes and predicates
+│   ├── materials.py           # 7 alloys, 40+ properties each
+│   ├── feeding_path.py, riser_design.py, microstructure.py,
+│   ├── stress_analysis.py, defect_regions.py, report_generator.py
+│   ├── acceleration.py, gpu_compute.py, octree.py, memory_*.py
+│   ├── surrogate/             # NumPy/Core ML surrogate model
+│   └── deep_model/            # PyTorch 3D U-Net (optional, lazy torch import)
 │
-├── ui/
-│   ├── __init__.py
-│   ├── main_window.py        # Main application UI
-│   └── visualizer.py         # 3D VTK visualization
+├── physics/                   # Mesh-agnostic solvers -- LIVE, not reference
+│   ├── heat_transfer.py       # HeatTransferModel (SI/metres internally)
+│   ├── solidification_physics.py
+│   ├── gas_porosity.py
+│   └── units.py               # The three length zones live here
 │
-├── test_hardware.py          # Test M3 optimization
-├── test_materials.py         # Test material database
-└── generate_samples.py       # Create sample STL files
+├── ui/                        # PyQt5 desktop
+│   ├── main_window.py, visualizer.py, workers.py
+│   └── dialogs/
+│
+├── web/                       # Flask API
+│   ├── app_factory.py, routes.py, payloads.py, repository.py
+│   └── services/              # simulation_queue.py, fair_share.py
+│
+├── web_frontend/              # React + TypeScript + Babylon.js client
+├── tests/                     # ~580 unittest tests
+├── tools/                     # CLI utilities, model training, diagnostics
+└── docs/
+    └── ARCHITECTURE.md        # Live path, layer contracts, extension points
 ```
 
 ### 🔧 Technology Stack
@@ -85,7 +114,7 @@ untitled folder/
 
 #### Step 1: Load Geometry
 ```
-STL or STEP (inches) → Convert to mm → Validate mesh → Extract properties
+STL or STEP (inches) → Validate mesh → Extract properties   [no unit conversion]
 ```
 
 #### Step 2: Generate Voxel Mesh
@@ -298,7 +327,7 @@ Solution: Add feeding channels or redesign
 #### Adjust Voxel Settings:
 ```python
 # In UI or code:
-base_voxel_size = 2.0  # mm (smaller = more accurate, slower)
+base_voxel_size = 0.1  # inches (smaller = more accurate, slower)
 refinement_level = 3   # 1-4 (higher = more detail)
 ```
 

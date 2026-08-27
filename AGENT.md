@@ -1,5 +1,9 @@
-# AGENTS.md
-# Clear, Concise, Actionable Communication
+# AGENT.md
+
+Solidus Pro working notes. Two parts: communication conventions, then the
+project guide (entrypoints, architecture, gotchas) from "Entrypoints" onward.
+
+## Clear, Concise, Actionable Communication
 
 ## Purpose 
 You and I maintain a no – BS, clear, concise, actionable relationship.
@@ -110,7 +114,9 @@ python -m compileall config core physics ui web   # syntax pass
 
 ## Architecture
 
-- `core/simulation_pipeline.py` + `core/solidification_loop.py` + `core/solidification.py` are the current authoritative engine path. `core/solidification.py` is the authoritative output path; modules under `physics/` and `core/thermal_*` are reference implementations unless explicitly wired in.
+- `core/simulation_pipeline.py` + `core/solidification_loop.py` + `core/solidification.py` are the authoritative engine path, and `core/solidification.py` is the authoritative output path.
+- **`physics/` is live, not reference.** `core/solidification.py` imports `physics.heat_transfer` and `physics.solidification_physics` at module scope, plus `physics.gas_porosity` and `physics.units`. There is exactly one thermal model and it lives in `physics/`. The duplicate stack that used to sit in `core/thermal_solver.py`, `core/thermal_simulation.py`, `core/convection.py` and `core/mold_interface.py` was dead and has been deleted; `tests/test_architecture_boundaries.py` fails if it reappears or if `physics/` drops off the live path.
+- `physics/` is **mesh-agnostic**: it takes `n_voxels`, a neighbor array and material scalars, never an `AdaptiveVoxelMesh` or `PartManager`, and imports nothing from `core/` or `config/`. That boundary is enforced by test and is what makes it reusable by a new solver.
 - `config/settings.py` is the settings singleton (`get_settings()`); config from `castsim.yaml`/`castsim.toml`, `~/.castsim/`, and `CASTSIM_*` env vars (highest priority).
 - Web: `web/app_factory.py` (factory), `web/routes.py` (API), `web/repository.py` (SQLite), `web/payloads.py` (Babylon payloads), `web/services/{fair_share,simulation_queue}.py` (concurrency policy). Frontend sources in `web_frontend/src/`.
 - Keep boundaries: pipeline logic in `core/`, formulas in `physics/`, desktop UI in `ui/`, web request/data layers in `web/`.
@@ -134,13 +140,26 @@ python -m compileall config core physics ui web   # syntax pass
 
 ## Gotchas
 
-- **All units are inches throughout** — STL input and all physics. No mm conversion (README/QUICKSTART claims of mm conversion are stale).
+- **Units are not uniform. There are three length zones** — see `physics/units.py`, which holds the conversions and the full explanation:
+  - **inches** — geometry, mesh, moduli, feeding distances, UI, web, STL input. No mm conversion happens on import (older README/QUICKSTART claims of one are wrong).
+  - **metres** — inside `physics/heat_transfer.py`. Diffusivity is m²/s, HTC is W/(m²·K), and `HeatTransferModel` takes `voxel_size` in metres.
+  - **mm** — Niyama output, reported as °C·√s/mm (`_least_squares_gradients_c_per_mm`).
+  Material properties in `core/materials.py` are SI regardless of zone (Pa·s, kg/m³, gravity 9.81 m/s²), so any expression mixing a mesh length with a material property needs a conversion. Use `physics.units`; do not add another `0.0254` literal.
+- **New solvers should work internally in SI** and convert only at their boundary. Every standard correlation — CFL, Reynolds, Weber, Rayleigh, gravity head — assumes SI, and an inch-valued length in one of them yields a plausible wrong answer rather than an error.
 - **macOS**: multiprocessing must use `spawn` (already forced in `main.py`/`run_web.py`). gunicorn cannot run on Apple's Xcode system Python (workers segfault) — must use the project venv on a Homebrew Python.
 - Treat as generated/local (don't edit, don't commit): `data/`, `logs/`, `models/`, `web/static/uploads/` (large STL dump), `web/simulations.db`, `web_frontend/dist/`, `web_frontend/node_modules/`, `venv/`. Never delete/overwrite `.db` files without explicit approval.
 - Numba/thread tuning: `CASTSIM_NUMBA_THREADS` (default `all`), plus `CASTSIM_PART_ASSIGNMENT_*` and `CASTSIM_MAX_CONCURRENT_SIMULATIONS` / `CASTSIM_WEB_RESERVED_CORES` / `CASTSIM_WEB_RESERVE_MEMORY_MB` / `CASTSIM_WEB_MIN_SIM_MEMORY_MB` for the web fair-share queue.
 - GPU backends are optional extras (`mlx`/`taichi`, `cupy-cuda12x`, `pyopencl`); CPU Numba path is the universal fallback. `cascadio` is optional (STEP uploads only).
 
-## Other instruction sources
+## Other documentation, and how much to trust it
 
-- `CLAUDE.md` — GitNexus code-intelligence workflow (impact analysis before edits, detect_changes before commit).
-- `.github/GEMINI-instructions.md` — detailed physics/model notes; partially stale (e.g., duplicates the mm-conversion myth), trust executable code over it.
+This file is the one to trust. The rest have drifted to varying degrees; when
+they disagree with executable code, the code wins.
+
+- `docs/ARCHITECTURE.md` — live-vs-deleted module map, the unit zones, and where a new physics stage plugs in. Current.
+- `MATH_AUDIT_CHECKLIST.md` — the best map of known-weak formulas. Read §1–§7 before touching any physics. Some of its file references are stale (`physics/shrinkage.py` and `physics/niyama.py` were deleted in f2f6662).
+- `README.md` — accurate on features, alloys, solver modes and the model assumptions in "Known Simplifications".
+- `PROJECT_OVERVIEW.md` — the "What's Modeled / Simplifications" section is maintained and accurate; **the project-tree and pipeline sections are fossilized** (they omit `physics/`, `web/`, `tests/`, `core/surrogate/`, `core/deep_model/` and describe an inches→mm conversion that does not happen).
+- `QUICKSTART.md` — was the most stale file in the repo; corrected, but prefer README/AGENT.md.
+- `solidus_pro_paper.md` — good pipeline walkthrough, but documents `core/convection.py`, `core/mold_interface.py` and `core/thermal_solver.py` as live physics. They were dead and are now deleted.
+- `.github/GEMINI-instructions.md` — detailed physics notes, partially stale; its module tree predates `physics/`, `web/` and the ML packages.

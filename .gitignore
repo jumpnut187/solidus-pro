@@ -43,7 +43,10 @@ Thumbs.db
 # models/*.joblib
 
 # Docs
-docs/
+# docs/ was ignored, which hid the project's own documentation from every
+# clone. Ignore only the large generated artifacts inside it.
+docs/*.pdf
+docs/*.mov
 
 # Memory mapped files
 *.mmap

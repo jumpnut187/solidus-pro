@@ -36,25 +36,27 @@ python3 main.py
 python3 run.py
 ```
 
-## Testing Hardware Optimization
+## Checking Hardware Detection
 
-### Test M3 Detection
+`test_hardware.py` and `test_materials.py` were referenced here for a long time
+but have never existed in the repository. Use these instead.
+
+### Hardware / GPU detection
 ```bash
-python3 test_hardware.py
+python3 -c "import config.hardware_config"      # prints the detection summary
+python3 tools/diagnose_gpu.py                   # detailed GPU backend report
 ```
 
-This will show:
-- CPU core configuration (4P + 4E)
-- GPU/Metal availability
-- Neural Engine detection
-- Parallel performance benchmark
+Shows CPU core configuration, Metal/CUDA availability, Neural Engine detection
+and the selected compute backend.
 
-### Test Material Database
+### Material database
 ```bash
-python3 test_materials.py
+python3 -c "from core.materials import get_all_alloy_names, print_alloy_info; \
+    [print_alloy_info(n) for n in get_all_alloy_names()]"
 ```
 
-Shows all alloy properties for WCB, CF8, C958, and CA6NM.
+Covers all seven alloys: WCB, CF8, C958, C964, CA6NM, MONEL400 and IN625.
 
 ## Using the Simulator
 
@@ -69,15 +71,15 @@ Shows all alloy properties for WCB, CF8, C958, and CA6NM.
    - Click "Load CAD File (Inches)"
    - Select an STL or STEP (.step / .stp) file
    - STEP files are auto-fanned-out: each body in the assembly becomes its own part
-   - File will auto-convert from inches to millimeters
+   - Geometry is read and kept in **inches** — no unit conversion happens on import
    - **Note:** STEP support requires the optional `cascadio` package — install with `pip install cascadio` if a STEP upload fails
 
 3. **Select Material**
-   - Choose from dropdown: WCB, CF8, C958, or CA6NM
+   - Choose from dropdown: WCB, CF8, C958, C964, CA6NM, MONEL400 or IN625
    - View material properties in sidebar
 
 4. **Configure Mesh** (Optional)
-   - Base Voxel Size: 2mm (default)
+   - Base Voxel Size: 0.1 in (default)
      - Smaller = more accurate, slower
      - Larger = faster, less accurate
    - Refinement Level: 3 (default)
@@ -111,12 +113,12 @@ Shows all alloy properties for WCB, CF8, C958, and CA6NM.
 ## Performance Tips
 
 ### For Faster Results
-- Increase base voxel size (3-5mm)
+- Increase base voxel size (0.15-0.25 in)
 - Reduce refinement level (1-2)
 - Use simpler geometry
 
 ### For More Accuracy
-- Decrease voxel size (0.5-1mm)
+- Decrease voxel size (0.03-0.05 in)
 - Increase refinement (3-4 levels)
 - May take longer on complex parts
 
@@ -283,14 +285,15 @@ pip3 install -r requirements.txt
 
 ### Command Line Testing
 
-**Test hardware:**
+**Check hardware detection:**
 ```bash
-python3 test_hardware.py
+python3 -c "import config.hardware_config"
+python3 tools/diagnose_gpu.py
 ```
 
-**Test materials:**
+**Run the regression suite:**
 ```bash
-python3 test_materials.py
+python3 -m unittest discover tests
 ```
 
 **Check Python environment:**

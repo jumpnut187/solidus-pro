@@ -288,7 +288,7 @@ not happened; the second thermal stack was still on disk. Deleted:
 The answer to "one thermal model or two" is now **one**: `physics/heat_transfer.py`
 plus `physics/solidification_physics.py`, driven by `core/solidification_loop.py`.
 Note that `physics/` is the live path -- `core/solidification.py:35-36` imports it
-at module scope -- which is the opposite of what `AGENT.md:113` implies.
+at module scope. `AGENT.md` previously implied the opposite; corrected there too.
 
 Two of the listed `physics/` modules no longer exist: `physics/shrinkage.py` and
 `physics/niyama.py` were deleted in f2f6662, so the references to them at lines
