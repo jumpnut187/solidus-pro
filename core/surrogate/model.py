@@ -32,7 +32,7 @@ import numpy as np
 
 from core.surrogate.backend import Backend
 from core.surrogate.conditioning import Conditioning, raw_from_conditioning
-from core.surrogate.fields import CHANNELS
+from core.surrogate.fields import CHANNELS, PART_TYPE_DIVISOR
 
 OUTPUTS: List[str] = [
     "solidification_start_times",
@@ -73,6 +73,11 @@ class ModelManifest:
     kind: str
     backend: str
     grid_resolution: int = 64
+    #: Divisor used to encode part-type codes into channel 1 at capture
+    #: time. Recorded so an artifact trained under one encoding is not
+    #: silently fed inputs built under another; see fields.PART_TYPE_DIVISOR.
+    #: Defaults to 3.0 so manifests written before this field are accepted.
+    part_type_divisor: float = PART_TYPE_DIVISOR
     channels: List[str] = field(default_factory=lambda: list(CHANNELS))
     outputs: List[str] = field(default_factory=lambda: list(OUTPUTS))
     alloy_features: List[str] = field(default_factory=list)
@@ -400,6 +405,20 @@ def load_model(path: Union[str, os.PathLike]) -> ModelLoadResult:
 
     if manifest is None:
         return ModelLoadResult(error=f"No manifest.json found at {path}")
+
+    if not math.isclose(manifest.part_type_divisor, PART_TYPE_DIVISOR, rel_tol=1e-9):
+        # The part-type channel encoding changed since this artifact was
+        # trained, so its inputs no longer mean what it learned. Without this
+        # check the model would load and quietly produce worse predictions --
+        # the failure mode adding a PartType would otherwise introduce.
+        return ModelLoadResult(
+            error=(
+                f"Model {manifest.name!r} was trained with "
+                f"part_type_divisor={manifest.part_type_divisor}, but the current "
+                f"encoding uses {PART_TYPE_DIVISOR}. Retrain the model against the "
+                "current part-type encoding, or restore the previous divisor."
+            )
+        )
 
     if manifest.kind == "numpy_demo":
         return ModelLoadResult(model=NumpyDemoModel(manifest))

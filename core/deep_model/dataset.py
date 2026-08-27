@@ -21,8 +21,10 @@ import torch
 from torch.utils.data import Dataset
 
 from core.surrogate.dataset import DEFAULT_DATASET_DIR, load_dataset
+from core.surrogate.fields import PART_TYPE_DIVISOR
+from core.part_manager import PART_TYPE_CHILL
 
-CHILL_PART_TYPE = 2  # encoded as part_type / 3.0 -> 2/3 in channel 1
+CHILL_PART_TYPE = PART_TYPE_CHILL  # encoded as part_type / PART_TYPE_DIVISOR
 CHILL_CHANNEL_TOL = 0.05
 
 
@@ -126,7 +128,7 @@ class DeepItem:
 def _occupancy_mask(channels: np.ndarray) -> np.ndarray:
     """Loss mask: occupied cells, excluding chill cells."""
     occ = channels[0] > 0.5
-    chill = np.abs(channels[1] - CHILL_PART_TYPE / 3.0) < CHILL_CHANNEL_TOL
+    chill = np.abs(channels[1] - CHILL_PART_TYPE / PART_TYPE_DIVISOR) < CHILL_CHANNEL_TOL
     return occ & ~chill
 
 

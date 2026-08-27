@@ -34,6 +34,26 @@ CHANNELS: List[str] = [
 _LOG6 = float(np.log(6.0))
 _MAX_CHILL_BOOST = 5.0
 
+#: Divisor used to encode voxel part-type codes into channel 1.
+#:
+#: This is a **frozen encoding constant**, deliberately not derived from the
+#: number of PartType members. Every captured training record in
+#: ``data/surrogate_dataset/`` and every trained artifact was written with the
+#: value in force at the time, and ``core/deep_model/dataset.py`` recovers chill
+#: voxels by testing ``channel1 ~= PART_TYPE_CHILL / PART_TYPE_DIVISOR``. If this
+#: tracked the part-type count automatically, adding SPRUE/GATE/RUNNER for a
+#: mold-filling stage would silently shift every channel-1 value and quietly
+#: invalidate all existing models -- with no error, just worse predictions.
+#:
+#: To change it: bump this value, bump ModelManifest.part_type_divisor's default,
+#: and retrain. ``load_model`` refuses artifacts whose recorded divisor differs
+#: from this one, so the break is loud.
+#:
+#: Note the encoding is not strictly [0, 1]: CORE (code 4) maps to 4/3. That is
+#: pre-existing and is preserved deliberately rather than "fixed", because
+#: changing it would invalidate the dataset.
+PART_TYPE_DIVISOR = 3.0
+
 
 @dataclass
 class GridMeta:
@@ -138,7 +158,7 @@ def encode_channels(
     channels = np.zeros((len(CHANNELS), resolution, resolution, resolution), dtype=np.float32)
 
     channels[0] = _scatter(centers, np.ones(n_voxels, dtype=np.float32), meta)
-    channels[1] = _scatter(centers, part_types.astype(np.float32) / 3.0, meta)
+    channels[1] = _scatter(centers, part_types.astype(np.float32) / PART_TYPE_DIVISOR, meta)
     channels[2] = _scatter(centers, np.clip(surface_distances / max_dim, 0.0, 1.0), meta)
     channels[3] = _scatter(centers, np.clip(moduli / max_dim, 0.0, 1.0), meta)
     channels[4] = _scatter(centers, np.clip(heights, 0.0, 1.0), meta)
