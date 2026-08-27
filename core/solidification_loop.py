@@ -9,6 +9,7 @@ from typing import Any, Callable, Optional
 import numpy as np
 from config.hardware_config import hardware
 from core.thread_budget import resolve_thread_budget
+from physics.units import inches_to_mm
 
 try:
     from numba import get_num_threads, jit, prange, set_num_threads
@@ -156,7 +157,7 @@ def _least_squares_gradients_c_per_mm(
         if len(valid_neighbors) == 0:
             continue
 
-        offsets_mm = (centers_in[valid_neighbors] - centers_in[voxel_i]) * 25.4
+        offsets_mm = inches_to_mm(centers_in[valid_neighbors] - centers_in[voxel_i])
         valid = np.linalg.norm(offsets_mm, axis=1) > 1e-9
         offsets_mm = offsets_mm[valid]
         valid_neighbors = valid_neighbors[valid]

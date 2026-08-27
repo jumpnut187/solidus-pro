@@ -33,6 +33,7 @@ from core.solidification_params import (
 )
 from dataclasses import dataclass, field
 from physics.heat_transfer import BoundaryType, HeatTransferModel
+from physics.units import GRAVITY_M_S2, inches_to_meters, inches_to_mm
 from physics.solidification_physics import SolidificationModel as ThermalSolidificationModel
 from core.acceleration import (
     update_solidification_with_part_types_parallel,
@@ -325,14 +326,16 @@ class SolidificationEngine:
         """Create the coupled thermal and fraction-solid models for the new solver path."""
         n_voxels = len(self.mesh.voxel_centers)
         voxel_size_in = self._get_mean_voxel_size_inches()
-        voxel_size_m = max(voxel_size_in * 0.0254, 1e-6)
+        voxel_size_m = max(inches_to_meters(voxel_size_in), 1e-6)
         self._thermal_voxel_size_m = voxel_size_m
 
         # A2: pass per-voxel sizes (inches -> meters) so the heat model uses
         # the true local cell size instead of a single representative scalar.
         mesh_voxel_sizes = getattr(self.mesh, "voxel_sizes", None)
         if mesh_voxel_sizes is not None and len(mesh_voxel_sizes) == n_voxels:
-            voxel_sizes_m = np.asarray(mesh_voxel_sizes, dtype=np.float64) * 0.0254
+            voxel_sizes_m = inches_to_meters(
+                np.asarray(mesh_voxel_sizes, dtype=np.float64)
+            )
         else:
             voxel_sizes_m = np.full(n_voxels, voxel_size_m, dtype=np.float64)
 
@@ -2219,11 +2222,10 @@ class SolidificationEngine:
                 safe_sources = np.clip(source_indices[valid_source], 0, n_voxels - 1)
                 head_heights[valid_source] = source_top_heights[safe_sources]
 
-        g = 9.81  # m/s²
-        inches_to_meters = 0.0254
+        g = GRAVITY_M_S2
 
         height_diff_meters = np.maximum(
-            0.0, (head_heights - voxel_heights) * inches_to_meters
+            0.0, inches_to_meters(head_heights - voxel_heights)
         )
         ferrostatic_pressure = (
             self.alloy.density_liquid * g * height_diff_meters
@@ -2512,7 +2514,7 @@ class SolidificationEngine:
                 )
 
             perm_arr = self.alloy.vectorized_permeability(fs_proc, sdas_arr)
-            dist_m_arr = dist_proc * 0.0254
+            dist_m_arr = inches_to_meters(dist_proc)
             pd_arr = (
                 vis_arr * dist_m_arr * velocity_arr[idx_arr] / np.maximum(perm_arr, 1e-20)
             )
@@ -3853,7 +3855,7 @@ class SolidificationEngine:
 
             min_distance_to_boundary = 0.1  # inches - minimum distance for gradient calculation
             effective_distance_in = np.maximum(surface_feeding_dists, min_distance_to_boundary)
-            effective_distance_mm = effective_distance_in * 25.4
+            effective_distance_mm = inches_to_mm(effective_distance_in)
 
             base_gradient = temp_range / effective_distance_mm  # °C/mm
             directional_extraction_factor = np.ones(n_voxels, dtype=np.float32)
