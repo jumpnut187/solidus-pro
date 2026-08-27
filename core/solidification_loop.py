@@ -9,6 +9,7 @@ from typing import Any, Callable, Optional
 import numpy as np
 from config.hardware_config import hardware
 from core.thread_budget import resolve_thread_budget
+from core.stepping import should_capture_fraction_history
 from core.part_manager import PART_TYPE_RISER
 from physics.units import inches_to_mm
 
@@ -507,16 +508,7 @@ def _run_front_based_integration(
     progress_interval = 100.0 / target_snapshots
     last_progress_report = 0
 
-    history_capture_fn = getattr(engine, "_should_capture_fraction_history", None)
-    if callable(history_capture_fn):
-        capture_fraction_history = bool(history_capture_fn())
-    else:
-        capture_fraction_history = (
-            engine.analysis_options.fraction_liquid
-            or engine.analysis_options.hot_tear
-            or engine.analysis_options.shrinkage
-            or engine.analysis_options.feeding_path
-        )
+    capture_fraction_history = should_capture_fraction_history(engine)
 
     if capture_fraction_history:
         engine.fraction_liquid_history.append(engine.mesh.voxel_states.copy())
@@ -736,16 +728,7 @@ def _run_schedule_based_integration(
 
     last_progress_report = 0
 
-    history_capture_fn = getattr(engine, "_should_capture_fraction_history", None)
-    if callable(history_capture_fn):
-        capture_fraction_history = bool(history_capture_fn())
-    else:
-        capture_fraction_history = (
-            engine.analysis_options.fraction_liquid
-            or engine.analysis_options.hot_tear
-            or engine.analysis_options.shrinkage
-            or engine.analysis_options.feeding_path
-        )
+    capture_fraction_history = should_capture_fraction_history(engine)
 
     final_schedule_time = float(
         np.max(end_times[local_times > 0.0]) if np.any(local_times > 0.0) else 0.0
@@ -908,16 +891,7 @@ def _run_thermal_coupled_integration(
     last_budget_check = time.monotonic()
     last_snapshot_progress = -1.0
     progress_interval = 1.0
-    history_capture_fn = getattr(engine, "_should_capture_fraction_history", None)
-    if callable(history_capture_fn):
-        capture_fraction_history = bool(history_capture_fn())
-    else:
-        capture_fraction_history = (
-            engine.analysis_options.fraction_liquid
-            or engine.analysis_options.hot_tear
-            or engine.analysis_options.shrinkage
-            or engine.analysis_options.feeding_path
-        )
+    capture_fraction_history = should_capture_fraction_history(engine)
 
     if capture_fraction_history:
         engine.fraction_liquid_history = [np.asarray(engine.mesh.voxel_states, dtype=np.float32).copy()]
