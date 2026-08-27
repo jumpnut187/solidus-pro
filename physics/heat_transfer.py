@@ -341,7 +341,35 @@ class HeatTransferModel:
             time_function=time_function
         )
         self._boundaries.append(bc)
-    
+
+    @property
+    def boundaries(self) -> List["BoundaryCondition"]:
+        """Read-only view of the registered boundary conditions."""
+        return list(self._boundaries)
+
+    def clear_boundaries(self, boundary_type: Optional[BoundaryType] = None) -> int:
+        """Remove boundary conditions, optionally only those of one type.
+
+        ``add_boundary`` could previously only append, so a boundary whose voxel
+        set changes over time -- a mold-filling front, where cells become wetted
+        as metal arrives -- had no way to be revised. Clear and re-add instead.
+
+        Args:
+            boundary_type: Only remove conditions of this type. ``None``
+                removes all of them.
+
+        Returns:
+            How many conditions were removed.
+        """
+        before = len(self._boundaries)
+        if boundary_type is None:
+            self._boundaries.clear()
+        else:
+            self._boundaries = [
+                bc for bc in self._boundaries if bc.type is not boundary_type
+            ]
+        return before - len(self._boundaries)
+
     def set_heat_source(self, source: FloatArray) -> None:
         """
         Set volumetric heat source term (W/m³).
@@ -737,6 +765,28 @@ class HeatTransferModel:
                 rc_i = rho_cp_arr[idx] if rho_cp_arr is not None else rho_cp
                 T_new[idx] -= dt * h * (T_old[idx] - T_mold) / (rc_i * dx_i)
                 
+            elif bc.type == BoundaryType.HEAT_FLUX:
+                # Neumann: -k∂T/∂n = q, with n the outward normal, so a
+                # positive q is a flux INTO the domain and heats the cell.
+                #
+                # Energy balance on a boundary cell of thickness dx_i:
+                #     rho*cp*dx_i * dT/dt = q   [W/m^2]
+                # giving the same explicit form as the Robin branches above --
+                # evaluated against the pre-update field, and lumping the cell
+                # as its full dx rather than dx/2.
+                #
+                # q is in W/m^2 and dx_i is in metres, matching the SI
+                # convention of this module (see physics/units.py).
+                q = bc.get_effective_value(self.time)
+                idx = bc.indices
+                dx_i = (
+                    self._voxel_sizes[idx]
+                    if self._voxel_sizes is not None
+                    else self.voxel_size
+                )
+                rc_i = rho_cp_arr[idx] if rho_cp_arr is not None else rho_cp
+                T_new[idx] += dt * q / (rc_i * dx_i)
+
             elif bc.type == BoundaryType.ADIABATIC:
                 # No-flux boundary: ∂T/∂n = 0
                 # Nothing to do (handled by finite difference stencil)
