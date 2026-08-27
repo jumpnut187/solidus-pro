@@ -37,6 +37,14 @@ def _make_gpu_manager(available: bool, backend_name: str = "METAL",
     return mgr
 
 
+#: ``gpu_distance_chunk_size`` value that suppresses the ", DistChunk N"
+#: suffix in _update_performance_summary. These tests assert the GPU portion
+#: of the label exactly, so the suffix is pinned off rather than hard-coded --
+#: the setting is user/env-configurable and would otherwise make the expected
+#: text machine-dependent.
+_DIST_CHUNK_SUPPRESSED = 10000
+
+
 class PerformanceSummaryLabelTests(unittest.TestCase):
     """Sidebar label must reflect live GPUComputeManager + use_gpu toggle."""
 
@@ -47,7 +55,14 @@ class PerformanceSummaryLabelTests(unittest.TestCase):
             self._app = None
         self.label = QLabel()
 
+        from config.settings import get_settings
+
+        self._perf_settings = get_settings().performance
+        self._original_chunk = self._perf_settings.gpu_distance_chunk_size
+        self._perf_settings.gpu_distance_chunk_size = _DIST_CHUNK_SUPPRESSED
+
     def tearDown(self) -> None:
+        self._perf_settings.gpu_distance_chunk_size = self._original_chunk
         if self._app is not None:
             self._app.quit()
 

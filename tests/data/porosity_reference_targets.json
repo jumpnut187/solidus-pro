@@ -1,14 +1,14 @@
 {
-  "version": 1,
-  "notes": "Reference values for calibration harness. Replace with measured MAGMASOFT/SOLIDCast values when available. Re-baselined 2026-08-14 (3rd pass) after fixing the implicit (enthalpy) latent-heat solve: earlier re-baselines were measured with latent heat effectively disabled by a chained fancy-index no-op, so recalescence and the mushy plateau were absent. With latent active, solidification times are physical (~50-250 s for 1-4 in sections), the graphite chill cuts chill-side solidification to ~43% of baseline and reduces side porosity, and riser bodies hold more porosity than riser posts (post_porosity_to_riser_ratio ~0.49). Targets below are the current measured values; tolerances cover run-to-run variance (trimesh SIGTRAP flake in core/voxel_mesh.py is pre-existing).",
+  "version": 2,
+  "notes": "Reference values for calibration harness. Replace with measured MAGMASOFT/SOLIDCast values when available. Re-baselined 2026-08-27 (4th pass). Every drift from the 3rd-pass (2026-08-14) values was attributed by bisect to a deliberate physics correction; none was an unexplained regression. (a) 5f2a4f7 'CFL-adaptive thermal timestep with recalescence cap' caps recalescence at T_sol so a voxel that crosses below solidus on a coarse step is not re-heated into the mushy zone as a permanent hot lump. That moved baseline cast_shrinkage_mean 0.069935 -> 0.083056, baseline side_solidification_time_mean 199.8 -> 163.68, chill side_solidification_time_mean 85.132 -> 74.904, and dual_riser cast_porosity_mean 0.050078 -> 0.0713. (b) 9049ae0 'Fix false shrinkage/porosity risk on chill faces' moved chill_block side_porosity_mean 0.033671 -> 0.017029 (-52%) and chill_block cast_shrinkage_mean 0.034 -> 0.025197, which is precisely that commit's stated purpose. Targets below are the current measured values; tolerances cover run-to-run variance. CORRECTION to the 3rd-pass note: the 'trimesh SIGTRAP flake in core/voxel_mesh.py' was neither trimesh, nor voxel_mesh, nor a flake. It was a deterministic out-of-bounds write in core/feeding_path.py trace_paths_from_risers_batch, which re-pushed already-queued nodes onto a fixed-capacity (n_voxels) frontier on every distance relaxation; under @jit(nopython=True) that unchecked write corrupted the heap and surfaced later as SIGTRAP/SIGSEGV inside libsystem_malloc during unrelated numpy allocation. Fixed 2026-08-27 by relaxing in place instead of re-inserting. Verified result-neutral: dual_riser cast_porosity_mean is 0.072525 both before and after the fix.",
   "cases": {
     "baseline_block_2in": {
       "source": "provisional_internal_reference",
       "metrics": {
-        "cast_shrinkage_mean": 0.069935,
-        "cast_porosity_mean": 0.032977,
-        "side_porosity_mean": 0.051847,
-        "side_solidification_time_mean": 199.8
+        "cast_shrinkage_mean": 0.083056,
+        "cast_porosity_mean": 0.038997,
+        "side_porosity_mean": 0.060398,
+        "side_solidification_time_mean": 163.68
       },
       "tolerance": {
         "cast_shrinkage_mean": 0.01,
@@ -20,9 +20,9 @@
     "riser_post_block": {
       "source": "provisional_internal_reference",
       "metrics": {
-        "cast_shrinkage_mean": 0.0047691,
-        "cast_porosity_mean": 0.077069,
-        "post_porosity_to_riser_ratio": 0.48832
+        "cast_shrinkage_mean": 0.00399,
+        "cast_porosity_mean": 0.079972,
+        "post_porosity_to_riser_ratio": 0.466395
       },
       "tolerance": {
         "cast_shrinkage_mean": 0.005,
@@ -33,10 +33,10 @@
     "chill_block": {
       "source": "provisional_internal_reference",
       "metrics": {
-        "cast_shrinkage_mean": 0.027778,
-        "cast_porosity_mean": 0.02296,
-        "side_porosity_mean": 0.033671,
-        "side_solidification_time_mean": 85.132
+        "cast_shrinkage_mean": 0.025197,
+        "cast_porosity_mean": 0.025068,
+        "side_porosity_mean": 0.017029,
+        "side_solidification_time_mean": 74.904
       },
       "tolerance": {
         "cast_shrinkage_mean": 0.01,
@@ -48,8 +48,8 @@
     "dual_riser_block": {
       "source": "provisional_internal_reference",
       "metrics": {
-        "cast_shrinkage_mean": 0.018532,
-        "cast_porosity_mean": 0.050078
+        "cast_shrinkage_mean": 0.018729,
+        "cast_porosity_mean": 0.072525
       },
       "tolerance": {
         "cast_shrinkage_mean": 0.015,

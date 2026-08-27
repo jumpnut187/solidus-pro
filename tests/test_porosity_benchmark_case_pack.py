@@ -164,14 +164,18 @@ class PorosityBenchmarkCasePackTests(unittest.TestCase):
                 target = float(target_value)
                 tol = float(tolerance[metric_name])
                 error = abs(predicted - target)
-                self.assertLessEqual(
-                    error,
-                    tol,
-                    msg=(
-                        f"{case_id}: {metric_name} outside tolerance "
-                        f"(pred={predicted:.6f}, target={target:.6f}, tol={tol:.6f})"
-                    ),
-                )
+                # subTest so a single drifted metric does not abort the loop and
+                # hide the others. Without it this test reports only the first
+                # out-of-tolerance metric, which previously masked three more.
+                with self.subTest(case=case_id, metric=metric_name):
+                    self.assertLessEqual(
+                        error,
+                        tol,
+                        msg=(
+                            f"{case_id}: {metric_name} outside tolerance "
+                            f"(pred={predicted:.6f}, target={target:.6f}, tol={tol:.6f})"
+                        ),
+                    )
                 weighted_error_sum += error / max(abs(target), 1e-3)
                 weighted_metric_count += 1
 

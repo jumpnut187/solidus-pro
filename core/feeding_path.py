@@ -331,11 +331,23 @@ def trace_paths_from_risers_batch(
                     update = tie_condition and source_condition
 
                 if update:
+                    # Relax in place -- do NOT push onto the frontier here.
+                    #
+                    # Reaching this branch means path_length[neighbor] >= 0 and
+                    # visited[neighbor] is False, so the neighbor was already
+                    # pushed when it was first discovered above and has not been
+                    # popped yet: it is still in the frontier. The frontier's
+                    # minimum is recomputed by linear scan each iteration, so the
+                    # improved key is picked up without re-inserting.
+                    #
+                    # Pushing again would make total insertions unbounded by
+                    # n_voxels (a node can be relaxed many times), overflowing
+                    # the fixed-capacity frontier array. Under @jit(nopython=True)
+                    # that is an unchecked out-of-bounds write which corrupts the
+                    # heap and later crashes the process in unrelated code.
                     path_length[neighbor] = new_dist
                     path_permeability[neighbor] = new_min_perm
                     feeding_source[neighbor] = current_source
-                    frontier[frontier_size] = neighbor
-                    frontier_size += 1
 
     return path_length, path_permeability, feeding_source
 

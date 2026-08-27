@@ -3,6 +3,20 @@ import sys
 import types
 import unittest
 
+from tests.helpers.module_stubs import (
+    install_stub_modules,
+    restore_modules,
+    snapshot_modules,
+)
+
+# Captured before any stub is installed, so tearDownModule can hand the real
+# vtk/PyQt5 modules back to whatever runs next in this process.
+_MODULE_SNAPSHOT = snapshot_modules()
+
+
+def tearDownModule() -> None:
+    restore_modules(_MODULE_SNAPSHOT)
+
 
 class _SpyVTKPlane:
     """Minimal spy for vtkPlane that records normal and origin."""
@@ -105,15 +119,18 @@ def _install_cross_section_stubs() -> None:
     qtcore_module.QTimer = _DummyVTKClass
     qtcore_module.pyqtSignal = lambda *a, **k: _DummyVTKClass()
 
-    sys.modules["vtk"] = vtk_module
-    sys.modules["vtk.util"] = vtk_util_module
-    sys.modules["vtk.util.numpy_support"] = numpy_support_module
-    sys.modules["vtk.qt"] = vtk_qt_module
-    sys.modules["vtk.qt.QVTKRenderWindowInteractor"] = qvtk_module
-    sys.modules["PyQt5"] = pyqt5_module
-    sys.modules["PyQt5.QtWidgets"] = qtwidgets_module
-    sys.modules["PyQt5.QtCore"] = qtcore_module
-    sys.modules.pop("ui.visualizer", None)
+    # Forced install; tearDownModule restores the real modules. Also drops
+    # ui.visualizer/ui.main_window so they re-import against these stubs.
+    install_stub_modules({
+        "vtk": vtk_module,
+        "vtk.util": vtk_util_module,
+        "vtk.util.numpy_support": numpy_support_module,
+        "vtk.qt": vtk_qt_module,
+        "vtk.qt.QVTKRenderWindowInteractor": qvtk_module,
+        "PyQt5": pyqt5_module,
+        "PyQt5.QtWidgets": qtwidgets_module,
+        "PyQt5.QtCore": qtcore_module,
+    })
 
 
 class CrossSectionPlaneTests(unittest.TestCase):

@@ -171,32 +171,35 @@ class SurfaceApiTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def test_surface_endpoint_reads_saved_visualization_artifact(self) -> None:
+    def _create_completed_project(self, name: str = "Surface API") -> str:
+        """Create a project with a saved visualization artifact and return its id.
+
+        The surface endpoint loads the artifact before validating query
+        parameters, so any test that needs to reach parameter validation must
+        go through a project that actually has results.
+        """
         sim_id = repo.create_project(
             self.database_path,
             {
-                "name": "Surface API",
+                "name": name,
                 "alloy": "WCB",
                 "voxel_size": 1.0,
                 "refinement_level": 1,
             },
         )
-        artifact_path = Path(self.temp_dir.name) / "surface-artifact.json"
+        summary = {"voxel_count": 125, "total_volume": 125.0}
+        artifact_path = Path(self.temp_dir.name) / f"surface-artifact-{sim_id}.json"
         artifact_path.write_text(
-            json.dumps(
-                {
-                    "data": {"voxel_count": 125, "total_volume": 125.0},
-                    "visualization": _synthetic_visualization(),
-                }
-            ),
+            json.dumps({"data": summary, "visualization": _synthetic_visualization()}),
             encoding="utf-8",
         )
         repo.mark_project_completed(
-            self.database_path,
-            sim_id,
-            {"voxel_count": 125, "total_volume": 125.0},
-            str(artifact_path),
+            self.database_path, sim_id, summary, str(artifact_path)
         )
+        return sim_id
+
+    def test_surface_endpoint_reads_saved_visualization_artifact(self) -> None:
+        sim_id = self._create_completed_project()
 
         response = self.client.get(f"/api/projects/{sim_id}/surface?mode=shrinkage&threshold=0.35")
 
@@ -206,9 +209,16 @@ class SurfaceApiTests(unittest.TestCase):
         self.assertFalse(payload["empty"])
 
     def test_surface_endpoint_rejects_invalid_mode(self) -> None:
-        response = self.client.get("/api/projects/example/surface?mode=unknown")
+        sim_id = self._create_completed_project("Invalid mode")
+
+        response = self.client.get(f"/api/projects/{sim_id}/surface?mode=unknown")
 
         self.assertEqual(response.status_code, 400)
+
+    def test_surface_endpoint_returns_404_for_unknown_project(self) -> None:
+        response = self.client.get("/api/projects/example/surface?mode=shrinkage")
+
+        self.assertEqual(response.status_code, 404)
 
 
 if __name__ == "__main__":
