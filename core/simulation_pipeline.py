@@ -16,7 +16,6 @@ from core.materials import get_alloy
 from core.part_manager import PartManager, PartType, build_part_manager, infer_part_type_from_filename
 from core.solidification import (
     AnalysisOptions,
-    SOLVER_MODE_SCHEDULE_LEGACY,
     SOLVER_MODE_THERMAL_COUPLED,
     VALID_SOLVER_MODES,
     SolidificationEngine,
@@ -35,14 +34,6 @@ ProgressMessageCallback = Callable[[str], None]
 DetailedProgressCallback = Callable[[int, int, str], None]
 CancelCallback = Callable[[], bool]
 ThreadBudgetProvider = Callable[[], Optional[int]]
-
-
-def _should_use_legacy_solver_default(options: Optional[Dict[str, Any]]) -> bool:
-    """Return True when the caller did not explicitly request a solver mode."""
-    if options is None:
-        return True
-
-    return "solver_mode" not in options
 
 
 def _get_default_solver_mode_override() -> Optional[str]:
@@ -528,20 +519,6 @@ def run_pipeline(
     # This ensures the full Numba-prange time-integration loop runs on all hardware.
     # To re-enable schedule_legacy as a fallback, set CASTSIM_DEFAULT_SOLVER_MODE=schedule_legacy
     # or pass solver_mode="schedule_legacy" explicitly in analysis_options.
-    # elif (
-    #     analysis_options.solver_mode == SOLVER_MODE_THERMAL_COUPLED
-    #     and _should_use_legacy_solver_default(inputs.analysis_options)
-    #     and not analysis_options.niyama
-    #     and (
-    #         analysis_options.fraction_liquid
-    #         or analysis_options.hot_tear
-    #         or analysis_options.shrinkage
-    #         or analysis_options.feeding_path
-    #     )
-    # ):
-    #     # Preserve historical timing/history behavior for legacy callers that do not
-    #     # explicitly pin the new thermal solver.
-    #     analysis_options.solver_mode = SOLVER_MODE_SCHEDULE_LEGACY
 
     _emit_message(progress_message_callback, "Running solidification simulation...")
     _apply_thread_budget(inputs.thread_budget_provider)

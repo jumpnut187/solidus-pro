@@ -4156,49 +4156,6 @@ class MainWindow(QMainWindow):
     
     # ==================== Legacy STL Loading (Single Part) ====================
     
-    def _load_stl_file(self):
-        """Load STL file (legacy single-part mode - clears existing parts).
-
-        Deprecated: kept for backwards compatibility but unreferenced by
-        any menu/button. The file dialog now accepts STEP files too, but
-        the single-part mode always loads only the first body if a STEP
-        is selected. New code should use :meth:`_add_part`.
-        """
-        filepath, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open CAD File",
-            "",
-            "CAD Files (*.stl *.step *.stp);;STL Files (*.stl);;STEP Files (*.step *.stp);;All Files (*)"
-        )
-        
-        if filepath:
-            self.status_label.setText("Loading STL file...")
-            self.progress_bar.setRange(0, 0)  # Indeterminate
-            
-            # Clear existing parts and add new one
-            self.part_manager.clear_all()
-            part_id = self.part_manager.load_part(filepath)
-            
-            self.progress_bar.setRange(0, 100)
-            self.progress_bar.setValue(0)
-            
-            if part_id:
-                self._update_parts_ui()
-                self._update_visualization()
-                
-                part = self.part_manager.get_part(part_id)
-                self.status_label.setText("STL loaded successfully")
-                self.mesh_setting_origin = "manual"
-                self.last_ml_recommendation = None
-                self.ml_status_label.setText("")
-                
-                # Show voxel size recommendations based on model dimensions
-                self._show_voxel_recommendations(part_id)
-            else:
-                self.status_label.setText("Error loading STL")
-                self.apply_ml_button.setEnabled(False)
-                self.ml_status_label.setText("")
-    
     def _show_voxel_recommendations(self, part_id: str):
         """Show voxel size recommendations after loading an STL"""
         try:
@@ -4495,19 +4452,6 @@ class MainWindow(QMainWindow):
             return candidate
         return None
     
-    def _on_alloy_changed(self, alloy_name: str):
-        """Update alloy info display"""
-        try:
-            alloy = get_alloy(alloy_name)
-            liquidus_f = (alloy.liquidus_temp * 9/5) + 32
-            info = (
-                f"Feeding: {alloy.feeding_distance_multiplier}x thickness\n"
-                f"Liquidus: {liquidus_f:.0f}°F"
-            )
-            self.alloy_info_label.setText(info)
-        except:
-            self.alloy_info_label.setText("")
-
     def _purge_previous_simulation_memory(self) -> None:
         """Release prior simulation memory while preserving loaded parts."""
         previous_worker = self.simulation_worker
@@ -6288,119 +6232,6 @@ class MainWindow(QMainWindow):
         self.riser_dialog.raise_()
         self.riser_dialog.activateWindow()
     
-    def _run_auto_riser(self):
-        """Run automatic riser design analysis"""
-        # Check if we have a mesh to analyze
-        if not self.part_manager.get_all_parts():
-            QMessageBox.warning(self, "No Parts Loaded", 
-                               "Please load a CAD part before running riser design analysis.")
-            return
-        
-        try:
-            from core.riser_design import (
-                RiserDesigner, RiserDesignParameters, MaterialRiserProperties,
-                RiserRecommendation, RiserType, RiserShape
-            )
-            from core.voxel_mesh import AdaptiveVoxelMesh
-            from core.materials import get_alloy
-            from core.part_manager import PartType
-            
-            # Get the casting part (first casting-type part)
-            casting_part = None
-            for part in self.part_manager.get_all_parts():
-                if part.part_type == PartType.CAST:
-                    casting_part = part
-                    break
-            
-            if casting_part is None:
-                # Use first part if no casting specifically marked
-                casting_part = self.part_manager.get_all_parts()[0]
-            
-            # Get mesh data from the part
-            stl_mesh = casting_part.get_transformed_mesh()
-            if stl_mesh is None:
-                QMessageBox.warning(self, "Mesh Not Available", 
-                                   "The part mesh is not available for analysis.")
-                return
-            
-            self.status_label.setText("🔄 Creating voxel mesh for analysis...")
-            QApplication.processEvents()
-            
-            # Create voxel mesh with current settings
-            voxel_size = self._current_voxel_size
-            bounds = np.array([stl_mesh.bounds[0], stl_mesh.bounds[1]]).T
-            
-            voxel_mesh = AdaptiveVoxelMesh(base_voxel_size=voxel_size, max_refinement_level=3)
-            success = voxel_mesh.generate(stl_mesh, bounds)
-            
-            if not success or voxel_mesh.voxel_centers is None:
-                QMessageBox.warning(self, "Mesh Error", 
-                                   "Failed to create voxel mesh. Try a different voxel size.")
-                return
-            
-            self.status_label.setText("🔄 Running riser design analysis...")
-            QApplication.processEvents()
-            
-            # Get alloy properties - they already have the right attributes
-            try:
-                alloy_props = get_alloy(self._current_alloy)
-            except KeyError:
-                alloy_props = get_alloy("WCB")  # Default fallback
-            
-            # Configure riser design parameters
-            params = RiserDesignParameters(
-                safety_factor=1.2,
-                modulus_factor=1.2,  # Riser modulus should be 1.2x casting modulus
-                height_ratio=1.5,    # H/D ratio for cylindrical risers
-                min_diameter=voxel_size * 3,
-                max_diameter=voxel_size * 30
-            )
-            
-            # Get voxel data for the designer
-            voxel_positions = voxel_mesh.voxel_centers
-            n_voxels = len(voxel_positions)
-            surface_mask = voxel_mesh.surface_voxels if hasattr(voxel_mesh, 'surface_voxels') and voxel_mesh.surface_voxels is not None else np.ones(n_voxels, dtype=bool)
-            neighbors = voxel_mesh.voxel_neighbors if hasattr(voxel_mesh, 'voxel_neighbors') and voxel_mesh.voxel_neighbors is not None else np.full((n_voxels, 6), -1, dtype=np.int32)
-            
-            # Create designer and run analysis
-            designer = RiserDesigner(
-                voxel_positions=voxel_positions,
-                voxel_size=voxel_size,
-                neighbors=neighbors,
-                surface_mask=surface_mask,
-                alloy=alloy_props,
-                params=params
-            )
-            
-            recommendations = designer.design_risers(max_risers=5)
-            
-            # Store results
-            self._riser_recommendations = recommendations
-            
-            self.status_label.setText(f"✅ Riser analysis complete: {len(recommendations)} risers recommended")
-            print(f"\n========== RISER DESIGN ANALYSIS ==========")
-            print(f"Part: {casting_part.name}")
-            print(f"Alloy: {self._current_alloy}")
-            print(f"Voxel size: {voxel_size} in")
-            print(f"Voxel count: {n_voxels}")
-            print(f"Recommendations: {len(recommendations)} risers")
-            for i, rec in enumerate(recommendations):
-                print(f"\n  Riser {i+1}:")
-                print(f"    Type: {rec.riser_type.name}")
-                print(f"    Position: ({rec.position[0]:.2f}, {rec.position[1]:.2f}, {rec.position[2]:.2f})")
-                print(f"    Size: {rec.diameter:.2f} x {rec.height:.2f}")
-                print(f"    Confidence: {rec.confidence:.0%}")
-            print("==========================================\n")
-            
-        except ImportError as e:
-            QMessageBox.critical(self, "Module Error", 
-                                f"Riser design module not found:\n{str(e)}")
-        except Exception as e:
-            QMessageBox.critical(self, "Analysis Error", 
-                                f"Error during riser analysis:\n{str(e)}")
-            import traceback
-            traceback.print_exc()
-    
     def _apply_riser_recommendations(self, recommendations: list):
         """Add recommended risers as parts to the simulation"""
         if not recommendations:
@@ -6558,17 +6389,6 @@ class MainWindow(QMainWindow):
                                 f"Error generating report:\n{str(e)}")
             import traceback
             traceback.print_exc()
-    
-    def _refresh_parts_visualization(self):
-        """Refresh the visualization of all parts"""
-        self.visualizer.clear_all()
-        for part in self.part_manager.get_all_parts():
-            self.visualizer.add_stl_mesh(
-                part.mesh, 
-                name=part.part_id,
-                part_type=part.part_type
-            )
-        self.visualizer.reset_camera()
     
     def _reset_camera_view(self):
         """Reset the camera to default view"""

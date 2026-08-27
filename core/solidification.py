@@ -470,7 +470,6 @@ class SolidificationEngine:
                     self.time_step = float(f"{dt_cfl:.4g}")
                     if show_progress:
                         print(f"    Adaptive thermal timestep: {self.time_step:.4f}s (CFL)")
-                    self._thermal_adaptive_dt = self.time_step
 
     def _configure_thermal_boundaries(self, *, mold_temperature: float, chill_temperature: float) -> None:
         """Map current part types to simple thermal boundary conditions."""
