@@ -274,9 +274,12 @@ class SolidificationModel:
         Returns:
             Volumetric latent heat release rate (W/m³)
         """
+        if NUMBA_AVAILABLE:
+            return self._update_parallel(temperatures, dt)
+
         # Save previous state
         self._fraction_solid_prev[:] = self._fraction_solid
-        
+
         # Calculate new fraction solid
         if self.method == SolidificationMethod.LEVER_RULE:
             fs_new = self._lever_rule(temperatures)
@@ -319,9 +322,53 @@ class SolidificationModel:
         latent_heat_rate = self.L_vol * dfs / dt
         self._last_dt = dt
         self._last_latent_heat_rate[:] = latent_heat_rate
-        
+
         return latent_heat_rate
-    
+
+    def _update_parallel(self, temperatures: FloatArray, dt: float) -> FloatArray:
+        """
+        Numba-parallel equivalent of ``update``.
+
+        The lever rule (the default, and the method the thermal-coupled solver
+        runs) is evaluated inside the commit kernel so no candidate array is
+        built. Other methods keep their NumPy fraction-solid formulas
+        unchanged and only the commit math is parallelized.
+        """
+        T = np.ascontiguousarray(temperatures, dtype=np.float64)
+        use_lever = self.method == SolidificationMethod.LEVER_RULE
+
+        if use_lever:
+            # Unused by the kernel in this branch, but Numba still needs a
+            # float64 array of the right type for the argument.
+            fs_new = T
+        elif self.method == SolidificationMethod.SCHEIL:
+            fs_new = np.ascontiguousarray(self._scheil(temperatures), dtype=np.float64)
+        elif self.method == SolidificationMethod.BACK_DIFFUSION:
+            fs_new = np.ascontiguousarray(self._back_diffusion(temperatures), dtype=np.float64)
+        else:
+            fs_new = np.ascontiguousarray(self._lever_rule(temperatures), dtype=np.float64)
+
+        self.time += dt
+        commit_solidification_update_parallel(
+            fs_new,
+            T,
+            self._fraction_solid,
+            self._fraction_solid_prev,
+            self._solidification_start,
+            self._solidification_end,
+            self._last_latent_heat_rate,
+            use_lever,
+            float(self.T_liq),
+            float(self.dT),
+            float(self.time),
+            float(dt),
+            float(self.L_vol),
+        )
+        self._last_dt = dt
+        # Callers treat the return value as a snapshot independent of the
+        # model's own buffer (see get_state), so hand back a copy.
+        return self._last_latent_heat_rate.copy()
+
     def _lever_rule(self, T: FloatArray) -> FloatArray:
         """
         Calculate fraction solid using lever rule (linear).
@@ -571,5 +618,139 @@ if NUMBA_AVAILABLE:
                     fs[i] = cap
 
         return fs
-    
+
+    @njit(parallel=True, cache=True)
+    def commit_solidification_update_parallel(
+        fs_new: FloatArray,
+        T: FloatArray,
+        fs: FloatArray,
+        fs_prev: FloatArray,
+        sol_start: FloatArray,
+        sol_end: FloatArray,
+        latent_rate: FloatArray,
+        use_lever: bool,
+        T_liq: float,
+        dT: float,
+        time_now: float,
+        dt: float,
+        L_vol: float,
+    ) -> None:
+        """
+        Commit one solidification step in parallel, in place.
+
+        Fuses what ``SolidificationModel.update`` otherwise spends ten
+        full-array NumPy temporaries on: the previous-state save, the
+        irreversibility maximum, start/end crossing detection, and the latent
+        heat rate. Every voxel is independent, so this is a pure element-wise
+        pass.
+
+        With ``use_lever`` the lever-rule fraction is evaluated inline from
+        ``T`` and ``fs_new`` is ignored, which keeps the candidate field from
+        being materialized at all. Otherwise ``fs_new`` supplies candidates
+        computed by the caller.
+
+        ``time_now`` must be the model time AFTER the step (``self.time``
+        post-increment); ``sol_start``/``sol_end``/``latent_rate`` are outputs.
+        """
+        n = len(fs)
+        for i in prange(n):
+            prev = fs[i]
+            fs_prev[i] = prev
+
+            if use_lever:
+                candidate = (T_liq - T[i]) / dT
+                if candidate < 0.0:
+                    candidate = 0.0
+                elif candidate > 1.0:
+                    candidate = 1.0
+            else:
+                candidate = fs_new[i]
+
+            # Solidification is irreversible (no remelting).
+            f = prev if prev > candidate else candidate
+            fs[i] = f
+
+            starting = prev < 0.01 and f >= 0.01
+            ending = prev < 0.99 and f >= 0.99
+            if starting:
+                # A liquid -> solid crossing inside a single step would leave a
+                # degenerate start == end interval, which downstream schedule
+                # evaluation reads as "never solidified"; anchor it at the step
+                # beginning so the interval spans at least one step.
+                sol_start[i] = time_now - dt if ending else time_now
+            if ending:
+                sol_end[i] = time_now
+
+            dfs = f - prev
+            if dfs < 0.0:
+                dfs = 0.0
+            latent_rate[i] = L_vol * dfs / dt
+
+    @njit(parallel=True, cache=True)
+    def apply_enthalpy_correction_parallel(
+        T_post: FloatArray,
+        fs_prev: FloatArray,
+        T_out: FloatArray,
+        T_liq: float,
+        T_sol: float,
+        dT: float,
+        beta: float,
+    ) -> None:
+        """
+        Apply the implicit (enthalpy) latent-heat correction in parallel.
+
+        Element-wise equivalent of the mushy-zone solve in
+        ``core.solidification_loop._run_thermal_coupled_integration``; see the
+        derivation there. Writes the corrected field into ``T_out``.
+
+        Branches, in the order the NumPy form applies them: above liquidus is
+        untouched; a mushy voxel whose diffusion-only temperature implies more
+        solid than it already has gets the closed-form implicit solve, with
+        remelt (solve leaves the zone upward) and all-solid (leaves it
+        downward) special cases; a voxel already at or below solidus releases
+        its remaining latent capped at the solidus. The active and below-
+        solidus cases are mutually exclusive by their T_post comparisons.
+        """
+        n = len(T_post)
+        liq_over_dT = T_liq / dT
+        denom = 1.0 + beta / dT
+
+        for i in prange(n):
+            t_post = T_post[i]
+            if not (t_post < T_liq):
+                T_out[i] = t_post
+                continue
+
+            prev = fs_prev[i]
+            if t_post <= T_sol:
+                # Already below solidus: release all remaining latent, capped
+                # at T_sol so a coarse-step crossing cannot re-heat a completed
+                # voxel back into the mushy zone as a permanent hot lump.
+                remaining = 1.0 - prev
+                if remaining < 0.0:
+                    remaining = 0.0
+                elif remaining > 1.0:
+                    remaining = 1.0
+                recalesced = t_post + beta * remaining
+                T_out[i] = recalesced if recalesced < T_sol else T_sol
+                continue
+
+            fs_max = (T_liq - t_post) / dT
+            if fs_max < 0.0:
+                fs_max = 0.0
+            elif fs_max > 1.0:
+                fs_max = 1.0
+
+            if fs_max > prev:
+                t_mush = (t_post + beta * (liq_over_dT - prev)) / denom
+                if t_mush >= T_liq:
+                    T_out[i] = t_post
+                elif t_mush <= T_sol:
+                    T_out[i] = t_post + beta * (1.0 - prev)
+                else:
+                    T_out[i] = t_mush
+            else:
+                T_out[i] = t_post
+
+
 

@@ -18,6 +18,13 @@ except ImportError:
     NUMBA_THREADING_AVAILABLE = False
     prange = range  # type: ignore[assignment]
 
+try:
+    from physics.solidification_physics import apply_enthalpy_correction_parallel
+
+    ENTHALPY_KERNEL_AVAILABLE = True
+except ImportError:
+    ENTHALPY_KERNEL_AVAILABLE = False
+
 
 def _jit(fn):  # type: ignore[no-redef]
     """JIT decorator that gracefully no-ops when numba is missing."""
@@ -807,6 +814,68 @@ def _run_schedule_based_integration(
     return 0
 
 
+def _apply_enthalpy_correction_numpy(
+    T_post: np.ndarray,
+    fs_prev: np.ndarray,
+    T_final: np.ndarray,
+    T_liq: float,
+    T_sol: float,
+    dT: float,
+    beta: float,
+) -> None:
+    """
+    NumPy reference for the implicit latent-heat correction.
+
+    Fallback for when the Numba kernel is unavailable, and the parity
+    reference the kernel is tested against. Writes into ``T_final``; see
+    ``_run_thermal_coupled_integration`` for the derivation.
+    """
+    T_final[:] = T_post
+    below_liq = T_post < T_liq
+    if not np.any(below_liq):
+        return
+
+    liq_idx = np.flatnonzero(below_liq)
+    fs_max = np.clip((T_liq - T_post[liq_idx]) / dT, 0.0, 1.0)  # fs(T_post)
+    active = (fs_max > fs_prev[liq_idx]) & (T_post[liq_idx] > T_sol)
+    if np.any(active):
+        sel = liq_idx[active]
+        T_mush = (T_post[sel] + beta * (T_liq / dT - fs_prev[sel])) / (1.0 + beta / dT)
+        # Branch: implicit solve leaves the mushy zone upward (would
+        # remelt -> no latent, keep T_post) or downward (all latent
+        # released at solidus -> recalesce by the remaining fraction).
+        remelt = T_mush >= T_liq
+        all_solid = T_mush <= T_sol
+        T_final[sel] = np.where(
+            remelt,
+            T_post[sel],
+            np.where(
+                all_solid,
+                T_post[sel] + beta * (1.0 - fs_prev[sel]),
+                T_mush,
+            ),
+        )
+    below_sol = T_post[liq_idx] <= T_sol
+    if np.any(below_sol):
+        # Already below solidus: release all remaining latent.
+        sel2 = liq_idx[below_sol]
+        remaining = 1.0 - fs_prev[sel2]
+        # Recalescence must not push a completed voxel back above
+        # solidus. On a coarse step a voxel can cross below solidus
+        # with a large remaining latent fraction (fine steps cross
+        # with remaining ~ 0), and without this cap the temperature
+        # jump beta*remaining (tens of K) re-heats completed voxels
+        # into the mushy zone as permanent hot lumps, stalling their
+        # neighbors (observed: a dt=2s run frozen at ~98% while the
+        # dt=0.1s run finished at the same wall time). Capping at
+        # T_sol makes coarse-step crossings consistent with the
+        # fine-step limit.
+        T_final[sel2] = np.minimum(
+            T_post[sel2] + beta * np.clip(remaining, 0.0, 1.0),
+            T_sol,
+        )
+
+
 def _run_thermal_coupled_integration(
     engine: Any,
     *,
@@ -855,6 +924,12 @@ def _run_thermal_coupled_integration(
         or getattr(engine.analysis_options, "feeding_path", False)
     )
 
+    # Per-iteration scratch, allocated once: the enthalpy correction's output
+    # field and the pre-step fraction-solid snapshot it reads.
+    n_voxels = int(np.asarray(heat_model.temperatures).size)
+    T_final = np.empty(n_voxels, dtype=np.float64)
+    fs_prev = np.empty(n_voxels, dtype=np.float64)
+
     while iteration < max_iterations:
         previous_states = np.asarray(engine.mesh.voxel_states, dtype=np.float32).copy()
         if np.all(previous_states >= 0.99):
@@ -879,7 +954,7 @@ def _run_thermal_coupled_integration(
         # with branch handling when T_final leaves the mushy zone. This is
         # the classic apparent-heat-capacity formulation: oscillation-free,
         # energy-conserving, and the plateau proceeds at the physical rate.
-        fs_prev = np.asarray(solidification_model.fraction_solid, dtype=np.float64).copy()
+        np.copyto(fs_prev, np.asarray(solidification_model.fraction_solid, dtype=np.float64))
         T_post = np.asarray(heat_model.temperatures, dtype=np.float64)
         T_liq = float(engine.alloy.liquidus_temp)
         T_sol = float(engine.alloy.solidus_temp)
@@ -892,48 +967,14 @@ def _run_thermal_coupled_integration(
         )
         beta = l_vol / rho_cp  # K of recalescence per unit fraction solid
 
-        below_liq = T_post < T_liq
-        T_final = T_post.copy()
-        if np.any(below_liq):
-            liq_idx = np.flatnonzero(below_liq)
-            fs_max = np.clip((T_liq - T_post[liq_idx]) / dT, 0.0, 1.0)  # fs(T_post)
-            active = (fs_max > fs_prev[liq_idx]) & (T_post[liq_idx] > T_sol)
-            if np.any(active):
-                sel = liq_idx[active]
-                T_mush = (T_post[sel] + beta * (T_liq / dT - fs_prev[sel])) / (1.0 + beta / dT)
-                # Branch: implicit solve leaves the mushy zone upward (would
-                # remelt -> no latent, keep T_post) or downward (all latent
-                # released at solidus -> recalesce by the remaining fraction).
-                remelt = T_mush >= T_liq
-                all_solid = T_mush <= T_sol
-                T_final[sel] = np.where(
-                    remelt,
-                    T_post[sel],
-                    np.where(
-                        all_solid,
-                        T_post[sel] + beta * (1.0 - fs_prev[sel]),
-                        T_mush,
-                    ),
-                )
-            below_sol = T_post[liq_idx] <= T_sol
-            if np.any(below_sol):
-                # Already below solidus: release all remaining latent.
-                sel2 = liq_idx[below_sol]
-                remaining = 1.0 - fs_prev[sel2]
-                # Recalescence must not push a completed voxel back above
-                # solidus. On a coarse step a voxel can cross below solidus
-                # with a large remaining latent fraction (fine steps cross
-                # with remaining ~ 0), and without this cap the temperature
-                # jump beta*remaining (tens of K) re-heats completed voxels
-                # into the mushy zone as permanent hot lumps, stalling their
-                # neighbors (observed: a dt=2s run frozen at ~98% while the
-                # dt=0.1s run finished at the same wall time). Capping at
-                # T_sol makes coarse-step crossings consistent with the
-                # fine-step limit.
-                T_final[sel2] = np.minimum(
-                    T_post[sel2] + beta * np.clip(remaining, 0.0, 1.0),
-                    T_sol,
-                )
+        if ENTHALPY_KERNEL_AVAILABLE:
+            apply_enthalpy_correction_parallel(
+                T_post, fs_prev, T_final, T_liq, T_sol, dT, beta
+            )
+        else:
+            _apply_enthalpy_correction_numpy(
+                T_post, fs_prev, T_final, T_liq, T_sol, dT, beta
+            )
         heat_model.temperatures[:] = T_final
 
         # Fraction solid and solidification-time tracking from the corrected
@@ -954,11 +995,16 @@ def _run_thermal_coupled_integration(
 
         start_times = np.asarray(solidification_model.solidification_time, dtype=np.float64)
         end_times = np.asarray(solidification_model._solidification_end, dtype=np.float64)
-        local_times = np.asarray(solidification_model.local_solidification_time, dtype=np.float64)
 
         finite_start = np.isfinite(start_times)
         finite_end = np.isfinite(end_times)
-        finite_local = np.isfinite(local_times)
+        # Same value as the model's local_solidification_time property, built
+        # from the arrays already in hand instead of re-deriving them. The
+        # masked subtract leaves unfinished voxels at inf without evaluating
+        # inf - inf for them.
+        finite_local = finite_start & finite_end
+        local_times = np.full_like(start_times, np.inf)
+        np.subtract(end_times, start_times, out=local_times, where=finite_local)
 
         engine.solidification_start_times[:] = np.where(finite_start, start_times, 0.0).astype(np.float32)
         # Unfinished voxels get NaN (not 0.0) so they cannot collide with

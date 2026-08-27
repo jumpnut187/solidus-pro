@@ -434,10 +434,8 @@ class SolidificationEngine:
             print(f"    Representative voxel size: {voxel_size_in:.4f}\" ({voxel_size_m:.6f} m)")
             print(f"    Surface mold temperature: {mold_temperature:.1f} C")
             print(f"    Chill temperature: {chill_temperature:.1f} C")
-            backend_label = (
-                "Numba parallel kernels"
-                if getattr(self._thermal_heat_model, "numba_parallel_eligible", False)
-                else "NumPy/vectorized kernels"
+            backend_label = getattr(
+                self._thermal_heat_model, "backend_description", "NumPy/vectorized kernels"
             )
             print(f"    Thermal solver backend: {backend_label}")
             print("    Temperature-dependent properties: enabled")

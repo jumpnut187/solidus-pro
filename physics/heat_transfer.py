@@ -217,6 +217,18 @@ class HeatTransferModel:
         )
         self._diffusivity_overrides = diffusivity_overrides
         self._property_curves = property_curves
+        # Contiguous float64 copies of the curves, cast once so the per-step
+        # diffusivity evaluation does no per-call conversion.
+        if property_curves is not None:
+            self._curve_temp = np.ascontiguousarray(property_curves["temp_points"], dtype=np.float64)
+            self._curve_k = np.ascontiguousarray(property_curves["conductivity"], dtype=np.float64)
+            self._curve_rho = np.ascontiguousarray(property_curves["density"], dtype=np.float64)
+            self._curve_cp = np.ascontiguousarray(property_curves["specific_heat"], dtype=np.float64)
+        else:
+            self._curve_temp = None
+            self._curve_k = None
+            self._curve_rho = None
+            self._curve_cp = None
         self._rho_cp_scalar = alloy.density_liquid * alloy.specific_heat
         self._rho_cp_overrides = rho_cp_overrides
         
@@ -259,6 +271,19 @@ class HeatTransferModel:
     def numba_parallel_eligible(self) -> bool:
         """Return True when the model can use Numba parallel kernels."""
         return self._numba_parallel_eligible
+
+    @property
+    def backend_description(self) -> str:
+        """
+        Human-readable name of the kernel backend used per step.
+
+        With Numba present every ``_step_internal`` branch dispatches a
+        parallel kernel: the uniform Laplacian/update pair when alpha is
+        scalar, the conservative flux kernel when it is per-voxel.
+        ``numba_parallel_eligible`` covers only the uniform branch, so it
+        is the wrong flag to label the backend with.
+        """
+        return "Numba parallel kernels" if NUMBA_AVAILABLE else "NumPy/vectorized kernels"
 
     @property
     def last_step_used_numba(self) -> bool:
@@ -325,7 +350,7 @@ class HeatTransferModel:
         """
         self._heat_source[:] = source
     
-    def get_stable_timestep(self) -> float:
+    def get_stable_timestep(self, alpha: Optional[FloatArray] = None) -> float:
         """
         Calculate maximum stable time step for explicit scheme.
 
@@ -335,14 +360,18 @@ class HeatTransferModel:
         (0.5 * 6 + 0.125 * 8) / dx² = 4 / dx², so 4α/dx² is the correct
         diffusion bound. Uses the smallest per-voxel size and the largest
         per-voxel diffusivity when those vary.
+
+        Args:
+            alpha: Optional diffusivity field already evaluated at the
+                current temperatures, reused instead of recomputing it.
         """
         if isinstance(self._inv_dx2, np.ndarray):
             min_dx2 = 1.0 / float(np.max(self._inv_dx2))
         else:
             min_dx2 = 1.0 / float(self._inv_dx2)
-        return 0.9 * min_dx2 / (4.0 * self._get_alpha_max())
+        return 0.9 * min_dx2 / (4.0 * self._get_alpha_max(alpha))
 
-    def _get_alpha_max(self) -> float:
+    def _get_alpha_max(self, alpha: Optional[FloatArray] = None) -> float:
         """
         Return the maximum thermal diffusivity over all voxels.
 
@@ -352,9 +381,14 @@ class HeatTransferModel:
         would under-estimate the CFL diffusivity and let the explicit
         scheme run unstable at the chill interface (observed as +/-inf
         blow-up within a few hundred steps).
+
+        Args:
+            alpha: Optional diffusivity field already evaluated at the
+                current temperatures, reused instead of recomputing it.
         """
         if self.use_temperature_dependent:
-            alpha = self._get_temperature_dependent_diffusivity(self._temperatures)
+            if alpha is None:
+                alpha = self._get_temperature_dependent_diffusivity(self._temperatures)
             alpha_max = float(np.max(alpha))
         else:
             alpha_max = float(self._alpha)
@@ -408,31 +442,65 @@ class HeatTransferModel:
         Args:
             dt: Time step in seconds
         """
+        # The CFL bound and the first substep both need alpha at the current
+        # field, so evaluate the property curves once and share the result.
+        # The bound is deliberately NOT cached across steps: alpha rises as
+        # the casting cools (k climbs toward room temperature while cp falls),
+        # so a stale bound is stale in the unstable direction, and the
+        # adaptive-dt path (CASTSIM_THERMAL_ADAPTIVE_DT) sets the outer step
+        # near this bound, making the subdivision below load-bearing.
+        alpha0 = (
+            self._get_temperature_dependent_diffusivity(self._temperatures)
+            if self.use_temperature_dependent
+            else None
+        )
+
         # Check stability
-        dt_stable = self.get_stable_timestep()
+        dt_stable = (
+            self.get_stable_timestep(alpha=alpha0)
+            if alpha0 is not None
+            else self.get_stable_timestep()
+        )
         if dt > dt_stable:
             # Subdivide step
             n_substeps = int(np.ceil(dt / dt_stable))
             dt_sub = dt / n_substeps
-            for _ in range(n_substeps):
-                self._step_internal(dt_sub)
+            for substep in range(n_substeps):
+                # Only the first substep sees the field alpha0 was built from;
+                # later ones recompute against the updated temperatures.
+                self._step_internal(dt_sub, alpha_precomputed=alpha0 if substep == 0 else None)
         else:
-            self._step_internal(dt)
-        
+            self._step_internal(dt, alpha_precomputed=alpha0)
+
         self.time += dt
-    
-    def _step_internal(self, dt: float) -> None:
-        """Internal time stepping (assumes dt is stable)"""
+
+    def _step_internal(self, dt: float, alpha_precomputed: Optional[FloatArray] = None) -> None:
+        """
+        Internal time stepping (assumes dt is stable).
+
+        Args:
+            dt: Time step in seconds
+            alpha_precomputed: Optional diffusivity field already evaluated at
+                the current temperatures (see ``step``).
+        """
         T = self._temperatures
         T_new = self._temperatures_new
-        
+
         # Get thermal diffusivity (potentially temperature-dependent)
         if self.use_temperature_dependent:
-            alpha = self._get_temperature_dependent_diffusivity(T)
+            alpha = (
+                alpha_precomputed
+                if alpha_precomputed is not None
+                else self._get_temperature_dependent_diffusivity(T)
+            )
         else:
             alpha = self._alpha
 
-        # Apply per-voxel diffusivity overrides (e.g., chill regions).
+        # Apply per-voxel diffusivity overrides (e.g., chill regions). This
+        # mutates alpha in place, including a field handed down from step();
+        # that array is a per-call local whose CFL maximum was already taken,
+        # and _get_alpha_max folds the override values in separately, so the
+        # mutation cannot leak into a later step or under-state the bound.
         if self._diffusivity_overrides is not None:
             if not isinstance(alpha, np.ndarray):
                 alpha = np.full(self.n_voxels, alpha, dtype=np.float64)
@@ -685,12 +753,20 @@ class HeatTransferModel:
         Otherwise fall back to a simple linear blend between solid and
         liquid values.
         """
-        curves = self._property_curves
-        if curves is not None:
-            temp_points = np.asarray(curves["temp_points"], dtype=np.float64)
-            k = np.interp(T, temp_points, np.asarray(curves["conductivity"], dtype=np.float64))
-            rho = np.interp(T, temp_points, np.asarray(curves["density"], dtype=np.float64))
-            cp = np.interp(T, temp_points, np.asarray(curves["specific_heat"], dtype=np.float64))
+        if self._curve_temp is not None:
+            if NUMBA_AVAILABLE:
+                # One parallel pass computing k, rho, cp and their quotient,
+                # replacing three serial np.interp sweeps over the full field.
+                return compute_diffusivity_from_curves_parallel(
+                    np.ascontiguousarray(T, dtype=np.float64),
+                    self._curve_temp,
+                    self._curve_k,
+                    self._curve_rho,
+                    self._curve_cp,
+                )
+            k = np.interp(T, self._curve_temp, self._curve_k)
+            rho = np.interp(T, self._curve_temp, self._curve_rho)
+            cp = np.interp(T, self._curve_temp, self._curve_cp)
             return k / (rho * cp)
 
         T_solidus = self.alloy.solidus_temp
@@ -744,6 +820,63 @@ except ImportError:
 
 
 if NUMBA_AVAILABLE:
+    @njit(parallel=True, cache=True)
+    def compute_diffusivity_from_curves_parallel(
+        T: FloatArray,
+        temp_points: FloatArray,
+        k_vals: FloatArray,
+        rho_vals: FloatArray,
+        cp_vals: FloatArray,
+    ) -> FloatArray:
+        """
+        Evaluate alpha(T) = k(T) / (rho(T) * cp(T)) in one parallel pass.
+
+        Replaces three ``np.interp`` sweeps (each strictly single-threaded,
+        and together the dominant serial cost of a thermal step) with a
+        single traversal that interpolates all three curves per voxel and
+        materializes only the quotient.
+
+        ``temp_points`` is a short ascending grid (six points in the
+        production curves), so a forward scan beats a binary search. Edge
+        behaviour matches ``np.interp``: values outside the grid clamp to the
+        end points, and NaN propagates.
+        """
+        n = len(T)
+        m = len(temp_points)
+        alpha = np.empty(n, dtype=np.float64)
+        t_lo = temp_points[0]
+        t_hi = temp_points[m - 1]
+
+        for i in prange(n):
+            t = T[i]
+            if t <= t_lo:
+                k = k_vals[0]
+                rho = rho_vals[0]
+                cp = cp_vals[0]
+            elif t >= t_hi:
+                k = k_vals[m - 1]
+                rho = rho_vals[m - 1]
+                cp = cp_vals[m - 1]
+            else:
+                # Segment j with temp_points[j] <= t < temp_points[j+1]. A NaN
+                # t matches no segment and falls through with j = 0, where the
+                # arithmetic below carries the NaN into alpha as np.interp does.
+                j = 0
+                for s in range(m - 1):
+                    if t < temp_points[s + 1]:
+                        j = s
+                        break
+                x0 = temp_points[j]
+                inv_dx = 1.0 / (temp_points[j + 1] - x0)
+                offset = t - x0
+                # Slope-then-offset form, matching np.interp's arithmetic.
+                k = (k_vals[j + 1] - k_vals[j]) * inv_dx * offset + k_vals[j]
+                rho = (rho_vals[j + 1] - rho_vals[j]) * inv_dx * offset + rho_vals[j]
+                cp = (cp_vals[j + 1] - cp_vals[j]) * inv_dx * offset + cp_vals[j]
+            alpha[i] = k / (rho * cp)
+
+        return alpha
+
     @njit(parallel=True, cache=True)
     def compute_laplacian_parallel(
         T: FloatArray,
