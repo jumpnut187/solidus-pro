@@ -440,6 +440,7 @@ class VerticalSolidificationRegressionTests(unittest.TestCase):
         dummy.solidification_times = np.array([100.0, 100.0], dtype=np.float32)
         dummy.hotspot_intensity = np.zeros(2, dtype=np.float32)
         dummy._group_risers_by_component = lambda: [np.array([0, 1], dtype=np.int64)]
+        dummy._get_risk_moduli = lambda: dummy.mesh.voxel_moduli
         valid_indices = np.array([0, 1], dtype=np.int64)
         normalized_heights = np.array([0.0, 1.0], dtype=np.float32)
         local_section_size = np.array([1.0, 1.0], dtype=np.float32)

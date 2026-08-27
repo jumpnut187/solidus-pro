@@ -202,9 +202,14 @@ class SolidificationEngine:
         self.solidification_end_times = None
         self.local_solidification_time = None
         self.surface_distances = None
+        # Surface distance measured to the *material* surface (free surfaces plus
+        # chill/core-backed faces). Risk scoring uses this so a chill does not
+        # read as casting wall thickness; the solver keeps surface_distances.
+        self.cast_surface_distances = None
+        self._risk_moduli = None
         self.feeding_fraction_solid = None
         self.feeding_path_lengths = None
-        
+
         # Shrinkage/Porosity results
         self.shrinkage_risk = None
         self.shrinkage_probability = None
@@ -1264,6 +1269,8 @@ class SolidificationEngine:
 
         if len(surface_centers) == 0:
             self.surface_distances = np.zeros(n_voxels, dtype=np.float32)
+            self.cast_surface_distances = self.surface_distances
+            self._risk_moduli = None
             return
 
         # Ensure arrays are contiguous float32
@@ -1286,12 +1293,137 @@ class SolidificationEngine:
                 # Conservative fallback path if KD-tree query is unavailable.
                 self.surface_distances = compute_min_distances_parallel(voxel_centers, surface_centers)
                 print(f"  Feeding distances computed (JIT-parallel)")
-    
+
+        self.cast_surface_distances = self._compute_cast_surface_distances(voxel_centers)
+        self._risk_moduli = None
+
+    def _get_material_surface_indices(self) -> np.ndarray:
+        """Material surface indices, falling back to the geometric surface."""
+        getter = getattr(self.mesh, "get_material_surface_voxel_indices", None)
+        if callable(getter):
+            return getter()
+        return self.mesh.get_surface_voxel_indices()
+
+    def _compute_cast_surface_distances(self, voxel_centers: np.ndarray) -> np.ndarray:
+        """Distance to the nearest material surface (free surface or chill/core face)."""
+        material_indices = self._get_material_surface_indices()
+        extra = np.setdiff1d(material_indices, self.mesh.get_surface_voxel_indices())
+        if len(extra) == 0:
+            return self.surface_distances
+
+        extra_centers = np.ascontiguousarray(self.mesh.voxel_centers[extra], dtype=np.float32)
+        try:
+            distances, _ = cKDTree(extra_centers).query(voxel_centers, k=1, workers=-1)
+            extra_distances = np.asarray(distances, dtype=np.float32)
+        except Exception:
+            extra_distances = compute_min_distances_parallel(voxel_centers, extra_centers)
+        return np.minimum(self.surface_distances, extra_distances).astype(np.float32)
+
+    def _get_cast_surface_distances(self) -> np.ndarray:
+        """Surface distances for risk scoring; geometric distances if unavailable."""
+        cast_distances = getattr(self, "cast_surface_distances", None)
+        if cast_distances is not None:
+            return cast_distances
+        return self.surface_distances
+
+    def _get_risk_moduli(self) -> np.ndarray:
+        """Voxel moduli capped by distance to the material surface.
+
+        ``mesh.voxel_moduli`` measures depth into the combined assembly, so a
+        chill inflates it and makes chill-backed metal look thick and interior.
+        Risk terms use this capped view; the solver keeps the raw moduli.
+        """
+        cached = getattr(self, "_risk_moduli", None)
+        if cached is not None:
+            return cached
+
+        moduli = np.asarray(self.mesh.voxel_moduli, dtype=np.float32)
+        cast_distances = getattr(self, "cast_surface_distances", None)
+        if cast_distances is None or len(cast_distances) != len(moduli):
+            return moduli
+
+        self._risk_moduli = np.minimum(moduli, np.asarray(cast_distances, dtype=np.float32))
+        return self._risk_moduli
+
     def _get_chill_voxel_indices(self) -> np.ndarray:
         """Get indices of voxels that are part of chills"""
         if self.mesh.voxel_part_types is None:
             return np.array([], dtype=int)
         return np.where(self.mesh.voxel_part_types == 2)[0]  # 2 = CHILL
+
+    def _get_orphan_metal_mask(self) -> np.ndarray:
+        """Metal voxels disconnected from the main casting body.
+
+        Voxelizing the combined assembly can create phantom "metal" voxels in
+        gaps and notches around chills (the cavity-fill step floods enclosed
+        space, and unclaimed voxels default to CAST). Such voxels have no metal
+        connection to the casting: the feeding trace correctly reports them
+        unreachable, which floors their shrink risk and paints a bright plate
+        on the chill face. They are not real metal, so they are excluded from
+        defect scoring. A genuine second cavity stays included via the size
+        guard (components >= 5% of the largest metal body are kept).
+        """
+        cached = getattr(self, "_orphan_metal_mask", None)
+        if cached is not None:
+            return cached
+
+        part_types = getattr(self.mesh, "voxel_part_types", None)
+        neighbors = getattr(self.mesh, "voxel_neighbors", None)
+        if part_types is not None:
+            n_voxels = len(part_types)
+        else:
+            centers = getattr(self.mesh, "voxel_centers", None)
+            n_voxels = len(centers) if centers is not None else 0
+        orphan = np.zeros(n_voxels, dtype=bool)
+        if part_types is None or neighbors is None:
+            self._orphan_metal_mask = orphan
+            return orphan
+
+        part_types = np.asarray(part_types)
+        metal = (part_types == 0) | (part_types == 1) | (part_types == 3)
+        n_metal = int(np.sum(metal))
+        if n_metal == 0:
+            self._orphan_metal_mask = orphan
+            return orphan
+
+        from scipy.sparse import coo_matrix
+        from scipy.sparse.csgraph import connected_components
+
+        nbr = np.asarray(neighbors)
+        rows = np.repeat(np.arange(n_voxels), nbr.shape[1])
+        cols = nbr.ravel()
+        valid = (cols >= 0) & metal[rows] & metal[np.maximum(cols, 0)]
+        rows, cols = rows[valid], cols[valid]
+        graph = coo_matrix(
+            (np.ones(len(rows), dtype=np.int8), (rows, cols)),
+            shape=(n_voxels, n_voxels),
+        )
+        _, labels = connected_components(graph, directed=False)
+
+        metal_labels = labels[metal]
+        unique, counts = np.unique(metal_labels, return_counts=True)
+        largest = int(counts.max())
+        # Components at least 5% the size of the main body are treated as real
+        # (e.g. a second cavity); anything smaller - and never the main body
+        # itself - is a voxelization artifact. The floor of 2 keeps the guard
+        # meaningful on tiny meshes.
+        threshold = max(2.0, 0.05 * largest)
+        keep = set(unique[(counts >= threshold) | (counts == largest)].tolist())
+        orphan = metal & ~np.isin(labels, list(keep))
+
+        n_orphan = int(np.sum(orphan))
+        if n_orphan > 0:
+            n_pockets = len(unique) - len(keep)
+            print(
+                f"  NOTE: excluding {n_orphan:,} metal voxels in {n_pockets} "
+                "pocket(s) with no metal connection to the casting "
+                "(voxelization artifacts around chills/gaps) from defect scoring."
+            )
+        self._orphan_metal_mask = orphan
+        return orphan
+
+    def _get_orphan_metal_indices(self) -> np.ndarray:
+        return np.flatnonzero(self._get_orphan_metal_mask())
 
     def _get_riser_post_voxel_indices(self) -> np.ndarray:
         """Get indices of voxels that are part of feeder necks / riser posts."""
@@ -2526,7 +2658,7 @@ class SolidificationEngine:
         for relative ranking, but it is shape-dependent and should not be read
         as a literal wall thickness for complex junctions or ribs.
         """
-        return self.mesh.voxel_moduli * 2.0
+        return self._get_risk_moduli() * 2.0
 
     def _compute_shrinkage_base_risk(
         self,
@@ -2556,7 +2688,7 @@ class SolidificationEngine:
         applied later as separate factors.
         """
         heights = normalized_heights[valid_indices]
-        moduli = self.mesh.voxel_moduli[valid_indices]
+        moduli = self._get_risk_moduli()[valid_indices]
         thicknesses = local_section_size[valid_indices]
         # NaN = unfinished at max_time cap; treat as last-to-freeze.
         times = np.asarray(self.solidification_times, dtype=np.float32)
@@ -3031,8 +3163,9 @@ class SolidificationEngine:
         # UPDATED: Relaxed casting thickness threshold (was 1.5", now 0.5") to catch internal porosity
         thick_enough_cast = local_thickness >= 0.5
         thick_enough_riser = local_thickness >= 0.5  # Lower threshold for risers
-        interior_enough_cast = self.mesh.voxel_moduli >= 0.3
-        interior_enough_riser = self.mesh.voxel_moduli >= 0.2  # Lower threshold for risers
+        risk_moduli = self._get_risk_moduli()
+        interior_enough_cast = risk_moduli >= 0.3
+        interior_enough_riser = risk_moduli >= 0.2  # Lower threshold for risers
         
         # Valid mask: casting uses strict thresholds, feeders use relaxed thresholds
         valid_cast = include_mask & ~riser_mask & ~riser_post_mask & thick_enough_cast & interior_enough_cast
@@ -3190,6 +3323,10 @@ class SolidificationEngine:
             # even if a feeding-path edge case let one through the masks.
             if len(chill_indices) > 0:
                 self.shrinkage_risk[chill_indices] = 0.0
+            get_orphans = getattr(self, "_get_orphan_metal_indices", None)
+            orphan_indices = get_orphans() if callable(get_orphans) else np.array([], dtype=int)
+            if len(orphan_indices) > 0:
+                self.shrinkage_risk[orphan_indices] = 0.0
             self.shrinkage_probability = self.shrinkage_risk
             
             # Debug output for first few qualifying voxels
@@ -3243,8 +3380,8 @@ class SolidificationEngine:
         
         # Debug: count voxels that pass each filter
         thick_enough_count = np.sum(local_thickness >= 1.5)
-        interior_enough_count = np.sum(self.mesh.voxel_moduli >= 0.3)
-        both = np.sum((local_thickness >= 1.5) & (self.mesh.voxel_moduli >= 0.3))
+        interior_enough_count = np.sum(risk_moduli >= 0.3)
+        both = np.sum((local_thickness >= 1.5) & (risk_moduli >= 0.3))
         
         print(f"  Thick sections (≥1.5\"): {thick_enough_count:,}")
         print(f"  Interior voxels (≥0.3\" from surface): {interior_enough_count:,}")
@@ -3402,6 +3539,11 @@ class SolidificationEngine:
         self.porosity_risk = np.clip(porosity_risk, 0.0, 1.0).astype(np.float32)
         if np.any(chill_mask):
             self.porosity_risk[chill_mask] = 0.0
+        get_orphans = getattr(self, "_get_orphan_metal_mask", None)
+        if callable(get_orphans):
+            orphan_mask = get_orphans()
+            if np.any(orphan_mask):
+                self.porosity_risk[orphan_mask] = 0.0
         self.porosity_probability = self.porosity_risk
         print(
             "    Porosity criterion components: "
@@ -3513,13 +3655,14 @@ class SolidificationEngine:
         normalized_time = times / max_solid_time
         
         # Factor 2: Distance from surface (feeding distance)
-        surface_distances = self.surface_distances
+        surface_distances = self._get_cast_surface_distances()
         max_feeding_dist = np.max(surface_distances)
         normalized_feeding = surface_distances / max(max_feeding_dist, 0.1)
-        
+
         # Factor 3: Geometric modulus (higher = thicker = hotter)
-        max_modulus = np.max(self.mesh.voxel_moduli)
-        normalized_modulus = self.mesh.voxel_moduli / max(max_modulus, 0.1)
+        risk_moduli = self._get_risk_moduli()
+        max_modulus = np.max(risk_moduli)
+        normalized_modulus = risk_moduli / max(max_modulus, 0.1)
         
         # NEW Factor 4: ISOLATION detection
         # Calculate how "isolated" each voxel becomes during solidification
@@ -3587,9 +3730,14 @@ class SolidificationEngine:
             np.where(np.isnan(solid_times), float(max_time), solid_times)
         )
 
-        isolation_score = compute_isolation_score_parallel(solid_times, neighbors)
+        if self.mesh.voxel_part_types is not None:
+            part_types = np.ascontiguousarray(self.mesh.voxel_part_types, dtype=np.int32)
+        else:
+            part_types = np.zeros(n_voxels, dtype=np.int32)
 
-        surface_distances = self.surface_distances
+        isolation_score = compute_isolation_score_parallel(solid_times, neighbors, part_types)
+
+        surface_distances = self._get_cast_surface_distances()
         surface_factor = surface_distances / np.max(surface_distances + 0.1)
         isolation_score = isolation_score * (0.5 + 0.5 * surface_factor)
 
@@ -3659,7 +3807,9 @@ class SolidificationEngine:
             threshold_status = "literature_default" if alloy_key == "WCB" else "estimated_default"
         else:
             # ===== THERMAL GRADIENT CALCULATION =====
-            surface_distances = self.surface_distances
+            # Chill-backed faces count as boundaries here, so the legacy
+            # gradient stays steep against a chill instead of collapsing.
+            surface_distances = self._get_cast_surface_distances()
             surface_feeding_dists = surface_distances
 
             min_distance_to_boundary = 0.1  # inches - minimum distance for gradient calculation
@@ -3759,8 +3909,10 @@ class SolidificationEngine:
             isolation_score * 0.7,
         ).astype(np.float32)
         
-        # Exclude surface voxels (they're always fine - high gradient)
-        surface_indices = self.mesh.get_surface_voxel_indices()
+        # Exclude surface voxels (they're always fine - high gradient).
+        # Uses the material surface so cast voxels backed by a chill - which are
+        # geometrically buried but thermally a boundary - are guarded too.
+        surface_indices = self._get_material_surface_indices()
         self.niyama_defect_risk[surface_indices] = False
         self.niyama_risk[surface_indices] = 0.0
         self.combined_feed_risk[surface_indices] = 0.0
@@ -3770,7 +3922,15 @@ class SolidificationEngine:
         self.niyama_defect_risk[chill_indices] = False
         self.niyama_risk[chill_indices] = 0.0
         self.combined_feed_risk[chill_indices] = 0.0
-        
+
+        # Exclude phantom metal pockets with no connection to the casting.
+        get_orphans = getattr(self, "_get_orphan_metal_indices", None)
+        orphan_indices = get_orphans() if callable(get_orphans) else np.array([], dtype=int)
+        if len(orphan_indices) > 0:
+            self.niyama_defect_risk[orphan_indices] = False
+            self.niyama_risk[orphan_indices] = 0.0
+            self.combined_feed_risk[orphan_indices] = 0.0
+
         # Backward-compatible alias used by existing shrinkage/porosity code.
         self.niyama_severity = self.combined_feed_risk.astype(np.float32)
         
@@ -4921,6 +5081,9 @@ class SolidificationEngine:
             chill_mask = part_types_arr == 2
             if np.any(chill_mask):
                 display[chill_mask] = 0.0
+            orphan_mask = self._get_orphan_metal_mask()
+            if len(orphan_mask) == len(display) and np.any(orphan_mask):
+                display[orphan_mask] = 0.0
 
         return np.clip(display, 0.0, 1.0).astype(np.float32, copy=False)
     

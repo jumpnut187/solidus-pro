@@ -431,7 +431,12 @@ class FeedingPathAnalyzer:
         total_path_length = float(np.sum(path_length[fed_mask])) if n_fed > 0 else 0.0
         max_path_len = float(np.max(path_length[fed_mask])) if n_fed > 0 else 0.0
 
-        blocked_voxels = (feeding_source < 0) & (fraction_solid < 0.99)
+        # Blocked = cut off from every riser while still BELOW the coherency
+        # point, i.e. while the voxel still needed liquid feed. Past critical
+        # fraction solid a voxel is impermeable and unreachable by definition -
+        # that is normal freeze-off, not a feeding defect, and using the old
+        # `fs < 0.99` window here flagged every voxel at its own crossing.
+        blocked_voxels = (feeding_source < 0) & (fraction_solid < self.critical_fraction_solid)
         open_mask = path_length >= 0.0
         latest_open_time = np.where(open_mask, 0.0, -1.0).astype(np.float32)
 
@@ -521,6 +526,10 @@ class FeedingPathAnalyzer:
 
         snapshot_results: List[FeedingPathResult] = []
         snapshot_times: List[float] = []
+        # Per snapshot: which voxels are still below coherency, i.e. still
+        # need liquid feed. Snapshots taken after a voxel crossed critical
+        # fraction solid carry no information about its feeding.
+        snapshot_needs_feed: List[np.ndarray] = []
 
         clipped_fraction_solid = np.ascontiguousarray(np.clip(fraction_solid, 0.0, 1.0), dtype=np.float64)
         clipped_reference_times = None
@@ -543,15 +552,17 @@ class FeedingPathAnalyzer:
                 print(f"  Sampling {sample_indices.size} thermal-history snapshots for feeding paths...")
             for idx in sample_indices:
                 snapshot_start = perf_counter()
+                snapshot_fs = np.ascontiguousarray(np.clip(history[idx], 0.0, 1.0), dtype=np.float64)
                 snapshot_results.append(
                     self._analyze_snapshot(
                         riser_mask,
-                        np.ascontiguousarray(np.clip(history[idx], 0.0, 1.0), dtype=np.float64),
+                        snapshot_fs,
                         voxel_centers,
                         neighbors,
                     )
                 )
                 snapshot_times.append(float(history_times_array[idx]))
+                snapshot_needs_feed.append(snapshot_fs < self.critical_fraction_solid)
                 if show_progress:
                     print(f"  Snapshot {int(idx)} feeding path time: {perf_counter() - snapshot_start:.2f}s")
         else:
@@ -603,27 +614,70 @@ class FeedingPathAnalyzer:
             # Track whether a voxel was blocked at ANY eligible snapshot (history-aware).
             any_blocked_accum = np.zeros(n_voxels, dtype=np.bool_)
 
-            for time_value, snapshot_result in zip(times_array, snapshot_results):
+            for time_value, snapshot_result, needs_feed in zip(
+                times_array, snapshot_results, snapshot_needs_feed
+            ):
                 eligible = time_value <= (clipped_reference_times + 1e-6)
-                if not np.any(eligible):
+                # Score a voxel only while it still needs feed. The snapshot at
+                # its own coherency crossing (and any later one) always reads
+                # "unreachable" - that is freeze-off, not blockage, and scoring
+                # it marked every voxel blocked and every early-freezing voxel
+                # (e.g. against a chill) as never-open.
+                active = eligible & needs_feed
+                if not np.any(active):
                     continue
 
                 time_weight = 0.2 + 0.8 * ((time_value / max_reference_time) ** 2)
-                total_weight[eligible] += np.float32(time_weight)
+                total_weight[active] += np.float32(time_weight)
 
-                open_mask = eligible & (snapshot_result.path_length >= 0.0)
+                open_mask = active & (snapshot_result.path_length >= 0.0)
                 history_open_fraction[open_mask] += np.float32(time_weight)
                 latest_open_time[open_mask] = np.float32(time_value)
 
-                feeding_quality[eligible] = snapshot_result.feeding_quality[eligible]
-                path_length[eligible] = snapshot_result.path_length[eligible]
-                path_permeability[eligible] = snapshot_result.path_permeability[eligible]
-                feeding_source[eligible] = snapshot_result.feeding_source[eligible]
-                # Accumulate blocked status across all eligible snapshots.
-                any_blocked_accum[eligible] |= snapshot_result.blocked_voxels[eligible]
+                feeding_quality[active] = snapshot_result.feeding_quality[active]
+                path_length[active] = snapshot_result.path_length[active]
+                path_permeability[active] = snapshot_result.path_permeability[active]
+                feeding_source[active] = snapshot_result.feeding_source[active]
+                # Accumulate blocked status across the feed-active snapshots.
+                any_blocked_accum[active] |= snapshot_result.blocked_voxels[active]
 
             valid_weight = total_weight > 0.0
             history_open_fraction[valid_weight] /= total_weight[valid_weight]
+            # A voxel never sampled while feed-active froze before the first
+            # usable snapshot (fast local freeze, e.g. against a chill). There
+            # is no evidence of a feeding problem for it - treat it as fed and
+            # let the thermal criteria judge it.
+            never_active = ~valid_weight
+            if np.any(never_active):
+                history_open_fraction[never_active] = 1.0
+                feeding_quality[never_active] = 1.0
+
+            # Sanity check: on the most-liquid snapshot the trace should reach
+            # the bulk of the feed-needing voxels. If it reaches almost none,
+            # the riser voxels are not connected to the casting in the voxel
+            # graph (misaligned STLs, missing riser necks, gap beyond the
+            # interface-bridging radius). Connectivity data is then meaningless
+            # noise - flagging the whole casting "blocked" and flooring its
+            # risk - so degrade to the same semantics as a run without risers.
+            mean_fs_per_snapshot = [float(np.mean(nf)) for nf in snapshot_needs_feed]
+            most_liquid = int(np.argmax(mean_fs_per_snapshot))
+            liquid_needs_feed = snapshot_needs_feed[most_liquid] & ~riser_mask
+            n_needing = int(np.sum(liquid_needs_feed))
+            if n_needing > 0:
+                reached = snapshot_results[most_liquid].path_length >= 0.0
+                coverage = float(np.sum(reached & liquid_needs_feed)) / n_needing
+                if coverage < 0.05:
+                    print(
+                        "  WARNING: feeding-path trace reached "
+                        f"{coverage * 100.0:.1f}% of the liquid casting - risers "
+                        "appear disconnected from the casting in the voxel mesh "
+                        "(check part alignment / riser necks). Ignoring "
+                        "connectivity results for this run."
+                    )
+                    any_blocked_accum[:] = False
+                    history_open_fraction[:] = 1.0
+                    feeding_quality[:] = 1.0
+
             feeding_quality = np.clip(
                 (0.75 * feeding_quality) + (0.25 * history_open_fraction),
                 0.0,

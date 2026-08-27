@@ -355,7 +355,10 @@ class AdaptiveVoxelMesh:
         # solution.
         self.voxel_states = None
         self.surface_voxels = None
-        
+        # Cached union of geometric surface voxels and cast voxels backed by a
+        # mold-like part (chill/core). Invalidated whenever part types change.
+        self._material_surface_indices = None
+
         # Spatial index for fast queries
         self._spatial_index = None
         
@@ -1367,7 +1370,8 @@ class AdaptiveVoxelMesh:
             return
         
         n_voxels = len(self.voxel_centers)
-        
+        self._material_surface_indices = None
+
         # Initialize all voxels as CAST (0) by default
         self.voxel_part_types = create_managed_array(
             n_voxels, dtype=np.int8, name="voxel_part_types", manager=self.memory_manager
@@ -1510,6 +1514,9 @@ class AdaptiveVoxelMesh:
         # Bridge interfaces between different part types
         if riser_count > 0 or chill_count > 0 or riser_post_count > 0:
             self._bridge_part_interfaces()
+
+        # Neighbour graph and part types are both final now.
+        self._material_surface_indices = None
     
     def _bridge_part_interfaces(self):
         """
@@ -1861,7 +1868,50 @@ class AdaptiveVoxelMesh:
         if self.surface_voxels is None:
             return np.array([], dtype=int)
         return np.where(self.surface_voxels)[0]
-    
+
+    def get_material_surface_voxel_indices(self) -> np.ndarray:
+        """Geometric surface voxels plus cast voxels backed by a chill or core.
+
+        Surface detection is purely geometric over the combined assembly, so a
+        cast voxel with a chill pressed against it is not a surface voxel even
+        though that face is a heat-extraction boundary just like sand. Risk
+        analyses need the physical notion, not the geometric one.
+
+        Riser and riser-post neighbours are deliberately excluded - those are
+        metallurgically continuous with the casting, not a boundary.
+        """
+        if self._material_surface_indices is not None:
+            return self._material_surface_indices
+
+        geometric = self.get_surface_voxel_indices()
+        part_types = self.voxel_part_types
+        neighbors = self.voxel_neighbors
+        if part_types is None or neighbors is None or self.voxel_centers is None:
+            self._material_surface_indices = geometric
+            return geometric
+
+        part_types = np.asarray(part_types)
+        if not np.any((part_types == 2) | (part_types == 4)):
+            self._material_surface_indices = geometric
+            return geometric
+
+        n_voxels = len(self.voxel_centers)
+        mask = np.zeros(n_voxels, dtype=bool)
+        mask[geometric] = True
+
+        # Chunked so the neighbour-type temporary stays small on large meshes.
+        chunk = 100_000
+        for start in range(0, n_voxels, chunk):
+            end = min(start + chunk, n_voxels)
+            nbr = neighbors[start:end]
+            valid = nbr >= 0
+            nbr_types = np.where(valid, part_types[np.maximum(nbr, 0)], -1)
+            mold_adjacent = np.any((nbr_types == 2) | (nbr_types == 4), axis=1)
+            mask[start:end] |= mold_adjacent & (part_types[start:end] == 0)
+
+        self._material_surface_indices = np.flatnonzero(mask)
+        return self._material_surface_indices
+
     def cleanup(self):
         """Clean up memory-mapped files"""
         self.memory_manager.cleanup()

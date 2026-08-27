@@ -910,6 +910,7 @@ def compute_solid_path_strain_parallel(
 def compute_isolation_score_parallel(
     solid_times: np.ndarray,
     neighbors: np.ndarray,
+    part_types: np.ndarray,
 ) -> np.ndarray:
     """
     Compute isolation score for each voxel (JIT-optimized).
@@ -918,9 +919,16 @@ def compute_isolation_score_parallel(
     High values mean the voxel was surrounded by solid material when it froze,
     indicating a likely shrinkage defect candidate.
 
+    Chill (2) and core (4) neighbours are skipped entirely, the same way an
+    absent neighbour at a mold wall is. They are solid from t=0, so counting
+    them in the denominator alone would dilute the score; counting them as
+    "solidified before" would instead flag every chilled face as isolated.
+    Neither is right - a chill was never a feed path.
+
     Args:
         solid_times: Solidification time per voxel (0 = never solidified)
         neighbors: Neighbor connectivity matrix (n_voxels x max_neighbors)
+        part_types: Part type per voxel (0=CAST, 1=RISER, 2=CHILL, 3=RISER_POST, 4=CORE)
 
     Returns:
         Array of isolation scores in [0, 1].
@@ -940,6 +948,9 @@ def compute_isolation_score_parallel(
         for j in range(max_neighbors):
             neighbor_idx = neighbors[i, j]
             if neighbor_idx >= 0:
+                neighbor_type = part_types[neighbor_idx]
+                if neighbor_type == 2 or neighbor_type == 4:
+                    continue
                 total_neighbors += 1
                 neighbor_time = solid_times[neighbor_idx]
                 if neighbor_time > 0.0 and neighbor_time < my_solid_time:

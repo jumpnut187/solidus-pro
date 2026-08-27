@@ -37,21 +37,26 @@ def _run_pipeline_with_patched_memory(
     hot_tear: bool = False,
     stress_analysis: bool = False,
     sand_restraint_index: float = 0.5,
+    extra_analysis_options: dict | None = None,
 ) -> object:
+    analysis_options = {
+        "shrinkage": True,
+        "hotspot": True,
+        "niyama": True,
+        "fraction_liquid": True,
+        "hot_tear": hot_tear,
+        "stress_analysis": stress_analysis,
+        "sand_restraint_index": sand_restraint_index,
+    }
+    if extra_analysis_options:
+        analysis_options.update(extra_analysis_options)
+
     inputs = PipelineInputs(
         alloy_name=alloy_name,
         voxel_size=0.5,
         refinement_level=0,
         memory_mode="conservative",
-        analysis_options={
-            "shrinkage": True,
-            "hotspot": True,
-            "niyama": True,
-            "fraction_liquid": True,
-            "hot_tear": hot_tear,
-            "stress_analysis": stress_analysis,
-            "sand_restraint_index": sand_restraint_index,
-        },
+        analysis_options=analysis_options,
         use_gpu=False,
         use_incremental=False,
         show_progress=False,
@@ -114,6 +119,32 @@ def _cast_with_chill_manager() -> PartManager:
     chill.set_part_type(PartType.CHILL)
     cast.set_position(0.0, 0.0, 0.0)
     chill.set_position(1.5, 0.0, 0.0)
+    return manager
+
+
+def _cast_with_chill_and_riser_manager() -> PartManager:
+    """Casting with a chill on one face and a riser in full contact on top.
+
+    The riser makes the feeding-path trace run, which is what exposes any
+    feeding-history mis-scoring of the fast-freezing metal against the chill.
+    """
+    manager = PartManager()
+    cast_id = manager.load_part("sample_stl_files/block_2inch.stl", name="cast")
+    chill_id = manager.load_part("sample_stl_files/small_block.stl", name="chill")
+    riser_id = manager.load_part("sample_stl_files/cylinder.stl", name="riser")
+    assert cast_id is not None and chill_id is not None and riser_id is not None
+
+    cast = manager.get_part(cast_id)
+    chill = manager.get_part(chill_id)
+    riser = manager.get_part(riser_id)
+    assert cast is not None and chill is not None and riser is not None
+
+    cast.set_part_type(PartType.CAST)
+    chill.set_part_type(PartType.CHILL)
+    riser.set_part_type(PartType.RISER)
+    cast.set_position(0.0, 0.0, 0.0)
+    chill.set_position(1.5, 0.0, 0.0)   # flush against the +x face
+    riser.set_position(0.0, 0.0, 1.0)   # base flush on the top face
     return manager
 
 

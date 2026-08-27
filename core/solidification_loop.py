@@ -135,7 +135,14 @@ def _least_squares_gradients_c_per_mm(
     target_indices: np.ndarray,
     cast_mask: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return local temperature-gradient magnitudes and quality flags."""
+    """Return local temperature-gradient magnitudes and quality flags.
+
+    ``cast_mask`` selects which voxels are *evaluated*; neighbour temperatures
+    are sampled from every in-mesh voxel regardless of part type. Chill, riser
+    and core voxels are solved cells carrying valid temperatures, and at a chill
+    face they hold nearly the whole local delta-T - dropping them would collapse
+    the gradient exactly where it is steepest.
+    """
     gradients = np.zeros(len(target_indices), dtype=np.float32)
     quality = np.zeros(len(target_indices), dtype=np.int8)
 
@@ -145,8 +152,7 @@ def _least_squares_gradients_c_per_mm(
 
         neighbor_indices = neighbors[voxel_i]
         in_bounds = (neighbor_indices >= 0) & (neighbor_indices < len(centers_in))
-        candidate_neighbors = neighbor_indices[in_bounds]
-        valid_neighbors = candidate_neighbors[cast_mask[candidate_neighbors]]
+        valid_neighbors = neighbor_indices[in_bounds]
         if len(valid_neighbors) == 0:
             continue
 
@@ -160,7 +166,13 @@ def _least_squares_gradients_c_per_mm(
         delta_t = temperatures[valid_neighbors] - temperatures[voxel_i]
         try:
             grad_vec, _, rank, _ = np.linalg.lstsq(offsets_mm, delta_t, rcond=None)
-            gradients[out_i] = float(np.linalg.norm(grad_vec))
+            grad_mag = float(np.linalg.norm(grad_vec))
+            if rank < 3:
+                # The minimum-norm solution under-reports |grad T| along the
+                # unsampled directions; fall back to the steepest sampled slope.
+                slopes = np.abs(delta_t) / np.maximum(np.linalg.norm(offsets_mm, axis=1), 1e-9)
+                grad_mag = max(grad_mag, float(np.max(slopes)))
+            gradients[out_i] = grad_mag
             quality[out_i] = 2 if rank >= 3 and len(valid_neighbors) >= 4 else 1
         except np.linalg.LinAlgError:
             slopes = np.abs(delta_t) / np.maximum(np.linalg.norm(offsets_mm, axis=1), 1e-9)

@@ -58,8 +58,9 @@ class UnfinishedVoxelMaskingTests(unittest.TestCase):
         reference = compute_isolation_score_parallel(
             np.ascontiguousarray(times, dtype=np.float32),
             neighbors,
+            np.zeros(len(times), dtype=np.int32),
         )
-        surface_distances = engine.surface_distances
+        surface_distances = engine._get_cast_surface_distances()
         surface_factor = surface_distances / np.max(surface_distances + 0.1)
         reference = reference * (0.5 + 0.5 * surface_factor)
         reference = np.clip(reference, 0.0, 1.0).astype(np.float32)
