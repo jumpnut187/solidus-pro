@@ -1352,16 +1352,25 @@ class SolidificationEngine:
         return np.where(self.mesh.voxel_part_types == 2)[0]  # 2 = CHILL
 
     def _get_orphan_metal_mask(self) -> np.ndarray:
-        """Metal voxels disconnected from the main casting body.
+        """Phantom "metal" voxels that are not real casting metal.
 
-        Voxelizing the combined assembly can create phantom "metal" voxels in
-        gaps and notches around chills (the cavity-fill step floods enclosed
-        space, and unclaimed voxels default to CAST). Such voxels have no metal
-        connection to the casting: the feeding trace correctly reports them
-        unreachable, which floors their shrink risk and paints a bright plate
-        on the chill face. They are not real metal, so they are excluded from
-        defect scoring. A genuine second cavity stays included via the size
-        guard (components >= 5% of the largest metal body are kept).
+        Voxelizing the combined assembly fills gaps and notches between parts
+        (the cavity-fill step floods enclosed space), and unclaimed voxels
+        default to CAST. Such phantom voxels read as poured metal - the
+        feeding trace correctly reports them unreachable, flooring their
+        shrink risk into a bright plate on the chill face, and the Fraction
+        Liquid view shows them as liquid outside the casting.
+
+        Three complementary detectors, all cheap and geometry-query-free:
+        1. Outside every metal part's bounding box: certainly not metal
+           (a part's bbox is a superset of the part).
+        2. Smothered by chill/core: at least 8 chill/core neighbors and at
+           least as many as metal neighbors. Real metal at a flat chill face
+           sees at most ~9 of 26; a gap-fill sliver wedged against graphite
+           sees far more. (Physically such a sliver freezes instantly anyway.)
+        3. Disconnected: after removing 1/2, metal components with no
+           connection to the main body (and smaller than 5% of it, so a
+           genuine second cavity is never dropped) are gap-fill pockets.
         """
         cached = getattr(self, "_orphan_metal_mask", None)
         if cached is not None:
@@ -1386,38 +1395,69 @@ class SolidificationEngine:
             self._orphan_metal_mask = orphan
             return orphan
 
+        # 1. Outside every metal part's bounding box.
+        outside_boxes = np.zeros(n_voxels, dtype=bool)
+        metal_bounds = getattr(self.mesh, "metal_part_bounds", None)
+        centers = getattr(self.mesh, "voxel_centers", None)
+        sizes = getattr(self.mesh, "voxel_sizes", None)
+        if metal_bounds and centers is not None:
+            centers_arr = np.asarray(centers)
+            pad = 0.5 * float(np.max(np.asarray(sizes))) if sizes is not None else 0.0
+            inside_any = np.zeros(n_voxels, dtype=bool)
+            for box in metal_bounds:
+                lo, hi = np.asarray(box[0]), np.asarray(box[1])
+                inside_any |= np.all(
+                    (centers_arr >= lo - pad) & (centers_arr <= hi + pad), axis=1
+                )
+            outside_boxes = metal & ~inside_any
+
+        # 2. Smothered by chill/core.
+        nbr = np.asarray(neighbors)
+        valid_nbr = nbr >= 0
+        nbr_types = np.where(valid_nbr, part_types[np.maximum(nbr, 0)], -1)
+        n_chillcore = ((nbr_types == 2) | (nbr_types == 4)).sum(axis=1)
+        n_metal_nb = (
+            (nbr_types == 0) | (nbr_types == 1) | (nbr_types == 3)
+        ).sum(axis=1)
+        smothered = metal & (n_chillcore >= 8) & (n_chillcore >= n_metal_nb)
+
+        # 3. Connectivity on the remaining metal.
         from scipy.sparse import coo_matrix
         from scipy.sparse.csgraph import connected_components
 
-        nbr = np.asarray(neighbors)
-        rows = np.repeat(np.arange(n_voxels), nbr.shape[1])
-        cols = nbr.ravel()
-        valid = (cols >= 0) & metal[rows] & metal[np.maximum(cols, 0)]
-        rows, cols = rows[valid], cols[valid]
-        graph = coo_matrix(
-            (np.ones(len(rows), dtype=np.int8), (rows, cols)),
-            shape=(n_voxels, n_voxels),
-        )
-        _, labels = connected_components(graph, directed=False)
+        core_metal = metal & ~outside_boxes & ~smothered
+        disconnected = np.zeros(n_voxels, dtype=bool)
+        n_pockets = 0
+        if np.any(core_metal):
+            rows = np.repeat(np.arange(n_voxels), nbr.shape[1])
+            cols = nbr.ravel()
+            valid = (cols >= 0) & core_metal[rows] & core_metal[np.maximum(cols, 0)]
+            rows, cols = rows[valid], cols[valid]
+            graph = coo_matrix(
+                (np.ones(len(rows), dtype=np.int8), (rows, cols)),
+                shape=(n_voxels, n_voxels),
+            )
+            _, labels = connected_components(graph, directed=False)
+            unique, counts = np.unique(labels[core_metal], return_counts=True)
+            largest = int(counts.max())
+            threshold = max(2.0, 0.05 * largest)
+            keep = set(unique[(counts >= threshold) | (counts == largest)].tolist())
+            disconnected = core_metal & ~np.isin(labels, list(keep))
+            n_pockets = len(unique) - len(keep)
 
-        metal_labels = labels[metal]
-        unique, counts = np.unique(metal_labels, return_counts=True)
-        largest = int(counts.max())
-        # Components at least 5% the size of the main body are treated as real
-        # (e.g. a second cavity); anything smaller - and never the main body
-        # itself - is a voxelization artifact. The floor of 2 keeps the guard
-        # meaningful on tiny meshes.
-        threshold = max(2.0, 0.05 * largest)
-        keep = set(unique[(counts >= threshold) | (counts == largest)].tolist())
-        orphan = metal & ~np.isin(labels, list(keep))
+        orphan = outside_boxes | smothered | disconnected
 
         n_orphan = int(np.sum(orphan))
         if n_orphan > 0:
-            n_pockets = len(unique) - len(keep)
+            detail = (
+                f"{int(outside_boxes.sum()):,} outside metal parts, "
+                f"{int((smothered & ~outside_boxes).sum()):,} chill-smothered, "
+                f"{int(disconnected.sum()):,} disconnected ({n_pockets} pocket(s))"
+            )
             print(
-                f"  NOTE: excluding {n_orphan:,} metal voxels in {n_pockets} "
-                "pocket(s) with no metal connection to the casting "
-                "(voxelization artifacts around chills/gaps) from defect scoring."
+                f"  NOTE: excluding {n_orphan:,} phantom metal voxels "
+                f"(voxelization gap-fill around chills/gaps: {detail}) "
+                "from defect scoring and liquid displays."
             )
         self._orphan_metal_mask = orphan
         return orphan
@@ -5188,6 +5228,14 @@ class SolidificationEngine:
             non_cast = np.asarray(part_types, dtype=np.int32) == 2  # CHILL
             fraction_liquid = np.asarray(fraction_liquid, dtype=np.float32).copy()
             fraction_liquid[non_cast] = 0.0
+            # Phantom metal pockets (gap-fill voxels around chills with no
+            # metal connection to the casting) are simulated as poured metal,
+            # but they are not real metal - never show them as liquid.
+            get_orphans = getattr(self, "_get_orphan_metal_mask", None)
+            if callable(get_orphans):
+                orphan_mask = get_orphans()
+                if len(orphan_mask) == len(fraction_liquid) and np.any(orphan_mask):
+                    fraction_liquid[orphan_mask] = 0.0
         return fraction_liquid
     
     def get_fraction_liquid_time_range(self) -> Tuple[float, float]:

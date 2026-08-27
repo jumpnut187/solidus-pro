@@ -339,8 +339,15 @@ def build_visualization_payload(
         if len(combined_feed_risk) == n_voxels:
             visualization_data["combined_feed_risk"] = combined_feed_risk[indices].tolist()
 
+    # Chills and phantom gap-fill voxels must never render as liquid metal;
+    # route liquid fields through the engine's mask when available.
+    mask_liquid = getattr(engine, "_mask_non_cast_fraction_liquid", None)
+    if not callable(mask_liquid):
+        mask_liquid = lambda arr: arr  # noqa: E731
+
     if voxel_mesh.voxel_states is not None:
         fraction_liquid = 1.0 - np.asarray(voxel_mesh.voxel_states).astype(float)
+        fraction_liquid = np.asarray(mask_liquid(fraction_liquid), dtype=float)
         visualization_data["fraction_liquid"] = fraction_liquid[indices].tolist()
     if engine.solidification_times is not None:
         solidification_times = np.asarray(engine.solidification_times).astype(float)
@@ -350,6 +357,7 @@ def build_visualization_payload(
         fl_history = []
         for snapshot in engine.fraction_liquid_history:
             fl_frame = 1.0 - np.asarray(snapshot)
+            fl_frame = np.asarray(mask_liquid(fl_frame), dtype=float)
             fl_history.append(fl_frame[indices].tolist())
         visualization_data["fraction_liquid_history"] = fl_history
         visualization_data["fraction_liquid_times"] = engine.fraction_liquid_times or []

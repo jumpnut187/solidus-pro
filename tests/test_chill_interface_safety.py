@@ -261,14 +261,21 @@ class OrphanMetalPocketTests(unittest.TestCase):
     """
 
     @staticmethod
-    def _fake_engine(part_types, neighbors):
+    def _fake_engine(part_types, neighbors, centers=None, metal_part_bounds=None):
         from core.solidification import SolidificationEngine
 
         engine = SolidificationEngine.__new__(SolidificationEngine)
         engine.mesh = type("M", (), {})()
         engine.mesh.voxel_part_types = np.asarray(part_types, dtype=np.int8)
         engine.mesh.voxel_neighbors = np.asarray(neighbors, dtype=np.int32)
-        engine.mesh.voxel_centers = np.zeros((len(part_types), 3), dtype=np.float32)
+        if centers is None:
+            centers = np.zeros((len(part_types), 3), dtype=np.float32)
+        engine.mesh.voxel_centers = np.asarray(centers, dtype=np.float64)
+        engine.mesh.voxel_sizes = np.full(len(part_types), 1.0, dtype=np.float32)
+        if metal_part_bounds is not None:
+            engine.mesh.metal_part_bounds = [
+                np.asarray(b, dtype=np.float64) for b in metal_part_bounds
+            ]
         return engine
 
     def test_enclosed_pocket_is_orphaned(self) -> None:
@@ -320,6 +327,76 @@ class OrphanMetalPocketTests(unittest.TestCase):
         orphan = engine._get_orphan_metal_mask()
 
         self.assertFalse(bool(np.any(orphan)))
+
+    def test_outside_metal_boxes_is_flagged_even_when_connected(self) -> None:
+        # Voxel 4 sits outside every metal part's bounding box but is linked
+        # into the main metal chain by a gap-fill bridge - connectivity alone
+        # would keep it, the bbox layer must not.
+        part_types = [0, 0, 0, 0, 0]
+        neighbors = [
+            [1, -1],
+            [0, 2],
+            [1, 3],
+            [2, 4],
+            [3, -1],
+        ]
+        centers = [[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0], [10, 0, 0]]
+        # One metal part covering voxels 0-3 (with the half-voxel pad).
+        bounds = [[[-0.5, -0.5, -0.5], [3.5, 0.5, 0.5]]]
+        engine = self._fake_engine(part_types, neighbors, centers=centers,
+                                   metal_part_bounds=bounds)
+
+        orphan = engine._get_orphan_metal_mask()
+
+        np.testing.assert_array_equal(orphan, [False, False, False, False, True])
+
+    def test_chill_smothered_voxel_is_flagged_even_when_connected(self) -> None:
+        # Voxel 0 is real casting; voxel 1 is a sliver with 8 chill neighbors
+        # and only 1 metal neighbor - smothered, flagged despite connectivity.
+        part_types = [0, 0] + [2] * 8
+        nbr_row_1 = [0] + list(range(2, 10))
+        neighbors = [
+            [1] + [-1] * 8,
+            nbr_row_1,
+        ] + [[1] + [-1] * 8 for _ in range(8)]
+        engine = self._fake_engine(part_types, neighbors)
+
+        orphan = engine._get_orphan_metal_mask()
+
+        self.assertFalse(bool(orphan[0]))
+        self.assertTrue(bool(orphan[1]))
+
+    def test_flat_chill_face_voxel_is_not_smothered(self) -> None:
+        # A cast voxel with a full 26-neighborhood where one face (9 voxels)
+        # is chill: normal chill contact, must never be flagged.
+        part_types = [0] + [0] * 17 + [2] * 9
+        neighbors = [list(range(1, 27))] + [[0] + [-1] * 25 for _ in range(26)]
+        engine = self._fake_engine(part_types, neighbors)
+
+        orphan = engine._get_orphan_metal_mask()
+
+        self.assertFalse(bool(orphan[0]))
+
+    def test_fraction_liquid_view_hides_orphans_and_chills(self) -> None:
+        # Phantom gap-fill voxels are simulated as poured metal, so they read
+        # fully liquid - but they are not real metal and must never render as
+        # liquid in the Fraction Liquid view.
+        part_types = [0, 0, 0, 2, 0]
+        neighbors = [
+            [1, -1, -1],
+            [0, 2, -1],
+            [1, 3, -1],
+            [2, 4, -1],
+            [3, -1, -1],
+        ]
+        engine = self._fake_engine(part_types, neighbors)
+        raw = np.array([1.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float32)
+
+        masked = engine._mask_non_cast_fraction_liquid(raw)
+
+        self.assertEqual(float(masked[3]), 0.0)  # chill
+        self.assertEqual(float(masked[4]), 0.0)  # orphan phantom voxel
+        self.assertEqual(float(masked[0]), 1.0)  # real casting stays liquid
 
 
 class ChillInterfaceWithRiserTests(unittest.TestCase):

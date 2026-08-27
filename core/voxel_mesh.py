@@ -358,6 +358,9 @@ class AdaptiveVoxelMesh:
         # Cached union of geometric surface voxels and cast voxels backed by a
         # mold-like part (chill/core). Invalidated whenever part types change.
         self._material_surface_indices = None
+        # Bounding boxes of metal parts (CAST/RISER/RISER_POST), recorded in
+        # assign_part_types; used to detect phantom gap-fill voxels.
+        self.metal_part_bounds = None
 
         # Spatial index for fast queries
         self._spatial_index = None
@@ -1377,10 +1380,21 @@ class AdaptiveVoxelMesh:
             n_voxels, dtype=np.int8, name="voxel_part_types", manager=self.memory_manager
         )
         self.voxel_part_types[:] = 0  # Default to CAST
-        
+
         if not parts_data:
             print("  No part type data provided - all voxels set to CAST")
             return
+
+        # Record the bounding boxes of the metal parts (CAST/RISER/RISER_POST).
+        # Voxelization fills gaps between parts, and unclaimed voxels default
+        # to CAST - a metal-typed voxel outside every metal part's box is
+        # gap-fill, not metal. The risk analysis uses these boxes to exclude
+        # such phantom voxels from defect scoring and liquid displays.
+        self.metal_part_bounds = [
+            np.array(m.bounds, dtype=np.float64)
+            for m, t in parts_data
+            if m is not None and t in (0, 1, 3)
+        ]
         
         # Count parts by type
         cast_parts = [(m, t) for m, t in parts_data if t == 0 and m is not None]
