@@ -190,6 +190,11 @@ class SolidificationEngine:
         self._air_gap_slowdown: Optional[np.ndarray] = None
         self._thermal_heat_model: Optional[HeatTransferModel] = None
         self._thermal_solidification_model: Optional[ThermalSolidificationModel] = None
+        # Optional non-uniform initial state, supplied by an upstream stage.
+        # None means "no pour model": every metal voxel starts at
+        # alloy.pouring_temp. See set_initial_temperature_field.
+        self._initial_temperature_field: Optional[np.ndarray] = None
+        self._fill_arrival_times: Optional[np.ndarray] = None
         self._thermal_peak_cooling_rates: Optional[np.ndarray] = None
         self._thermal_latest_temperatures: Optional[np.ndarray] = None
         self._thermal_latest_gradients: Optional[np.ndarray] = None
@@ -416,7 +421,18 @@ class SolidificationEngine:
         boundary_params = self.analysis_options.solidification_params.thermal_boundary
         mold_temperature = boundary_params.mold_temperature
         chill_temperature = boundary_params.chill_temperature
-        initial_temperatures = np.full(n_voxels, self.alloy.pouring_temp, dtype=np.float64)
+        if self._initial_temperature_field is not None:
+            # A pour/filling stage computed where the metal actually is and how
+            # much heat it lost on the way in. Use it instead of assuming the
+            # cavity filled instantaneously at pouring temperature.
+            initial_temperatures = np.array(
+                self._initial_temperature_field, dtype=np.float64, copy=True
+            )
+        else:
+            initial_temperatures = np.full(n_voxels, self.alloy.pouring_temp, dtype=np.float64)
+
+        # Chills are mold material: they start at mold temperature no matter
+        # what the metal did, so this override applies in both cases.
         if len(chill_indices) > 0:
             initial_temperatures[chill_indices] = chill_temperature
 
@@ -651,6 +667,65 @@ class SolidificationEngine:
         self._max_modulus = max_modulus
         self._mold_constant = mold_constant
         self._material_factor = material_factor
+
+    def set_initial_temperature_field(
+        self,
+        temperatures: np.ndarray,
+        *,
+        fill_arrival_times: Optional[np.ndarray] = None,
+    ) -> None:
+        """Seed the solve with a non-uniform initial temperature field.
+
+        Without this, the engine assumes the cavity filled instantaneously at
+        ``alloy.pouring_temp`` -- a single uniform assignment that is the whole
+        pour model today, and is documented as a known simplification in
+        README.md and PROJECT_OVERVIEW.md.
+
+        A mold-filling stage runs before solidification and calls this with the
+        temperature field left behind by the fill, so the metal that entered
+        first and travelled furthest starts cooler than the metal at the gate.
+
+        Call before :meth:`run_simulation`. Chill voxels are still forced to
+        mold temperature afterwards regardless of what is passed here, since
+        chills are mold material rather than metal.
+
+        Args:
+            temperatures: Per-voxel temperature in degrees Celsius, length
+                equal to the mesh voxel count.
+            fill_arrival_times: Optional per-voxel fill time in seconds, stored
+                for downstream analyses. Not yet consumed by the solver.
+
+        Raises:
+            ValueError: If a length does not match the mesh.
+
+        Note:
+            Only the ``thermal_coupled`` solver mode consumes this. The legacy
+            ``schedule_legacy`` path derives its own timing from Chvorinov and
+            ignores the initial field.
+        """
+        n_voxels = self.mesh.get_voxel_count()
+
+        field = np.asarray(temperatures, dtype=np.float64)
+        if field.shape != (n_voxels,):
+            raise ValueError(
+                f"initial temperature field has shape {field.shape}, "
+                f"expected ({n_voxels},) to match the mesh"
+            )
+        if not np.all(np.isfinite(field)):
+            raise ValueError("initial temperature field contains non-finite values")
+        self._initial_temperature_field = field.copy()
+
+        if fill_arrival_times is None:
+            self._fill_arrival_times = None
+            return
+
+        times = np.asarray(fill_arrival_times, dtype=np.float64)
+        if times.shape != (n_voxels,):
+            raise ValueError(
+                f"fill arrival times have shape {times.shape}, "
+                f"expected ({n_voxels},) to match the mesh"
+            )
+        self._fill_arrival_times = times.copy()
 
     def initialize(self):
         """Initialize simulation arrays using memory-managed storage"""
