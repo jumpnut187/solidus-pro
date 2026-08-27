@@ -53,55 +53,6 @@ try:
 except ImportError:
     INCREMENTAL_AVAILABLE = False
 
-# Physics simulation modules (new in v2.0)
-try:
-    from core.thermal_solver import (
-        ThermalSolver,
-        ThermalSolverConfig,
-        ThermalProperties,
-        create_thermal_properties_from_alloy,
-        create_thermal_solver,
-    )
-    THERMAL_SOLVER_AVAILABLE = True
-except ImportError:
-    THERMAL_SOLVER_AVAILABLE = False
-
-try:
-    from core.mold_interface import (
-        MoldInterfaceModel,
-        MoldType,
-        MoldProperties,
-        get_mold_properties,
-        get_all_mold_types,
-        create_mold_interface,
-    )
-    MOLD_INTERFACE_AVAILABLE = True
-except ImportError:
-    MOLD_INTERFACE_AVAILABLE = False
-
-try:
-    from core.convection import (
-        ConvectionModel,
-        LiquidMetalProperties,
-        create_liquid_properties_from_alloy,
-        create_convection_model,
-    )
-    CONVECTION_AVAILABLE = True
-except ImportError:
-    CONVECTION_AVAILABLE = False
-
-try:
-    from core.thermal_simulation import (
-        ThermalSimulationEngine,
-        ThermalSimConfig,
-        SimulationMode,
-        SimulationResults,
-        create_thermal_simulation,
-    )
-    THERMAL_SIMULATION_AVAILABLE = True
-except ImportError:
-    THERMAL_SIMULATION_AVAILABLE = False
-
 __all__ = [
     'get_max_voxels_for_system',
     'get_hard_voxel_limit',
@@ -120,9 +71,4 @@ __all__ = [
     'GPU_AVAILABLE',
     'OCTREE_AVAILABLE',
     'INCREMENTAL_AVAILABLE',
-    # Physics simulation modules
-    'THERMAL_SOLVER_AVAILABLE',
-    'MOLD_INTERFACE_AVAILABLE',
-    'CONVECTION_AVAILABLE',
-    'THERMAL_SIMULATION_AVAILABLE',
 ]

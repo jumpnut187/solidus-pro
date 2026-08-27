@@ -4869,7 +4869,6 @@ class SolidificationEngine:
             compute_combined_risk,
             compute_hotspots,
         )
-        from core.mold_interface import BinderType
 
         n_voxels = len(self.mesh.voxel_centers)
 
