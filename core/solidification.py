@@ -4746,21 +4746,23 @@ class SolidificationEngine:
                     chill_centers = self.mesh.voxel_centers[chill_indices]
                     surface_centers = self.mesh.voxel_centers[surface_indices]
                     
-                    chill_tree = cKDTree(chill_centers)
-                    distances, _ = chill_tree.query(
-                        surface_centers,
-                        k=1,
-                        distance_upper_bound=chill_burn_in_radius,
-                    )
-                    
-                    # Chill effect radius for burn-in reduction based on chill thickness
+                    # Chill effect radius for burn-in reduction based on chill
+                    # thickness. Must be computed before the query below, which
+                    # uses it as distance_upper_bound.
                     if self._chill_thicknesses is not None and len(self._chill_thicknesses) > 0:
                         chill_thickness = np.mean(self._chill_thicknesses)
                     else:
                         chill_thickness = self.mesh.base_voxel_size * 5.0
                     chill_burn_in_radius = chill_thickness * 1.5  # Same as shrinkage reduction zone
                     max_reduction = 0.3  # At chill contact, only 30% burn-in risk
-                    
+
+                    chill_tree = cKDTree(chill_centers)
+                    distances, _ = chill_tree.query(
+                        surface_centers,
+                        k=1,
+                        distance_upper_bound=chill_burn_in_radius,
+                    )
+
                     within_radius = np.isfinite(distances) & (distances < chill_burn_in_radius)
                     if np.any(within_radius):
                         # Linear reduction with distance
@@ -4778,6 +4780,13 @@ class SolidificationEngine:
                         context={'n_chill_voxels': len(chill_indices)}
                     )
                     print("    Warning: scipy not available, skipping chill proximity reduction")
+                except NameError:
+                    # Always a code defect, never a data condition. This block
+                    # previously used chill_burn_in_radius before assigning it,
+                    # and the broad handler below turned the resulting NameError
+                    # into a warning -- so chill burn-in reduction never ran and
+                    # no test noticed. Let programming errors surface.
+                    raise
                 except Exception as e:
                     logger.warning(
                         f"Chill proximity calculation failed in sand burn-in analysis: {e}",
