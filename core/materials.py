@@ -41,7 +41,18 @@ class AlloyProperties:
     dynamic_viscosity: float = 0.006  # Pa·s (liquid state)
     thermal_expansion: float = 1.2e-4  # 1/K (liquid state)
     viscosity_temp_sensitivity: float = 1.2  # Exponential factor over freezing range
-    
+
+    # Surface tension of the liquid metal against the mold atmosphere (N/m).
+    # Feeds the mold-filling free-surface gas-density correction and the
+    # capillary entry pressure that determines whether a ceramic filter
+    # primes. Published ranges (Keene 1993 review of pure/alloy surface
+    # tension data; foundry handbooks for the bronze family):
+    #   carbon/low-alloy & stainless steels: ~1.7-1.9 N/m
+    #   nickel alloys (Monel 400, Inconel 625): ~1.7-1.8 N/m
+    #   copper-base alloys (C958/C964 are Ni-Al / Cu-Ni bronzes): ~1.1-1.3 N/m
+    # See per-alloy comments below for the value adopted for each family.
+    surface_tension: float = 1.8  # N/m (liquid steel default)
+
     # Niyama criterion threshold (defect risk below this value)
     niyama_threshold: float = 1.0
     
@@ -452,6 +463,8 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         specific_heat_liquid=660,  # J/(kg·K)
         dynamic_viscosity=0.006,  # Pa·s
         thermal_expansion=1.2e-4,  # 1/K
+        # Surface tension - carbon/low-alloy steel family, ~1.7-1.9 N/m (Keene 1993)
+        surface_tension=1.85,  # N/m
         niyama_threshold=1.0,  # Standard steel threshold
         # Hot tear properties - carbon steel is moderate susceptibility
         hot_tear_susceptibility=0.30,  # Moderate - narrow freezing range helps
@@ -491,6 +504,8 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         specific_heat_liquid=550,
         dynamic_viscosity=0.007,  # Pa·s - slightly higher viscosity
         thermal_expansion=1.5e-4,  # 1/K - higher expansion
+        # Surface tension - austenitic stainless steel family, ~1.7-1.9 N/m (Keene 1993)
+        surface_tension=1.80,  # N/m
         niyama_threshold=0.7,  # Lower threshold due to poor conductivity
         # Hot tear properties - stainless is HIGHLY susceptible
         hot_tear_susceptibility=0.65,  # High - wide freezing range, low ductility at BTR
@@ -559,6 +574,9 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         specific_heat_liquid=480,
         dynamic_viscosity=0.004,  # Pa·s — consistent with NAB literature
         thermal_expansion=1.0e-4,
+        # Surface tension - copper-base (Ni-Al bronze) family, ~1.1-1.3 N/m;
+        # no C95800-specific measurement found, estimated from the Cu-alloy range.
+        surface_tension=1.2,  # N/m
         # Niyama — NAB has excellent feeding and high thermal conductivity,
         # so defect-tolerant threshold is high.
         niyama_threshold=1.2,
@@ -628,6 +646,9 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         specific_heat_liquid=414, # J/(kg·K) (≈ 1.1 of solid) — was 555
         dynamic_viscosity=0.0048,  # Pa·s — consistent with liquid Cu alloys
         thermal_expansion=1.3e-4,  # 1/K (liquid)
+        # Surface tension - copper-base (Cu-Ni) family, ~1.1-1.3 N/m; no
+        # C96400-specific measurement found, estimated from the Cu-alloy range.
+        surface_tension=1.2,  # N/m
         niyama_threshold=1.1,  # Cu-Ni has good feeding; CDA "Fluidity: HIGH"
         # Hot tear properties — copper-nickel has low-to-moderate susceptibility
         # (CDA "Drossing: Medium", "Section size: Low"). The app default (0.28)
@@ -671,6 +692,8 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         specific_heat_liquid=530,
         dynamic_viscosity=0.0064,  # Pa·s
         thermal_expansion=1.35e-4,  # 1/K
+        # Surface tension - martensitic stainless steel family, ~1.7-1.9 N/m (Keene 1993)
+        surface_tension=1.85,  # N/m
         niyama_threshold=0.95,
         # Hot tear properties - medium susceptibility
         hot_tear_susceptibility=0.38,
@@ -710,6 +733,8 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         specific_heat_liquid=530,  # J/(kg·K)
         dynamic_viscosity=0.0063,  # Pa·s
         thermal_expansion=1.45e-4,  # 1/K
+        # Surface tension - nickel alloy family, ~1.7-1.8 N/m (Keene 1993)
+        surface_tension=1.75,  # N/m
         niyama_threshold=0.85,  # Moderate threshold
         # Hot tear properties - nickel alloys are moderate for hot tear
         hot_tear_susceptibility=0.42,
@@ -749,6 +774,8 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         specific_heat_liquid=485,  # J/(kg·K)
         dynamic_viscosity=0.0068,  # Pa·s
         thermal_expansion=1.5e-4,  # 1/K
+        # Surface tension - nickel alloy family, ~1.7-1.8 N/m (Keene 1993)
+        surface_tension=1.75,  # N/m
         niyama_threshold=0.9,  # Conservative threshold
         # Hot tear properties - high-alloy materials often higher susceptibility
         hot_tear_susceptibility=0.58,

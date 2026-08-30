@@ -8,13 +8,15 @@ serializable dataclass hierarchy so they can be configured via:
   - UI settings modal
   - Direct Python instantiation
 
-The parameters are organized into 6 subgroups:
+The parameters are organized into subgroups:
   - FeedingParams      : Riser feeding distance and shrinkage reduction near risers
   - ChillParams         : Chill thermal boost and shrinkage reduction near chills
   - ExothermicParams    : Exothermic riser sleeve timing and effectiveness
   - AirGapParams        : Mold air-gap development and surface influence
   - ThermalBoundaryParams: Mold/chill temperatures and HTC values
   - TimingParams        : Chvorinov mold constant and simulation time bounds
+  - HotTearParams       : Hot tear risk analysis parameters
+  - FillingParams       : Mold-filling stage parameters (nests FilterParams)
 
 Usage:
     from core.solidification_params import SolidificationParameters
@@ -54,6 +56,14 @@ def _clamp_float(value: Any, minimum: float, maximum: float, default: float) -> 
     except (TypeError, ValueError):
         numeric = default
     if numeric != numeric:
+        numeric = default
+    return max(minimum, min(maximum, numeric))
+
+
+def _clamp_int(value: Any, minimum: int, maximum: int, default: int) -> int:
+    try:
+        numeric = int(value)
+    except (TypeError, ValueError):
         numeric = default
     return max(minimum, min(maximum, numeric))
 
@@ -132,6 +142,13 @@ class ThermalBoundaryParams:
     htc_cast_interface: float = 500.0
     htc_riser_post: float = 350.0
     htc_riser: float = 220.0
+    # W/(m^2*K) for gating-system surfaces (pour cup, sprue, runner, gate) and
+    # ceramic filters. They sit in the same sand as the casting, so the value
+    # belongs between the riser (220, insulated sleeve) and the casting (500,
+    # bare sand contact). Without an entry here these surfaces get no boundary
+    # condition at all and integrate adiabatically -- a silent failure, since
+    # an adiabatic sprue simply never gives up heat.
+    htc_gating: float = 400.0
     # W/(m^2*K) heat transfer from chill surfaces into the surrounding mold
     # sand (finite-heat-sink chill model). Same order as the casting-to-sand
     # contact conductance: the chill back face is buried in the same sand.
@@ -186,6 +203,73 @@ class TimingParams:
 
 
 @dataclass
+class FilterParams:
+    """Parameters for the ceramic pour filter (foam/extruded) used during
+    mold filling.
+
+    priming_enabled and drag_enabled are boolean on/off switches, but every
+    leaf in this parameter tree is rendered by the desktop settings dialog
+    (ui/main_window.py FIELD_DEFS) and the web settings drawer
+    (SolidificationDrawer.tsx), and both of those UIs only know how to render
+    a numeric slider/spinbox -- neither has a checkbox or dropdown widget.
+    A bool (or str/enum) leaf here would simply not appear in either UI. So
+    these are encoded as plain ints with a documented 0/1 meaning instead of
+    as bools, matching every other leaf in this tree (see also
+    FillingParams' docstring, which has the same constraint for its own
+    mode-code fields).
+    """
+    porosity: float = 0.85
+    pore_diameter_mm: float = 2.54          # 10 ppi
+    ergun_prefactor: float = 2.2
+    forchheimer_c_f: float = 0.55
+    contact_angle_deg: float = 120.0
+    window_fraction: float = 0.45
+    rated_velocity_warn_factor: float = 1.5
+    head_fraction_warn: float = 0.25
+    priming_enabled: int = 1                # 0/1 bool-as-int; see class docstring
+    drag_enabled: int = 1                   # 0/1 bool-as-int; see class docstring
+
+    def __post_init__(self) -> None:
+        self.porosity = _clamp_float(self.porosity, 0.50, 0.95, 0.85)
+        self.pore_diameter_mm = _clamp_float(self.pore_diameter_mm, 0.5, 8.0, 2.54)
+        self.ergun_prefactor = _clamp_float(self.ergun_prefactor, 0.5, 10.0, 2.2)
+        self.forchheimer_c_f = _clamp_float(self.forchheimer_c_f, 0.1, 2.0, 0.55)
+        self.contact_angle_deg = _clamp_float(self.contact_angle_deg, 90.0, 160.0, 120.0)
+        self.window_fraction = _clamp_float(self.window_fraction, 0.2, 0.8, 0.45)
+
+
+@dataclass
+class FillingParams:
+    """Parameters for the (not-yet-implemented) mold-filling stage.
+
+    inlet_mode_code (0=head, 1=velocity) and pour_mode_code (0=lip,
+    1=bottom) are small closed sets of named modes, and vent_risers is a
+    boolean on/off switch. As with FilterParams above, both settings UIs
+    only render numeric fields, so these are ints with a documented
+    encoding rather than an enum/str or bool -- introducing either would
+    make the field invisible in both UIs.
+    """
+    pour_rate_lb_s: float = 5.0
+    pour_time_s: float = 0.0                # 0 = derive from rate and volume
+    pour_temperature_c: float = 0.0         # 0 = use alloy.pouring_temp
+    initial_head_in: float = 4.0
+    fill_grid_coarsening: int = 2
+    max_fill_time_s: float = 60.0
+    smagorinsky_cs: float = 0.16
+    lattice_velocity_max: float = 0.05
+    wall_htc_multiplier: float = 1.0
+    inlet_mode_code: int = 0                # 0 = head, 1 = velocity
+    pour_mode_code: int = 0                 # 0 = lip, 1 = bottom
+    vent_risers: int = 1                    # 0/1 bool-as-int; see class docstring
+    filter: FilterParams = field(default_factory=FilterParams)
+
+    def __post_init__(self) -> None:
+        self.fill_grid_coarsening = _clamp_int(self.fill_grid_coarsening, 1, 8, 2)
+        self.lattice_velocity_max = _clamp_float(self.lattice_velocity_max, 0.005, 0.2, 0.05)
+        self.max_fill_time_s = _clamp_float(self.max_fill_time_s, 1.0, 600.0, 60.0)
+
+
+@dataclass
 class HotTearParams:
     """Parameters for hot tear risk analysis."""
     mold_restraint_index: float = 0.5
@@ -211,6 +295,8 @@ class SolidificationParameters:
         thermal_boundary: Mold/chill temperatures and HTC values.
         timing: Chvorinov time calculation and simulation time bounds.
         hot_tear: Hot tear risk analysis parameters.
+        filling: Mold-filling stage parameters (pour rate/time/head, LBM
+            solver knobs, and the nested filter media parameters).
     """
     feeding: FeedingParams = field(default_factory=FeedingParams)
     chill: ChillParams = field(default_factory=ChillParams)
@@ -219,6 +305,7 @@ class SolidificationParameters:
     thermal_boundary: ThermalBoundaryParams = field(default_factory=ThermalBoundaryParams)
     timing: TimingParams = field(default_factory=TimingParams)
     hot_tear: HotTearParams = field(default_factory=HotTearParams)
+    filling: FillingParams = field(default_factory=FillingParams)
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]]) -> SolidificationParameters:
@@ -298,6 +385,33 @@ class SolidificationParameters:
             1e-3,
             3.3e-7,
         )
+        self.filling.fill_grid_coarsening = _clamp_int(
+            self.filling.fill_grid_coarsening, 1, 8, 2,
+        )
+        self.filling.lattice_velocity_max = _clamp_float(
+            self.filling.lattice_velocity_max, 0.005, 0.2, 0.05,
+        )
+        self.filling.max_fill_time_s = _clamp_float(
+            self.filling.max_fill_time_s, 1.0, 600.0, 60.0,
+        )
+        self.filling.filter.porosity = _clamp_float(
+            self.filling.filter.porosity, 0.50, 0.95, 0.85,
+        )
+        self.filling.filter.pore_diameter_mm = _clamp_float(
+            self.filling.filter.pore_diameter_mm, 0.5, 8.0, 2.54,
+        )
+        self.filling.filter.ergun_prefactor = _clamp_float(
+            self.filling.filter.ergun_prefactor, 0.5, 10.0, 2.2,
+        )
+        self.filling.filter.forchheimer_c_f = _clamp_float(
+            self.filling.filter.forchheimer_c_f, 0.1, 2.0, 0.55,
+        )
+        self.filling.filter.contact_angle_deg = _clamp_float(
+            self.filling.filter.contact_angle_deg, 90.0, 160.0, 120.0,
+        )
+        self.filling.filter.window_fraction = _clamp_float(
+            self.filling.filter.window_fraction, 0.2, 0.8, 0.45,
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -344,6 +458,7 @@ class SolidificationParameters:
                 'htc_cast_interface': self.thermal_boundary.htc_cast_interface,
                 'htc_riser_post': self.thermal_boundary.htc_riser_post,
                 'htc_riser': self.thermal_boundary.htc_riser,
+                'htc_gating': self.thermal_boundary.htc_gating,
                 'chill_ambient_htc': self.thermal_boundary.chill_ambient_htc,
                 'chill_htc_floor_fraction': self.thermal_boundary.chill_htc_floor_fraction,
                 'mold_thermal_conductivity': self.thermal_boundary.mold_thermal_conductivity,
@@ -367,5 +482,31 @@ class SolidificationParameters:
                 'healing_relief_strength': self.hot_tear.healing_relief_strength,
                 'surface_restraint_depth_inches': self.hot_tear.surface_restraint_depth_inches,
                 'solid_path_search_depth': self.hot_tear.solid_path_search_depth,
+            },
+            'filling': {
+                'pour_rate_lb_s': self.filling.pour_rate_lb_s,
+                'pour_time_s': self.filling.pour_time_s,
+                'pour_temperature_c': self.filling.pour_temperature_c,
+                'initial_head_in': self.filling.initial_head_in,
+                'fill_grid_coarsening': self.filling.fill_grid_coarsening,
+                'max_fill_time_s': self.filling.max_fill_time_s,
+                'smagorinsky_cs': self.filling.smagorinsky_cs,
+                'lattice_velocity_max': self.filling.lattice_velocity_max,
+                'wall_htc_multiplier': self.filling.wall_htc_multiplier,
+                'inlet_mode_code': self.filling.inlet_mode_code,
+                'pour_mode_code': self.filling.pour_mode_code,
+                'vent_risers': self.filling.vent_risers,
+                'filter': {
+                    'porosity': self.filling.filter.porosity,
+                    'pore_diameter_mm': self.filling.filter.pore_diameter_mm,
+                    'ergun_prefactor': self.filling.filter.ergun_prefactor,
+                    'forchheimer_c_f': self.filling.filter.forchheimer_c_f,
+                    'contact_angle_deg': self.filling.filter.contact_angle_deg,
+                    'window_fraction': self.filling.filter.window_fraction,
+                    'rated_velocity_warn_factor': self.filling.filter.rated_velocity_warn_factor,
+                    'head_fraction_warn': self.filling.filter.head_fraction_warn,
+                    'priming_enabled': self.filling.filter.priming_enabled,
+                    'drag_enabled': self.filling.filter.drag_enabled,
+                },
             },
         }

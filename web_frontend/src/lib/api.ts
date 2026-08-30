@@ -19,6 +19,13 @@ export type UploadedFile = {
   mesh_data: MeshData;
 };
 
+export type PourLocationPayload = {
+  schema_version: number;
+  point_in: [number, number, number];
+  normal: [number, number, number] | null;
+  part_id: string | null;
+};
+
 export type ProjectPart = {
   id: string;
   name: string;
@@ -56,8 +63,13 @@ export type ProjectSettings = {
   memory_mode: string;
   analysis_options: Record<string, boolean | number | string>;
   performance_options: Record<string, boolean | number | string>;
-  solidification_params: Record<string, Record<string, number>>;
+  solidification_params: Record<string, Record<string, number | Record<string, number>>>;
   ui_state?: Record<string, unknown>;
+  // The MAGMASOFT-style pour point clicked on the 3D assembly, or null when
+  // none has been set yet. The mold-filling analysis is gated on this being
+  // non-null -- see AnalysisDrawer. Persisted server-side inside the
+  // project's existing `ui_state` JSON blob (see web/repository.py).
+  pour_location?: PourLocationPayload | null;
 };
 
 export type ResultPayload = {

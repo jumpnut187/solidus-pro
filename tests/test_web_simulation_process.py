@@ -229,6 +229,23 @@ class SimulationWorkerInputsTests(unittest.TestCase):
         inputs = self._run_worker({"alloy": "WCB"})
         self.assertFalse(inputs.use_gpu)
 
+    def test_pour_location_reaches_pipeline_inputs_through_worker(self) -> None:
+        """A stored project's pour_location must survive the subprocess worker path.
+
+        This covers the same mapping as
+        ``BuildPipelineInputsTests.test_pour_location_reaches_pipeline_inputs`` in
+        tests/test_web_api.py, but through ``_simulation_process_worker`` -- the
+        entry point the live queued-simulation path actually calls.
+        """
+        pour_location = {
+            "schema_version": 1,
+            "point_in": [0.5, 1.5, 2.5],
+            "normal": [0.0, 1.0, 0.0],
+            "part_id": "gate-1",
+        }
+        inputs = self._run_worker({"alloy": "WCB", "pour_location": pour_location})
+        self.assertEqual(inputs.pour_location, pour_location)
+
 
 class SimulationQueueCleanupTests(unittest.TestCase):
     """Verify cleanup and cancellation work across process boundaries."""

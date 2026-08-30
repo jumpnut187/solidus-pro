@@ -22,8 +22,14 @@ import {
   Vector3,
   VertexData
 } from '@babylonjs/core';
-import type { ProjectPart, ResultFieldsPayload } from '../lib/api';
+import type { PourLocationPayload, ProjectPart, ResultFieldsPayload } from '../lib/api';
 import type { SectionState } from '../lib/uiPrefs';
+
+export type PourLocationPick = {
+  point: [number, number, number];
+  normal: [number, number, number] | null;
+  partId: string | null;
+};
 
 type Props = {
   parts: ProjectPart[];
@@ -40,7 +46,17 @@ type Props = {
   ortho: boolean;
   section: SectionState;
   onPartSelected?: (partId: string | null) => void;
+  /** When true, the next click on the assembly reports a pour location instead of selecting a part. */
+  pourPickMode?: boolean;
+  /** The currently set pour location (or null); rendered as a magenta marker mesh. */
+  pourLocation?: PourLocationPayload | null;
+  onPourLocationPicked?: (pick: PourLocationPick) => void;
 };
+
+/** Pixel distance beyond which a pointerdown/pointerup pair counts as a camera
+ * drag rather than a click, so orbiting the camera never accidentally drops
+ * a pour location or part selection. */
+const CLICK_DRAG_THRESHOLD_PX = 4;
 
 const partColors: Record<string, Color3> = {
   cast: new Color3(0.62, 0.71, 0.74),
@@ -91,7 +107,10 @@ export function BabylonViewport({
   onCameraHandled,
   ortho,
   section,
-  onPartSelected
+  onPartSelected,
+  pourPickMode = false,
+  pourLocation = null,
+  onPourLocationPicked
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sceneRef = useRef<Scene | null>(null);
@@ -100,8 +119,14 @@ export function BabylonViewport({
   const partMeshesRef = useRef<Map<string, Mesh>>(new Map());
   const resultMeshRef = useRef<Mesh | null>(null);
   const particleRef = useRef<ParticleSystem | null>(null);
+  const pourMarkerRef = useRef<Mesh | null>(null);
   const onPartSelectedRef = useRef(onPartSelected);
   onPartSelectedRef.current = onPartSelected;
+  const pourPickModeRef = useRef(pourPickMode);
+  pourPickModeRef.current = pourPickMode;
+  const onPourLocationPickedRef = useRef(onPourLocationPicked);
+  onPourLocationPickedRef.current = onPourLocationPicked;
+  const pointerDownAtRef = useRef<{ x: number; y: number } | null>(null);
   const orthoBaseRef = useRef<{ extent: number; radius: number } | null>(null);
 
   useEffect(() => {
@@ -177,15 +202,40 @@ export function BabylonViewport({
     });
 
     const pointerObserver = scene.onPointerObservable.add((pointerInfo) => {
-      if (pointerInfo.type === PointerEventTypes.POINTERUP) {
-        const pickResult = scene.pick(scene.pointerX, scene.pointerY);
-        if (pickResult.hit && pickResult.pickedMesh) {
-          const meshName = pickResult.pickedMesh.name;
-          if (meshName.startsWith('part-')) {
-            const partId = meshName.slice(5);
-            onPartSelectedRef.current?.(partId);
-          }
-        }
+      if (pointerInfo.type === PointerEventTypes.POINTERDOWN) {
+        pointerDownAtRef.current = { x: scene.pointerX, y: scene.pointerY };
+        return;
+      }
+      if (pointerInfo.type !== PointerEventTypes.POINTERUP) return;
+
+      const downAt = pointerDownAtRef.current;
+      pointerDownAtRef.current = null;
+      if (downAt) {
+        const dragDistance = Math.hypot(scene.pointerX - downAt.x, scene.pointerY - downAt.y);
+        // A camera orbit/pan starts and ends under the same click handler --
+        // only a pointerup close to its pointerdown counts as an actual click.
+        if (dragDistance > CLICK_DRAG_THRESHOLD_PX) return;
+      }
+
+      const pickResult = scene.pick(scene.pointerX, scene.pointerY);
+      if (!pickResult.hit || !pickResult.pickedMesh) return;
+      const meshName = pickResult.pickedMesh.name;
+
+      if (pourPickModeRef.current) {
+        if (!pickResult.pickedPoint) return;
+        const point = pickResult.pickedPoint;
+        const normalVec = pickResult.getNormal(true, true);
+        onPourLocationPickedRef.current?.({
+          point: [point.x, point.y, point.z],
+          normal: normalVec ? [normalVec.x, normalVec.y, normalVec.z] : null,
+          partId: meshName.startsWith('part-') ? meshName.slice(5) : null
+        });
+        return;
+      }
+
+      if (meshName.startsWith('part-')) {
+        const partId = meshName.slice(5);
+        onPartSelectedRef.current?.(partId);
       }
     });
 
@@ -209,8 +259,26 @@ export function BabylonViewport({
       engineRef.current = null;
       cameraRef.current = null;
       partMeshes.clear();
+      pourMarkerRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+    if (!pourLocation) {
+      pourMarkerRef.current?.dispose();
+      pourMarkerRef.current = null;
+      return;
+    }
+    let marker = pourMarkerRef.current;
+    if (!marker) {
+      marker = createPourMarker(scene);
+      pourMarkerRef.current = marker;
+    }
+    const [x, y, z] = pourLocation.point_in;
+    marker.position = new Vector3(x, y, z);
+  }, [pourLocation]);
 
   useEffect(() => {
     const scene = sceneRef.current;
@@ -682,6 +750,47 @@ function boundsFromActiveVoxels(activeSet: ActiveVoxelSet) {
     min,
     max
   };
+}
+
+/** Magenta MAGMASOFT-style pin marking the user-chosen pour (ingate) point.
+ *
+ * Distinct from every part color and result-mode color in this file (see
+ * `partColors` / `resultColors` above) so it always reads as "this is the
+ * pour point", not a shrinkage or defect highlight. Not pickable, so it
+ * never occludes picking the assembly surface underneath it -- including
+ * while the user is re-picking a new pour location.
+ */
+function createPourMarker(scene: Scene): Mesh {
+  const marker = MeshBuilder.CreateSphere('pour-location-marker', { diameter: 0.5, segments: 16 }, scene);
+  marker.isPickable = false;
+  marker.renderingGroupId = 3;
+  const material = new StandardMaterial('pour-location-marker-mat', scene);
+  material.diffuseColor = new Color3(1, 0, 1);
+  material.emissiveColor = new Color3(1, 0.05, 1);
+  material.specularColor = Color3.Black();
+  marker.material = material;
+
+  const label = MeshBuilder.CreatePlane('pour-location-label', { size: 1.1 }, scene);
+  label.isPickable = false;
+  label.renderingGroupId = 3;
+  label.billboardMode = Mesh.BILLBOARDMODE_ALL;
+  label.parent = marker;
+  label.position.z = 0.6;
+  const labelTexture = new DynamicTexture('pour-location-label-texture', { width: 256, height: 128 }, scene, false);
+  labelTexture.hasAlpha = true;
+  // drawText (rather than the raw 2D context) is what Babylon's
+  // ICanvasRenderingContext abstraction actually supports across its
+  // WebGL/native canvas backends -- it lacks fillText/textAlign.
+  labelTexture.drawText('POUR', null, 84, 'bold 44px Helvetica, Arial, sans-serif', '#ff21ff', 'transparent', true, true);
+  const labelMaterial = new StandardMaterial('pour-location-label-mat', scene);
+  labelMaterial.diffuseTexture = labelTexture;
+  labelMaterial.opacityTexture = labelTexture;
+  labelMaterial.emissiveColor = Color3.White();
+  labelMaterial.disableLighting = true;
+  labelMaterial.backFaceCulling = false;
+  label.material = labelMaterial;
+
+  return marker;
 }
 
 function createPartMesh(scene: Scene, part: ProjectPart): Mesh {

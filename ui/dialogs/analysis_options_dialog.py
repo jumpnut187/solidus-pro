@@ -130,6 +130,21 @@ class AnalysisOptionsDialog(DraggableDialog):
         )
         analysis_layout.addWidget(self.gas_porosity_check)
 
+        self.filling_check = QCheckBox("Mold Filling (CFD)")
+        self.filling_check.setChecked(False)
+        self._filling_disabled_tooltip = (
+            "Set a pour location on the 3D model first (see \"Set Pour "
+            "Location\" in the sidebar) -- the mold-filling analysis needs "
+            "to know where metal enters the mold."
+        )
+        self._filling_enabled_tooltip = (
+            "Simulates mold filling (CFD) from the chosen pour location:\n"
+            "melt front advance, air entrainment risk, and fill time.\n\n"
+            "Runs after voxelization, before solidification."
+        )
+        self.set_filling_available(False)
+        analysis_layout.addWidget(self.filling_check)
+
         self.fraction_liquid_check = QCheckBox("Fraction Liquid (Solidification Path)")
         self.fraction_liquid_check.setChecked(False)
         self.fraction_liquid_check.setToolTip(
@@ -235,6 +250,21 @@ class AnalysisOptionsDialog(DraggableDialog):
 
         self.content_layout.addStretch()
 
+    def set_filling_available(self, available: bool) -> None:
+        """Enable/disable the Mold Filling toggle based on pour-location state.
+
+        The mold-filling analysis needs a pour location to know where metal
+        enters the mold, so it is greyed out (with an explanatory tooltip)
+        until one has been picked, and forced off if the toggle happened to
+        be checked when the location is cleared.
+        """
+        self.filling_check.setEnabled(available)
+        if available:
+            self.filling_check.setToolTip(self._filling_enabled_tooltip)
+        else:
+            self.filling_check.setChecked(False)
+            self.filling_check.setToolTip(self._filling_disabled_tooltip)
+
     def store_original_values(self):
         """Store current settings"""
         self._original_values = {
@@ -245,6 +275,7 @@ class AnalysisOptionsDialog(DraggableDialog):
             'sand_burn_in': self.sand_burn_in_check.isChecked(),
             'gas_porosity': self.gas_porosity_check.isChecked(),
             'fraction_liquid': self.fraction_liquid_check.isChecked(),
+            'filling': self.filling_check.isChecked(),
             'feeding_path': self.feeding_path_check.isChecked(),
             'stress_analysis': self.stress_check.isChecked(),
             'microstructure': self.microstructure_check.isChecked(),
@@ -261,6 +292,11 @@ class AnalysisOptionsDialog(DraggableDialog):
             self.sand_burn_in_check.setChecked(self._original_values['sand_burn_in'])
             self.gas_porosity_check.setChecked(self._original_values['gas_porosity'])
             self.fraction_liquid_check.setChecked(self._original_values['fraction_liquid'])
+            # Only restore a checked filling toggle if it is still allowed --
+            # the checkbox may have been force-disabled (pour location
+            # cleared) while the dialog was open.
+            if self.filling_check.isEnabled():
+                self.filling_check.setChecked(self._original_values.get('filling', False))
             self.feeding_path_check.setChecked(self._original_values.get('feeding_path', False))
             self.stress_check.setChecked(self._original_values.get('stress_analysis', False))
             self.microstructure_check.setChecked(self._original_values.get('microstructure', False))
@@ -280,6 +316,7 @@ class AnalysisOptionsDialog(DraggableDialog):
             'sand_burn_in': self.sand_burn_in_check.isChecked(),
             'gas_porosity': self.gas_porosity_check.isChecked(),
             'fraction_liquid': self.fraction_liquid_check.isChecked(),
+            'filling': self.filling_check.isChecked(),
             'feeding_path': self.feeding_path_check.isChecked(),
             'stress_analysis': self.stress_check.isChecked(),
             'microstructure': self.microstructure_check.isChecked(),
@@ -295,6 +332,9 @@ class AnalysisOptionsDialog(DraggableDialog):
         self.sand_burn_in_check.setChecked(options.get('sand_burn_in', False))
         self.gas_porosity_check.setChecked(options.get('gas_porosity', False))
         self.fraction_liquid_check.setChecked(options.get('fraction_liquid', False))
+        # 'filling' is intentionally not restored here: it stays gated by
+        # set_filling_available(), which main_window drives from whether a
+        # pour location currently exists, independent of a saved value.
         self.feeding_path_check.setChecked(options.get('feeding_path', False))
         self.stress_check.setChecked(options.get('stress_analysis', False))
         self.microstructure_check.setChecked(options.get('microstructure', False))

@@ -84,6 +84,66 @@ class LoadGateTests(unittest.TestCase):
             self.assertIn("Retrain", result.error)
 
 
+class GatingAliasTests(unittest.TestCase):
+    """
+    Existing models were trained on codes 0-4 only. The gating codes must not
+    reach the encoder raw, or channel 1 carries values the network has never
+    seen -- with no divisor mismatch to make the problem loud.
+    """
+
+    def test_every_code_encodes_in_distribution(self) -> None:
+        import numpy as np
+
+        from core.part_manager import PART_TYPE_TO_CODE
+        from core.surrogate.fields import apply_part_type_aliases
+
+        codes = np.array(sorted(PART_TYPE_TO_CODE.values()), dtype=np.int32)
+        encoded = apply_part_type_aliases(codes) / PART_TYPE_DIVISOR
+        highest_trained = 4 / PART_TYPE_DIVISOR
+        for code, value in zip(codes.tolist(), encoded.tolist()):
+            with self.subTest(code=code):
+                self.assertGreaterEqual(value, 0.0)
+                self.assertLessEqual(
+                    value,
+                    highest_trained + 1e-9,
+                    f"code {code} encodes to {value:.3f}, above the trained "
+                    f"maximum of {highest_trained:.3f}",
+                )
+
+    def test_original_codes_are_left_untouched(self) -> None:
+        import numpy as np
+
+        from core.surrogate.fields import apply_part_type_aliases
+
+        original = np.array([0, 1, 2, 3, 4], dtype=np.int32)
+        np.testing.assert_array_equal(apply_part_type_aliases(original), original)
+
+    def test_aliasing_does_not_mutate_its_input(self) -> None:
+        import numpy as np
+
+        from core.part_manager import PART_TYPE_SPRUE
+        from core.surrogate.fields import apply_part_type_aliases
+
+        codes = np.array([PART_TYPE_SPRUE], dtype=np.int32)
+        apply_part_type_aliases(codes)
+        self.assertEqual(codes[0], PART_TYPE_SPRUE)
+
+    def test_filter_is_not_aliased_into_the_chill_window(self) -> None:
+        """dataset.py pulls chill cells with a +/-0.05 window around 2/3."""
+        import numpy as np
+
+        from core.deep_model.dataset import CHILL_CHANNEL_TOL
+        from core.part_manager import PART_TYPE_CHILL, PART_TYPE_FILTER
+        from core.surrogate.fields import apply_part_type_aliases
+
+        encoded = float(
+            apply_part_type_aliases(np.array([PART_TYPE_FILTER], dtype=np.int32))[0]
+            / PART_TYPE_DIVISOR
+        )
+        chill_value = PART_TYPE_CHILL / PART_TYPE_DIVISOR
+        self.assertGreater(abs(encoded - chill_value), CHILL_CHANNEL_TOL)
+
+
 class ChillDecodingTests(unittest.TestCase):
     def test_chill_encoding_is_recoverable(self) -> None:
         """deep_model recovers chill from channel 1; the two must agree."""

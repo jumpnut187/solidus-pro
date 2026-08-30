@@ -330,6 +330,11 @@ body,
   font-size: 12px;
 }
 
+.check:has(input:disabled) {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .vis-select {
   min-width: 0;
   flex: 1;
@@ -729,6 +734,12 @@ body,
 .mini-button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.ghost-button.is-active {
+  background: color-mix(in srgb, var(--accent), transparent 65%);
+  border-color: var(--accent-bright);
+  color: #ffffff;
 }
 
 /* ---------------- Drawer form styles ---------------- */

@@ -1,8 +1,8 @@
 import { useRef } from 'react';
-import { Box, Copy, Layers3, Plus, Trash2, Upload, X } from 'lucide-react';
+import { Box, Copy, Layers3, MapPin, Plus, Trash2, Upload, X } from 'lucide-react';
 
 import { ConfigDrawer } from '../ConfigDrawer';
-import type { ProjectPart } from '../../lib/api';
+import type { PourLocationPayload, ProjectPart } from '../../lib/api';
 
 const TYPE_OPTIONS: { value: ProjectPart['part_type']; label: string }[] = [
   { value: 'cast', label: 'Cast' },
@@ -22,6 +22,10 @@ type Props = {
   onClearAll: () => void;
   onDuplicatePart: (id: string) => void;
   onClose: () => void;
+  pourLocation: PourLocationPayload | null;
+  pourPickMode: boolean;
+  onTogglePourPick: () => void;
+  onClearPourLocation: () => void;
 };
 
 export function PartsDrawer({
@@ -33,7 +37,11 @@ export function PartsDrawer({
   onRemovePart,
   onClearAll,
   onDuplicatePart,
-  onClose
+  onClose,
+  pourLocation,
+  pourPickMode,
+  onTogglePourPick,
+  onClearPourLocation
 }: Props) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const selectedPart = parts.find((p) => p.id === selectedPartId) ?? null;
@@ -240,6 +248,34 @@ export function PartsDrawer({
           <X size={14} /> Clear All
         </button>
       </div>
+
+      <div className="group-title">Pour Location</div>
+      <div className="drawer-tool-row">
+        <button
+          type="button"
+          className={pourPickMode ? 'ghost-button is-active' : 'ghost-button'}
+          disabled={!parts.length}
+          title="Click a point on the 3D assembly to set where metal enters the mold"
+          onClick={onTogglePourPick}
+        >
+          <MapPin size={14} /> {pourPickMode ? 'Click the Assembly...' : 'Set Pour Location'}
+        </button>
+        <button
+          type="button"
+          className="ghost-button"
+          disabled={!pourLocation}
+          title="Remove the pour location"
+          onClick={onClearPourLocation}
+        >
+          <X size={14} /> Clear
+        </button>
+      </div>
+      <p className="parts-meta">
+        {pourLocation
+          ? `Pour point: (${pourLocation.point_in[0].toFixed(2)}, ${pourLocation.point_in[1].toFixed(2)}, ${pourLocation.point_in[2].toFixed(2)}) in` +
+            (pourLocation.part_id ? ` on part ${pourLocation.part_id}` : '')
+          : 'Not set. Click "Set Pour Location", then click a point on the assembly to place it. Required for the Mold Filling (CFD) analysis.'}
+      </p>
 
       <div className="drawer-footer-meta">
         <span>{parts.length} part{parts.length === 1 ? '' : 's'}</span>

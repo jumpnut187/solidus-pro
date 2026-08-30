@@ -82,6 +82,7 @@ def init_db(database_path: Path) -> None:
 def create_project(database_path: Path, data: Dict[str, Any]) -> str:
     project_id = str(uuid.uuid4())[:12]
     now_name = f"Solidification {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    ui_state = _merge_pour_location(dict(data.get("ui_state") or {}), data)
     with get_db_connection(database_path) as db:
         db.execute(
             """
@@ -103,7 +104,7 @@ def create_project(database_path: Path, data: Dict[str, Any]) -> str:
                 json.dumps(data.get("analysis_options", _default_analysis_options())),
                 json.dumps(data.get("performance_options", _default_performance_options())),
                 json.dumps(data.get("solidification_params", {})),
-                json.dumps(data.get("ui_state", {})),
+                json.dumps(ui_state),
             ),
         )
     return project_id
@@ -138,6 +139,9 @@ def get_project(database_path: Path, project_id: str) -> Optional[Dict[str, Any]
     project["solidification_params"] = _loads(project.get("solidification_params"), {})
     project["ui_state"] = _loads(project.get("ui_state"), {})
     project["summary"] = _loads(project.get("summary_json"), {})
+    # Mirrored to a top-level key for API/web-layer convenience -- see
+    # _merge_pour_location for why the value itself lives in ui_state.
+    project["pour_location"] = project["ui_state"].get("pour_location")
     return project
 
 
@@ -145,6 +149,7 @@ def update_project(database_path: Path, project_id: str, data: Dict[str, Any]) -
     current = get_project(database_path, project_id)
     if current is None:
         return
+    ui_state = _merge_pour_location(dict(data.get("ui_state", current["ui_state"]) or {}), data)
     with get_db_connection(database_path) as db:
         db.execute(
             """
@@ -165,7 +170,7 @@ def update_project(database_path: Path, project_id: str, data: Dict[str, Any]) -
                 json.dumps(data.get("analysis_options", current["analysis_options"])),
                 json.dumps(data.get("performance_options", current["performance_options"])),
                 json.dumps(data.get("solidification_params", current["solidification_params"])),
-                json.dumps(data.get("ui_state", current["ui_state"])),
+                json.dumps(ui_state),
                 project_id,
             ),
         )
@@ -319,6 +324,24 @@ def get_artifact_path(database_path: Path, project_id: str) -> Optional[str]:
     return str(row["artifact_path"])
 
 
+def _merge_pour_location(ui_state: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any]:
+    """Fold a request's top-level ``pour_location`` into the ``ui_state`` blob.
+
+    The pour point the user clicks on the 3D assembly (see
+    ``core.pour_location.PourLocation``) is persisted inside the existing
+    ``ui_state`` JSON column rather than a new table column -- the projects
+    table already has a general-purpose JSON blob for exactly this kind of
+    UI-originated value, so a schema migration buys nothing here. The web
+    API still accepts and returns it as a plain top-level ``pour_location``
+    field (see :func:`get_project`) for client ergonomics; this is the one
+    place that reconciles the two representations before a write.
+    """
+    if "pour_location" in data:
+        ui_state = dict(ui_state)
+        ui_state["pour_location"] = data["pour_location"]
+    return ui_state
+
+
 def _loads(value: Any, default: Dict[str, Any]) -> Dict[str, Any]:
     if not value:
         return dict(default)
@@ -345,6 +368,7 @@ def _default_analysis_options() -> Dict[str, Any]:
         "feeding_path": False,
         "stress_analysis": False,
         "microstructure": False,
+        "filling": False,
         "sand_restraint_index": 0.5,
     }
 

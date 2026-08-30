@@ -20,10 +20,29 @@ const ANALYSIS_ROWS: Array<{ key: string; label: string; section: 'core' | 'adva
   { key: 'feeding_path', label: 'Feeding Path Analysis', section: 'advanced' },
   { key: 'stress_analysis', label: 'Thermal Stress & Distortion', section: 'advanced' },
   { key: 'microstructure', label: 'Microstructure (SDAS) Prediction', section: 'advanced' },
+  { key: 'filling', label: 'Mold Filling (CFD)', section: 'advanced' },
 ];
 
-function Check({ label, checked, onChange }: { label: string; checked: boolean; onChange: (checked: boolean) => void }) {
-  return <label className="check"><input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} /> {label}</label>;
+const NO_POUR_LOCATION_HINT = 'Set a pour location on the 3D assembly (Parts Manager) before enabling mold filling.';
+
+function Check({
+  label,
+  checked,
+  onChange,
+  disabled,
+  title
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  disabled?: boolean;
+  title?: string;
+}) {
+  return (
+    <label className="check" title={title}>
+      <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} /> {label}
+    </label>
+  );
 }
 
 function SectionLabel({ children }: { children: ReactNode }) {
@@ -47,14 +66,19 @@ export function AnalysisDrawer({ settings, setAnalysis, onClose }: Props) {
         />
       ))}
       <SectionLabel>Advanced Analysis:</SectionLabel>
-      {ANALYSIS_ROWS.filter((row) => row.section === 'advanced').map((row) => (
-        <Check
-          key={row.key}
-          label={row.label}
-          checked={Boolean(settings.analysis_options[row.key as keyof typeof settings.analysis_options])}
-          onChange={(v) => setAnalysis(row.key, v)}
-        />
-      ))}
+      {ANALYSIS_ROWS.filter((row) => row.section === 'advanced').map((row) => {
+        const requiresPourLocation = row.key === 'filling' && !settings.pour_location;
+        return (
+          <Check
+            key={row.key}
+            label={row.label}
+            checked={Boolean(settings.analysis_options[row.key as keyof typeof settings.analysis_options])}
+            onChange={(v) => setAnalysis(row.key, v)}
+            disabled={requiresPourLocation}
+            title={requiresPourLocation ? NO_POUR_LOCATION_HINT : undefined}
+          />
+        );
+      })}
       <label>
         Sand Restraint Index {Number(settings.analysis_options.sand_restraint_index).toFixed(2)}
         <input

@@ -21,6 +21,7 @@ import numpy as np
 
 from core.analysis_strategies import run_post_analyses
 from core.materials import AlloyProperties, get_alloy
+from core.filling_stage import maybe_run_filling
 from core.simulation_pipeline import (
     PipelineInputs,
     PipelineResult,
@@ -196,10 +197,25 @@ def run_surrogate_pipeline(
     analysis_options.solver_mode = SOLVER_MODE_SCHEDULE_LEGACY
     disabled_analyses = _disable_unsupported_analyses(analysis_options)
 
+
+    filling_result = maybe_run_filling(
+        voxel_mesh,
+        alloy,
+        analysis_options,
+        inputs,
+        cancel_callback=cancel_callback,
+        progress_message_callback=progress_message_callback,
+    )
+
     engine = SolidificationEngine(voxel_mesh, alloy, analysis_options)
     engine.initialize()
     if inputs.thread_budget_provider is not None:
         engine._thread_budget_provider = inputs.thread_budget_provider
+    if filling_result is not None:
+        engine.set_initial_temperature_field(
+            filling_result.temperature_c,
+            fill_arrival_times=filling_result.fill_time_s,
+        )
 
     # Geometry-derived input channels (no physics loop required).
     engine._calculate_feeding_distances()

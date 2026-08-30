@@ -273,6 +273,7 @@ class InspectorRoutingTests(unittest.TestCase):
         viz._cross_section_enabled = False
         viz.cross_section_planes = {}
         viz.measurement_tool = None
+        viz._pour_pick_enabled = False
         viz.feed_modulus_leader = _StubFeedModulusLeader(_RecordingRenderer())
         viz._feed_modulus_leader_enabled = False
         viz._inspector_layer = None
@@ -432,6 +433,7 @@ class ShrinkInspectorLifecycleTests(unittest.TestCase):
         viz._cross_section_enabled = False
         viz.cross_section_planes = {}
         viz.measurement_tool = None
+        viz._pour_pick_enabled = False
         viz.feed_modulus_leader = _StubFeedModulusLeader(_RecordingRenderer())
         viz._feed_modulus_leader_enabled = False
         viz._inspector_layer = None

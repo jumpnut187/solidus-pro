@@ -19,6 +19,15 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+from core.part_manager import (
+    PART_TYPE_CAST,
+    PART_TYPE_CORE,
+    PART_TYPE_FILTER,
+    PART_TYPE_GATE,
+    PART_TYPE_POUR_CUP,
+    PART_TYPE_RUNNER,
+    PART_TYPE_SPRUE,
+)
 from core.voxel_mesh import AdaptiveVoxelMesh
 
 CHANNELS: List[str] = [
@@ -53,6 +62,40 @@ _MAX_CHILL_BOOST = 5.0
 #: pre-existing and is preserved deliberately rather than "fixed", because
 #: changing it would invalidate the dataset.
 PART_TYPE_DIVISOR = 3.0
+
+
+#: Gating part types remapped to an in-distribution code before encoding.
+#:
+#: The divisor above is frozen, which keeps existing artifacts *loadable* --
+#: ``load_model`` only compares the recorded divisor to this one. It does not
+#: make them *applicable*: every model was trained on codes 0-4, i.e. channel-1
+#: values in [0, 4/3]. Encoding FILTER (8) and GATE (9) raw would feed 2.667 and
+#: 3.0 into a network that has never seen anything above 1.333, with no error
+#: and no divisor mismatch to catch it -- just silently worse predictions on
+#: exactly the assemblies the mold-filling stage exists to handle.
+#:
+#: So the gating metals encode as CAST, which is what they are thermally, and
+#: the filter encodes as CORE -- the closest in-distribution mold-class code.
+#: Deliberately NOT CHILL: ``core/deep_model/dataset.py`` recovers chill voxels
+#: with a +/-0.05 window around 2/3 and would pull filter cells into that mask.
+#:
+#: Delete this table and bump PART_TYPE_DIVISOR once training data containing
+#: gating geometry exists; the load gate will then force the retrain loudly.
+SURROGATE_PART_TYPE_ALIASES = {
+    PART_TYPE_POUR_CUP: PART_TYPE_CAST,
+    PART_TYPE_SPRUE: PART_TYPE_CAST,
+    PART_TYPE_RUNNER: PART_TYPE_CAST,
+    PART_TYPE_GATE: PART_TYPE_CAST,
+    PART_TYPE_FILTER: PART_TYPE_CORE,
+}
+
+
+def apply_part_type_aliases(part_types: np.ndarray) -> np.ndarray:
+    """Remap gating codes to in-distribution codes for surrogate encoding."""
+    aliased = np.asarray(part_types).copy()
+    for source, target in SURROGATE_PART_TYPE_ALIASES.items():
+        aliased[aliased == source] = target
+    return aliased
 
 
 @dataclass
@@ -158,7 +201,11 @@ def encode_channels(
     channels = np.zeros((len(CHANNELS), resolution, resolution, resolution), dtype=np.float32)
 
     channels[0] = _scatter(centers, np.ones(n_voxels, dtype=np.float32), meta)
-    channels[1] = _scatter(centers, part_types.astype(np.float32) / PART_TYPE_DIVISOR, meta)
+    channels[1] = _scatter(
+        centers,
+        apply_part_type_aliases(part_types).astype(np.float32) / PART_TYPE_DIVISOR,
+        meta,
+    )
     channels[2] = _scatter(centers, np.clip(surface_distances / max_dim, 0.0, 1.0), meta)
     channels[3] = _scatter(centers, np.clip(moduli / max_dim, 0.0, 1.0), meta)
     channels[4] = _scatter(centers, np.clip(heights, 0.0, 1.0), meta)

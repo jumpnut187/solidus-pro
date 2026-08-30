@@ -9,6 +9,7 @@ import { MeshDrawer } from './components/drawers/MeshDrawer';
 import { AnalysisDrawer } from './components/drawers/AnalysisDrawer';
 import { PerformanceDrawer } from './components/drawers/PerformanceDrawer';
 import { SolidificationDrawer } from './components/drawers/SolidificationDrawer';
+import type { PourLocationPick } from './components/BabylonViewport';
 import { api, type MaterialInfo, type ProjectPart, type ResultFieldsPayload } from './lib/api';
 import { loadStoredSettings, saveStoredSettings } from './lib/defaults';
 import { loadUiPrefs, saveUiPrefs, type UiPrefs } from './lib/uiPrefs';
@@ -32,6 +33,7 @@ export function App() {
   const [mlStatus, setMlStatus] = useState('No ML recommendation yet');
   const [cameraCommand, setCameraCommand] = useState<string | null>(null);
   const [activeDrawer, setActiveDrawer] = useState<DrawerId | null>(null);
+  const [pourPickMode, setPourPickMode] = useState(false);
 
   const material = materials.find((item) => item.name === settings.alloy);
   const resultsReady = Boolean(results && resultFields);
@@ -73,6 +75,19 @@ export function App() {
       setIsPlayingTimeline(false);
     }
   }, [ui.resultMode]);
+
+  useEffect(() => {
+    // Mold filling can only run against an inlet point, so if the pour
+    // location is ever cleared, force the analysis toggle off with it --
+    // AnalysisDrawer only disables the checkbox, it doesn't clear a value
+    // that was already set.
+    if (!settings.pour_location && settings.analysis_options.filling) {
+      setSettings((prev) => ({
+        ...prev,
+        analysis_options: { ...prev.analysis_options, filling: false }
+      }));
+    }
+  }, [settings.pour_location, settings.analysis_options.filling]);
 
   async function ensureProject(): Promise<string> {
     if (projectId) {
@@ -276,6 +291,25 @@ export function App() {
     setStatus('Simulation cancelled');
   }
 
+  function handlePourLocationPicked(pick: PourLocationPick) {
+    setSettings((prev) => ({
+      ...prev,
+      pour_location: {
+        schema_version: 1,
+        point_in: pick.point,
+        normal: pick.normal,
+        part_id: pick.partId
+      }
+    }));
+    setPourPickMode(false);
+    setStatus('Pour location set.');
+  }
+
+  function clearPourLocation() {
+    setSettings((prev) => ({ ...prev, pour_location: null }));
+    setPourPickMode(false);
+  }
+
   function setAnalysis(key: string, value: boolean | number) {
     setSettings((prev) => {
       const current = prev.analysis_options[key as keyof typeof prev.analysis_options];
@@ -327,6 +361,9 @@ export function App() {
           ortho={ui.ortho}
           section={ui.section}
           onPartSelected={(id) => setSelectedPartId(id)}
+          pourPickMode={pourPickMode}
+          pourLocation={settings.pour_location ?? null}
+          onPourLocationPicked={handlePourLocationPicked}
         />
         <ResultLegend
           resultMode={ui.resultMode}
@@ -346,6 +383,10 @@ export function App() {
           onClearAll={() => void clearAllParts()}
           onDuplicatePart={(id) => void duplicatePart(id)}
           onClose={() => setActiveDrawer(null)}
+          pourLocation={settings.pour_location ?? null}
+          pourPickMode={pourPickMode}
+          onTogglePourPick={() => setPourPickMode((prev) => !prev)}
+          onClearPourLocation={clearPourLocation}
         />
       )}
       {activeDrawer === 'material' && (

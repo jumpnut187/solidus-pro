@@ -97,13 +97,27 @@ class PartType(Enum):
     - RISER_POST: Riser post/neck connecting riser to casting - behaves like riser but can be distinguished
     - CHILL: External chill - accelerates cooling, promotes directional solidification
     - CORE: Sand core - internal cavity form, excluded from defect analysis
+
+    Gating system, used by the mold-filling stage. These hold metal and
+    solidify, but are not part of the casting and are never scored for
+    shrinkage. Declared in flow order, which is also their code order:
+    - POUR_CUP: Pouring basin at the top of the sprue
+    - SPRUE: Vertical downsprue
+    - RUNNER: Horizontal channel distributing metal to the gates
+    - FILTER: Ceramic foam filter - a refractory body metal flows *through*
+    - GATE: Ingate where metal enters the casting cavity
     """
     CAST = "cast"
     RISER = "riser"
     RISER_POST = "riser_post"
     CHILL = "chill"
     CORE = "core"
-    
+    POUR_CUP = "pour_cup"
+    SPRUE = "sprue"
+    RUNNER = "runner"
+    FILTER = "filter"
+    GATE = "gate"
+
     def __str__(self):
         return self.value.replace('_', ' ').title()
 
@@ -116,11 +130,22 @@ class PartType(Enum):
 # codes are greppable and self-describing instead of appearing as bare integers
 # at ~45 comparison sites across core/.
 
+#
+# Codes are frozen: core/surrogate/fields.py encodes them as
+# ``code / PART_TYPE_DIVISOR`` into an ML input channel, so renumbering an
+# existing code invalidates every trained artifact. Appending new codes is
+# safe -- see fields.PART_TYPE_DIVISOR for why the divisor stays at 3.0.
+
 PART_TYPE_CAST = 0
 PART_TYPE_RISER = 1
 PART_TYPE_CHILL = 2
 PART_TYPE_RISER_POST = 3
 PART_TYPE_CORE = 4
+PART_TYPE_POUR_CUP = 5
+PART_TYPE_SPRUE = 6
+PART_TYPE_RUNNER = 7
+PART_TYPE_FILTER = 8
+PART_TYPE_GATE = 9
 
 #: Authoritative PartType -> voxel code mapping.
 PART_TYPE_TO_CODE = {
@@ -129,24 +154,76 @@ PART_TYPE_TO_CODE = {
     PartType.CHILL: PART_TYPE_CHILL,
     PartType.RISER_POST: PART_TYPE_RISER_POST,
     PartType.CORE: PART_TYPE_CORE,
+    PartType.POUR_CUP: PART_TYPE_POUR_CUP,
+    PartType.SPRUE: PART_TYPE_SPRUE,
+    PartType.RUNNER: PART_TYPE_RUNNER,
+    PartType.FILTER: PART_TYPE_FILTER,
+    PartType.GATE: PART_TYPE_GATE,
 }
 
 CODE_TO_PART_TYPE = {code: part_type for part_type, code in PART_TYPE_TO_CODE.items()}
 
 # --- Semantic groupings -----------------------------------------------------
 # Add a new part type to the group(s) it belongs to here, once, rather than
-# revisiting every comparison site. A mold-filling stage will introduce SPRUE,
-# RUNNER, GATE and POUR_CUP, which are metal-filled and are flow paths, but are
-# not part of the casting and must not be scored for shrinkage defects.
+# revisiting every comparison site.
 
 #: Codes that hold molten metal and therefore participate in solidification.
-METAL_PART_CODES = (PART_TYPE_CAST, PART_TYPE_RISER, PART_TYPE_RISER_POST)
+#:
+#: Includes the gating system: a sprue full of metal does solidify, and
+#: excluding it here would make the orphan-metal detector treat it as phantom
+#: gap-fill. What the gating system must *not* do is get scored for casting
+#: defects -- that is :data:`SCORED_METAL_PART_CODES`, which is the narrower set.
+METAL_PART_CODES = (
+    PART_TYPE_CAST,
+    PART_TYPE_RISER,
+    PART_TYPE_RISER_POST,
+    PART_TYPE_POUR_CUP,
+    PART_TYPE_SPRUE,
+    PART_TYPE_RUNNER,
+    PART_TYPE_GATE,
+)
 
 #: Codes that feed the casting rather than forming it.
 FEEDER_PART_CODES = (PART_TYPE_RISER, PART_TYPE_RISER_POST)
 
 #: Codes that are mold material, not metal.
-MOLD_PART_CODES = (PART_TYPE_CHILL, PART_TYPE_CORE)
+#:
+#: FILTER belongs here: a ceramic foam filter is a refractory body that does
+#: not solidify and must never be scored for shrinkage, exactly like a chill or
+#: a core. It differs from them *hydrodynamically* -- metal flows through its
+#: pores rather than around it -- which is why the filling solver uses
+#: :func:`is_flow_restrictor` rather than ``is_mold`` to build its obstacle mask.
+MOLD_PART_CODES = (PART_TYPE_CHILL, PART_TYPE_CORE, PART_TYPE_FILTER)
+
+#: Metal that is part of the casting assembly proper and IS scored for
+#: shrinkage and porosity. Risers are deliberately included -- see
+#: ``SolidificationEngine._calculate_shrinkage``, which scores them on purpose.
+SCORED_METAL_PART_CODES = (PART_TYPE_CAST, PART_TYPE_RISER, PART_TYPE_RISER_POST)
+
+#: Every code the metal traverses on its way into the casting, in flow order.
+#: The filling solver's domain is this set plus the casting itself.
+FLOW_PATH_PART_CODES = (
+    PART_TYPE_POUR_CUP,
+    PART_TYPE_SPRUE,
+    PART_TYPE_RUNNER,
+    PART_TYPE_FILTER,
+    PART_TYPE_GATE,
+)
+
+#: Flow-path codes that hold metal and solidify (i.e. the flow path minus the
+#: filter). These are metal but not casting, so they are excluded from defect
+#: scoring while still participating in the thermal solve.
+GATING_METAL_PART_CODES = (
+    PART_TYPE_POUR_CUP,
+    PART_TYPE_SPRUE,
+    PART_TYPE_RUNNER,
+    PART_TYPE_GATE,
+)
+
+#: Codes that restrict flow without blocking it. Currently just the filter.
+#: Distinct from ``MOLD_PART_CODES`` because a bounce-back obstacle mask built
+#: from ``is_mold`` would make the filter impermeable, which is wrong.
+FLOW_RESTRICTOR_PART_CODES = (PART_TYPE_FILTER,)
 
 
 def _code_mask(part_types: "np.ndarray", codes) -> "np.ndarray":
@@ -182,6 +259,31 @@ def is_chill(part_types: "np.ndarray") -> "np.ndarray":
     return _code_mask(part_types, (PART_TYPE_CHILL,))
 
 
+def is_scored_metal(part_types: "np.ndarray") -> "np.ndarray":
+    """Metal voxels that defect analyses may score (cast, riser, riser post)."""
+    return _code_mask(part_types, SCORED_METAL_PART_CODES)
+
+
+def is_flow_path(part_types: "np.ndarray") -> "np.ndarray":
+    """Voxels the metal traverses before the casting (pour cup..gate, filter)."""
+    return _code_mask(part_types, FLOW_PATH_PART_CODES)
+
+
+def is_gating_metal(part_types: "np.ndarray") -> "np.ndarray":
+    """Flow-path voxels that hold metal and solidify (the filter excluded)."""
+    return _code_mask(part_types, GATING_METAL_PART_CODES)
+
+
+def is_flow_restrictor(part_types: "np.ndarray") -> "np.ndarray":
+    """Voxels that restrict flow without blocking it (ceramic filters)."""
+    return _code_mask(part_types, FLOW_RESTRICTOR_PART_CODES)
+
+
+def is_filter(part_types: "np.ndarray") -> "np.ndarray":
+    """Ceramic filter voxels."""
+    return _code_mask(part_types, (PART_TYPE_FILTER,))
+
+
 # Part type colors for visualization
 PART_TYPE_COLORS = {
     PartType.CAST: (0.7, 0.75, 0.8),    # Default grey-blue (steel appearance)
@@ -189,6 +291,71 @@ PART_TYPE_COLORS = {
     PartType.RISER_POST: (0.8, 0.5, 0.3),  # Darker orange (riser neck/post)
     PartType.CHILL: (0.3, 0.3, 0.5),    # Dark blue-grey (cold metal appearance)
     PartType.CORE: (0.6, 0.5, 0.4),     # Brownish (sand core appearance)
+    # Gating system: a blue-green family, distinct from the warm riser oranges
+    # and the cool chill blues, and ordered light-to-dark along the flow path.
+    PartType.POUR_CUP: (0.45, 0.80, 0.75),  # Pale teal (entry point)
+    PartType.SPRUE: (0.30, 0.68, 0.70),     # Teal
+    PartType.RUNNER: (0.20, 0.55, 0.65),    # Deeper teal
+    PartType.FILTER: (0.85, 0.85, 0.35),    # Yellow (ceramic, not metal)
+    PartType.GATE: (0.15, 0.45, 0.60),      # Dark teal (last before the casting)
+}
+
+
+#: Human-readable label per part type, e.g. ``PartType.RISER_POST -> "Riser Post"``.
+#: This is what the desktop dialogs put in their dropdowns.
+PART_TYPE_DISPLAY_NAMES = {part_type: str(part_type) for part_type in PartType}
+
+_PART_TYPE_BY_DISPLAY_NAME = {
+    display: part_type for part_type, display in PART_TYPE_DISPLAY_NAMES.items()
+}
+
+
+def part_type_from_display_name(
+    text: str, default: PartType = PartType.CAST
+) -> PartType:
+    """
+    Map a dropdown label back to its :class:`PartType`.
+
+    The desktop UI carried three separate hardcoded copies of this mapping, each
+    of which silently fell back to CAST for a label it did not list. Deriving it
+    from the enum means a new part type cannot be selectable in a dropdown but
+    unmappable on the way back.
+    """
+    return _PART_TYPE_BY_DISPLAY_NAME.get(str(text).strip(), default)
+
+
+#: Compact letter labels for part-type summaries, e.g. "5 part(s): 3C, 1S, 1G".
+#:
+#: Every part type must appear here. UI code iterates this rather than listing
+#: types inline -- the sidebar and the parts dialog both used to index a
+#: four-key dict by ``part.part_type.value``, which raised KeyError the moment a
+#: user set a type those dicts did not know about.
+PART_TYPE_ABBREVIATIONS = {
+    PartType.CAST: "C",
+    PartType.RISER: "R",
+    PartType.RISER_POST: "RP",
+    PartType.CHILL: "Ch",
+    PartType.CORE: "Co",
+    PartType.POUR_CUP: "PC",
+    PartType.SPRUE: "S",
+    PartType.RUNNER: "Ru",
+    PartType.FILTER: "F",
+    PartType.GATE: "G",
+}
+
+#: Emoji badges for the parts dialog's type breakdown. Same totality rule as
+#: :data:`PART_TYPE_ABBREVIATIONS`.
+PART_TYPE_BADGES = {
+    PartType.CAST: "🔩",
+    PartType.RISER: "🔥",
+    PartType.RISER_POST: "📍",
+    PartType.CHILL: "❄️",
+    PartType.CORE: "🕳️",
+    PartType.POUR_CUP: "🥣",
+    PartType.SPRUE: "⬇️",
+    PartType.RUNNER: "➡️",
+    PartType.FILTER: "🧱",
+    PartType.GATE: "🚪",
 }
 
 
@@ -201,6 +368,11 @@ PART_TYPE_KEYWORDS = {
     PartType.RISER: ['feeder', 'riser', 'bridge', 'pad'],
     PartType.CHILL: ['chill'],
     PartType.CORE: ['core', 'sand_core', 'sand core'],
+    PartType.FILTER: ['filter', 'stelex', 'sedex'],
+    PartType.POUR_CUP: ['pour_cup', 'pour cup', 'pouring cup', 'pouring basin', 'basin'],
+    PartType.SPRUE: ['downsprue', 'down_sprue', 'down sprue', 'sprue'],
+    PartType.RUNNER: ['runner'],
+    PartType.GATE: ['ingate', 'in_gate', 'in gate', 'gate'],
 }
 
 
@@ -214,6 +386,15 @@ def infer_part_type_from_name(name: str) -> PartType:
     - RISER: 'feeder', 'riser', 'bridge', 'pad'
     - CHILL: 'chill'
     - CORE: 'core', 'sand_core', 'sand core'
+    - FILTER: 'filter', 'stelex', 'sedex'
+    - POUR_CUP: 'pour_cup', 'pour cup', 'pouring cup', 'pouring basin', 'basin'
+    - SPRUE: 'downsprue', 'down_sprue', 'down sprue', 'sprue'
+    - RUNNER: 'runner'
+    - GATE: 'ingate', 'in_gate', 'in gate', 'gate'
+
+    The gating types are checked before RISER_POST and RISER because those two
+    carry the generic keywords 'post', 'pad' and 'bridge', which would otherwise
+    swallow a name like "Runner Post".
 
     The input is lowercased and matched as substrings, so underscores,
     spaces, and concatenated words are all handled. When checking a
@@ -240,6 +421,21 @@ def infer_part_type_from_name(name: str) -> PartType:
     for keyword in PART_TYPE_KEYWORDS[PartType.CHILL]:
         if keyword in base_name:
             return PartType.CHILL
+
+    # Gating system before RISER_POST/RISER, whose 'post', 'pad' and 'bridge'
+    # keywords are generic enough to capture gating part names by accident.
+    # Within the gating group, order is flow order and the keywords do not
+    # overlap, except that 'downsprue' is caught by SPRUE's own list.
+    for gating_type in (
+        PartType.FILTER,
+        PartType.POUR_CUP,
+        PartType.SPRUE,
+        PartType.RUNNER,
+        PartType.GATE,
+    ):
+        for keyword in PART_TYPE_KEYWORDS[gating_type]:
+            if keyword in base_name:
+                return gating_type
 
     # RISER_POST before RISER (since 'post' is more specific than 'riser')
     for keyword in PART_TYPE_KEYWORDS[PartType.RISER_POST]:
@@ -1007,12 +1203,13 @@ class MultiPartSTLLoader:
         return self.part_manager
 
 
+#: Serialized part-type key -> PartType, for web payloads and saved projects.
+#:
+#: Derived from the enum rather than listed by hand. As a literal it silently
+#: fell out of date: a key it did not list fell back to CAST, so a part the user
+#: had typed came back as a casting with no error anywhere.
 _PART_TYPE_KEY_MAP: Dict[str, PartType] = {
-    "cast": PartType.CAST,
-    "riser": PartType.RISER,
-    "riser_post": PartType.RISER_POST,
-    "chill": PartType.CHILL,
-    "core": PartType.CORE,
+    part_type.value: part_type for part_type in PartType
 }
 
 

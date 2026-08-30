@@ -20,6 +20,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from core.part_manager import PART_TYPE_DISPLAY_NAMES
 from .base import DraggableDialog
 
 
@@ -38,7 +39,8 @@ class PartsDialog(DraggableDialog):
     duplicate_requested = pyqtSignal()
     open_top_changed = pyqtSignal(str, bool)
 
-    PART_TYPE_OPTIONS = ["Cast", "Riser", "Riser Post", "Chill", "Core"]
+    #: Dropdown entries, derived so a new PartType is selectable automatically.
+    PART_TYPE_OPTIONS = list(PART_TYPE_DISPLAY_NAMES.values())
 
     def __init__(self, parent=None):
         super().__init__(parent, "Parts Manager")
@@ -343,11 +345,8 @@ class PartsDialog(DraggableDialog):
         self._pending_changes.clear()
 
         type_value_to_text = {
-            "cast": "Cast",
-            "riser": "Riser",
-            "riser_post": "Riser Post",
-            "chill": "Chill",
-            "core": "Core"
+            part_type.value: display
+            for part_type, display in PART_TYPE_DISPLAY_NAMES.items()
         }
 
         for part_data in parts_data:

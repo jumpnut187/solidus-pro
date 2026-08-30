@@ -341,6 +341,49 @@ class WebApiTests(unittest.TestCase):
         self.assertTrue(part_payload["is_open_top"])
         self.assertEqual(part_payload["part_type"], "riser")
 
+    def test_pour_location_round_trips_through_project_api(self) -> None:
+        """A pour location set via PUT persists and reads back through GET.
+
+        The value is stored inside the existing ``ui_state`` JSON blob (see
+        ``web.repository._merge_pour_location``) rather than a new column,
+        but the API exposes it as a plain top-level ``pour_location`` field.
+        """
+        create_response = self.client.post(
+            "/api/projects",
+            json={"name": "Pour Location Test", "alloy": "WCB"},
+        )
+        self.assertEqual(create_response.status_code, 201)
+        project_id = create_response.get_json()["id"]
+        self.assertIsNone(create_response.get_json()["project"]["pour_location"])
+
+        pour_location = {
+            "schema_version": 1,
+            "point_in": [1.5, -2.25, 3.0],
+            "normal": [0.0, 0.0, 1.0],
+            "part_id": "abc123",
+        }
+        update_response = self.client.put(
+            f"/api/projects/{project_id}",
+            json={"name": "Pour Location Test", "alloy": "WCB", "pour_location": pour_location},
+        )
+        self.assertEqual(update_response.status_code, 200)
+        self.assertEqual(update_response.get_json()["project"]["pour_location"], pour_location)
+
+        get_response = self.client.get(f"/api/projects/{project_id}")
+        self.assertEqual(get_response.status_code, 200)
+        project = get_response.get_json()["project"]
+        self.assertEqual(project["pour_location"], pour_location)
+        # It must also be readable back out of the ui_state blob it is
+        # actually stored in, since that is the persistence mechanism.
+        self.assertEqual(project["ui_state"]["pour_location"], pour_location)
+
+        clear_response = self.client.put(
+            f"/api/projects/{project_id}",
+            json={"name": "Pour Location Test", "alloy": "WCB", "pour_location": None},
+        )
+        self.assertEqual(clear_response.status_code, 200)
+        self.assertIsNone(clear_response.get_json()["project"]["pour_location"])
+
     def test_upload_endpoint_returns_mesh_data(self) -> None:
         mesh_path = Path(self.temp_dir.name) / "casting.stl"
         trimesh.creation.box(extents=(1.0, 2.0, 3.0)).export(mesh_path)
@@ -476,6 +519,26 @@ class BuildPipelineInputsTests(unittest.TestCase):
         self.assertEqual(inputs.part_assignment_workers, 4)
         self.assertEqual(inputs.part_assignment_batch_size, 1000)
         self.assertEqual(inputs.max_voxels_for_visualization, 12345)
+
+    def test_pour_location_reaches_pipeline_inputs(self) -> None:
+        """A project's pour_location must reach PipelineInputs.pour_location.
+
+        Mold filling (core.filling_stage.maybe_run_filling) gates entirely on
+        this attribute being set, so the web layer must plumb it through.
+        """
+        pour_location = {
+            "schema_version": 1,
+            "point_in": [1.0, 2.0, 3.0],
+            "normal": None,
+            "part_id": None,
+        }
+        inputs = self._build({"alloy": "WCB", "pour_location": pour_location})
+        self.assertEqual(inputs.pour_location, pour_location)
+
+    def test_pour_location_defaults_to_none_when_missing(self) -> None:
+        """Projects with no pour location must leave PipelineInputs.pour_location unset."""
+        inputs = self._build({"alloy": "WCB"})
+        self.assertIsNone(inputs.pour_location)
 
     def test_analysis_and_solidification_params_pass_through(self) -> None:
         """Nested option dicts travel opaquely, so new keys need no queue change."""

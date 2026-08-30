@@ -457,6 +457,23 @@ class MemoryMonitor:
         
         return (True, status)
     
+    def get_used_mb(self) -> float:
+        """
+        System memory currently in use, in MB.
+
+        Paired with :meth:`get_limit_mb` for ``logger.log_memory_warning``.
+        Both existed only as call sites in ``core/voxel_mesh.py``'s abort path
+        until that path first became reachable, at which point it raised
+        ``AttributeError`` instead of reporting the memory problem it had
+        correctly detected.
+        """
+        return psutil.virtual_memory().used / (1024 ** 2)
+
+    def get_limit_mb(self) -> float:
+        """Memory ceiling this monitor aborts at, in MB."""
+        total_mb = psutil.virtual_memory().total / (1024 ** 2)
+        return total_mb * (self.abort_threshold / 100.0)
+
     def get_stats(self) -> Dict[str, float]:
         """Get memory statistics"""
         mem = psutil.virtual_memory()

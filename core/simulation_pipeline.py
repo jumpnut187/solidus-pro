@@ -12,6 +12,7 @@ import os
 
 import numpy as np
 
+from core.filling_stage import maybe_run_filling
 from core.materials import get_alloy
 from core.part_manager import PartManager, PartType, build_part_manager, infer_part_type_from_filename
 from core.solidification import (
@@ -73,6 +74,7 @@ class PipelineInputs:
         show_progress: bool = False,
         solidification_params: Optional[Dict[str, Any]] = None,
         thread_budget_provider: Optional[ThreadBudgetProvider] = None,
+        pour_location: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.alloy_name = alloy_name
         self.voxel_size = voxel_size
@@ -89,6 +91,8 @@ class PipelineInputs:
         self.show_progress = show_progress
         self.solidification_params = solidification_params
         self.thread_budget_provider = thread_budget_provider
+        # Serialized PourLocation, or None. Filling runs only when set.
+        self.pour_location = pour_location
 
 
 class PipelineResult:
@@ -172,6 +176,7 @@ def create_analysis_options(
     analysis_options.stress_analysis = bool(option_map.get("stress_analysis", False))
     analysis_options.microstructure = bool(option_map.get("microstructure", False))
     analysis_options.gas_porosity = bool(option_map.get("gas_porosity", False))
+    analysis_options.filling = bool(option_map.get("filling", False))
     try:
         sand_restraint_value = float(option_map.get("sand_restraint_index", 0.5))
     except (TypeError, ValueError):
@@ -520,12 +525,27 @@ def run_pipeline(
     # To re-enable schedule_legacy as a fallback, set CASTSIM_DEFAULT_SOLVER_MODE=schedule_legacy
     # or pass solver_mode="schedule_legacy" explicitly in analysis_options.
 
+
+    filling_result = maybe_run_filling(
+        voxel_mesh,
+        alloy,
+        analysis_options,
+        inputs,
+        cancel_callback=cancel_callback,
+        progress_message_callback=progress_message_callback,
+    )
+
     _emit_message(progress_message_callback, "Running solidification simulation...")
     _apply_thread_budget(inputs.thread_budget_provider)
     engine = SolidificationEngine(voxel_mesh, alloy, analysis_options)
     engine.initialize()
     if inputs.thread_budget_provider is not None:
         engine._thread_budget_provider = inputs.thread_budget_provider
+    if filling_result is not None:
+        engine.set_initial_temperature_field(
+            filling_result.temperature_c,
+            fill_arrival_times=filling_result.fill_time_s,
+        )
 
     def on_sim_progress(current: int, total: int, stage: str) -> None:
         _check_cancel(cancel_callback)

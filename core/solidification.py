@@ -21,7 +21,7 @@ import numpy as np
 import os
 import time
 import warnings
-from typing import Tuple, Dict, Optional, List
+from typing import Callable, Tuple, Dict, Optional, List
 from collections import deque
 from scipy.spatial import cKDTree
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -41,7 +41,10 @@ from core.part_manager import (
     PART_TYPE_RISER,
     PART_TYPE_RISER_POST,
     is_feeder,
+    is_flow_path,
+    is_gating_metal,
     is_metal,
+    is_mold,
 )
 from physics.solidification_physics import SolidificationModel as ThermalSolidificationModel
 from core.acceleration import (
@@ -123,6 +126,7 @@ class AnalysisOptions:
     stress_analysis: bool = False   # Thermal stress and distortion analysis
     microstructure: bool = False    # SDAS and mechanical property prediction
     gas_porosity: bool = False      # Gas porosity analysis (binder gas + entrapment)
+    filling: bool = False           # Mold-filling (CFD) stage gate
     sand_restraint_index: float = 0.5  # 0-1 mold restraint/collapse behavior for hot tear & crack risk
     use_gpu: bool = False           # GPU acceleration (requires cupy or pyopencl)
     use_incremental: bool = False   # Incremental solidification (can be slower for small models)
@@ -195,6 +199,13 @@ class SolidificationEngine:
         # alloy.pouring_temp. See set_initial_temperature_field.
         self._initial_temperature_field: Optional[np.ndarray] = None
         self._fill_arrival_times: Optional[np.ndarray] = None
+        # Thread-budget side channel. Both pipelines attach a provider here
+        # after construction and core/solidification_loop.py reads it back
+        # through getattr. Declaring it makes that contract visible instead of
+        # leaving an attribute that only exists if some caller happened to set
+        # it, and lets the assignment type-check.
+        self._thread_budget_provider: Optional[Callable[[], Optional[int]]] = None
+        self._active_thread_budget: Optional[int] = None
         self._thermal_peak_cooling_rates: Optional[np.ndarray] = None
         self._thermal_latest_temperatures: Optional[np.ndarray] = None
         self._thermal_latest_gradients: Optional[np.ndarray] = None
@@ -548,9 +559,16 @@ class SolidificationEngine:
         else:
             part_types = np.asarray(self.mesh.voxel_part_types, dtype=np.int32)
 
-        cast_surface = surface_indices[part_types[surface_indices] == 0]
-        riser_surface = surface_indices[part_types[surface_indices] == 1]
-        riser_post_surface = surface_indices[part_types[surface_indices] == 3]
+        surface_part_types = part_types[surface_indices]
+        cast_surface = surface_indices[surface_part_types == PART_TYPE_CAST]
+        riser_surface = surface_indices[surface_part_types == PART_TYPE_RISER]
+        riser_post_surface = surface_indices[surface_part_types == PART_TYPE_RISER_POST]
+        # Gating system and filters. Partitioning by three literal codes left
+        # every other part type with no boundary at all, so it integrated
+        # adiabatically -- invisible, because nothing errors when a surface
+        # simply never loses heat.
+        flow_path_surface = surface_indices[is_flow_path(surface_part_types)]
+        core_surface = surface_indices[surface_part_types == PART_TYPE_CORE]
         chill_indices = self._get_chill_voxel_indices().astype(np.int32, copy=False)
 
         if cast_surface.size > 0:
@@ -576,6 +594,24 @@ class SolidificationEngine:
                 htc=tb.htc_riser,
                 T_infinity=mold_temperature,
                 time_function=_mold_interface_decay(tb.htc_riser),
+            )
+        if flow_path_surface.size > 0:
+            self._thermal_heat_model.add_boundary(
+                flow_path_surface,
+                BoundaryType.INTERFACE,
+                htc=tb.htc_gating,
+                T_infinity=mold_temperature,
+                time_function=_mold_interface_decay(tb.htc_gating),
+            )
+        # A sand core is mold material bounded by metal, so its exposed faces
+        # see the same contact conductance as the casting-to-sand interface.
+        if core_surface.size > 0:
+            self._thermal_heat_model.add_boundary(
+                core_surface,
+                BoundaryType.INTERFACE,
+                htc=tb.htc_cast_interface,
+                T_infinity=mold_temperature,
+                time_function=_mold_interface_decay(tb.htc_cast_interface),
             )
         # B4: chills are finite heat sinks, not fixed-temperature pins. Their
         # exposed surface loses heat into the mold/ambient through the same
@@ -4288,9 +4324,11 @@ class SolidificationEngine:
 
         part_types = np.asarray(self.mesh.voxel_part_types, dtype=np.int32) if self.mesh.voxel_part_types is not None else np.zeros(n_voxels, dtype=np.int32)
 
-        # Part type convention (per part_manager._PART_TYPE_KEY_MAP):
-        # 0=CAST, 1=RISER, 2=CHILL, 3=RISER_POST, 4=CORE
-        # Hot tears are cast-metal defects; exclude risers, chills, riser posts, cores.
+        # Hot tears are cast-metal defects, so everything that is not the
+        # casting is excluded. This matters even though cast_mask already
+        # selects CAST: when no CAST voxels exist, cast_mask falls back to
+        # all-ones below, and the exclusions are then the only thing keeping
+        # riser, mold and gating metal out of the analysis.
         cast_mask = (part_types == PART_TYPE_CAST)
         if not np.any(cast_mask):
             cast_mask = np.ones(n_voxels, dtype=bool)
@@ -4300,10 +4338,9 @@ class SolidificationEngine:
         surface_mask[surface_indices] = True
 
         exclude_mask = np.zeros(n_voxels, dtype=bool)
-        exclude_mask |= part_types == PART_TYPE_RISER
-        exclude_mask |= part_types == PART_TYPE_RISER_POST
-        exclude_mask |= part_types == PART_TYPE_CHILL
-        exclude_mask |= part_types == PART_TYPE_CORE
+        exclude_mask |= is_feeder(part_types)        # riser, riser post
+        exclude_mask |= is_mold(part_types)          # chill, core, filter
+        exclude_mask |= is_gating_metal(part_types)  # pour cup, sprue, runner, gate
         exclude_mask |= surface_mask      # M3: surface voxels kept in analysis;
                                           # the previous exclusion was a pre-existing
                                           # issue. Phase 3.3 reverses this.

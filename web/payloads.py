@@ -426,10 +426,10 @@ def build_fork_surface_payload(
     if normalized_mode in {"shrinkage", "hotspot", "feed_modulus", "niyama", "niyama_raw", "combined_feed_risk"}:
         return build_voxel_glyph_payload(visualization, normalized_mode, threshold, time_percent, max_voxels=8_000)
     if normalized_mode in BASIC_SURFACE_MODES:
-        return cast(Dict[str, Any], build_surface_payload(
+        return build_surface_payload(
             visualization,
             normalize_surface_request(normalized_mode, threshold, time_percent),
-        ))
+        )
     return build_voxel_glyph_payload(visualization, normalized_mode, threshold, time_percent)
 
 

@@ -5,6 +5,7 @@ import unittest
 import trimesh
 
 from core.part_manager import PartManager, PartType
+from core.pour_location import PourLocation
 from ui.project_state import build_project_state, load_project_state
 
 
@@ -62,6 +63,65 @@ class ProjectStateTests(unittest.TestCase):
             self.assertEqual(loaded_part["color"], [0.1, 0.2, 0.3])
             self.assertFalse(loaded_part["visible"])
             self.assertTrue(loaded_part["is_open_top"])
+
+    def test_round_trip_preserves_pour_location(self) -> None:
+        manager = PartManager()
+        location = PourLocation(point_in=(1.5, -2.5, 3.0), normal=(0.0, 0.0, 1.0), part_id="cast-1")
+
+        payload = build_project_state(
+            manager,
+            alloy_name="WCB",
+            voxel_size=0.1,
+            refinement_level=3,
+            memory_mode="auto",
+            analysis_options={"filling": True},
+            performance_options={},
+            pour_location=location.to_dict(),
+            mesh_setting_origin="manual",
+            current_vis_mode="shrinkage",
+            ui_state={},
+        ).to_dict()
+
+        self.assertEqual(payload["simulation"]["pour_location"], location.to_dict())
+
+        loaded = load_project_state(payload).to_dict()
+        restored = PourLocation.from_dict(loaded["simulation"]["pour_location"])
+        self.assertEqual(restored.point_in, location.point_in)
+        self.assertEqual(restored.normal, location.normal)
+        self.assertEqual(restored.part_id, location.part_id)
+
+    def test_round_trip_with_no_pour_location_stores_none(self) -> None:
+        manager = PartManager()
+
+        payload = build_project_state(
+            manager,
+            alloy_name="WCB",
+            voxel_size=0.1,
+            refinement_level=3,
+            memory_mode="auto",
+            analysis_options={},
+            performance_options={},
+            mesh_setting_origin="manual",
+            current_vis_mode="shrinkage",
+            ui_state={},
+        ).to_dict()
+
+        self.assertIsNone(payload["simulation"]["pour_location"])
+
+        loaded = load_project_state(payload).to_dict()
+        self.assertIsNone(loaded["simulation"]["pour_location"])
+
+    def test_load_defaults_pour_location_to_none_for_older_project_files(self) -> None:
+        """A project saved before pour locations existed has no such key."""
+        loaded = load_project_state(
+            {
+                "schema_version": 1,
+                "simulation": {},
+                "parts": [],
+            }
+        ).to_dict()
+
+        self.assertIsNone(loaded["simulation"]["pour_location"])
 
     def test_load_normalizes_partial_vectors(self) -> None:
         loaded = load_project_state(

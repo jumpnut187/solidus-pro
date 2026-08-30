@@ -117,6 +117,7 @@ def build_pipeline_inputs(
         max_voxels_for_visualization=int(performance.get("max_voxels_for_visualization", 80_000) or 80_000),
         solidification_params=sim_data.get("solidification_params") or {},
         thread_budget_provider=thread_budget_provider,
+        pour_location=sim_data.get("pour_location"),
     )
 
 

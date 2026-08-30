@@ -16,14 +16,54 @@ import numpy as np
 from typing import Tuple, List, Dict, Optional, Union, Sequence
 import trimesh
 from core.part_manager import (
+    CODE_TO_PART_TYPE,
+    METAL_PART_CODES,
     PART_TYPE_CAST,
     PART_TYPE_CHILL,
+    PART_TYPE_FILTER,
+    PART_TYPE_GATE,
+    PART_TYPE_POUR_CUP,
     PART_TYPE_RISER,
     PART_TYPE_RISER_POST,
+    PART_TYPE_RUNNER,
+    PART_TYPE_SPRUE,
     is_mold,
 )
 from scipy.spatial import cKDTree
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
+
+#: Part-type pairs whose voxels are bridged into neighbours when they touch.
+#:
+#: Separate STL bodies leave sub-voxel gaps at their interfaces, so voxels that
+#: should conduct end up with no neighbour link. Only pairs that are genuinely
+#: adjacent in a real rigging are listed: bridging every pair would invent a
+#: conduction path between, say, a chill and a riser that merely pass close by.
+#:
+#: The gating chain is listed with its optional links included, because a
+#: rigging may omit any of the pour cup, runner or filter -- e.g. sprue->gate
+#: directly. A pair whose two types are not both present is skipped.
+_INTERFACE_BRIDGE_PAIRS = (
+    (PART_TYPE_CAST, PART_TYPE_RISER),
+    (PART_TYPE_CAST, PART_TYPE_CHILL),
+    (PART_TYPE_CAST, PART_TYPE_RISER_POST),
+    (PART_TYPE_RISER_POST, PART_TYPE_RISER),
+    # Gating chain, in flow order, with the skip links for optional members.
+    (PART_TYPE_POUR_CUP, PART_TYPE_SPRUE),
+    (PART_TYPE_SPRUE, PART_TYPE_RUNNER),
+    (PART_TYPE_SPRUE, PART_TYPE_FILTER),
+    (PART_TYPE_SPRUE, PART_TYPE_GATE),
+    (PART_TYPE_RUNNER, PART_TYPE_FILTER),
+    (PART_TYPE_RUNNER, PART_TYPE_GATE),
+    (PART_TYPE_FILTER, PART_TYPE_GATE),
+    (PART_TYPE_GATE, PART_TYPE_CAST),
+    # A gate may feed a riser directly in some riggings.
+    (PART_TYPE_GATE, PART_TYPE_RISER),
+)
+
+#: Distinct codes appearing in :data:`_INTERFACE_BRIDGE_PAIRS`.
+_INTERFACE_BRIDGE_CODES = tuple(
+    sorted({code for pair in _INTERFACE_BRIDGE_PAIRS for code in pair})
+)
 import multiprocessing
 from core.acceleration import (
     compute_modulus_parallel
@@ -1400,30 +1440,51 @@ class AdaptiveVoxelMesh:
         self.metal_part_bounds = [
             np.array(m.bounds, dtype=np.float64)
             for m, t in parts_data
-            if m is not None and t in (0, 1, 3)
+            if m is not None and t in METAL_PART_CODES
         ]
-        
-        # Count parts by type
-        cast_parts = [(m, t) for m, t in parts_data if t == 0 and m is not None]
-        riser_parts = [(m, t) for m, t in parts_data if t == 1 and m is not None]
-        chill_parts = [(m, t) for m, t in parts_data if t == 2 and m is not None]
-        riser_post_parts = [(m, t) for m, t in parts_data if t == 3 and m is not None]
-        
-        # FAST PATH: If only one CAST part and no risers/chills/posts, skip containment check
-        # All voxels were already determined to be inside during voxelization
-        if len(cast_parts) <= 1 and len(riser_parts) == 0 and len(chill_parts) == 0 and len(riser_post_parts) == 0:
+
+        # Group parts by code rather than by name. This used to be four
+        # hardcoded lists filtering t == 1/2/3, which silently dropped every
+        # other code: CORE parts produced zero voxels, and so would every
+        # gating part type. Bucketing generically is what makes a new part type
+        # a one-line change in part_manager rather than an edit here.
+        parts_by_code: Dict[int, list] = {}
+        for mesh_obj, code in parts_data:
+            if mesh_obj is not None:
+                parts_by_code.setdefault(int(code), []).append((mesh_obj, int(code)))
+
+        cast_parts = parts_by_code.get(PART_TYPE_CAST, [])
+        # Every non-CAST part needs a containment check; CAST is the default.
+        # Ascending code order preserves the existing "higher code wins" rule
+        # for overlapping parts.
+        all_parts = [
+            part
+            for code in sorted(parts_by_code)
+            if code != PART_TYPE_CAST
+            for part in parts_by_code[code]
+        ]
+
+        # FAST PATH: a single CAST part and nothing else means every voxel was
+        # already determined to be inside it during voxelization.
+        if len(cast_parts) <= 1 and not all_parts:
             print(f"  Single CAST part - all {n_voxels:,} voxels assigned to CAST (fast path)")
             return
-        
+
+        def _type_name(code: int) -> str:
+            part_type = CODE_TO_PART_TYPE.get(code)
+            return part_type.name if part_type is not None else f"UNKNOWN({code})"
+
         print(f"\n  Assigning part types to {n_voxels:,} voxels...")
-        print(f"    Parts: {len(cast_parts)} CAST, {len(riser_parts)} RISER, {len(chill_parts)} CHILL, {len(riser_post_parts)} RISER_POST")
-        
-        # Only check containment for RISER, CHILL, and RISER_POST parts (they override CAST)
-        # CAST voxels are already the default, no need to re-check
+        print(
+            "    Parts: "
+            + ", ".join(
+                f"{len(parts_by_code[code])} {_type_name(code)}"
+                for code in sorted(parts_by_code)
+            )
+        )
+
         voxel_centers_array = np.asarray(self.voxel_centers)
-        
-        # Process parts with bounding box pre-filtering for speed
-        all_parts = riser_parts + chill_parts + riser_post_parts
+
         total_parts = len(all_parts)
         
         # Tolerance for proximity-based containment (for touching assemblies)
@@ -1431,7 +1492,7 @@ class AdaptiveVoxelMesh:
         proximity_tolerance = self.base_voxel_size * 0.5
         
         for idx, (mesh, part_type) in enumerate(all_parts):
-            type_name = {1: "RISER", 2: "CHILL", 3: "RISER_POST"}.get(part_type, "UNKNOWN")
+            type_name = _type_name(part_type)
             print(f"    [{idx+1}/{total_parts}] Checking {type_name} part...", end=" ", flush=True)
             
             # OPTIMIZATION: Use bounding box to pre-filter voxels
@@ -1510,30 +1571,33 @@ class AdaptiveVoxelMesh:
                     self.voxel_part_types[inside_global_indices[override_mask]] = part_type
         
         # Count voxels by type
-        cast_count = np.sum(self.voxel_part_types == PART_TYPE_CAST)
-        riser_count = np.sum(self.voxel_part_types == PART_TYPE_RISER)
-        chill_count = np.sum(self.voxel_part_types == PART_TYPE_CHILL)
-        riser_post_count = np.sum(self.voxel_part_types == PART_TYPE_RISER_POST)
-        print(f"    Part types assigned: CAST={cast_count:,}, RISER={riser_count:,}, CHILL={chill_count:,}, RISER_POST={riser_post_count:,}")
-        
-        # Warn if expected parts have no voxels (likely containment check failure)
-        if len(riser_parts) > 0 and riser_count == 0:
-            print(f"    ⚠️  WARNING: {len(riser_parts)} RISER parts loaded but 0 voxels assigned!")
+        counts = {
+            code: int(np.sum(self.voxel_part_types == code))
+            for code in sorted(set(parts_by_code) | {PART_TYPE_CAST})
+        }
+        print(
+            "    Part types assigned: "
+            + ", ".join(f"{_type_name(code)}={count:,}" for code, count in counts.items())
+        )
+
+        # Warn if a part was loaded but claimed no voxels. That almost always
+        # means the containment check failed on a non-watertight mesh, and it
+        # is silent otherwise -- the part simply vanishes from the simulation.
+        for code, parts in sorted(parts_by_code.items()):
+            if code == PART_TYPE_CAST or counts.get(code, 0) > 0:
+                continue
+            name = _type_name(code)
+            print(f"    ⚠️  WARNING: {len(parts)} {name} parts loaded but 0 voxels assigned!")
             print(f"       This may indicate containment check issues. Check STL mesh quality.")
-            logger.warning(f"RISER parts loaded ({len(riser_parts)}) but no voxels assigned - containment check may have failed")
-        
-        if len(chill_parts) > 0 and chill_count == 0:
-            print(f"    ⚠️  WARNING: {len(chill_parts)} CHILL parts loaded but 0 voxels assigned!")
-            print(f"       This may indicate containment check issues. Check STL mesh quality.")
-            print(f"       Chills must be watertight meshes for containment detection.")
-            logger.warning(f"CHILL parts loaded ({len(chill_parts)}) but no voxels assigned - containment check may have failed")
-        
-        if len(riser_post_parts) > 0 and riser_post_count == 0:
-            print(f"    ⚠️  WARNING: {len(riser_post_parts)} RISER_POST parts loaded but 0 voxels assigned!")
-            logger.warning(f"RISER_POST parts loaded ({len(riser_post_parts)}) but no voxels assigned")
-        
+            if code == PART_TYPE_CHILL:
+                print(f"       Chills must be watertight meshes for containment detection.")
+            logger.warning(
+                f"{name} parts loaded ({len(parts)}) but no voxels assigned - "
+                f"containment check may have failed"
+            )
+
         # Bridge interfaces between different part types
-        if riser_count > 0 or chill_count > 0 or riser_post_count > 0:
+        if any(count > 0 for code, count in counts.items() if code != PART_TYPE_CAST):
             self._bridge_part_interfaces()
 
         # Neighbour graph and part types are both final now.
@@ -1550,46 +1614,36 @@ class AdaptiveVoxelMesh:
         This is critical for:
         - RISER feeding the CAST (risers need to thermally connect to casting)
         - CHILL accelerating solidification (chills need to contact the casting)
+        - The gating system conducting metal from the pour cup to the casting,
+          where a break in the chain would strand the fill front
+
+        Which pairs get bridged is declared in :data:`_INTERFACE_BRIDGE_PAIRS`.
         """
         if self.voxel_part_types is None or self.voxel_neighbors is None:
             return
-        
-        n_voxels = len(self.voxel_centers)
+
         voxel_centers_array = np.asarray(self.voxel_centers)
         voxel_sizes_array = np.asarray(self.voxel_sizes)
-        
-        # Find voxels of each type
-        cast_indices = np.where(self.voxel_part_types == PART_TYPE_CAST)[0]
-        riser_indices = np.where(self.voxel_part_types == PART_TYPE_RISER)[0]
-        chill_indices = np.where(self.voxel_part_types == PART_TYPE_CHILL)[0]
-        riser_post_indices = np.where(self.voxel_part_types == PART_TYPE_RISER_POST)[0]
-        
+
         bridges_added = 0
-        
-        # Bridge CAST-RISER interfaces
-        if len(cast_indices) > 0 and len(riser_indices) > 0:
+
+        # Only pairs that physically touch in a real assembly are bridged.
+        # Bridging every pair would connect, say, a chill to a riser that merely
+        # pass near each other, and invent a conduction path that is not there.
+        indices_by_code = {
+            code: np.where(self.voxel_part_types == code)[0]
+            for code in _INTERFACE_BRIDGE_CODES
+        }
+        for code_a, code_b in _INTERFACE_BRIDGE_PAIRS:
+            side_a = indices_by_code.get(code_a)
+            side_b = indices_by_code.get(code_b)
+            if side_a is None or side_b is None or len(side_a) == 0 or len(side_b) == 0:
+                continue
+            label = f"{CODE_TO_PART_TYPE[code_a].name}-{CODE_TO_PART_TYPE[code_b].name}"
             bridges_added += self._bridge_two_types(
-                cast_indices, riser_indices, voxel_centers_array, voxel_sizes_array, "CAST-RISER"
+                side_a, side_b, voxel_centers_array, voxel_sizes_array, label
             )
-        
-        # Bridge CAST-CHILL interfaces
-        if len(cast_indices) > 0 and len(chill_indices) > 0:
-            bridges_added += self._bridge_two_types(
-                cast_indices, chill_indices, voxel_centers_array, voxel_sizes_array, "CAST-CHILL"
-            )
-        
-        # Bridge CAST-RISER_POST interfaces (post connects casting to riser)
-        if len(cast_indices) > 0 and len(riser_post_indices) > 0:
-            bridges_added += self._bridge_two_types(
-                cast_indices, riser_post_indices, voxel_centers_array, voxel_sizes_array, "CAST-RISER_POST"
-            )
-        
-        # Bridge RISER_POST-RISER interfaces (post connects to the riser body)
-        if len(riser_post_indices) > 0 and len(riser_indices) > 0:
-            bridges_added += self._bridge_two_types(
-                riser_post_indices, riser_indices, voxel_centers_array, voxel_sizes_array, "RISER_POST-RISER"
-            )
-        
+
         if bridges_added > 0:
             print(f"    Interface bridges added: {bridges_added:,} new neighbor connections")
     

@@ -35,7 +35,16 @@ from datetime import datetime
 
 import numpy as np
 
-from core.part_manager import PartManager, MultiPartSTLLoader, PartType, PART_TYPE_COLORS
+from collections import Counter
+from core.part_manager import (
+    PartManager,
+    MultiPartSTLLoader,
+    PartType,
+    PART_TYPE_ABBREVIATIONS,
+    PART_TYPE_BADGES,
+    PART_TYPE_COLORS,
+    part_type_from_display_name,
+)
 from core.materials import get_all_alloy_names, get_alloy
 from core.gpu_compute import GPUComputeManager
 from core.memory_limits import (
@@ -1953,6 +1962,8 @@ class SolidificationParamsDialog(DraggableDialog):
          "Heat-transfer coefficient at riser-post-mold interface."),
         ("thermal_boundary", "htc_riser", "HTC Riser", 220.0, 100.0, 2000.0, 50.0, 0, "W/m²K",
          "Heat-transfer coefficient at riser-mold interface."),
+        ("thermal_boundary", "htc_gating", "HTC Gating", 400.0, 100.0, 2000.0, 50.0, 0, "W/m²K",
+         "Heat-transfer coefficient at gating/filter-mold interface (sprue, runner, gate, pour cup, filter)."),
         # Timing
         ("timing", "chvorinov_mold_constant", "Chvorinov Mold Constant", 280.0, 50.0, 1000.0, 10.0, 0, "s/in²",
          "Chvorinov mold constant B (t = B·M²). ~280 s/in² for WCB in sand."),
@@ -1985,7 +1996,67 @@ class SolidificationParamsDialog(DraggableDialog):
          "Depth from surface where mold restraint applies."),
         ("hot_tear", "solid_path_search_depth", "Solid Path Search Depth", 8, 2, 20, 1, 0, "voxels",
          "Search depth for solidification path strain calculation."),
+        # Filling (mold-filling stage; FilterParams fields below live in the
+        # same "filling" group in the UI but are nested under
+        # SolidificationParameters.filling.filter -- see FILLING_FILTER_KEYS
+        # and the get_options()/set_options() nesting logic.)
+        ("filling", "pour_rate_lb_s", "Pour Rate", 5.0, 0.5, 50.0, 0.5, 2, "lb/s",
+         "Metal pour rate into the mold."),
+        ("filling", "pour_time_s", "Pour Time", 0.0, 0.0, 120.0, 1.0, 0, "seconds",
+         "Fixed pour duration. 0 = derive from pour rate and casting volume."),
+        ("filling", "pour_temperature_c", "Pour Temperature", 0.0, 0.0, 1700.0, 10.0, 0, "°C",
+         "Metal temperature at pour. 0 = use the alloy's default pouring temperature."),
+        ("filling", "initial_head_in", "Initial Head", 4.0, 0.5, 24.0, 0.5, 2, "inches",
+         "Initial metallostatic head height at the start of the pour."),
+        ("filling", "fill_grid_coarsening", "Fill Grid Coarsening", 2, 1, 8, 1, 0, "× voxel",
+         "Coarsening factor applied to the solidification grid for the filling-stage lattice."),
+        ("filling", "max_fill_time_s", "Max Fill Time", 60.0, 1.0, 600.0, 5.0, 0, "seconds",
+         "Upper bound on simulated fill time before the filling stage is cut off."),
+        ("filling", "smagorinsky_cs", "Smagorinsky Cs", 0.16, 0.05, 0.3, 0.01, 2, "",
+         "Smagorinsky constant for the LBM turbulence sub-grid model."),
+        ("filling", "lattice_velocity_max", "Lattice Velocity Max", 0.05, 0.005, 0.2, 0.005, 3, "lattice units",
+         "Maximum stable lattice velocity for the filling-stage LBM solver."),
+        ("filling", "wall_htc_multiplier", "Wall HTC Multiplier", 1.0, 0.1, 5.0, 0.1, 2, "multiplier",
+         "Multiplier applied to mold-wall heat-transfer coefficients during filling."),
+        ("filling", "inlet_mode_code", "Inlet Mode (0=Head, 1=Velocity)", 0, 0, 1, 1, 0, "code",
+         "Inlet boundary mode: 0 = head-driven, 1 = prescribed velocity."),
+        ("filling", "pour_mode_code", "Pour Mode (0=Lip, 1=Bottom)", 0, 0, 1, 1, 0, "code",
+         "Pour mode: 0 = lip (top) pour, 1 = bottom pour."),
+        ("filling", "vent_risers", "Vent Risers Enabled", 1, 0, 1, 1, 0, "bool",
+         "Whether open risers act as air vents during filling (1=on, 0=off)."),
+        ("filling", "porosity", "Filter Porosity", 0.85, 0.50, 0.95, 0.01, 2, "fraction",
+         "Ceramic filter media porosity (void fraction)."),
+        ("filling", "pore_diameter_mm", "Filter Pore Diameter", 2.54, 0.5, 8.0, 0.1, 2, "mm",
+         "Ceramic filter pore diameter (2.54mm ≈ 10 ppi)."),
+        ("filling", "ergun_prefactor", "Filter Ergun Prefactor", 2.2, 0.5, 10.0, 0.1, 2, "",
+         "Ergun-equation viscous-drag prefactor for flow through the filter."),
+        ("filling", "forchheimer_c_f", "Filter Forchheimer C_f", 0.55, 0.1, 2.0, 0.05, 2, "",
+         "Forchheimer-term inertial-drag coefficient for flow through the filter."),
+        ("filling", "contact_angle_deg", "Filter Contact Angle", 120.0, 90.0, 160.0, 1.0, 0, "degrees",
+         "Metal/filter-media wetting contact angle used for priming resistance."),
+        ("filling", "window_fraction", "Filter Window Fraction", 0.45, 0.2, 0.8, 0.01, 2, "fraction",
+         "Open-window fraction of the filter footprint available to flow."),
+        ("filling", "rated_velocity_warn_factor", "Filter Rated Velocity Warn Factor", 1.5, 0.5, 5.0, 0.1, 2, "multiplier",
+         "Warn when filter approach velocity exceeds this multiple of the rated velocity."),
+        ("filling", "head_fraction_warn", "Filter Head Fraction Warn", 0.25, 0.05, 1.0, 0.05, 2, "fraction",
+         "Warn when the head consumed across the filter exceeds this fraction of available head."),
+        ("filling", "priming_enabled", "Filter Priming Enabled", 1, 0, 1, 1, 0, "bool",
+         "Whether filter priming resistance (contact-angle driven) is modeled (1=on, 0=off)."),
+        ("filling", "drag_enabled", "Filter Drag Enabled", 1, 0, 1, 1, 0, "bool",
+         "Whether filter flow drag (Ergun/Forchheimer) is modeled (1=on, 0=off)."),
     ]
+
+    # FilterParams field names -- these FIELD_DEFS rows share the "filling"
+    # UI group with FillingParams' own fields, but on the SolidificationParameters
+    # side they live one level deeper, at filling.filter.*. get_options()/
+    # set_options() use this set to nest/flatten them on the way in and out
+    # of the flat "filling": {...} bucket the generic FIELD_DEFS grouping
+    # code builds.
+    FILLING_FILTER_KEYS: set = {
+        "porosity", "pore_diameter_mm", "ergun_prefactor", "forchheimer_c_f",
+        "contact_angle_deg", "window_fraction", "rated_velocity_warn_factor",
+        "head_fraction_warn", "priming_enabled", "drag_enabled",
+    }
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent, title="Solidification Parameters")
@@ -2018,6 +2089,7 @@ class SolidificationParamsDialog(DraggableDialog):
             "thermal_boundary": "Thermal",
             "timing": "Timing",
             "hot_tear": "Hot Tear",
+            "filling": "Filling",
         }
 
         for grp_key, grp_fields in groups.items():
@@ -2164,11 +2236,31 @@ class SolidificationParamsDialog(DraggableDialog):
                 continue
             result.setdefault(grp, {})
             result[grp][field_key] = spin.value()
+        # FilterParams fields share the "filling" UI group but belong under
+        # SolidificationParameters.filling.filter -- move them into a nested
+        # "filter" bucket so this matches SolidificationParameters.to_dict().
+        filling = result.get("filling")
+        if isinstance(filling, dict):
+            filt = {}
+            for key in list(filling.keys()):
+                if key in self.FILLING_FILTER_KEYS:
+                    filt[key] = filling.pop(key)
+            if filt:
+                filling["filter"] = filt
         return result
 
     def set_options(self, options: dict) -> None:
         if options is None:
             return
+        # Reverse the get_options() nesting: flatten filling.filter.* back
+        # onto the "filling" bucket so the per-field_key lookup below finds
+        # them (mirrors SolidificationParameters.from_dict()'s merge, just
+        # for this dialog's flat spinbox storage).
+        filling = options.get("filling")
+        if isinstance(filling, dict) and isinstance(filling.get("filter"), dict):
+            flattened = dict(filling)
+            flattened.update(flattened.pop("filter"))
+            options = {**options, "filling": flattened}
         for (grp_label, field_key), spin in self._spinboxes.items():
             grp = None
             for fd in self.FIELD_DEFS:
@@ -2211,13 +2303,19 @@ class MainWindow(QMainWindow):
         self._applying_ml_suggestion = False
         self._selected_part_id: Optional[str] = None
         self._current_project_path: Optional[str] = None
-        
+
+        # Pour (metal-entry) location -- serialized PourLocation dict, or
+        # None until the user clicks a point via "Set Pour Location". Kept
+        # in sync with the visualizer's marker via pour_location_changed.
+        self._pour_location: Optional[dict] = None
+
         # Analysis options
         self._analysis_options = {
             'shrinkage': True,
             'hotspot': True,
             'niyama': False,
             'fraction_liquid': True,
+            'filling': False,
             'sand_restraint_index': 0.5,
         }
         
@@ -2768,7 +2866,32 @@ class MainWindow(QMainWindow):
         self.analysis_summary_label = QLabel("Analyses: Shrink, Hot Spots")
         self.analysis_summary_label.setStyleSheet("font-size: 10px; color: #888; margin-left: 10px;")
         settings_layout.addWidget(self.analysis_summary_label)
-        
+
+        # Pour Location button (MAGMASOFT-style ingate placement). The Mold
+        # Filling analysis toggle in Analysis Options stays disabled until
+        # this is set -- see _on_pour_location_changed.
+        self.set_pour_location_btn = QPushButton("🎯 Set Pour Location...")
+        self.set_pour_location_btn.setToolTip(
+            "Click a point on the 3D assembly to mark where metal enters "
+            "the mold.\nRequired before the Mold Filling (CFD) analysis "
+            "can be enabled."
+        )
+        self.set_pour_location_btn.setCheckable(True)
+        self.set_pour_location_btn.toggled.connect(self._toggle_pour_pick_mode)
+        settings_layout.addWidget(self.set_pour_location_btn)
+
+        pour_location_row = QHBoxLayout()
+        self.pour_location_label = QLabel("Pour Location: not set")
+        self.pour_location_label.setStyleSheet("font-size: 10px; color: #888; margin-left: 10px;")
+        pour_location_row.addWidget(self.pour_location_label, 1)
+        self.clear_pour_location_btn = QPushButton("✕")
+        self.clear_pour_location_btn.setToolTip("Clear the pour location")
+        self.clear_pour_location_btn.setMaximumWidth(28)
+        self.clear_pour_location_btn.setEnabled(False)
+        self.clear_pour_location_btn.clicked.connect(self._clear_pour_location)
+        pour_location_row.addWidget(self.clear_pour_location_btn)
+        settings_layout.addLayout(pour_location_row)
+
         # Mesh button
         self.open_mesh_btn = QPushButton("🔲 Mesh Parameters...")
         self.open_mesh_btn.setToolTip("Configure voxel mesh settings")
@@ -3255,19 +3378,11 @@ class MainWindow(QMainWindow):
         if not changes:
             return
         
-        type_map = {
-            "Cast": PartType.CAST, 
-            "Riser": PartType.RISER, 
-            "Riser Post": PartType.RISER_POST, 
-            "Chill": PartType.CHILL,
-            "Core": PartType.CORE,
-        }
-        
         # Apply all part type changes
         for part_id, type_text in changes.items():
             part = self.part_manager.get_part(part_id)
             if part:
-                new_type = type_map.get(type_text, PartType.CAST)
+                new_type = part_type_from_display_name(type_text)
                 part.set_part_type(new_type)
                 print(f"Changed '{part.name}' to {new_type.value.upper()}")
         
@@ -3314,7 +3429,9 @@ class MainWindow(QMainWindow):
             analyses.append("Niyama")
         if self._analysis_options.get('fraction_liquid', False):
             analyses.append("Frac. Liq.")
-        
+        if self._analysis_options.get('filling', False):
+            analyses.append("Filling")
+
         if analyses:
             self.analysis_summary_label.setText(f"Analyses: {', '.join(analyses)}")
         else:
@@ -3797,19 +3914,15 @@ class MainWindow(QMainWindow):
         if count == 0:
             self.parts_summary_label.setText("No parts loaded")
         else:
-            types = {"cast": 0, "riser": 0, "riser_post": 0, "chill": 0}
-            for part in self.part_manager.parts.values():
-                types[part.part_type.value] += 1
+            # Counter, not a fixed dict: indexing a hardcoded set of keys by
+            # part_type.value raised KeyError for any type not listed.
+            types = Counter(part.part_type for part in self.part_manager.parts.values())
             summary = f"{count} part(s): "
-            parts = []
-            if types["cast"] > 0:
-                parts.append(f"{types['cast']}C")
-            if types["riser"] > 0:
-                parts.append(f"{types['riser']}R")
-            if types["riser_post"] > 0:
-                parts.append(f"{types['riser_post']}RP")
-            if types["chill"] > 0:
-                parts.append(f"{types['chill']}Ch")
+            parts = [
+                f"{types[part_type]}{abbreviation}"
+                for part_type, abbreviation in PART_TYPE_ABBREVIATIONS.items()
+                if types[part_type] > 0
+            ]
             self.parts_summary_label.setText(summary + ", ".join(parts))
     
     def _create_visualization_panel(self) -> QWidget:
@@ -3819,6 +3932,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         
         self.visualizer = CastingVisualizer()
+        self.visualizer.pour_location_changed.connect(self._on_pour_location_changed)
         layout.addWidget(self.visualizer)
         
         panel.setLayout(layout)
@@ -4092,12 +4206,11 @@ class MainWindow(QMainWindow):
         # Update dialog parts list
         self._sync_parts_to_dialog()
         
-        # Count parts by type
-        type_counts = {"cast": 0, "riser": 0, "riser_post": 0, "chill": 0}
-        
-        for part in self.part_manager.get_all_parts():
-            type_counts[part.part_type.value] += 1
-        
+        # Count parts by type (see _update_parts_summary on why this is a Counter)
+        type_counts = Counter(
+            part.part_type for part in self.part_manager.get_all_parts()
+        )
+
         # Update sidebar summary
         self._update_parts_summary()
         
@@ -4122,16 +4235,12 @@ class MainWindow(QMainWindow):
                 dims = "N/A"
             
             # Show type breakdown
-            type_info = []
-            if type_counts["cast"] > 0:
-                type_info.append(f"🔩{type_counts['cast']}")
-            if type_counts["riser"] > 0:
-                type_info.append(f"🔥{type_counts['riser']}")
-            if type_counts["riser_post"] > 0:
-                type_info.append(f"📍{type_counts['riser_post']}")
-            if type_counts["chill"] > 0:
-                type_info.append(f"❄️{type_counts['chill']}")
-            
+            type_info = [
+                f"{badge}{type_counts[part_type]}"
+                for part_type, badge in PART_TYPE_BADGES.items()
+                if type_counts[part_type] > 0
+            ]
+
             self.parts_dialog.parts_info_label.setText(
                 f"{count} part(s) | {' '.join(type_info)}\n"
                 f"Total: {total_vol:.2f} in³ | {dims}"
@@ -4277,6 +4386,7 @@ class MainWindow(QMainWindow):
             analysis_options=self._get_effective_analysis_options(),
             performance_options=self._performance_options,
             solidification_params=self._solidification_params,
+            pour_location=self._pour_location,
             mesh_setting_origin=self.mesh_setting_origin,
             current_vis_mode=self._current_vis_mode,
             ui_state=ui_state,
@@ -4387,6 +4497,7 @@ class MainWindow(QMainWindow):
         )
         self.analysis_dialog.set_options(simulation_state["analysis_options"])
         self._on_analysis_options_confirmed(simulation_state["analysis_options"])
+        self._restore_pour_location(simulation_state.get("pour_location"))
         self.performance_dialog.set_options(simulation_state["performance_options"])
         self._on_performance_options_confirmed(simulation_state["performance_options"])
         solid_params = simulation_state.get("solidification_params", {})
@@ -4610,7 +4721,8 @@ class MainWindow(QMainWindow):
             part_manager=self.part_manager,  # Pass part manager for type tracking
             analysis_options=self._get_effective_analysis_options(),  # Pass normalized desktop options
             performance_options=self._performance_options,  # Pass performance options
-            solidification_params=self._solidification_params  # Pass solidification parameters
+            solidification_params=self._solidification_params,  # Pass solidification parameters
+            pour_location=self._pour_location,  # Pass user-picked pour (metal-entry) location
         )
         
         self.simulation_worker.progress.connect(self._on_simulation_progress)
@@ -5307,6 +5419,7 @@ class MainWindow(QMainWindow):
             part_manager=self.part_manager,
             analysis_options=self._get_effective_analysis_options(),
             solidification_params=self._solidification_params,
+            pour_location=self._pour_location,
         )
         self.surrogate_worker.progress.connect(self._on_simulation_progress)
         self.surrogate_worker.detailed_progress.connect(self._on_detailed_progress)
@@ -6153,6 +6266,76 @@ class MainWindow(QMainWindow):
                 sim_time = self.simulation_worker.simulation.time
             self.visualizer.set_legend_info(self._current_alloy, sim_time)
     
+    def _toggle_pour_pick_mode(self, checked: bool) -> None:
+        """Enter/exit pour-location pick mode on the visualizer."""
+        if checked:
+            self.visualizer.enable_pour_pick_mode()
+            self.status_label.setText("🎯 Pour location: click a point on the model")
+        else:
+            self.visualizer.disable_pour_pick_mode()
+            if self.status_label.text().startswith("🎯 Pour location"):
+                self.status_label.setText("Ready")
+
+    def _clear_pour_location(self) -> None:
+        """Clear the pour location and remove its marker."""
+        self.visualizer.clear_pour_location()
+
+    def _on_pour_location_changed(self, location) -> None:
+        """Handle a pour location being picked, restored, or cleared.
+
+        ``location`` is a :class:`core.pour_location.PourLocation` or
+        ``None``. This is the single place that keeps the sidebar label,
+        the stored serialized location, and the Mold Filling analysis gate
+        (AnalysisOptionsDialog.set_filling_available) all in sync, whether
+        the change came from a click, a Clear button press, or a project
+        load.
+        """
+        self.set_pour_location_btn.setChecked(False)
+
+        if location is None:
+            self._pour_location = None
+            self.pour_location_label.setText("Pour Location: not set")
+            self.clear_pour_location_btn.setEnabled(False)
+            self._analysis_options['filling'] = False
+            self.analysis_dialog.set_filling_available(False)
+            self._update_analysis_summary()
+            self.status_label.setText("Pour location cleared")
+            return
+
+        self._pour_location = location.to_dict()
+        x, y, z = location.point_in
+        self.pour_location_label.setText(f"Pour Location: ({x:.2f}, {y:.2f}, {z:.2f}) in")
+        self.clear_pour_location_btn.setEnabled(True)
+        self.analysis_dialog.set_filling_available(True)
+        # Sync the checkbox to whatever "filling" already holds (e.g. True
+        # when this location was restored from a project file that had it
+        # enabled); a fresh click leaves it unchecked since it defaults False.
+        self.analysis_dialog.filling_check.setChecked(bool(self._analysis_options.get('filling', False)))
+        self._update_analysis_summary()
+        self.status_label.setText("Pour location set")
+
+    def _restore_pour_location(self, pour_location_data: Optional[dict]) -> None:
+        """Restore a pour location from a loaded project, or clear any stale one.
+
+        Runs unconditionally on project load: a previous project's marker
+        must not linger on the newly loaded scene when the new project has
+        no pour location of its own.
+        """
+        location = None
+        if pour_location_data:
+            from core.pour_location import PourLocation
+
+            try:
+                location = PourLocation.from_dict(pour_location_data)
+            except (KeyError, ValueError, TypeError) as exc:
+                logger.warning(f"Discarding invalid saved pour location: {exc}")
+                location = None
+
+        if location is not None:
+            self.visualizer.set_pour_location(location)
+        else:
+            self.visualizer.clear_pour_location()
+
     def _start_distance_measurement(self):
         """Start distance measurement mode"""
         self.visualizer.enable_measurement_mode('distance')

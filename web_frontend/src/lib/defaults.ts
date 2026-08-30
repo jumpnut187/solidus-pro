@@ -10,6 +10,10 @@ export const analysisDefaults = {
   feeding_path: false,
   stress_analysis: false,
   microstructure: false,
+  // Mold-filling (CFD) analysis. Gated in the UI on a pour location existing
+  // (see AnalysisDrawer / App.tsx) and on the backend by
+  // core.filling_stage.maybe_run_filling.
+  filling: false,
   sand_restraint_index: 0.5
 };
 
@@ -57,7 +61,8 @@ export const solidificationDefaults = {
     chill_temperature: 21,
     htc_cast_interface: 500,
     htc_riser_post: 350,
-    htc_riser: 220
+    htc_riser: 220,
+    htc_gating: 400
   },
   timing: {
     chvorinov_mold_constant: 280,
@@ -77,6 +82,32 @@ export const solidificationDefaults = {
     healing_relief_strength: 0.65,
     surface_restraint_depth_inches: 0.5,
     solid_path_search_depth: 8
+  },
+  filling: {
+    pour_rate_lb_s: 5,
+    pour_time_s: 0,
+    pour_temperature_c: 0,
+    initial_head_in: 4,
+    fill_grid_coarsening: 2,
+    max_fill_time_s: 60,
+    smagorinsky_cs: 0.16,
+    lattice_velocity_max: 0.05,
+    wall_htc_multiplier: 1,
+    inlet_mode_code: 0,
+    pour_mode_code: 0,
+    vent_risers: 1,
+    filter: {
+      porosity: 0.85,
+      pore_diameter_mm: 2.54,
+      ergun_prefactor: 2.2,
+      forchheimer_c_f: 0.55,
+      contact_angle_deg: 120,
+      window_fraction: 0.45,
+      rated_velocity_warn_factor: 1.5,
+      head_fraction_warn: 0.25,
+      priming_enabled: 1,
+      drag_enabled: 1
+    }
   }
 };
 
@@ -89,7 +120,8 @@ export function defaultSettings(): ProjectSettings {
     memory_mode: 'auto',
     analysis_options: { ...analysisDefaults },
     performance_options: { ...performanceDefaults },
-    solidification_params: structuredClone(solidificationDefaults)
+    solidification_params: structuredClone(solidificationDefaults),
+    pour_location: null
   };
 }
 

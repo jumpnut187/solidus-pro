@@ -53,6 +53,25 @@ class SimulationPipelineOptionsTests(unittest.TestCase):
         )
         self.assertEqual(options.solver_mode, SOLVER_MODE_THERMAL_COUPLED)
 
+    def test_filling_defaults_to_false(self) -> None:
+        options = create_analysis_options({}, use_gpu=False, use_incremental=False)
+        self.assertFalse(options.filling)
+
+    def test_filling_is_set_from_option_map(self) -> None:
+        options = create_analysis_options(
+            {"filling": True},
+            use_gpu=False,
+            use_incremental=False,
+        )
+        self.assertTrue(options.filling)
+
+        options_off = create_analysis_options(
+            {"filling": False},
+            use_gpu=False,
+            use_incremental=False,
+        )
+        self.assertFalse(options_off.filling)
+
 
 if __name__ == "__main__":
     unittest.main()

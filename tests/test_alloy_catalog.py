@@ -45,6 +45,31 @@ class AlloyCatalogTests(unittest.TestCase):
         for code in self.added_alloys:
             self.assertIn(code, NIYAMA_THRESHOLDS)
 
+    def test_surface_tension_is_positive_for_all_alloys(self) -> None:
+        for code in get_all_alloy_names():
+            with self.subTest(alloy=code):
+                alloy = get_alloy(code)
+                self.assertGreater(alloy.surface_tension, 0)
+
+    def test_steel_surface_tension_in_expected_range(self) -> None:
+        steels = ("WCB", "CF8", "CA6NM")
+        for code in steels:
+            with self.subTest(alloy=code):
+                alloy = get_alloy(code)
+                self.assertGreaterEqual(alloy.surface_tension, 1.5)
+                self.assertLessEqual(alloy.surface_tension, 2.1)
+
+    def test_copper_alloys_have_lower_surface_tension_than_steels(self) -> None:
+        steels = ("WCB", "CF8", "CA6NM")
+        copper_alloys = ("C958", "C964")
+        min_steel_surface_tension = min(
+            get_alloy(code).surface_tension for code in steels
+        )
+        for code in copper_alloys:
+            with self.subTest(alloy=code):
+                alloy = get_alloy(code)
+                self.assertLess(alloy.surface_tension, min_steel_surface_tension)
+
 
 if __name__ == "__main__":
     unittest.main()

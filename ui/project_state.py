@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from core.part_manager import PartManager
 
@@ -34,6 +34,7 @@ def build_project_state(
     analysis_options: Dict[str, Any],
     performance_options: Dict[str, Any],
     solidification_params: Optional[Dict[str, Any]] = None,
+    pour_location: Optional[Dict[str, Any]] = None,
     mesh_setting_origin: str,
     current_vis_mode: str,
     ui_state: Dict[str, Any],
@@ -68,6 +69,9 @@ def build_project_state(
             "analysis_options": dict(analysis_options),
             "performance_options": dict(performance_options),
             "solidification_params": dict(solidification_params),
+            # Serialized PourLocation (see core.pour_location.PourLocation.to_dict),
+            # or None when the user has not picked one yet.
+            "pour_location": dict(pour_location) if pour_location else None,
             "mesh_setting_origin": mesh_setting_origin,
             "current_vis_mode": current_vis_mode,
         },
@@ -126,6 +130,9 @@ def load_project_state(payload: Dict[str, Any]) -> ProjectState:
             "analysis_options": dict(simulation.get("analysis_options", {})),
             "performance_options": dict(simulation.get("performance_options", {})),
             "solidification_params": dict(simulation.get("solidification_params", {})),
+            # Absent on any project saved before pour locations existed --
+            # None is the correct "not set" value for those older files.
+            "pour_location": _normalize_pour_location(simulation.get("pour_location")),
             "mesh_setting_origin": str(simulation.get("mesh_setting_origin", "manual")),
             "current_vis_mode": str(simulation.get("current_vis_mode", "shrinkage")),
         },
@@ -133,6 +140,20 @@ def load_project_state(payload: Dict[str, Any]) -> ProjectState:
         "parts": normalized_parts,
     }
     return ProjectState(normalized)
+
+
+def _normalize_pour_location(value: Any) -> Optional[Dict[str, Any]]:
+    """Normalize a persisted pour location payload.
+
+    Returns ``None`` for anything that is not a dict -- absent (an older
+    project file predating pour locations), ``null``, or malformed -- so a
+    corrupt value cannot crash project load. Deeper validation (schema
+    version, finite coordinates, ...) happens where the dict is turned into
+    an actual ``core.pour_location.PourLocation``.
+    """
+    if not isinstance(value, dict):
+        return None
+    return dict(value)
 
 
 def _normalize_vector(value: Any, expected_len: int, *, default: float) -> List[float]:

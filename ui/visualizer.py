@@ -34,6 +34,15 @@ try:
 except ImportError:
     from core.error_logger_dummy import logger
 
+from core.pour_location import PourLocation
+
+#: Marker color for the picked pour (metal-entry) location -- magenta, chosen
+#: to be distinct from every entry in ``core.part_manager.PART_TYPE_COLORS``
+#: (grey-blue casting, orange risers, dark blue-grey chills, brown cores, and
+#: the teal/yellow gating system) so it reads unambiguously as a UI marker
+#: rather than a part.
+POUR_LOCATION_MARKER_COLOR = (1.0, 0.0, 1.0)
+
 
 # ==================== Color Map Definitions ====================
 
@@ -864,6 +873,11 @@ class CastingVisualizer(QWidget):
     FRACTION_LIQUID_CACHE_MAX_POINTS = 20_000_000
     FRACTION_LIQUID_LOAD_PRINT_INTERVAL = 10
 
+    # Emitted with the new PourLocation when a pick lands, or with None when
+    # the pour location is cleared. main_window listens to keep its label
+    # and the "Mold Filling" analysis gate in sync.
+    pour_location_changed = pyqtSignal(object)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         
@@ -959,6 +973,12 @@ class CastingVisualizer(QWidget):
         self.feed_modulus_leader = None
         self._feed_modulus_leader_enabled = False
 
+        # Pour (metal-entry) location picking -- MAGMASOFT-style ingate
+        # placement. See the "Pour Location Picking" section below.
+        self._pour_pick_enabled = False
+        self._pour_location: Optional[PourLocation] = None
+        self._pour_location_actors: List[vtk.vtkActor] = []
+
         # Active result-mode inspector (feedmod, shrink/porosity, ...)
         self._inspector_layer: Optional[InspectorLayer] = None
         # Cached source-voxel indices for the currently-displayed shrinkage actor
@@ -1048,7 +1068,15 @@ class CastingVisualizer(QWidget):
         self._initialize_interactor()
     
     def _on_left_button_press(self, obj, event):
-        """Handle left mouse button press for measurement picking"""
+        """Handle left mouse button press for measurement/pour-location picking"""
+        # Pour-location picking takes priority: it is a deliberate,
+        # one-shot placement the user just started via "Set Pour Location".
+        if self._pour_pick_enabled:
+            click_pos = self.interactor.GetEventPosition()
+            x, y = click_pos[0], click_pos[1]
+            self._handle_pour_pick(x, y)
+            return
+
         # Only handle if measurement mode is enabled
         if self.measurement_tool and self.measurement_tool.enabled:
             # Get click position
@@ -1530,6 +1558,162 @@ class CastingVisualizer(QWidget):
         if self.measurement_tool:
             self.measurement_tool.clear_measurements()
             self.render_window.Render()
+
+    # ==================== Pour Location Picking ====================
+    #
+    # MAGMASOFT-style ingate placement: the user clicks a point on the 3D
+    # assembly and that point becomes the metal-entry location the
+    # mold-filling stage uses as its inlet. Reuses the same cell-picker /
+    # world-picker fallback pattern as MeasurementTool.pick_point above,
+    # rather than adding a second picking stack.
+
+    def enable_pour_pick_mode(self) -> None:
+        """Enter pour-location pick mode; the next left click sets it."""
+        self._pour_pick_enabled = True
+
+    def disable_pour_pick_mode(self) -> None:
+        """Leave pour-location pick mode without changing any stored location."""
+        self._pour_pick_enabled = False
+
+    def is_pour_pick_mode(self) -> bool:
+        """Return True while a click is expected to set the pour location."""
+        return self._pour_pick_enabled
+
+    @property
+    def pour_location(self) -> Optional[PourLocation]:
+        """The currently stored pour location, or ``None`` if unset."""
+        return self._pour_location
+
+    def set_pour_location(self, location: PourLocation) -> None:
+        """Set the pour location directly (e.g. restoring a saved project).
+
+        Draws the marker and emits :attr:`pour_location_changed` the same
+        way a click-driven pick does, so callers only need one code path
+        to react to "the pour location changed".
+        """
+        self._pour_pick_enabled = False
+        self._pour_location = location
+        self._add_pour_location_marker(location)
+        if self.render_window is not None:
+            self.render_window.Render()
+        self.pour_location_changed.emit(location)
+
+    def clear_pour_location(self) -> None:
+        """Clear the stored pour location and remove its marker."""
+        self._pour_pick_enabled = False
+        self._pour_location = None
+        self._clear_pour_location_marker()
+        if self.render_window is not None:
+            self.render_window.Render()
+        self.pour_location_changed.emit(None)
+
+    def _part_id_for_actor(self, actor) -> Optional[str]:
+        """Reverse-lookup the part id owning a picked actor, if any."""
+        if actor is None:
+            return None
+        for part_id, part_actor in self.part_actors.items():
+            if part_actor is actor:
+                return part_id
+        return None
+
+    def _handle_pour_pick(self, x: int, y: int) -> None:
+        """Resolve a click to a world point and store it as the pour location."""
+        cell_picker = vtk.vtkCellPicker()
+        cell_picker.SetTolerance(0.01)
+        cell_picker.Pick(x, y, 0, self.renderer)
+
+        point = None
+        normal = None
+        part_id = None
+
+        if cell_picker.GetCellId() >= 0:
+            point = tuple(cell_picker.GetPickPosition())
+            part_id = self._part_id_for_actor(cell_picker.GetActor())
+            try:
+                raw_normal = tuple(cell_picker.GetPickNormal())
+            except AttributeError:
+                raw_normal = (0.0, 0.0, 0.0)
+            if any(abs(component) > 1e-9 for component in raw_normal):
+                normal = raw_normal
+        else:
+            world_picker = vtk.vtkWorldPointPicker()
+            world_picker.Pick(x, y, 0, self.renderer)
+            pick_pos = world_picker.GetPickPosition()
+            if pick_pos[0] != 0 or pick_pos[1] != 0 or pick_pos[2] != 0:
+                point = tuple(pick_pos)
+
+        if point is None:
+            # Missed the model entirely -- stay in pick mode and let the
+            # user try again rather than silently failing the pick.
+            return
+
+        location = PourLocation(point_in=point, normal=normal, part_id=part_id)
+        self._pour_pick_enabled = False
+        self._pour_location = location
+        self._add_pour_location_marker(location)
+        self.render_window.Render()
+        self.pour_location_changed.emit(location)
+
+    def _add_pour_location_marker(self, location: PourLocation) -> None:
+        """Render a sphere (plus a normal arrow, if known) at ``location``."""
+        self._clear_pour_location_marker()
+
+        scale = 1.0
+        if self.model_bounds:
+            dx = self.model_bounds[1] - self.model_bounds[0]
+            dy = self.model_bounds[3] - self.model_bounds[2]
+            dz = self.model_bounds[5] - self.model_bounds[4]
+            diagonal = float(np.sqrt(dx * dx + dy * dy + dz * dz))
+            scale = max(0.1, diagonal * 0.015)
+
+        sphere = vtk.vtkSphereSource()
+        sphere.SetCenter(*location.point_in)
+        sphere.SetRadius(scale)
+        sphere.SetPhiResolution(20)
+        sphere.SetThetaResolution(20)
+
+        sphere_mapper = vtk.vtkPolyDataMapper()
+        sphere_mapper.SetInputConnection(sphere.GetOutputPort())
+
+        sphere_actor = vtk.vtkActor()
+        sphere_actor.SetMapper(sphere_mapper)
+        sphere_actor.GetProperty().SetColor(*POUR_LOCATION_MARKER_COLOR)
+
+        self.renderer.AddActor(sphere_actor)
+        self._pour_location_actors.append(sphere_actor)
+
+        if location.normal is not None:
+            arrow_length = scale * 3.0
+            nx, ny, nz = location.normal
+            px, py, pz = location.point_in
+            tip = (px + nx * arrow_length, py + ny * arrow_length, pz + nz * arrow_length)
+
+            cone = vtk.vtkConeSource()
+            cone.SetHeight(arrow_length)
+            cone.SetRadius(scale * 0.6)
+            cone.SetResolution(16)
+            cone.SetDirection(nx, ny, nz)
+            cone.SetCenter(
+                (px + tip[0]) / 2.0,
+                (py + tip[1]) / 2.0,
+                (pz + tip[2]) / 2.0,
+            )
+
+            cone_mapper = vtk.vtkPolyDataMapper()
+            cone_mapper.SetInputConnection(cone.GetOutputPort())
+
+            cone_actor = vtk.vtkActor()
+            cone_actor.SetMapper(cone_mapper)
+            cone_actor.GetProperty().SetColor(*POUR_LOCATION_MARKER_COLOR)
+
+            self.renderer.AddActor(cone_actor)
+            self._pour_location_actors.append(cone_actor)
+
+    def _clear_pour_location_marker(self) -> None:
+        """Remove any pour-location marker actors from the scene."""
+        for actor in self._pour_location_actors:
+            self.renderer.RemoveActor(actor)
+        self._pour_location_actors = []
 
     def enable_feed_modulus_leader(self, enabled: bool):
         """Enable or disable feed modulus leader mode.
