@@ -43,6 +43,10 @@ from core.pour_location import PourLocation
 #: rather than a part.
 POUR_LOCATION_MARKER_COLOR = (1.0, 0.0, 1.0)
 
+#: Direction metal travels from the pour point. Gravity pour, so straight
+#: down -- matches the fixed -Z gravity in physics.filling.gravity_force.
+POUR_DIRECTION = (0.0, 0.0, -1.0)
+
 
 # ==================== Color Map Definitions ====================
 
@@ -1682,32 +1686,44 @@ class CastingVisualizer(QWidget):
         self.renderer.AddActor(sphere_actor)
         self._pour_location_actors.append(sphere_actor)
 
-        if location.normal is not None:
-            arrow_length = scale * 3.0
-            nx, ny, nz = location.normal
-            px, py, pz = location.point_in
-            tip = (px + nx * arrow_length, py + ny * arrow_length, pz + nz * arrow_length)
+        # The arrow shows the POUR DIRECTION, which is always straight down.
+        #
+        # It deliberately does NOT follow the picked surface normal. On the top
+        # face of a down sprue -- the most common place to pour -- the outward
+        # normal points +Z, so a normal-aligned arrow reads as metal being
+        # fired upward out of the sprue. The solver never consults the normal
+        # anyway: gravity is fixed at -Z in physics.filling.gravity_force, so
+        # the metal falls -Z regardless of which face was clicked. Drawing the
+        # normal here would advertise a behaviour the solver does not have.
+        #
+        # The normal is still stored on the PourLocation; it is useful for
+        # offsetting the marker clear of the surface and will matter if a
+        # future inlet models a directed stream rather than a gravity pour.
+        arrow_length = scale * 3.0
+        nx, ny, nz = POUR_DIRECTION
+        px, py, pz = location.point_in
+        tip = (px + nx * arrow_length, py + ny * arrow_length, pz + nz * arrow_length)
 
-            cone = vtk.vtkConeSource()
-            cone.SetHeight(arrow_length)
-            cone.SetRadius(scale * 0.6)
-            cone.SetResolution(16)
-            cone.SetDirection(nx, ny, nz)
-            cone.SetCenter(
-                (px + tip[0]) / 2.0,
-                (py + tip[1]) / 2.0,
-                (pz + tip[2]) / 2.0,
-            )
+        cone = vtk.vtkConeSource()
+        cone.SetHeight(arrow_length)
+        cone.SetRadius(scale * 0.6)
+        cone.SetResolution(16)
+        cone.SetDirection(nx, ny, nz)
+        cone.SetCenter(
+            (px + tip[0]) / 2.0,
+            (py + tip[1]) / 2.0,
+            (pz + tip[2]) / 2.0,
+        )
 
-            cone_mapper = vtk.vtkPolyDataMapper()
-            cone_mapper.SetInputConnection(cone.GetOutputPort())
+        cone_mapper = vtk.vtkPolyDataMapper()
+        cone_mapper.SetInputConnection(cone.GetOutputPort())
 
-            cone_actor = vtk.vtkActor()
-            cone_actor.SetMapper(cone_mapper)
-            cone_actor.GetProperty().SetColor(*POUR_LOCATION_MARKER_COLOR)
+        cone_actor = vtk.vtkActor()
+        cone_actor.SetMapper(cone_mapper)
+        cone_actor.GetProperty().SetColor(*POUR_LOCATION_MARKER_COLOR)
 
-            self.renderer.AddActor(cone_actor)
-            self._pour_location_actors.append(cone_actor)
+        self.renderer.AddActor(cone_actor)
+        self._pour_location_actors.append(cone_actor)
 
     def _clear_pour_location_marker(self) -> None:
         """Remove any pour-location marker actors from the scene."""

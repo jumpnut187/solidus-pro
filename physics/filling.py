@@ -56,6 +56,7 @@ from physics.fluid_flow import (
     equilibrium,
     guo_force_terms,
     resolve_porous_velocity,
+    smagorinsky_relaxation,
 )
 
 # ---------------------------------------------------------------------------
@@ -672,6 +673,7 @@ def step(
     *,
     gravity_direction: Tuple[float, float, float] = (0.0, 0.0, -1.0),
     track_free_surface: bool = True,
+    smagorinsky: bool = True,
 ) -> FillingState:
     """
     Advance the solver one timestep.
@@ -699,10 +701,28 @@ def step(
 
     porosity = state.porous.porosity.astype(np.float64)
     feq = equilibrium(rho, u, porosity=porosity)
-    source = guo_force_terms(u, force, units.omega_minus)
-    post = collide_trt(
-        state.f.astype(np.float64), feq, units.omega_plus, units.omega_minus, source=source
-    )
+
+    f_now = state.f.astype(np.float64)
+    omega_plus: float | np.ndarray
+    omega_minus: float | np.ndarray
+    if smagorinsky:
+        # Eddy viscosity, evaluated per cell from the local non-equilibrium
+        # stress. Suppressed inside filters: the Forchheimer drag is already
+        # the closure for pore-scale inertial losses there, and stacking a
+        # subgrid model on top double-counts them.
+        omega_plus, omega_minus = smagorinsky_relaxation(
+            f_now,
+            feq,
+            rho,
+            units.tau,
+            suppress=state.porous.drag_c1 > 0.0,
+        )
+    else:
+        omega_plus = units.omega_plus
+        omega_minus = units.omega_minus
+
+    source = guo_force_terms(u, force, omega_minus)
+    post = collide_trt(f_now, feq, omega_plus, omega_minus, source=source)
 
     obstacle = state.flags == FLAG_OBSTACLE
     streamed = _stream_with_bounce_back(post, obstacle)

@@ -448,24 +448,19 @@ class DrivenFillTests(unittest.TestCase):
         obstacle[:, :, 0] = True
         return obstacle
 
-    @unittest.expectedFailure
     def test_an_inlet_fills_a_channel(self) -> None:
         """
-        KNOWN GAP -- F1 is not complete until this passes.
+        Metal held at an inlet on the top face of an open channel fills it
+        downward under gravity.
 
-        Metal held at an inlet on the top face of an open channel should fill
-        it downward under gravity. Measured: the front reaches a handful of
-        cells and stalls, on both this fixture and the real gating assembly
-        (0.5 % of 1,664 cells after 10,906 steps).
-
-        The free surface itself is sound -- an unforced column falls correctly
-        and mass conserves to 1e-16 -- so the defect is in how the inlet is
-        imposed. The current treatment pins flags and mass and re-imposes a
-        head pressure each step, which is a crude Dirichlet source: it does not
-        ramp (the design doc calls for ~10 ms to avoid a startup shock), it
-        does not model the falling stream, and a source only one or two cells
-        across cannot sustain a front at all. A proper Zou-He pressure inlet
-        over the full sprue cross-section is the fix.
+        This stalled until the Smagorinsky eddy viscosity was actually wired
+        into the collision. The closure existed but was never called, so every
+        cell relaxed at the molecular tau of 0.50000x -- within 1e-5 of the
+        stability limit. TRT alone holds a quiescent or smooth field there, but
+        a real fill front strains the flow hard enough to need the subgrid
+        term, which lifts tau by two orders of magnitude where it matters.
+        That is the design doc's point that a subgrid model here is correct
+        physics rather than a numerical crutch: Re is 6,000-720,000.
         """
         from physics.fluid_flow import equilibrium as _eq
 

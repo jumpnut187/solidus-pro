@@ -335,7 +335,7 @@ def guo_velocity(f: np.ndarray, rho: np.ndarray, force: np.ndarray) -> np.ndarra
 
 
 def guo_force_terms(
-    u: np.ndarray, force: np.ndarray, omega_minus: float
+    u: np.ndarray, force: np.ndarray, omega_minus: float | np.ndarray
 ) -> np.ndarray:
     """
     Guo forcing source terms.
@@ -392,8 +392,8 @@ def guo_force_terms(
 def collide_trt(
     f: np.ndarray,
     feq: np.ndarray,
-    omega_plus: float,
-    omega_minus: float,
+    omega_plus: float | np.ndarray,
+    omega_minus: float | np.ndarray,
     source: np.ndarray | None = None,
 ) -> np.ndarray:
     """
@@ -426,9 +426,17 @@ def collide_trt(
     feq_sym = 0.5 * (feq + feq_bar)
     feq_asym = 0.5 * (feq - feq_bar)
 
-    out: np.ndarray = (
-        f - omega_plus * (f_sym - feq_sym) - omega_minus * (f_asym - feq_asym)
-    )
+    # Broadcast per-cell relaxation rates against the direction axis. Scalars
+    # pass through untouched, so the closed-box benchmarks keep their exact
+    # single-tau behaviour.
+    op = np.asarray(omega_plus, dtype=np.float64)
+    om = np.asarray(omega_minus, dtype=np.float64)
+    if op.ndim:
+        op = op[None, ...]
+    if om.ndim:
+        om = om[None, ...]
+
+    out: np.ndarray = f - op * (f_sym - feq_sym) - om * (f_asym - feq_asym)
     if source is not None:
         out = out + np.asarray(source, dtype=np.float64)
     return out
@@ -793,3 +801,96 @@ def smagorinsky_tau(
     nu = (tau - 0.5) / 3.0
     nu_t = smagorinsky_cs * smagorinsky_cs * abs(strain_rate_magnitude)
     return 3.0 * (nu + nu_t) + 0.5
+
+
+def strain_rate_magnitude(f: np.ndarray, feq: np.ndarray) -> np.ndarray:
+    """
+    Magnitude of the non-equilibrium momentum flux, ``|Q|``.
+
+    ``Q_ab = sum_i c_ia c_ib (f_i - f_i^eq)`` and ``|Q| = sqrt(Q_ab Q_ab)``.
+
+    LBM recovers the strain rate locally from the non-equilibrium part of the
+    populations, so no finite differences are needed -- which is the whole
+    reason a subgrid model is cheap here.
+
+    Args:
+        f: Populations, shape ``(19, ...)``.
+        feq: Equilibrium populations, same shape.
+
+    Returns:
+        ``|Q|`` with the spatial shape of ``f[0]``.
+    """
+    neq = np.asarray(f, dtype=np.float64) - np.asarray(feq, dtype=np.float64)
+    c = LATTICE_VELOCITIES.astype(np.float64)
+    total = np.zeros(neq.shape[1:], dtype=np.float64)
+    for a in range(3):
+        for b in range(3):
+            q_ab = np.zeros(neq.shape[1:], dtype=np.float64)
+            for i in range(Q):
+                weight = c[i, a] * c[i, b]
+                if weight:
+                    q_ab += weight * neq[i]
+            total += q_ab * q_ab
+    return np.sqrt(total)
+
+
+def smagorinsky_relaxation(
+    f: np.ndarray,
+    feq: np.ndarray,
+    rho: np.ndarray,
+    tau: float,
+    *,
+    smagorinsky_cs: float = SMAGORINSKY_CS,
+    suppress: np.ndarray | None = None,
+    magic_parameter: float = TRT_MAGIC_PARAMETER,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Per-cell TRT relaxation rates including the Smagorinsky eddy viscosity.
+
+    ``tau_eff = (tau + sqrt(tau^2 + 18 sqrt(2) C_s^2 |Q| / rho)) / 2``
+
+    This is not an optional refinement. Reynolds numbers in a casting are
+    6,000-720,000, so the flow is strongly turbulent and nowhere near resolved
+    -- the subgrid model is the correct physics. It is also what makes the
+    scheme survive: molecular tau sits at 0.50000x, within 1e-5 of the
+    stability limit, and the eddy viscosity lifts it by orders of magnitude
+    wherever the flow is actually straining. TRT alone keeps a quiescent or
+    smooth field stable; a real fill front needs both.
+
+    Args:
+        f: Populations, shape ``(19, ...)``.
+        feq: Equilibrium populations, same shape.
+        rho: Density, spatial shape.
+        tau: Molecular relaxation time.
+        smagorinsky_cs: Smagorinsky constant.
+        suppress: Optional boolean mask of cells where the eddy viscosity must
+            NOT be applied. Filter cells belong here: their pore Reynolds
+            number is a few hundred and the Forchheimer drag is already the
+            closure for those pore-scale losses, so adding eddy viscosity on
+            top double-counts them.
+        magic_parameter: TRT Lambda.
+
+    Returns:
+        ``(omega_plus, omega_minus)`` arrays with the spatial shape of ``rho``.
+    """
+    q = strain_rate_magnitude(f, feq)
+    safe_rho = np.where(np.asarray(rho) > 1e-9, rho, 1.0)
+    tau_eff = 0.5 * (
+        tau
+        + np.sqrt(
+            tau * tau
+            + 18.0 * np.sqrt(2.0) * smagorinsky_cs * smagorinsky_cs * q / safe_rho
+        )
+    )
+    if suppress is not None:
+        tau_eff = np.where(suppress, tau, tau_eff)
+
+    # Guard the far tail: a cell that has already gone bad produces a huge |Q|,
+    # and an unbounded tau there would freeze it instead of letting the
+    # divergence check see it.
+    tau_eff = np.clip(tau_eff, tau, 10.0)
+
+    omega_plus = 1.0 / tau_eff
+    half = 1.0 / omega_plus - 0.5
+    omega_minus = 1.0 / (magic_parameter / np.maximum(half, 1e-12) + 0.5)
+    return omega_plus, omega_minus

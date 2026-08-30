@@ -427,7 +427,12 @@ class PourPickerVisualizerTests(unittest.TestCase):
         self.assertIsNone(viz.pour_location)
         viz.pour_location_changed.emit.assert_called_with(None)
 
-    def test_marker_without_normal_is_sphere_only(self) -> None:
+    def test_marker_is_drawn_even_without_a_surface_normal(self) -> None:
+        """
+        The arrow shows the pour direction, not the surface normal, and the
+        pour direction is always known (down). So the marker is sphere + arrow
+        whether or not the picker managed to report a normal.
+        """
         viz = self._bare_visualizer()
         viz.enable_pour_pick_mode()
         baseline = len(viz.renderer.actors)
@@ -438,7 +443,7 @@ class PourPickerVisualizerTests(unittest.TestCase):
             viz._on_left_button_press(None, None)
 
         self.assertIsNone(viz.pour_location.normal)
-        self.assertEqual(len(viz.renderer.actors), baseline + 1)
+        self.assertEqual(len(viz.renderer.actors), baseline + 2)
 
     # ---- set_pour_location() direct path (project restore) ----
 
@@ -449,7 +454,9 @@ class PourPickerVisualizerTests(unittest.TestCase):
         viz.set_pour_location(location)
 
         self.assertIs(viz.pour_location, location)
-        self.assertEqual(len(viz._pour_location_actors), 1)  # sphere only, no normal
+        # Sphere + downward pour arrow. The arrow does not depend on a surface
+        # normal, so a project-restored location gets one too.
+        self.assertEqual(len(viz._pour_location_actors), 2)
         viz.pour_location_changed.emit.assert_called_once_with(location)
 
     def test_clear_pour_location_without_prior_pick_is_a_noop(self) -> None:
@@ -461,3 +468,53 @@ class PourPickerVisualizerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PourDirectionTests(unittest.TestCase):
+    """
+    The marker must advertise the direction metal actually travels.
+
+    Reported from a real session: clicking the top face of a down sprue drew
+    the cone pointing +Z, because it followed the picked surface normal. On a
+    top face the outward normal *is* +Z, so the arrow read as metal being fired
+    upward out of the sprue -- the opposite of what happens.
+    """
+
+    def test_pour_direction_is_straight_down(self) -> None:
+        from ui.visualizer import POUR_DIRECTION
+
+        self.assertEqual(POUR_DIRECTION, (0.0, 0.0, -1.0))
+
+    def test_solver_gravity_is_also_straight_down(self) -> None:
+        """
+        The display constant is only honest if it matches the solver. Gravity
+        is fixed at -Z in the step loop, so this pins the two together.
+        """
+        import inspect
+
+        from physics.filling import gravity_force, step
+        from ui.visualizer import POUR_DIRECTION
+
+        for func in (gravity_force, step):
+            with self.subTest(func=func.__name__):
+                default = inspect.signature(func).parameters[
+                    "direction" if func is gravity_force else "gravity_direction"
+                ].default
+                self.assertEqual(tuple(default), POUR_DIRECTION)
+
+    def test_solver_ignores_the_picked_normal(self) -> None:
+        """
+        Metal falls under gravity regardless of which face was clicked, so the
+        fill must be identical whichever normal the picker happened to report.
+        If this ever fails, the marker has to start following the normal again.
+        """
+        import inspect
+
+        from core import filling_stage
+
+        source = inspect.getsource(filling_stage.run_filling_stage)
+        self.assertNotIn(
+            ".normal", source,
+            "run_filling_stage now consults the pour normal; the marker "
+            "direction and this test need revisiting",
+        )
