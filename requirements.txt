@@ -100,6 +100,8 @@ onnx>=1.16.0               # Snapdragon/ONNX export + graph validation
 onnxruntime>=1.18.0        # ONNX CPU EP validation
 onnxscript>=0.1.0          # torch ONNX exporter dependency (torch >= 2.12)
 onnx2tf>=1.22.0            # Google Tensor TFLite export (torch -> ONNX -> tflite)
-tflite-runtime>=2.14.0     # TFLite interpreter validation
+# tflite-runtime is NOT on PyPI — install separately from Google's index:
+#   venv/bin/pip install --index-url https://google-coral.github.io/py-repo/ tflite-runtime
+# TFLite export still works without it (validation is skipped with a note).
 # NOTE: onnx2tf may not yet publish Python 3.13 / arm64 wheels — the TFLite
 # export fails with a clear message instead of crashing in that case.

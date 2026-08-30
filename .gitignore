@@ -50,3 +50,11 @@ docs/*.mov
 
 # Memory mapped files
 *.mmap
+
+# User-uploaded CAD for the web app. 1.2 GB / 668 files at last count, and
+# regenerated per session -- never source.
+web/static/uploads/
+
+# Trained deep-model artifacts (~256 MB). Build outputs, not source; git
+# stores large binaries poorly and every clone would pay the cost forever.
+models/deep_model/

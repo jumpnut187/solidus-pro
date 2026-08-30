@@ -40,10 +40,10 @@
     "WCB (Carbon Steel Casting)"
   ],
   "accuracy": {
-    "rmse_s": 12.17,
-    "mae_s": 1.13,
-    "max_error_s": 291.4,
-    "confidence": 0.806
+    "rmse_s": 12.11,
+    "mae_s": 0.97,
+    "max_error_s": 525.93,
+    "confidence": 0.645
   },
   "trained_on": "2026-08-17",
   "units": "inches/seconds/celsius",
