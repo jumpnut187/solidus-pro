@@ -94,6 +94,14 @@ GAS_DENSITY = 1.0
 #: works in density perturbations about 1.
 REFERENCE_DENSITY = 1.0
 
+#: Sentinel for "this cell has never held metal". A cell that has never
+#: filled must carry no temperature at all -- seeding it at ambient would
+#: silently turn a misrun into a plausible-looking cold casting. NaN rather
+#: than e.g. -1 because it poisons arithmetic loudly: any stencil that
+#: accidentally reads across into an unfilled cell produces NaN, not a quiet
+#: wrong number.
+NO_TEMPERATURE = np.float32(np.nan)
+
 
 @dataclass
 class PorousZone:
@@ -159,6 +167,12 @@ class FillingState:
         mass: Cell mass, ``(nx, ny, nz)`` float64.
         flags: Cell state, ``(nx, ny, nz)`` uint8.
         fill_time_s: Arrival time per cell; -1 where never filled.
+        temperature: Degrees Celsius, ``(nx, ny, nz)`` float32. NaN
+            (:data:`NO_TEMPERATURE`) wherever the cell has never held metal --
+            see F2 in ``docs/filling_implementation.md`` section 4.5. Unlike
+            the LBM fields this is not a lattice-unit quantity: Celsius is
+            already dx/dt-independent, so no conversion happens at the
+            lattice-unit boundary the way it does for velocity or density.
         porous: Filter drag; inert when there are no filters.
         step_count: Steps taken.
         inlet_mass: Total mass delivered through the inlet, for the
@@ -174,6 +188,7 @@ class FillingState:
     mass: np.ndarray
     flags: np.ndarray
     fill_time_s: np.ndarray
+    temperature: np.ndarray
     porous: PorousZone
     step_count: int = 0
     inlet_mass: float = 0.0
@@ -199,6 +214,7 @@ def create_state(
     dt_s: float,
     initial_fluid: Optional[np.ndarray] = None,
     porous: Optional[PorousZone] = None,
+    initial_temperature_c: Optional[float] = None,
 ) -> FillingState:
     """
     Build a solver state from an occupancy grid.
@@ -210,6 +226,11 @@ def create_state(
         initial_fluid: Optional boolean mask of cells that start full of metal.
             Cells adjacent to the resulting fluid region become INTERFACE.
         porous: Optional filter drag. Defaults to inert.
+        initial_temperature_c: Temperature to seed ``initial_fluid`` (and its
+            interface skin) at. ``None`` -- the default -- leaves every cell at
+            :data:`NO_TEMPERATURE`, which is correct for a synthetic lattice
+            with no metal in it at all. Ignored when ``initial_fluid`` is not
+            given, since there is then nothing to seed.
 
     Returns:
         An initialised :class:`FillingState` at rest.
@@ -221,6 +242,7 @@ def create_state(
 
     flags = np.where(obstacle, FLAG_OBSTACLE, FLAG_GAS).astype(np.uint8)
     mass = np.zeros(shape, dtype=np.float64)
+    temperature = np.full(shape, NO_TEMPERATURE, dtype=np.float32)
 
     if initial_fluid is not None:
         fluid = np.asarray(initial_fluid, dtype=bool) & ~obstacle
@@ -231,6 +253,8 @@ def create_state(
         interface = neighbours & ~fluid & ~obstacle
         flags[interface] = FLAG_INTERFACE
         mass[interface] = 0.5 * REFERENCE_DENSITY
+        if initial_temperature_c is not None:
+            temperature[fluid | interface] = np.float32(initial_temperature_c)
 
     rho = np.full(shape, REFERENCE_DENSITY, dtype=np.float32)
     u = np.zeros((3,) + shape, dtype=np.float32)
@@ -268,6 +292,7 @@ def create_state(
         mass=mass,
         flags=flags,
         fill_time_s=fill_time,
+        temperature=temperature,
         porous=porous if porous is not None else PorousZone.inert(shape),
     )
 
@@ -534,6 +559,10 @@ def apply_transitions(state: FillingState, time_s: float) -> Tuple[int, int]:
     state.mass[to_gas] = 0.0
     state.flags[to_fluid] = FLAG_FLUID
     state.flags[to_gas] = FLAG_GAS
+    # An emptied cell holds no metal any more, so it holds no temperature any
+    # more either -- the same "no metal, no temperature" rule create_state
+    # applies at t=0 applies for the rest of the run.
+    state.temperature[to_gas] = NO_TEMPERATURE
 
     newly_filled = to_fluid & (state.fill_time_s < 0)
     state.fill_time_s[newly_filled] = np.float32(time_s)
@@ -545,6 +574,7 @@ def apply_transitions(state: FillingState, time_s: float) -> Tuple[int, int]:
         promote = _dilate(to_fluid) & (state.flags == FLAG_GAS)
         state.flags[promote] = FLAG_INTERFACE
         _initialise_promoted_cells(state, promote)
+        _initialise_promoted_temperature(state, promote)
 
     # An emptied cell's fluid neighbours must *retreat* to the interface.
     #
@@ -617,6 +647,51 @@ def _initialise_promoted_cells(state: FillingState, promote: np.ndarray) -> None
     state.rho[has_donor] = rho_avg[has_donor].astype(np.float32)
 
 
+def _initialise_promoted_temperature(state: FillingState, promote: np.ndarray) -> None:
+    """
+    Give a freshly promoted GAS -> INTERFACE cell a starting temperature.
+
+    Mirrors :func:`_initialise_promoted_cells`: a cell joining the interface
+    for the first time has no temperature of its own -- it was gas a moment
+    ago -- so it inherits one from whichever already-wet neighbours are
+    feeding it, averaged rather than copied from a single donor so the
+    thermal front stays as smooth as the population seed does.
+
+    Skipping this leaves a promoted cell at :data:`NO_TEMPERATURE` (NaN) even
+    though its flag says FLUID-adjacent metal, which then poisons the next
+    advection step's stencil the moment a neighbour reads across into it.
+    """
+    if not np.any(promote):
+        return
+
+    donor = (
+        (state.flags == FLAG_FLUID) | (state.flags == FLAG_INTERFACE)
+    ) & ~promote
+    donor_has_temp = donor & np.isfinite(state.temperature)
+    if not np.any(donor_has_temp):
+        return
+
+    weight = donor_has_temp.astype(np.float64)
+    temp = np.where(donor_has_temp, state.temperature.astype(np.float64), 0.0) * weight
+
+    temp_sum = np.zeros(state.shape, dtype=np.float64)
+    count = np.zeros(state.shape, dtype=np.float64)
+
+    for i in range(1, Q):
+        c = LATTICE_VELOCITIES[i]
+        shift = (-int(c[0]), -int(c[1]), -int(c[2]))
+        count += np.roll(weight, shift=shift, axis=(0, 1, 2))
+        temp_sum += np.roll(temp, shift=shift, axis=(0, 1, 2))
+
+    has_donor = promote & (count > 0)
+    if not np.any(has_donor):
+        return
+
+    safe = np.where(count > 0, count, 1.0)
+    avg = temp_sum / safe
+    state.temperature[has_donor] = avg[has_donor].astype(np.float32)
+
+
 def _redistribute(state: FillingState, excess: np.ndarray) -> None:
     """
     Push leftover mass into neighbouring interface cells.
@@ -657,6 +732,159 @@ def _redistribute(state: FillingState, excess: np.ndarray) -> None:
 def interface_shifted(interface: np.ndarray, c: np.ndarray) -> np.ndarray:
     """Indicator of "the neighbour in direction ``c`` is an interface cell"."""
     return np.roll(interface, shift=(-int(c[0]), -int(c[1]), -int(c[2])), axis=(0, 1, 2))
+
+
+# ---------------------------------------------------------------------------
+# Thermal coupling (F2)
+# ---------------------------------------------------------------------------
+#
+# Advected as a passive scalar with explicit finite-difference upwind
+# advection plus a 6-point Laplacian, not a second (D3Q7) population set. The
+# design doc offers either; upwind is stable at these Mach numbers (the LBM
+# solver already caps the lattice velocity at 0.05, an order of magnitude
+# under the 1/6 diffusion stability limit measured in
+# tests/test_filling_thermal.py) and is a fraction of the code, with no extra
+# populations to keep conserved.
+#
+# Both functions work in *lattice steps* (dx = dt = 1), matching how the LBM
+# fields themselves are differenced, with one exception: temperature is
+# stored in degrees Celsius throughout, never converted to a lattice unit, because
+# it is already dx/dt-independent -- unlike velocity or density there is no
+# "lattice temperature". ``alpha_lattice`` is the caller's SI thermal
+# diffusivity rescaled the same way ``nu_lattice`` is (``alpha_SI * dt_s /
+# dx_m**2``), so it drops into the stencil as a plain dimensionless number.
+
+
+def _neighbour_or_self(
+    field: np.ndarray, wet: np.ndarray, axis: int, shift: int
+) -> np.ndarray:
+    """
+    The neighbour's value in direction ``shift`` along ``axis``, or the cell's
+    own value where that neighbour is not wet.
+
+    This is what keeps NaN (gas and obstacle cells carry no temperature) out
+    of the stencil: a metal cell sitting at the free surface or against a
+    mold wall sees a zero-gradient (Neumann) boundary in that direction
+    instead of reading across into a cell that has none. Heat still leaves
+    through a wall -- that is :func:`apply_wall_heat_loss`'s job, applied as a
+    separate lumped term, exactly as the governing equation in
+    ``docs/filling_implementation.md`` section 4.5 splits ``alpha * lap(T)``
+    from ``q_wall`` into two additive terms rather than one.
+    """
+    rolled = np.roll(field, shift=shift, axis=axis)
+    rolled_wet = np.roll(wet, shift=shift, axis=axis)
+    return np.where(rolled_wet, rolled, field)
+
+
+def advect_temperature(state: FillingState, alpha_lattice: float) -> np.ndarray:
+    """
+    Advance the temperature field one lattice step: upwind advection plus
+    diffusion, over metal cells only.
+
+    ``T_new = T - dt(u . grad T) + alpha * dt * lap(T)``, with ``dt = 1`` and
+    axis-aligned first-order upwind differencing for the gradient (the
+    stencil direction follows the sign of the local velocity component, so
+    information always comes from upstream) and a standard 6-point Laplacian
+    for the diffusion term. Both use ``state.u``, which is already in lattice
+    units and current as of this step's collision.
+
+    Cells that are neither FLUID nor INTERFACE (no metal) are left exactly as
+    they were -- typically :data:`NO_TEMPERATURE` -- rather than being
+    advected. A gas cell has no temperature to advect, and computing one
+    would silently manufacture a value for a cell the fill has not reached.
+
+    Args:
+        state: Solver state, mutated in place.
+        alpha_lattice: Thermal diffusivity in lattice units
+            (``alpha_SI * dt_s / dx_m**2``), the same rescaling
+            :func:`physics.fluid_flow.lattice_units` applies to viscosity.
+
+    Returns:
+        The updated ``state.temperature``.
+    """
+    wet = (state.flags == FLAG_INTERFACE) | (state.flags == FLAG_FLUID)
+    if not np.any(wet):
+        return state.temperature
+
+    T = state.temperature.astype(np.float64)
+    u = state.u.astype(np.float64)
+
+    convective = np.zeros(state.shape, dtype=np.float64)
+    laplacian = np.zeros(state.shape, dtype=np.float64)
+
+    for axis in range(3):
+        # roll(shift=-1) brings the value at index+1 to position index -- the
+        # same convention physics.filling already uses elsewhere (see
+        # interface_shifted) for "the neighbour in the +1 direction".
+        t_plus = _neighbour_or_self(T, wet, axis, -1)
+        t_minus = _neighbour_or_self(T, wet, axis, 1)
+
+        u_axis = u[axis]
+        # Upwind: take the gradient from whichever side the flow is coming
+        # from. Using a centred difference here is the textbook way this kind
+        # of scheme goes unstable -- upwind is the whole reason this is safe
+        # at CFL = 0.05 without a flux limiter.
+        gradient = np.where(u_axis >= 0.0, T - t_minus, t_plus - T)
+        convective += u_axis * gradient
+        laplacian += t_plus + t_minus - 2.0 * T
+
+    T_new = T - convective + alpha_lattice * laplacian
+    state.temperature = np.where(wet, T_new, T).astype(np.float32)
+    return state.temperature
+
+
+def apply_wall_heat_loss(
+    state: FillingState,
+    *,
+    htc_w_m2k,
+    mold_temperature_c: float,
+    density_kg_m3: float,
+    specific_heat_j_kgk: float,
+) -> np.ndarray:
+    """
+    Lose heat through faces that border an OBSTACLE cell (the mold wall).
+
+    ``dT = -h (T - T_mold) dt / (rho cp dx)``, applied once per exposed face,
+    so a corner cell -- more than one face against the mold -- loses
+    proportionally more than a cell with a single flat wall. ``h`` is left to
+    the caller rather than looked up here: ``physics/`` cannot import
+    ``core/solidification_params.ThermalBoundaryParams``, so
+    ``core/filling_stage.py`` resolves ``htc_gating`` vs ``htc_cast_interface``
+    per cell and passes the result down as a plain array.
+
+    Args:
+        state: Solver state, mutated in place. Uses ``state.dx_m``,
+            ``state.dt_s`` and ``state.flags``.
+        htc_w_m2k: Interface heat-transfer coefficient, W/(m^2 K). Either a
+            scalar or a ``(nx, ny, nz)`` array -- gating and casting surfaces
+            use different HTCs.
+        mold_temperature_c: Ambient mold temperature, degrees Celsius.
+        density_kg_m3: Liquid metal density.
+        specific_heat_j_kgk: Liquid metal specific heat.
+
+    Returns:
+        The updated ``state.temperature``.
+    """
+    wet = (state.flags == FLAG_INTERFACE) | (state.flags == FLAG_FLUID)
+    obstacle = state.flags == FLAG_OBSTACLE
+
+    exposed_faces = np.zeros(state.shape, dtype=np.float64)
+    for axis in range(3):
+        for shift in (-1, 1):
+            exposed_faces += np.roll(obstacle, shift=shift, axis=axis)
+
+    losing = wet & (exposed_faces > 0)
+    if not np.any(losing):
+        return state.temperature
+
+    h = np.broadcast_to(np.asarray(htc_w_m2k, dtype=np.float64), state.shape)
+    T = state.temperature.astype(np.float64)
+    coeff = (
+        h * exposed_faces * state.dt_s / (density_kg_m3 * specific_heat_j_kgk * state.dx_m)
+    )
+    delta = np.where(losing, -coeff * (T - mold_temperature_c), 0.0)
+    state.temperature = np.where(wet, (T + delta), T).astype(np.float32)
+    return state.temperature
 
 
 # ---------------------------------------------------------------------------
@@ -886,6 +1114,148 @@ def _free_surface_scratch(state: FillingState) -> Tuple[np.ndarray, np.ndarray]:
         state._scratch_f_out = f_out
         state._scratch_mass_out = mass_out
     return f_out, mass_out
+
+
+# ---------------------------------------------------------------------------
+# Defect indicators (F3)
+# ---------------------------------------------------------------------------
+
+
+def find_entrapped_gas(flags: np.ndarray, vent_mask: np.ndarray) -> np.ndarray:
+    """
+    Gas cells that cannot escape to atmosphere as the metal closes around them.
+
+    Labels connected components of GAS cells with **6-connectivity (face
+    neighbours only)**, not the 18-neighbour set the D3Q19 stencil streams
+    along elsewhere in this module. Two cells that touch only along an edge
+    or at a corner share zero boundary area in the real 3-D geometry the
+    lattice discretises -- no gas volume can cross a corner. D3Q19 includes
+    those directions anyway because they improve the *momentum* stencil's
+    isotropy; that is a numerical choice about the fluid solver, not a claim
+    about what counts as a connected air pocket. Face connectivity is the
+    physically correct choice for "can this gas physically get out".
+
+    A component with no cell in ``vent_mask`` has no route to atmosphere: the
+    metal closing in around it cannot displace it, and it freezes in as
+    trapped-air porosity.
+
+    Args:
+        flags: Cell state, ``(nx, ny, nz)``.
+        vent_mask: Boolean ``(nx, ny, nz)``, cells that count as open to
+            atmosphere -- see ``core.filling_stage`` for how this is
+            assembled (open riser tops, the inlet, and gas cells currently on
+            the domain boundary). An all-``False`` mask makes every gas
+            pocket in the domain read as entrapped; this function has no way
+            to distinguish "no vent exists" from "no vent has been reached
+            yet", so the caller must detect and warn about that condition
+            itself (see ``core.filling_stage._entrapment_warning_if_no_vent``).
+
+    Returns:
+        Boolean ``(nx, ny, nz)``, True on every GAS cell belonging to a
+        component that contains no vent cell.
+    """
+    from scipy import ndimage
+
+    gas = flags == FLAG_GAS
+    if not np.any(gas):
+        return np.zeros_like(gas, dtype=bool)
+
+    # generate_binary_structure(3, 1) is the face-only (6-neighbour)
+    # structuring element -- connectivity 1 means "shares a face", as
+    # opposed to connectivity 2/3 which also admit edge/corner touches.
+    structure = ndimage.generate_binary_structure(3, 1)
+    labels, n_components = ndimage.label(gas, structure=structure)
+    if n_components == 0:
+        return np.zeros_like(gas, dtype=bool)
+
+    vented = np.asarray(vent_mask, dtype=bool) & gas
+    vented_labels = (
+        np.unique(labels[vented]) if np.any(vented) else np.empty(0, dtype=labels.dtype)
+    )
+    result: np.ndarray = gas & ~np.isin(labels, vented_labels)
+    return result
+
+
+def find_cold_shuts(
+    fill_time_s: np.ndarray,
+    temperature: np.ndarray,
+    flags: np.ndarray,
+    *,
+    liquidus_c: float,
+    arrival_gap_s: float,
+    temperature_margin_c: float,
+) -> np.ndarray:
+    """
+    Cells where two metal fronts met after the metal had already cooled too
+    far to fuse.
+
+    Both conditions below are required -- see
+    ``docs/filling_implementation.md`` section 6.4/F3. Neither alone is a
+    cold shut: two hot fronts meeting just fuses, and cold metal with nothing
+    meeting it is ordinary heat loss, not a seam.
+
+    **Front meeting.** This deliberately does not use the literal test from
+    the design doc ("a wet neighbour whose arrival time differs by more than
+    ``arrival_gap_s``"). That test alone flags the trailing edge of *every*
+    moving front: a front's own wake always has an arrival-time gradient
+    along the direction of travel, and a slow front accumulates more than
+    ``arrival_gap_s`` of that gradient over a long enough run with no second
+    front anywhere nearby -- exactly the false positive the design doc's own
+    prose warns about two paragraphs later. What actually distinguishes "two
+    fronts met here" from "one front passed through here" is *how many
+    directions* the earlier metal came from: a single sweeping front --
+    however slow, however curved -- has at most one face direction whose
+    neighbour arrived substantially earlier (directly behind it); the
+    opposite/leading side is either still gas or arrived within the same
+    instant. A cell where two fronts converge -- head-on along one axis, or
+    from two different axes at a corner -- has *two or more* such directions.
+    Requiring at least two is what holds a single front sweep to zero false
+    positives in ``tests/test_filling_defects.py`` while still catching both
+    head-on and corner meetings.
+
+    **Cold.** Scored against ``liquidus_c + temperature_margin_c`` rather
+    than the bare liquidus: fusion quality degrades on approach to the
+    liquidus, not only below it, and the margin is what lets a foundry tune
+    how conservative the indicator is.
+
+    Args:
+        fill_time_s: Arrival time per cell, ``-1`` where never filled.
+        temperature: Degrees Celsius, NaN (:data:`NO_TEMPERATURE`) where
+            never filled.
+        flags: Cell state.
+        liquidus_c: Alloy liquidus, degrees Celsius.
+        arrival_gap_s: Minimum arrival-time difference across a face to
+            count that face as "a different front", seconds.
+        temperature_margin_c: Degrees above the liquidus still counted as
+            cold enough to risk a seam.
+
+    Returns:
+        Boolean ``(nx, ny, nz)``.
+    """
+    wet = (flags == FLAG_INTERFACE) | (flags == FLAG_FLUID)
+    fill_time = np.asarray(fill_time_s, dtype=np.float64)
+    temp = np.asarray(temperature, dtype=np.float64)
+
+    # Sentinels never participate: a cell the fill never reached has no
+    # arrival time and no temperature to evaluate either condition against,
+    # and a corrupted state (wet but still carrying a sentinel) must not
+    # silently pass either test.
+    valid = wet & (fill_time >= 0.0) & np.isfinite(temp)
+    if not np.any(valid):
+        return np.zeros_like(wet, dtype=bool)
+
+    earlier_directions = np.zeros(flags.shape, dtype=np.int32)
+    for axis in range(3):
+        for shift in (1, -1):
+            nbr_time = np.roll(fill_time, shift=shift, axis=axis)
+            nbr_valid = np.roll(valid, shift=shift, axis=axis)
+            earlier = valid & nbr_valid & ((fill_time - nbr_time) > arrival_gap_s)
+            earlier_directions += earlier.astype(np.int32)
+
+    meeting = valid & (earlier_directions >= 2)
+    cold = valid & (temp <= liquidus_c + temperature_margin_c)
+    result: np.ndarray = meeting & cold
+    return result
 
 
 def _stream_with_bounce_back(post: np.ndarray, obstacle: np.ndarray) -> np.ndarray:

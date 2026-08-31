@@ -35,6 +35,7 @@ BASIC_SURFACE_MODES = {
     "combined_feed_risk",
     "fraction_liquid",
     "porosity",
+    "fill_time",
 }
 ADVANCED_SURFACE_MODES = {
     "hot_tear",
@@ -373,6 +374,7 @@ def build_result_fields_payload(
             "modes": [],
             "fields": {},
             "solidification": {"normalized_times": [], "min_time": 0.0, "max_time": 0.0, "front_width": 0.075},
+            "fill_time": None,
             "source_count": 0,
             "sample_count": 0,
         }
@@ -380,7 +382,7 @@ def build_result_fields_payload(
     step = max(1, len(centers) // max(1, max_points))
     idx = np.arange(0, len(centers), step, dtype=np.int32)
     fields: Dict[str, Dict[str, Any]] = {}
-    for mode in sorted(SURFACE_MODES - {"fraction_liquid"}):
+    for mode in sorted(SURFACE_MODES - {"fraction_liquid", "fill_time"}):
         values = visualization.get(mode)
         if values is None:
             continue
@@ -396,8 +398,13 @@ def build_result_fields_payload(
 
     solidification = _solidification_payload(visualization, idx, len(centers))
     fraction_liquid = _fraction_liquid_frames_payload(visualization, idx, len(centers))
+    fill_time = _fill_time_payload(visualization, idx, len(centers))
     has_fraction_liquid = bool(solidification["normalized_times"] or fraction_liquid["frames"])
-    modes = sorted(list(fields.keys()) + (["fraction_liquid"] if has_fraction_liquid else []))
+    modes = sorted(
+        list(fields.keys())
+        + (["fraction_liquid"] if has_fraction_liquid else [])
+        + (["fill_time"] if fill_time is not None else [])
+    )
     return {
         "version": 1,
         "empty": False,
@@ -407,6 +414,7 @@ def build_result_fields_payload(
         "fields": fields,
         "solidification": solidification,
         "fraction_liquid": fraction_liquid,
+        "fill_time": fill_time,
         "source_count": int(len(centers)),
         "sample_count": int(len(idx)),
     }
@@ -423,6 +431,14 @@ def build_fork_surface_payload(
         raise ValueError(f"Unsupported surface mode: {mode}")
     if normalized_mode == "fraction_liquid":
         return build_voxel_glyph_payload(visualization, normalized_mode, max(threshold, 0.01), time_percent, max_voxels=12_000)
+    if normalized_mode == "fill_time":
+        # Raw arrival-time seconds, not a 0-1 risk field, so route it through
+        # the same glyph builder as fraction_liquid rather than the generic
+        # BASIC_SURFACE_MODES path below (which clamps threshold to [0, 1]
+        # and would hide every filled voxel). This screenshot/export path
+        # renders the static "all filled voxels" map -- see load_fill_time /
+        # BabylonViewport for the interactive misrun-aware sweep.
+        return build_voxel_glyph_payload(visualization, normalized_mode, 0.0, time_percent, max_voxels=12_000)
     if normalized_mode in {"shrinkage", "hotspot", "feed_modulus", "niyama", "niyama_raw", "combined_feed_risk"}:
         return build_voxel_glyph_payload(visualization, normalized_mode, threshold, time_percent, max_voxels=8_000)
     if normalized_mode in BASIC_SURFACE_MODES:
@@ -608,6 +624,50 @@ def _fraction_liquid_frames_payload(
         denominator = max(len(history) - 1, 1)
         frame_percents = [float((int(frame_index) / denominator) * 100.0) for frame_index in frame_indices]
     return {"frames": frames, "frame_percents": frame_percents}
+
+
+def _fill_time_payload(
+    visualization: Dict[str, Any],
+    idx: np.ndarray,
+    expected_length: int,
+) -> Optional[Dict[str, Any]]:
+    """
+    Build the Fill Time sweep field for the web viewer's time slider.
+
+    The raw per-voxel arrival time (seconds, -1 = misrun) is remapped to
+    ``max_finite_time_s - t`` so the existing "value >= cutoff" active-voxel
+    filter (see BabylonViewport's ``deriveActiveVoxels``) can sweep it the
+    same way every other threshold-based mode does, just inverted: a cutoff
+    that falls as the slider advances reveals progressively later arrivals
+    instead of progressively higher-risk voxels. Misrun voxels are flagged
+    in a parallel ``misrun`` mask (transformed value -1, always excluded
+    from that cutoff comparison) so the client can render them as a
+    separate, always-visible layer instead of folding them into the ramp.
+    """
+    raw = visualization.get("fill_time")
+    if raw is None:
+        return None
+    arr = np.asarray(raw, dtype=np.float64)
+    if len(arr) != expected_length:
+        return None
+
+    misrun = arr < 0.0
+    finite = arr[~misrun]
+    max_finite = float(np.max(finite)) if finite.size > 0 else 0.0
+
+    transformed = np.full_like(arr, -1.0, dtype=np.float32)
+    if max_finite > 0.0:
+        transformed[~misrun] = (max_finite - np.clip(arr[~misrun], 0.0, max_finite)).astype(np.float32)
+    else:
+        transformed[~misrun] = 0.0
+
+    return {
+        "values": transformed[idx].tolist(),
+        "misrun": misrun[idx].tolist(),
+        "max_finite_time_s": max_finite,
+        "filled_voxels": int(np.sum(~misrun)),
+        "unfilled_voxels": int(np.sum(misrun)),
+    }
 
 
 def _append_cube(

@@ -261,12 +261,18 @@ class FillingParams:
     inlet_mode_code: int = 0                # 0 = head, 1 = velocity
     pour_mode_code: int = 0                 # 0 = lip, 1 = bottom
     vent_risers: int = 1                    # 0/1 bool-as-int; see class docstring
+    cold_shut_arrival_gap_s: float = 0.5
+    cold_shut_temp_margin_c: float = 25.0
+    entrapment_check_interval: int = 50
     filter: FilterParams = field(default_factory=FilterParams)
 
     def __post_init__(self) -> None:
         self.fill_grid_coarsening = _clamp_int(self.fill_grid_coarsening, 1, 8, 2)
         self.lattice_velocity_max = _clamp_float(self.lattice_velocity_max, 0.005, 0.2, 0.05)
         self.max_fill_time_s = _clamp_float(self.max_fill_time_s, 1.0, 600.0, 60.0)
+        self.cold_shut_arrival_gap_s = _clamp_float(self.cold_shut_arrival_gap_s, 0.01, 10.0, 0.5)
+        self.cold_shut_temp_margin_c = _clamp_float(self.cold_shut_temp_margin_c, 0.0, 200.0, 25.0)
+        self.entrapment_check_interval = _clamp_int(self.entrapment_check_interval, 1, 1000, 50)
 
 
 @dataclass
@@ -394,6 +400,15 @@ class SolidificationParameters:
         self.filling.max_fill_time_s = _clamp_float(
             self.filling.max_fill_time_s, 1.0, 600.0, 60.0,
         )
+        self.filling.cold_shut_arrival_gap_s = _clamp_float(
+            self.filling.cold_shut_arrival_gap_s, 0.01, 10.0, 0.5,
+        )
+        self.filling.cold_shut_temp_margin_c = _clamp_float(
+            self.filling.cold_shut_temp_margin_c, 0.0, 200.0, 25.0,
+        )
+        self.filling.entrapment_check_interval = _clamp_int(
+            self.filling.entrapment_check_interval, 1, 1000, 50,
+        )
         self.filling.filter.porosity = _clamp_float(
             self.filling.filter.porosity, 0.50, 0.95, 0.85,
         )
@@ -496,6 +511,9 @@ class SolidificationParameters:
                 'inlet_mode_code': self.filling.inlet_mode_code,
                 'pour_mode_code': self.filling.pour_mode_code,
                 'vent_risers': self.filling.vent_risers,
+                'cold_shut_arrival_gap_s': self.filling.cold_shut_arrival_gap_s,
+                'cold_shut_temp_margin_c': self.filling.cold_shut_temp_margin_c,
+                'entrapment_check_interval': self.filling.entrapment_check_interval,
                 'filter': {
                     'porosity': self.filling.filter.porosity,
                     'pore_diameter_mm': self.filling.filter.pore_diameter_mm,

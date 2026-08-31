@@ -81,6 +81,10 @@ export const MODE_CONTROL: Record<string, ModeControl> = {
   niyama: { legendTitle: 'Niyama Defect Risk', thresholdLabel: 'Min Defect Risk %', defaultThreshold: 30 },
   combined_feed_risk: { legendTitle: 'Combined Feed Risk', thresholdLabel: 'Min Value %', defaultThreshold: 10 },
   fraction_liquid: { legendTitle: 'Fraction Liquid', thresholdLabel: '', defaultThreshold: 30 },
+  // Empty thresholdLabel marks this as a time-sliced mode (Sidebar shows
+  // the timeline scrubber instead of the threshold slider), same as
+  // fraction_liquid above.
+  fill_time: { legendTitle: 'Fill Time', thresholdLabel: '', defaultThreshold: 0 },
   hot_tear: { legendTitle: 'Hot Tear Risk', thresholdLabel: 'Min Risk %', defaultThreshold: 30 },
   sand_burn_in: { legendTitle: 'Sand Burn-In', thresholdLabel: 'Min Risk %', defaultThreshold: 30 },
   feeding_quality: { legendTitle: 'Blocked Feeding', thresholdLabel: 'Min Value %', defaultThreshold: 10 },

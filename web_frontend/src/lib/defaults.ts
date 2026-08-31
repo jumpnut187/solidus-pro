@@ -96,6 +96,9 @@ export const solidificationDefaults = {
     inlet_mode_code: 0,
     pour_mode_code: 0,
     vent_risers: 1,
+    cold_shut_arrival_gap_s: 0.5,
+    cold_shut_temp_margin_c: 25,
+    entrapment_check_interval: 50,
     filter: {
       porosity: 0.85,
       pore_diameter_mm: 2.54,
@@ -172,6 +175,7 @@ export const resultModes = [
   { id: 'niyama', label: 'Niyama Risk', color: '#b85cff' },
   { id: 'combined_feed_risk', label: 'Combined Feed Risk', color: '#f43f5e' },
   { id: 'fraction_liquid', label: 'Fraction Liquid', color: '#ff5c1f' },
+  { id: 'fill_time', label: 'Fill Time', color: '#2f6fed' },
   { id: 'hot_tear', label: 'Hot Tear Risk', color: '#20d3ff' },
   { id: 'sand_burn_in', label: 'Sand Burn-In', color: '#c08142' },
   { id: 'feeding_quality', label: 'Blocked Feeding', color: '#ff2d55' },

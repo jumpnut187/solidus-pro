@@ -5417,7 +5417,30 @@ class SolidificationEngine:
         if not self.fraction_liquid_times:
             return (0.0, 0.0)
         return (self.fraction_liquid_times[0], self.fraction_liquid_times[-1])
-    
+
+    def get_fill_time_range(self) -> Tuple[float, float]:
+        """
+        Get the time range for the Fill Time visualization slider.
+
+        Unlike :meth:`get_fraction_liquid_time_range`, this always starts at
+        0 -- the slider sweeps "voxels filled by time t", not a solidification
+        snapshot window -- and ends at the last finite arrival time. The -1
+        misrun sentinel is excluded from the max so a single misrun cannot
+        collapse the whole slider range.
+
+        Returns:
+            Tuple of (0.0, max_finite_fill_time_s). ``(0.0, 0.0)`` if no
+            filling stage ran, or nothing ever filled.
+        """
+        times = getattr(self, "_fill_arrival_times", None)
+        if times is None:
+            return (0.0, 0.0)
+        times = np.asarray(times, dtype=np.float64)
+        finite = times[times >= 0.0]
+        if finite.size == 0:
+            return (0.0, 0.0)
+        return (0.0, float(np.max(finite)))
+
     def _calculate_feeding_paths(self):
         """
         Calculate feeding paths from risers to casting voxels.
@@ -5759,6 +5782,16 @@ class SolidificationEngine:
         if self.analysis_options.fraction_liquid:
             results['fraction_liquid_times'] = self.fraction_liquid_times
             results['fraction_liquid_snapshots'] = len(self.fraction_liquid_history)
+
+        # Fill time results (mold-filling arrival time per voxel)
+        if self.analysis_options.filling and self._fill_arrival_times is not None:
+            fill_times = np.asarray(self._fill_arrival_times, dtype=np.float64)
+            filled_mask = fill_times >= 0.0
+            results['fill_time_max_s'] = (
+                float(np.max(fill_times[filled_mask])) if np.any(filled_mask) else 0.0
+            )
+            results['fill_time_filled_voxels'] = int(np.sum(filled_mask))
+            results['fill_time_unfilled_voxels'] = int(np.sum(~filled_mask))
         
         # Feeding path results
         if self.analysis_options.feeding_path and self.feeding_path_result is not None:

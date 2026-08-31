@@ -447,14 +447,37 @@ function countActiveResults(
     if (!values.length) return null;
     return values.reduce((count, value) => count + (value >= 0.01 ? 1 : 0), 0);
   }
+  if (resultMode === 'fill_time') {
+    const info = resultFields.fill_time;
+    if (!info) return null;
+    const cutoff = thresholdForResultMode(resultFields, resultMode, threshold, timePercent);
+    let count = 0;
+    for (let i = 0; i < info.values.length; i += 1) {
+      // Misruns always count as "active" (shown) -- they render on their
+      // own always-visible layer, independent of the sweep position.
+      if (info.misrun[i] || info.values[i] >= cutoff) count += 1;
+    }
+    return count;
+  }
   const field = resultFields.fields[resultMode];
   if (!field) return null;
   const cutoff = thresholdForResultMode(resultFields, resultMode, threshold);
   return field.values.reduce((count, value) => count + (Number.isFinite(value) && value >= cutoff ? 1 : 0), 0);
 }
 
-function thresholdForResultMode(resultFields: ResultFieldsPayload, resultMode: string, threshold: number): number {
+function thresholdForResultMode(
+  resultFields: ResultFieldsPayload,
+  resultMode: string,
+  threshold: number,
+  timePercent = 0
+): number {
   if (resultMode === 'niyama_raw') return 0.01;
+  if (resultMode === 'fill_time') {
+    const maxT = resultFields.fill_time?.max_finite_time_s ?? 0;
+    if (maxT <= 0) return 0;
+    const progress = Math.min(1, Math.max(0, timePercent / 100));
+    return maxT * (1 - progress);
+  }
   const fraction = Math.min(1, Math.max(0, threshold / 100));
   if (resultMode === 'feed_modulus') {
     const field = resultFields.fields.feed_modulus;

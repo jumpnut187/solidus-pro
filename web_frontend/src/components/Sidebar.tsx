@@ -73,6 +73,11 @@ export function Sidebar({
   const hasParts = parts.length > 0;
   const control = MODE_CONTROL[resultMode];
   const isFractionLiquid = resultMode === 'fraction_liquid';
+  const isFillTime = resultMode === 'fill_time';
+  // Both modes reuse the same timePercent scrubber instead of the threshold
+  // slider -- fraction_liquid sweeps a solidification snapshot, fill_time
+  // sweeps mold-filling arrival time.
+  const isTimeSliced = isFractionLiquid || isFillTime;
   const bounds = combinedBounds(parts);
 
   function sectionPositionLabel(): string {
@@ -224,7 +229,7 @@ export function Sidebar({
               </select>
             </div>
 
-            {!isFractionLiquid && control && (
+            {!isTimeSliced && control && (
               <div className="threshold-row">
                 <label>{control.thresholdLabel}:</label>
                 <input
@@ -239,11 +244,11 @@ export function Sidebar({
               </div>
             )}
 
-            {isFractionLiquid && (
+            {isTimeSliced && (
               <div className="timeline">
                 <div className="timeline-labels">
-                  <span>Liquid</span>
-                  <span>Solid</span>
+                  <span>{isFillTime ? 'Empty' : 'Liquid'}</span>
+                  <span>{isFillTime ? 'Filled' : 'Solid'}</span>
                 </div>
                 <input
                   type="range"
@@ -264,33 +269,41 @@ export function Sidebar({
                       patchUi({ timePercent: 0 });
                     }}
                   >
-                    Liquidus
+                    {isFillTime ? 'Start of Pour' : 'Liquidus'}
                   </button>
-                  <button
-                    className="mini-button"
-                    disabled={!resultsReady}
-                    onClick={() => {
-                      const playing = !isPlayingTimeline;
-                      setIsPlayingTimeline(playing);
-                      patchUi({ timePercent: playing && timePercent >= 100 ? 0 : timePercent });
-                    }}
-                  >
-                    {isPlayingTimeline ? <Pause size={13} /> : <Play size={13} />}
-                    {isPlayingTimeline ? 'Pause' : 'Play'}
-                  </button>
-                  <label>
-                    Speed
-                    <select
-                      value={flSpeed}
+                  {/* Fill Time has no autoplay wired up (App.tsx's playback
+                      timer is gated to fraction_liquid) -- dragging the
+                      scrubber is the animation for this mode. Showing a
+                      Play button here would just do nothing. */}
+                  {isFractionLiquid && (
+                    <button
+                      className="mini-button"
                       disabled={!resultsReady}
-                      onChange={(e) => patchUi({ flSpeed: Number(e.target.value) })}
+                      onClick={() => {
+                        const playing = !isPlayingTimeline;
+                        setIsPlayingTimeline(playing);
+                        patchUi({ timePercent: playing && timePercent >= 100 ? 0 : timePercent });
+                      }}
                     >
-                      <option value={0.5}>0.5x</option>
-                      <option value={1}>1x</option>
-                      <option value={2}>2x</option>
-                      <option value={4}>4x</option>
-                    </select>
-                  </label>
+                      {isPlayingTimeline ? <Pause size={13} /> : <Play size={13} />}
+                      {isPlayingTimeline ? 'Pause' : 'Play'}
+                    </button>
+                  )}
+                  {isFractionLiquid && (
+                    <label>
+                      Speed
+                      <select
+                        value={flSpeed}
+                        disabled={!resultsReady}
+                        onChange={(e) => patchUi({ flSpeed: Number(e.target.value) })}
+                      >
+                        <option value={0.5}>0.5x</option>
+                        <option value={1}>1x</option>
+                        <option value={2}>2x</option>
+                        <option value={4}>4x</option>
+                      </select>
+                    </label>
+                  )}
                   <span className="timeline-time">{timePercent}%</span>
                 </div>
               </div>

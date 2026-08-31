@@ -195,6 +195,30 @@ def _part_assignment_contains_worker(chunk_idx: int, chunk_indices: np.ndarray,
     return chunk_idx, chunk_indices[inside_mask]
 
 
+
+def _build_kdtree(points, **kwargs):
+    """
+    Build a cKDTree with midpoint splitting instead of median splitting.
+
+    ``balanced_tree=False`` is a crash fix, not a tuning knob. SciPy's default
+    median rule recurses to a depth set by the data distribution, and on voxel
+    centres it can exceed the 8 MB macOS main-thread stack and take the whole
+    process down with SIGSEGV -- no exception, no traceback, just exit 139.
+
+    Reproduced before the fix on thick_thin_test.stl at base_voxel_size 0.30 and
+    0.17, and on the Filling_Test gating assembly at 0.25 and 0.40; all four
+    survive with midpoint splitting. Confirmed as stack exhaustion by running
+    the same crashing cases on a 256 MB thread stack, where they pass unchanged.
+
+    The midpoint rule bounds recursion by the bounding box rather than by the
+    points, which is the natural fit for a uniform lattice. Query results are
+    unaffected -- only the tree's internal structure differs -- and
+    tests/test_voxel_mesh_kdtree.py asserts that.
+    """
+    kwargs.setdefault("balanced_tree", False)
+    return cKDTree(points, **kwargs)
+
+
 class AdaptiveVoxelMesh:
     """
     Creates adaptive voxel mesh for casting simulation
@@ -969,7 +993,7 @@ class AdaptiveVoxelMesh:
         refined = []
         
         # Build KD-tree for mesh vertices
-        vertex_tree = cKDTree(trimesh_obj.vertices)
+        vertex_tree = _build_kdtree(trimesh_obj.vertices)
         
         for voxel in voxels:
             center = voxel['center']
@@ -1067,7 +1091,7 @@ class AdaptiveVoxelMesh:
         )
         
         # Build KD-tree for voxel centers
-        voxel_tree = cKDTree(self.voxel_centers)
+        voxel_tree = _build_kdtree(self.voxel_centers)
         
         # Identify surface voxels - use VECTORIZED batch queries for speed
         print(f"  Computing surface areas for {n_voxels:,} voxels...")
@@ -1149,7 +1173,7 @@ class AdaptiveVoxelMesh:
         
         if len(surface_indices) > 0:
             surface_centers = self.voxel_centers[surface_indices]
-            surface_tree = cKDTree(surface_centers)
+            surface_tree = _build_kdtree(surface_centers)
             
             # OPTIMIZED: Query all voxels at once (vectorized) instead of one at a time
             print(f"    Querying distances for {n_voxels:,} voxels to {len(surface_indices):,} surface voxels...")
@@ -1234,7 +1258,7 @@ class AdaptiveVoxelMesh:
         else:
             # Standard KD-tree approach
             print(f"  Building KD-tree for neighbor search...")
-            tree = cKDTree(self.voxel_centers)
+            tree = _build_kdtree(self.voxel_centers)
             
             # Pre-compute arrays
             voxel_centers_array = np.asarray(self.voxel_centers)
@@ -1661,7 +1685,7 @@ class AdaptiveVoxelMesh:
         """
         # Build KD-tree for type2 voxels
         type2_centers = voxel_centers[type2_indices]
-        type2_tree = cKDTree(type2_centers)
+        type2_tree = _build_kdtree(type2_centers)
         
         bridges_added = 0
         interface_search_radius = self.base_voxel_size * 3.0  # Extended radius for interfaces

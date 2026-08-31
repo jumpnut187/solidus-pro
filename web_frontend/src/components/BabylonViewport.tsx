@@ -74,6 +74,7 @@ const resultColors: Record<string, Color3> = {
   niyama: new Color3(0.72, 0.24, 1),
   combined_feed_risk: new Color3(1, 0.08, 0.28),
   fraction_liquid: new Color3(1, 0.23, 0.02),
+  fill_time: new Color3(0.3, 0.45, 0.95),
   hot_tear: new Color3(0.05, 0.78, 1),
   sand_burn_in: new Color3(0.74, 0.42, 0.18),
   feeding_quality: new Color3(1, 0.05, 0.2),
@@ -83,6 +84,15 @@ const resultColors: Record<string, Color3> = {
   sdas: new Color3(1, 0.78, 0.12),
   predicted_uts: new Color3(0.95, 0.08, 0.08)
 };
+
+/**
+ * Color for a voxel the mold-filling stage never reached (a misrun), in the
+ * Fill Time visualization. Every part color and every resultColors entry
+ * above carries a hue; a neutral, hue-free grey reads unmistakably as "this
+ * is a void, not a colored material" -- same choice, same reasoning, as
+ * FILL_TIME_MISRUN_COLOR in the desktop viewer (ui/visualizer.py).
+ */
+const MISRUN_COLOR = new Color3(0.55, 0.55, 0.55);
 
 type ActiveVoxelSet = {
   centers: number[];
@@ -119,6 +129,7 @@ export function BabylonViewport({
   const partMeshesRef = useRef<Map<string, Mesh>>(new Map());
   const resultMeshRef = useRef<Mesh | null>(null);
   const particleRef = useRef<ParticleSystem | null>(null);
+  const misrunMeshRef = useRef<Mesh | null>(null);
   const pourMarkerRef = useRef<Mesh | null>(null);
   const onPartSelectedRef = useRef(onPartSelected);
   onPartSelectedRef.current = onPartSelected;
@@ -414,6 +425,63 @@ export function BabylonViewport({
     particleRef.current = particleSystem;
   }, [resultFields, resultMode, threshold, timePercent, showResults]);
 
+  // Fill Time misruns render as their own always-visible layer, independent
+  // of the sweep position -- that is the one thing this whole mode exists
+  // to surface, so it must never be gated behind the timeline slider the
+  // way the ramp above is.
+  useEffect(() => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+    let mesh = misrunMeshRef.current;
+    if (!mesh) {
+      mesh = MeshBuilder.CreateBox('fill-time-misrun-instance-source', { size: 1 }, scene);
+      mesh.renderingGroupId = 2;
+      misrunMeshRef.current = mesh;
+    }
+    const info = resultMode === 'fill_time' ? resultFields?.fill_time : null;
+    const misrunFlags = info?.misrun ?? [];
+    const misrunIndices: number[] = [];
+    for (let i = 0; i < misrunFlags.length; i += 1) {
+      if (misrunFlags[i]) misrunIndices.push(i);
+    }
+    if (!info || !showResults || !misrunIndices.length || !resultFields) {
+      mesh.thinInstanceSetBuffer('matrix', new Float32Array(), 16);
+      mesh.setEnabled(false);
+      return;
+    }
+    mesh.setEnabled(true);
+    const sizes = resultFields.sizes.length ? resultFields.sizes : [0.1];
+    const sortedSizes = [...sizes].sort((a, b) => a - b);
+    const baseSize = sortedSizes[Math.floor(sortedSizes.length / 2)] ?? 0.1;
+    const matrices = new Float32Array(misrunIndices.length * 16);
+    const rotation = Quaternion.Identity();
+    for (let i = 0; i < misrunIndices.length; i += 1) {
+      const sourceIndex = misrunIndices[i];
+      const centerOffset = sourceIndex * 3;
+      const size = (sizes[sourceIndex] ?? baseSize) * 0.9;
+      const matrix = Matrix.Compose(
+        new Vector3(size, size, size),
+        rotation,
+        new Vector3(
+          resultFields.centers[centerOffset] ?? 0,
+          resultFields.centers[centerOffset + 1] ?? 0,
+          resultFields.centers[centerOffset + 2] ?? 0
+        )
+      );
+      matrix.copyToArray(matrices, i * 16);
+    }
+    mesh.thinInstanceSetBuffer('matrix', matrices, 16, true);
+    const mat = (mesh.material as PBRMaterial | null) ?? new PBRMaterial('fill-time-misrun-mat', scene);
+    mat.albedoColor = MISRUN_COLOR;
+    mat.emissiveColor = MISRUN_COLOR.scale(0.12);
+    mat.metallic = 0.05;
+    mat.roughness = 0.6;
+    mat.alpha = 0.85;
+    mat.backFaceCulling = false;
+    mesh.material = mat;
+    applyClipping([...partMeshesRef.current.values()], mesh, section);
+  }, [resultFields, resultMode, showResults, section]);
+
   useEffect(() => {
     const camera = cameraRef.current;
     if (!camera) return;
@@ -620,9 +688,16 @@ function deriveActiveVoxels(
   if (!resultFields || resultFields.empty || !resultFields.centers.length) return null;
   const values = valuesForMode(resultFields, resultMode, timePercent);
   if (!values.length) return null;
-  const cutoff = thresholdForMode(resultFields, resultMode, threshold);
+  const cutoff = thresholdForMode(resultFields, resultMode, threshold, timePercent);
+  const isFillTime = resultMode === 'fill_time';
+  const misrun = isFillTime ? resultFields.fill_time?.misrun : undefined;
   const active: Array<{ index: number; value: number }> = [];
   for (let i = 0; i < values.length; i += 1) {
+    // Misruns are rendered by a separate, always-visible layer (see the
+    // dedicated fill-time-misrun effect below) -- never fold them into this
+    // sweep-thresholded set, or they would flash the ramp color as the
+    // slider crosses their (sentinel) value instead of staying grey.
+    if (misrun?.[i]) continue;
     const value = values[i] ?? 0;
     if (Number.isFinite(value) && value >= cutoff) {
       active.push({ index: i, value });
@@ -665,6 +740,9 @@ function valuesForMode(
   resultMode: string,
   timePercent: number
 ): number[] {
+  if (resultMode === 'fill_time') {
+    return resultFields.fill_time?.values ?? [];
+  }
   if (resultMode !== 'fraction_liquid') {
     return resultFields.fields[resultMode]?.values ?? [];
   }
@@ -678,8 +756,24 @@ function valuesForMode(
   return resultFields.solidification.normalized_times.map((time) => Math.max(0, Math.min(1, (time - progress) / frontWidth)));
 }
 
-function thresholdForMode(resultFields: ResultFieldsPayload, resultMode: string, threshold: number): number {
+function thresholdForMode(
+  resultFields: ResultFieldsPayload,
+  resultMode: string,
+  threshold: number,
+  timePercent = 0
+): number {
   if (resultMode === 'fraction_liquid' || resultMode === 'niyama_raw') return 0.01;
+  if (resultMode === 'fill_time') {
+    // Values are pre-transformed server-side to `max_finite - arrival_time`
+    // (see _fill_time_payload in web/payloads.py), so a cutoff that FALLS as
+    // timePercent rises reveals progressively later arrivals -- the sweep
+    // animates forward even though the comparison direction (value >=
+    // cutoff) is the same one every other mode uses.
+    const maxT = resultFields.fill_time?.max_finite_time_s ?? 0;
+    if (maxT <= 0) return 0;
+    const progress = Math.min(1, Math.max(0, timePercent / 100));
+    return maxT * (1 - progress);
+  }
   const fraction = Math.min(1, Math.max(0, threshold / 100));
   if (resultMode === 'feed_modulus') {
     const field = resultFields.fields.feed_modulus;

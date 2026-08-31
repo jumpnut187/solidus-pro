@@ -477,6 +477,12 @@ class _Alloy:
     density_liquid = 7200.0
     pouring_temp = 1600.0
     surface_tension = 1.85
+    # F2 thermal coupling: physics.filling advects and cools the fill, which
+    # needs the same material properties the solidification solve already
+    # uses (see AlloyProperties in core/materials.py).
+    thermal_conductivity = 30.0
+    specific_heat = 600.0
+    liquidus_temp = 1450.0
 
 
 def _column_mesh(nz=6, dx=0.25):
@@ -573,10 +579,14 @@ class FillingResultTests(unittest.TestCase):
     def test_temperature_field_is_finite(self) -> None:
         self.assertTrue(bool(np.all(np.isfinite(self.result.temperature_c))))
 
-    def test_temperatures_are_pour_or_mold_only(self) -> None:
-        """F1 is isothermal: no advection yet, so only two values may appear."""
-        values = set(np.unique(self.result.temperature_c).tolist())
-        self.assertTrue(values.issubset({1600.0, 21.0}), values)
+    def test_temperatures_are_bounded_by_pour_and_mold(self) -> None:
+        """
+        F2 advects and cools the fill, so filled voxels are no longer pinned
+        to the pour temperature exactly -- but the scheme must not overshoot
+        either bound (see tests/test_filling_thermal.py for the general case).
+        """
+        self.assertTrue(bool(np.all(self.result.temperature_c <= 1600.0 + 1e-6)))
+        self.assertTrue(bool(np.all(self.result.temperature_c >= 21.0 - 1e-6)))
 
     def test_the_inlet_filled(self) -> None:
         self.assertGreater(self.result.inlet_voxel_count, 0)
@@ -599,8 +609,9 @@ class FillingResultTests(unittest.TestCase):
             np.testing.assert_allclose(self.result.temperature_c[unfilled], 21.0)
 
     def test_filled_voxels_have_a_nonnegative_arrival_time(self) -> None:
-        filled = self.result.temperature_c == 1600.0
-        self.assertTrue(bool(np.all(self.result.fill_time_s[filled] >= 0.0)))
+        """Anything warmer than mold temperature must have actually arrived."""
+        warmed = self.result.temperature_c > 21.0 + 1e-6
+        self.assertTrue(bool(np.all(self.result.fill_time_s[warmed] >= 0.0)))
 
     def test_progress_was_reported(self) -> None:
         self.assertTrue(any("Filling:" in m for m in self.messages))

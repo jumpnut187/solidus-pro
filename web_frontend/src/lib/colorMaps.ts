@@ -6,6 +6,9 @@ export const MODE_COLOR_STOPS: Record<string, string[]> = {
   niyama: ['#0d1b3e', '#1e5fb4', '#3fa7e8', '#f2c94c', '#e5484d'],
   combined_feed_risk: ['#2e7d32', '#a4c639', '#ffeb3b', '#ff9800', '#e53935'],
   fraction_liquid: ['#440154', '#3b528b', '#21918c', '#5ec962', '#fde725'],
+  // Blue (fills first) -> red (fills last), the conventional flow-front
+  // palette so the ramp reads as a wavefront sweeping through the casting.
+  fill_time: ['#0d1b6b', '#1e5fb4', '#8a4ec0', '#e0485c', '#ff3b1f'],
   hot_tear: ['#0b1e3d', '#1e5fa8', '#3fd8f0', '#f2e94c', '#e5484d'],
   sand_burn_in: ['#1a0f04', '#6b3a12', '#c08142', '#e8c08a', '#fdf0da'],
   feeding_quality: ['#1c0700', '#8a2408', '#ff4d00', '#ffb35c', '#fff3d6'],

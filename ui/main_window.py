@@ -2024,6 +2024,12 @@ class SolidificationParamsDialog(DraggableDialog):
          "Pour mode: 0 = lip (top) pour, 1 = bottom pour."),
         ("filling", "vent_risers", "Vent Risers Enabled", 1, 0, 1, 1, 0, "bool",
          "Whether open risers act as air vents during filling (1=on, 0=off)."),
+        ("filling", "cold_shut_arrival_gap_s", "Cold Shut Arrival Gap", 0.5, 0.01, 10.0, 0.05, 2, "seconds",
+         "Minimum arrival-time difference between converging fronts to count as a cold-shut candidate."),
+        ("filling", "cold_shut_temp_margin_c", "Cold Shut Temp Margin", 25.0, 0.0, 200.0, 5.0, 0, "°C",
+         "Degrees above the liquidus still counted as cold enough to risk a cold shut."),
+        ("filling", "entrapment_check_interval", "Entrapment Check Interval", 50, 1, 1000, 10, 0, "steps",
+         "Lattice steps between air-entrapment connected-component checks during the fill."),
         ("filling", "porosity", "Filter Porosity", 0.85, 0.50, 0.95, 0.01, 2, "fraction",
          "Ceramic filter media porosity (void fraction)."),
         ("filling", "pore_diameter_mm", "Filter Pore Diameter", 2.54, 0.5, 8.0, 0.1, 2, "mm",
@@ -2967,7 +2973,7 @@ class MainWindow(QMainWindow):
         # Result type selector
         vis_layout.addWidget(QLabel("Result Type:"))
         self.result_type_combo = QComboBox()
-        self.result_type_combo.addItems(["Shrinkage/Porosity", "Feed Modulus", "Hot Spots", "Niyama Criterion", "Fraction Liquid"])
+        self.result_type_combo.addItems(["Shrinkage/Porosity", "Feed Modulus", "Hot Spots", "Niyama Criterion", "Fraction Liquid", "Fill Time"])
         self.result_type_combo.currentTextChanged.connect(self._on_result_type_changed)
         self.result_type_combo.setEnabled(False)  # Enable after simulation
         vis_layout.addWidget(self.result_type_combo)
@@ -2990,15 +2996,21 @@ class MainWindow(QMainWindow):
         time_slider_layout = QVBoxLayout()
         time_slider_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Header with liquid/solid indicators
+        # Header with state indicators. The text swaps between the
+        # Fraction Liquid and Fill Time framings in _on_result_type_changed,
+        # since both modes reuse this same slider widget rather than each
+        # getting its own.
         time_header_layout = QHBoxLayout()
-        time_header_layout.addWidget(QLabel("🟡 Liquid"))
+        self.time_slider_left_label = QLabel("🟡 Liquid")
+        time_header_layout.addWidget(self.time_slider_left_label)
         time_header_layout.addStretch()
-        time_header_layout.addWidget(QLabel("Solidification Time"))
+        self.time_slider_title_label = QLabel("Solidification Time")
+        time_header_layout.addWidget(self.time_slider_title_label)
         time_header_layout.addStretch()
-        time_header_layout.addWidget(QLabel("Solid ⬜"))
+        self.time_slider_right_label = QLabel("Solid ⬜")
+        time_header_layout.addWidget(self.time_slider_right_label)
         time_slider_layout.addLayout(time_header_layout)
-        
+
         self.time_slider = QSlider(Qt.Horizontal)
         self.time_slider.setRange(0, FRACTION_LIQUID_TIME_SLIDER_MAX)
         self.time_slider.setValue(0)
@@ -3588,6 +3600,7 @@ class MainWindow(QMainWindow):
             "Gas Entrapment": "gas_entrapment",
             "Gas Porosity Risk": "gas_porosity",
             "Fraction Liquid": "fraction_liquid",
+            "Fill Time": "fill_time",
             # Advanced analysis modes
             "Feeding Quality": "feeding_quality",
             "Thermal Stress": "thermal_stress",
@@ -3598,21 +3611,28 @@ class MainWindow(QMainWindow):
         }.get(result_type, "shrinkage")
         
         print(f"DEBUG: Visualization mode set to: {self._current_vis_mode}")
-        
-        # Show/hide time slider for fraction liquid
+
+        # Show/hide time slider for fraction liquid and fill time -- both
+        # sweep the same slider widget, just over a different scalar field.
         is_fraction_liquid = (self._current_vis_mode == "fraction_liquid")
+        is_fill_time = (self._current_vis_mode == "fill_time")
+        is_time_sliced = is_fraction_liquid or is_fill_time
         is_hot_tear = (self._current_vis_mode == "hot_tear")
-        print(f"DEBUG: Setting time_slider_widget visible: {is_fraction_liquid}")
-        self.time_slider_widget.setVisible(is_fraction_liquid)
-        
-        # Only hide threshold slider for fraction liquid (uses time slider instead)
-        # Hot tear now uses threshold to filter within identified zones
-        hide_threshold = is_fraction_liquid
+        print(f"DEBUG: Setting time_slider_widget visible: {is_time_sliced}")
+        self.time_slider_widget.setVisible(is_time_sliced)
+
+        # Only hide threshold slider for the time-sliced modes (they use the
+        # time slider instead). Hot tear uses threshold to filter within
+        # identified zones.
+        hide_threshold = is_time_sliced
         self.threshold_slider.setVisible(not hide_threshold)
         self.threshold_label.setVisible(not hide_threshold)
         self.threshold_label_title.setVisible(not hide_threshold)
-        
+
         if is_fraction_liquid:
+            self.time_slider_left_label.setText("🟡 Liquid")
+            self.time_slider_title_label.setText("Solidification Time")
+            self.time_slider_right_label.setText("Solid ⬜")
             self.threshold_slider.setValue(1)  # Show all voxels with >1% liquid
             # Check if simulation has fraction liquid data
             if self.simulation_worker and self.simulation_worker.simulation:
@@ -3624,6 +3644,18 @@ class MainWindow(QMainWindow):
                     self._update_time_slider(self.time_slider.value())
                 else:
                     print("DEBUG: NO fraction liquid snapshots found!")
+            else:
+                print("DEBUG: No simulation worker or simulation object!")
+        elif is_fill_time:
+            self.time_slider_left_label.setText("⬛ Empty")
+            self.time_slider_title_label.setText("Fill Time")
+            self.time_slider_right_label.setText("Filled 🟦")
+            if self.simulation_worker and self.simulation_worker.simulation:
+                sim = self.simulation_worker.simulation
+                min_time, max_time = sim.get_fill_time_range()
+                print(f"DEBUG: Fill time range: {min_time:.1f}s to {max_time:.1f}s")
+                # Trigger initial visualization at slider position
+                self._update_time_slider(self.time_slider.value())
             else:
                 print("DEBUG: No simulation worker or simulation object!")
         elif is_hot_tear:
@@ -3779,7 +3811,16 @@ class MainWindow(QMainWindow):
         return max(minimum_display_threshold, min(max_intensity, requested_threshold)), True
 
     def _update_time_slider(self, value):
-        """Handle time slider change for fraction liquid visualization"""
+        """Handle time slider change for the active time-sliced visualization.
+
+        The slider is shared between Fraction Liquid and Fill Time; each
+        mode maps the same 0..FRACTION_LIQUID_TIME_SLIDER_MAX raw value onto
+        its own time range and scalar field.
+        """
+        if self._current_vis_mode == "fill_time":
+            self._update_fill_time_slider(value)
+            return
+
         if self.simulation_worker is None or self.simulation_worker.simulation is None:
             return
 
@@ -3852,7 +3893,62 @@ class MainWindow(QMainWindow):
             # Update legend without a second full render (load_fraction_liquid
             # already rendered this tick).
             self.visualizer.update_legend("Fraction Liquid", 0.0, 1.0, render=False)
-    
+
+    def _update_fill_time_slider(self, value):
+        """Handle time slider change while in Fill Time mode.
+
+        Unlike the fraction-liquid path, there is no snapshot history to
+        query -- the slider position is mapped directly onto seconds and
+        used as a threshold against the per-voxel arrival-time field.
+        """
+        if self.simulation_worker is None or self.simulation_worker.simulation is None:
+            return
+
+        sim = self.simulation_worker.simulation
+        fill_times = getattr(sim, "_fill_arrival_times", None)
+        if fill_times is None:
+            print("DEBUG: No fill time data available!")
+            return
+
+        min_time, max_time = sim.get_fill_time_range()
+        time_value = self._map_fraction_liquid_slider_time(value, min_time, max_time)
+
+        fill_times_arr = np.asarray(fill_times, dtype=np.float64)
+        filled_by_now = int(np.sum((fill_times_arr >= 0.0) & (fill_times_arr <= time_value)))
+        misrun_count = int(np.sum(fill_times_arr < 0.0))
+        self.time_label.setText(
+            f"{time_value:.2f}s - {filled_by_now:,} filled, {misrun_count:,} never fill"
+        )
+
+        self._update_fill_time_visualization(time_value, slider_value=value)
+
+    def _update_fill_time_visualization(self, time_seconds, slider_value=None):
+        """Update the Fill Time visualization at a given arrival-time threshold."""
+        if self.simulation_worker is None or self.simulation_worker.simulation is None:
+            return
+
+        voxel_mesh = self.simulation_worker.voxel_mesh
+        if voxel_mesh is None or voxel_mesh.voxel_centers is None:
+            return
+
+        sim = self.simulation_worker.simulation
+        fill_times = getattr(sim, "_fill_arrival_times", None)
+        if fill_times is None:
+            return
+
+        _, max_time = sim.get_fill_time_range()
+        self.visualizer.load_fill_time(
+            voxel_mesh.voxel_centers,
+            voxel_mesh.voxel_sizes,
+            np.asarray(fill_times, dtype=np.float64),
+            time_seconds,
+            max_time,
+            cache_key=slider_value,
+        )
+        self.visualizer.update_legend(
+            "Fill Time", 0.0, max_time if max_time > 0.0 else 1.0, "s", render=False
+        )
+
     def _on_mesh_settings_confirmed(self, voxel_size, refinement, memory_mode):
         """Handle mesh settings confirmation from dialog"""
         self._current_voxel_size = voxel_size
@@ -5488,6 +5584,13 @@ class MainWindow(QMainWindow):
             available_types.append("Gas Porosity Risk")
         if self._analysis_options.get('fraction_liquid', False):
             available_types.append("Fraction Liquid")
+        if (
+            self._analysis_options.get('filling', False)
+            and self.simulation_worker is not None
+            and self.simulation_worker.simulation is not None
+            and getattr(self.simulation_worker.simulation, "_fill_arrival_times", None) is not None
+        ):
+            available_types.append("Fill Time")
         # Advanced analysis types
         if self._analysis_options.get('feeding_path', False):
             available_types.append("Feeding Quality")
@@ -5524,6 +5627,7 @@ class MainWindow(QMainWindow):
                 "Gas Entrapment": "gas_entrapment",
                 "Gas Porosity Risk": "gas_porosity",
                 "Fraction Liquid": "fraction_liquid",
+                "Fill Time": "fill_time",
                 "Feeding Quality": "feeding_quality",
                 "Thermal Stress": "thermal_stress",
                 "Distortion": "distortion",
@@ -5569,6 +5673,16 @@ class MainWindow(QMainWindow):
                 max_time,
             )
             self._update_fraction_liquid_visualization(
+                time_value, slider_value=self.time_slider.value()
+            )
+        elif self._current_vis_mode == 'fill_time':
+            min_time, max_time = simulation.get_fill_time_range()
+            time_value = self._map_fraction_liquid_slider_time(
+                self.time_slider.value(),
+                min_time,
+                max_time,
+            )
+            self._update_fill_time_visualization(
                 time_value, slider_value=self.time_slider.value()
             )
         # Advanced analysis visualizations
@@ -6256,7 +6370,9 @@ class MainWindow(QMainWindow):
             title = "Hot Tear Risk"
         elif self._current_vis_mode == 'fraction_liquid':
             title = "Fraction Liquid"
-        
+        elif self._current_vis_mode == 'fill_time':
+            title = "Fill Time"
+
         self.visualizer.show_color_bar(title, show)
         
         # Set additional legend info

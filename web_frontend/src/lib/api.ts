@@ -138,6 +138,20 @@ export type ResultFieldsPayload = {
     frames: number[][];
     frame_percents: number[];
   };
+  /**
+   * Fill Time sweep field: values are pre-transformed to
+   * `max_finite_time_s - arrival_time` so the shared "value >= cutoff"
+   * active-voxel filter sweeps later arrivals in as the slider advances.
+   * `misrun[i]` flags a voxel the fill never reached -- always rendered,
+   * regardless of the sweep position. Null/absent when no filling stage ran.
+   */
+  fill_time?: {
+    values: number[];
+    misrun: boolean[];
+    max_finite_time_s: number;
+    filled_voxels: number;
+    unfilled_voxels: number;
+  } | null;
   source_count: number;
   sample_count: number;
 };

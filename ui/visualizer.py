@@ -47,6 +47,18 @@ POUR_LOCATION_MARKER_COLOR = (1.0, 0.0, 1.0)
 #: down -- matches the fixed -Z gravity in physics.filling.gravity_force.
 POUR_DIRECTION = (0.0, 0.0, -1.0)
 
+#: Color for a voxel the mold-filling stage never reached (a misrun), in the
+#: Fill Time visualization. Every other color in the scene carries a hue --
+#: the teal/yellow gating system, orange risers, dark blue-grey chills, the
+#: magenta pour marker, and the blue-to-red fill-time ramp itself -- so a
+#: neutral, hue-free grey is unmistakable as "this is a void, not a colored
+#: material". A near-black grey was considered and rejected: the renderer
+#: background is a dark blue-grey (0.1, 0.1, 0.15), and anything much darker
+#: than this would nearly vanish against it. Mid-grey reads clearly against
+#: that background while staying visually distinct from every part/marker
+#: color in the scene.
+FILL_TIME_MISRUN_COLOR = (0.55, 0.55, 0.55)
+
 
 # ==================== Color Map Definitions ====================
 
@@ -918,7 +930,10 @@ class CastingVisualizer(QWidget):
         
         # Fraction liquid actor
         self.fraction_liquid_actor = None
-        
+
+        # Fill time actor (mold-filling arrival-time visualization)
+        self.fill_time_actor = None
+
         # Data
         self.current_mesh = None
         self.current_shrinkage_data = None
@@ -928,7 +943,8 @@ class CastingVisualizer(QWidget):
         self.current_sand_burn_in_data = None
         self.current_gas_porosity_data = None
         self.current_fraction_liquid_data = None
-        
+        self.current_fill_time_data = None
+
         # Pre-rendered shrinkage cache for fast threshold updates
         # Maps threshold levels (0.05, 0.10, ..., 1.0) to pre-built VTK polydata
         self._shrinkage_cache: Dict[float, vtk.vtkPolyData] = {}
@@ -952,6 +968,13 @@ class CastingVisualizer(QWidget):
         self._fraction_liquid_cache: OrderedDict[int, vtk.vtkPolyData] = OrderedDict()
         self._fraction_liquid_cache_point_count = 0
         self._fraction_liquid_load_count = 0
+
+        # Fill time frame cache: slider frame value -> rendered polydata.
+        # Mirrors the fraction liquid cache above -- same threshold-sweep
+        # slider mechanism, just keyed to a different scalar field.
+        self._fill_time_cache: OrderedDict[int, vtk.vtkPolyData] = OrderedDict()
+        self._fill_time_cache_point_count = 0
+        self._fill_time_load_count = 0
         
         # ==================== NEW FEATURES ====================
         
@@ -1501,7 +1524,9 @@ class CastingVisualizer(QWidget):
             self._clip_actor(self.niyama_actor, enabled_planes)
         if self.fraction_liquid_actor:
             self._clip_actor(self.fraction_liquid_actor, enabled_planes)
-        
+        if self.fill_time_actor:
+            self._clip_actor(self.fill_time_actor, enabled_planes)
+
         # Apply to mesh actor
         if self.mesh_actor:
             self._clip_actor(self.mesh_actor, enabled_planes)
@@ -1528,8 +1553,8 @@ class CastingVisualizer(QWidget):
     
     def _remove_cross_section_clipping(self):
         """Remove all clipping from actors"""
-        actors = [self.shrinkage_actor, self.hotspot_actor, self.niyama_actor, 
-                  self.fraction_liquid_actor, self.mesh_actor]
+        actors = [self.shrinkage_actor, self.hotspot_actor, self.niyama_actor,
+                  self.fraction_liquid_actor, self.fill_time_actor, self.mesh_actor]
         actors.extend(self.part_actors.values())
         
         for actor in actors:
@@ -2117,6 +2142,8 @@ class CastingVisualizer(QWidget):
         self._gas_porosity_cache.clear()
         self._fraction_liquid_cache.clear()
         self._fraction_liquid_cache_point_count = 0
+        self._fill_time_cache.clear()
+        self._fill_time_cache_point_count = 0
 
     def _store_fraction_liquid_cache(self, key: int, polydata: vtk.vtkPolyData) -> None:
         """Store a rendered fraction-liquid frame under an LRU, point-budgeted cache."""
@@ -2133,6 +2160,22 @@ class CastingVisualizer(QWidget):
         ) and len(self._fraction_liquid_cache) > 1:
             _, oldest = self._fraction_liquid_cache.popitem(False)  # oldest entry
             self._fraction_liquid_cache_point_count -= oldest.GetNumberOfPoints()
+
+    def _store_fill_time_cache(self, key: int, polydata: vtk.vtkPolyData) -> None:
+        """Store a rendered fill-time frame under an LRU, point-budgeted cache."""
+        if key in self._fill_time_cache:
+            self._fill_time_cache.move_to_end(key)
+            return
+
+        self._fill_time_cache[key] = polydata
+        self._fill_time_cache_point_count += polydata.GetNumberOfPoints()
+
+        while (
+            len(self._fill_time_cache) > self.FRACTION_LIQUID_CACHE_MAX_FRAMES
+            or self._fill_time_cache_point_count > self.FRACTION_LIQUID_CACHE_MAX_POINTS
+        ) and len(self._fill_time_cache) > 1:
+            _, oldest = self._fill_time_cache.popitem(False)  # oldest entry
+            self._fill_time_cache_point_count -= oldest.GetNumberOfPoints()
 
     def _get_shrinkage_threshold_levels(self, current_threshold: float) -> List[float]:
         """Return nearby threshold levels that should be pre-built."""
@@ -2994,9 +3037,175 @@ class CastingVisualizer(QWidget):
         glyph3D.SetInputArrayToProcess(0, 0, 0, 0, "Scales")
         glyph3D.SetColorModeToColorByScalar()
         glyph3D.Update()
-        
+
         return glyph3D.GetOutput()
-    
+
+    def load_fill_time(self, voxel_centers: np.ndarray,
+                        voxel_sizes: np.ndarray,
+                        fill_time: np.ndarray,
+                        time_threshold: float,
+                        max_fill_time_s: float,
+                        cache_key: Optional[int] = None):
+        """
+        Load and display the Fill Time visualization.
+
+        Shows metal arrival progress as the mold fills: voxels the pour has
+        reached by ``time_threshold`` render colored by how early they
+        arrived; voxels the fill never reaches (misruns) always render in
+        :data:`FILL_TIME_MISRUN_COLOR`, regardless of the slider position --
+        that is the whole point of surfacing them.
+
+        Args:
+            voxel_centers: Nx3 array of voxel centers.
+            voxel_sizes: N array of voxel sizes.
+            fill_time: N array of per-voxel arrival time in seconds, with -1
+                marking a voxel the fill never reached.
+            time_threshold: Sweep position in seconds. Voxels with
+                ``0 <= fill_time <= time_threshold`` are shown, colored by
+                arrival time; later voxels are hidden until the sweep
+                reaches them.
+            max_fill_time_s: The full-timeline fill time (slider maximum),
+                used to normalize the arrival-time color ramp so its span
+                does not shift as the sweep moves.
+            cache_key: Deterministic slider frame value used to reuse the
+                previously rendered geometry for the same frame. When None
+                the geometry is always rebuilt.
+        """
+        if self.fill_time_actor is not None:
+            self.renderer.RemoveActor(self.fill_time_actor)
+
+        self.current_fill_time_data = (voxel_centers, voxel_sizes, fill_time, max_fill_time_s)
+
+        polydata = None
+        if cache_key is not None and cache_key in self._fill_time_cache:
+            polydata = self._fill_time_cache[cache_key]
+            self._fill_time_cache.move_to_end(cache_key)
+        else:
+            polydata = self._build_fill_time_geometry(
+                voxel_centers, voxel_sizes, fill_time, time_threshold, max_fill_time_s
+            )
+            if (
+                polydata is not None
+                and cache_key is not None
+                and polydata.GetNumberOfPoints() > 0
+            ):
+                self._store_fill_time_cache(cache_key, polydata)
+
+        if polydata is None or polydata.GetNumberOfPoints() == 0:
+            print("No fill-time voxels to display")
+            return
+
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputData(polydata)
+        mapper.SetScalarModeToUsePointData()
+
+        self.fill_time_actor = vtk.vtkActor()
+        self.fill_time_actor.SetMapper(mapper)
+
+        prop = self.fill_time_actor.GetProperty()
+        prop.SetOpacity(0.85)
+        prop.SetInterpolationToFlat()
+
+        self.renderer.AddActor(self.fill_time_actor)
+        self.render_window.Render()
+
+        self._fill_time_load_count += 1
+        if self._fill_time_load_count % self.FRACTION_LIQUID_LOAD_PRINT_INTERVAL == 0:
+            num_displayed = polydata.GetNumberOfCells() // 6
+            print(f"Displayed {num_displayed:,} fill-time voxels")
+
+    def _build_fill_time_geometry(self, voxel_centers: np.ndarray,
+                                   voxel_sizes: np.ndarray,
+                                   fill_time: np.ndarray,
+                                   time_threshold: float,
+                                   max_fill_time_s: float) -> Optional[vtk.vtkPolyData]:
+        """
+        Build Fill Time visualization geometry.
+
+        Color convention:
+        - Neutral grey (``FILL_TIME_MISRUN_COLOR``) = the fill never reached
+          this voxel (misrun). Always shown, independent of the sweep.
+        - Blue -> red ramp = arrival time, early to late. This is the
+          conventional "flow front" palette (see e.g. MAGMASOFT/ProCAST fill
+          plots): dark blue fills first, red fills last, so the eye reads
+          the sweep as a wavefront moving through the casting.
+
+        Args:
+            voxel_centers: Nx3 array of voxel centers.
+            voxel_sizes: N array of voxel sizes.
+            fill_time: N array of arrival time in seconds, -1 = misrun.
+            time_threshold: Only arrived-by voxels (0 <= fill_time <=
+                time_threshold) are included, alongside every misrun voxel.
+            max_fill_time_s: Full-timeline max, for a ramp that does not
+                rescale as the sweep advances.
+
+        Returns:
+            VTK polydata with colored cubes, or None if nothing to show.
+        """
+        fill_time = np.asarray(fill_time, dtype=np.float64)
+        misrun_mask = fill_time < 0.0
+        arrived_mask = (~misrun_mask) & (fill_time <= time_threshold)
+        mask = misrun_mask | arrived_mask
+
+        filtered_centers = voxel_centers[mask]
+        filtered_sizes = voxel_sizes[mask]
+        filtered_times = fill_time[mask]
+        filtered_misrun = misrun_mask[mask]
+
+        n_voxels = len(filtered_centers)
+        if n_voxels == 0:
+            return None
+
+        centers_f32 = np.ascontiguousarray(filtered_centers, dtype=np.float32)
+        vtk_points_array = numpy_support.numpy_to_vtk(centers_f32, deep=True, array_type=vtk.VTK_FLOAT)
+        vtk_points_array.SetNumberOfComponents(3)
+
+        points = vtk.vtkPoints()
+        points.SetData(vtk_points_array)
+
+        scaled_sizes = np.ascontiguousarray(filtered_sizes * 0.85, dtype=np.float32)
+        vtk_scales = numpy_support.numpy_to_vtk(scaled_sizes, deep=True, array_type=vtk.VTK_FLOAT)
+        vtk_scales.SetName("Scales")
+
+        # Blue (early) -> red (late) ramp for arrived voxels; flat neutral
+        # grey for misruns, overriding whatever the ramp math would give.
+        safe_max = max_fill_time_s if max_fill_time_s > 0.0 else 1.0
+        normalized = np.clip(filtered_times / safe_max, 0.0, 1.0)
+        color_array = np.zeros((n_voxels, 3), dtype=np.uint8)
+        color_array[:, 0] = (20 + 235 * normalized).astype(np.uint8)   # R: low->high
+        color_array[:, 1] = (60 + 40 * (1.0 - np.abs(normalized - 0.5) * 2)).astype(np.uint8)  # G: small mid bump
+        color_array[:, 2] = (235 - 215 * normalized).astype(np.uint8)  # B: high->low
+
+        misrun_rgb = (np.array(FILL_TIME_MISRUN_COLOR, dtype=np.float32) * 255.0).astype(np.uint8)
+        color_array[filtered_misrun] = misrun_rgb
+
+        vtk_colors = numpy_support.numpy_to_vtk(
+            np.ascontiguousarray(color_array), deep=True, array_type=vtk.VTK_UNSIGNED_CHAR
+        )
+        vtk_colors.SetName("Colors")
+        vtk_colors.SetNumberOfComponents(3)
+
+        pointsPolydata = vtk.vtkPolyData()
+        pointsPolydata.SetPoints(points)
+        pointsPolydata.GetPointData().SetScalars(vtk_colors)
+        pointsPolydata.GetPointData().AddArray(vtk_scales)
+
+        cubeSource = vtk.vtkCubeSource()
+        cubeSource.SetXLength(1.0)
+        cubeSource.SetYLength(1.0)
+        cubeSource.SetZLength(1.0)
+        cubeSource.Update()
+
+        glyph3D = vtk.vtkGlyph3D()
+        glyph3D.SetSourceConnection(cubeSource.GetOutputPort())
+        glyph3D.SetInputData(pointsPolydata)
+        glyph3D.SetScaleModeToScaleByScalar()
+        glyph3D.SetInputArrayToProcess(0, 0, 0, 0, "Scales")
+        glyph3D.SetColorModeToColorByScalar()
+        glyph3D.Update()
+
+        return glyph3D.GetOutput()
+
     def update_hotspot_threshold(self, threshold: float):
         """Update hot spot visualization threshold"""
         if self.current_hotspot_data is None:
@@ -3820,13 +4029,15 @@ class CastingVisualizer(QWidget):
             self.gas_porosity_actor.SetVisibility(False)
         if self.fraction_liquid_actor is not None:
             self.fraction_liquid_actor.SetVisibility(False)
+        if self.fill_time_actor is not None:
+            self.fill_time_actor.SetVisibility(False)
         self.render_window.Render()
-    
+
     def show_analysis(self, analysis_type: str):
         """Show a specific analysis visualization and hide others"""
         # Hide all first
         self.hide_all_analysis()
-        
+
         # Show the requested one
         if analysis_type == "shrinkage" and self.shrinkage_actor is not None:
             self.shrinkage_actor.SetVisibility(True)
@@ -3840,7 +4051,9 @@ class CastingVisualizer(QWidget):
             self.sand_burn_in_actor.SetVisibility(True)
         elif analysis_type == "fraction_liquid" and self.fraction_liquid_actor is not None:
             self.fraction_liquid_actor.SetVisibility(True)
-        
+        elif analysis_type == "fill_time" and self.fill_time_actor is not None:
+            self.fill_time_actor.SetVisibility(True)
+
         self.render_window.Render()
 
     def clear_visualization(self):
@@ -3877,10 +4090,14 @@ class CastingVisualizer(QWidget):
         if self.fraction_liquid_actor is not None:
             self.renderer.RemoveActor(self.fraction_liquid_actor)
             self.fraction_liquid_actor = None
-        
+
+        if self.fill_time_actor is not None:
+            self.renderer.RemoveActor(self.fill_time_actor)
+            self.fill_time_actor = None
+
         # Clear all cached result geometry
         self._clear_result_caches()
-        
+
         # Clear stored data
         self.current_shrinkage_data = None
         self.current_hotspot_data = None
@@ -3888,7 +4105,8 @@ class CastingVisualizer(QWidget):
         self.current_hot_tear_data = None
         self.current_sand_burn_in_data = None
         self.current_fraction_liquid_data = None
-        
+        self.current_fill_time_data = None
+
         self.render_window.Render()
     
     def clear_result_actors(self):
@@ -3924,6 +4142,10 @@ class CastingVisualizer(QWidget):
         if self.fraction_liquid_actor is not None:
             self.renderer.RemoveActor(self.fraction_liquid_actor)
             self.fraction_liquid_actor = None
+
+        if self.fill_time_actor is not None:
+            self.renderer.RemoveActor(self.fill_time_actor)
+            self.fill_time_actor = None
 
         self._clear_result_caches()
 

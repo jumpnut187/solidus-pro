@@ -201,6 +201,9 @@ class VisualizerColormapTests(unittest.TestCase):
         viz._fraction_liquid_cache = OrderedDict()
         viz._fraction_liquid_cache_point_count = 0
         viz._fraction_liquid_load_count = 0
+        viz._fill_time_cache = OrderedDict()
+        viz._fill_time_cache_point_count = 0
+        viz._fill_time_load_count = 0
         viz.feed_modulus_leader = None
         viz.shrinkage_actor = None
         viz.hotspot_actor = None
@@ -209,6 +212,7 @@ class VisualizerColormapTests(unittest.TestCase):
         viz.sand_burn_in_actor = None
         viz.gas_porosity_actor = None
         viz.fraction_liquid_actor = None
+        viz.fill_time_actor = None
         viz.renderer = _DummyVTKClass()
         viz.render_window = _DummyVTKClass()
         return viz
@@ -252,6 +256,8 @@ class VisualizerColormapTests(unittest.TestCase):
         viz._gas_porosity_cache[0.5] = _DummyVTKClass()
         viz._fraction_liquid_cache[10] = _DummyVTKClass()
         viz._fraction_liquid_cache_point_count = 6
+        viz._fill_time_cache[10] = _DummyVTKClass()
+        viz._fill_time_cache_point_count = 6
 
         viz.clear_result_actors()
 
@@ -263,6 +269,8 @@ class VisualizerColormapTests(unittest.TestCase):
         self.assertEqual(viz._gas_porosity_cache, {})
         self.assertEqual(viz._fraction_liquid_cache, {})
         self.assertEqual(viz._fraction_liquid_cache_point_count, 0)
+        self.assertEqual(viz._fill_time_cache, {})
+        self.assertEqual(viz._fill_time_cache_point_count, 0)
 
     def test_fraction_liquid_frame_cache_reuses_stored_polydata(self) -> None:
         # Requires the stubbed vtk environment; when another test module has

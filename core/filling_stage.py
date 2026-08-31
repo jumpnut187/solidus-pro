@@ -44,7 +44,7 @@ existence and silently remove the restriction the user placed.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -598,6 +598,82 @@ def build_porous_zone(
     return zone
 
 
+def _static_vent_mask(
+    dense_types: np.ndarray, inlet: np.ndarray, vent_risers_enabled: bool
+) -> np.ndarray:
+    """
+    Vent-eligible cells whose eligibility does not depend on the fill's
+    progress: open riser tops (when enabled) and the inlet.
+
+    "Open riser top" is a static geometric fact -- the cell one step above a
+    RISER cell is either off the top of the domain or has no geometry at all
+    (:data:`EMPTY_CELL`), which is exactly section 6.3's "vents/risers open
+    to atmosphere". Whether that riser cell currently *holds* gas is not
+    this function's concern -- :func:`~physics.filling.find_entrapped_gas`
+    intersects the mask with the live GAS set itself, so a riser that has
+    already filled simply contributes nothing further, harmlessly.
+
+    Inlet cells are included per the design doc even though they hold FLUID
+    for essentially the whole run and so rarely intersect a gas set -- the
+    one moment they might (before the very first fill step) is exactly the
+    moment a well-formed vent mask should already cover them.
+    """
+    from core.part_manager import PART_TYPE_RISER
+
+    shape = dense_types.shape
+    vent = np.zeros(shape, dtype=bool)
+
+    if vent_risers_enabled:
+        riser = dense_types == PART_TYPE_RISER
+        above = np.full(shape, EMPTY_CELL, dtype=dense_types.dtype)
+        above[:, :, :-1] = dense_types[:, :, 1:]
+        vent |= riser & (above == EMPTY_CELL)
+
+    if inlet.shape[0]:
+        vent[inlet[:, 0], inlet[:, 1], inlet[:, 2]] = True
+
+    return vent
+
+
+def _domain_boundary_mask(shape: Tuple[int, int, int]) -> np.ndarray:
+    """
+    Cells sitting on the outer envelope of the dense grid.
+
+    ``build_grid_mapping`` sizes the dense grid exactly to the voxel
+    centres' bounding box (module docstring, "the dense shape must be
+    derived from the voxel centres"), so a cell at index 0 or ``shape - 1``
+    along any axis is at the true edge of the meshed geometry -- nothing is
+    modelled beyond it, and no wall was ever asserted there either. A GAS
+    cell found there is therefore open to atmosphere by omission, not by
+    any wall the user drew.
+    """
+    boundary = np.zeros(shape, dtype=bool)
+    boundary[[0, -1], :, :] = True
+    boundary[:, [0, -1], :] = True
+    boundary[:, :, [0, -1]] = True
+    return boundary
+
+
+def _entrapment_warning_if_no_vent(vent_mask: np.ndarray) -> Optional[str]:
+    """
+    Message to warn with when the assembled vent mask has no open cell.
+
+    Section 6.3 of the design doc: without at least one vent the cavity
+    cannot fill at all and air compresses unphysically; every gas pocket
+    then reads as entrapped by construction, which is worth telling the user
+    rather than letting them discover a 100%-entrapped result and assume the
+    detector is broken.
+    """
+    if np.any(vent_mask):
+        return None
+    return (
+        "no vent path found for air-entrapment checking (vent_risers is "
+        "off, no riser is present, and no gas cell currently touches the "
+        "inlet or the domain boundary): every gas pocket will read as "
+        "entrapped until a vent opens"
+    )
+
+
 def measure_choke_area_cm2(dense_types: np.ndarray, dx_m: float) -> float:
     """
     Smallest cross-section anywhere in the gating system, in cm^2.
@@ -648,7 +724,11 @@ class FillingResult:
 
     Attributes:
         fill_time_s: Arrival time per voxel; ``-1`` where metal never arrived.
-        temperature_c: Initial temperature per voxel, degrees Celsius.
+        temperature_c: Initial temperature per voxel, degrees Celsius. F2:
+            the metal's actual thermal history through the fill -- the metal
+            that entered first and travelled furthest starts cooler than
+            metal at the gate -- not the two-constant (pour temp / mold temp)
+            placeholder F1 used.
         inlet_voxel_count: Voxels the pour location resolved to.
         filled_voxel_count: Metal voxels the fill reached.
         misrun_voxel_count: Metal voxels it did not.
@@ -657,6 +737,23 @@ class FillingResult:
         steps: Lattice steps taken.
         fill_seconds: Physical time simulated.
         coarsening: Fill-grid coarsening factor used.
+        min_fill_temperature_c: Coolest filled metal at handover. Below the
+            alloy's liquidus this is incipient cold-shut territory.
+        mean_fill_temperature_c: Average filled-metal temperature at handover.
+        entrapped_voxel_count: Voxels of trapped gas at the end of the fill
+            (F3). Zero when every gas pocket found a vent.
+        peak_entrapped_voxel_count: The largest entrapped-gas volume seen at
+            any periodic check during the fill, not just at the end -- a
+            pocket can be entrapped mid-fill and vent later, so the final
+            snapshot alone understates the risk. Always ``>=
+            entrapped_voxel_count``.
+        cold_shut_voxel_count: Voxels flagged as a cold-shut seam (F3): a
+            wet cell where fronts converged from two or more directions and
+            the metal had already cooled to within
+            ``FillingParams.cold_shut_temp_margin_c`` of the liquidus.
+        entrapped_gas: Per-voxel boolean, ``(n_voxels,)``, the final
+            entrapped-gas set gathered the same way ``fill_time_s`` is.
+        cold_shut: Per-voxel boolean, ``(n_voxels,)``, the cold-shut set.
         warnings: Human-readable conditions worth surfacing.
     """
 
@@ -670,6 +767,13 @@ class FillingResult:
     steps: int
     fill_seconds: float
     coarsening: int
+    min_fill_temperature_c: float
+    mean_fill_temperature_c: float
+    entrapped_voxel_count: int = 0
+    peak_entrapped_voxel_count: int = 0
+    cold_shut_voxel_count: int = 0
+    entrapped_gas: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=bool))
+    cold_shut: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=bool))
     warnings: Tuple[str, ...] = ()
 
     @property
@@ -790,10 +894,15 @@ def run_filling_stage(
         FLAG_GAS,
         FLAG_OBSTACLE,
         REFERENCE_DENSITY,
+        advect_temperature,
+        apply_wall_heat_loss,
         create_state,
+        find_cold_shuts,
+        find_entrapped_gas,
         step,
     )
     from physics.fluid_flow import equilibrium, lattice_units
+    from core.part_manager import is_gating_metal
 
     def emit(message: str) -> None:
         if progress_message_callback is not None:
@@ -804,6 +913,12 @@ def run_filling_stage(
     if filling is None:
         emit("Filling stage skipped: no filling parameters configured.")
         return None
+    thermal_boundary = getattr(params, "thermal_boundary", None)
+
+    # 0 means "use the alloy's own pouring temperature" -- see FillingParams'
+    # docstring for pour_temperature_c.
+    pour_temp = float(getattr(filling, "pour_temperature_c", 0.0)) or float(alloy.pouring_temp)
+    mold_temp = float(getattr(thermal_boundary, "mold_temperature", 21.0))
 
     centers = np.asarray(voxel_mesh.voxel_centers, dtype=np.float64)
     dx_in = float(np.asarray(voxel_mesh.voxel_sizes).ravel()[0])
@@ -875,8 +990,32 @@ def run_filling_stage(
     seed = np.zeros(solve_types.shape, dtype=bool)
     seed[inlet[:, 0], inlet[:, 1], inlet[:, 2]] = True
     state = create_state(
-        obstacle, dx_m=dx_m, dt_s=units.dt_s, initial_fluid=seed, porous=porous
+        obstacle,
+        dx_m=dx_m,
+        dt_s=units.dt_s,
+        initial_fluid=seed,
+        porous=porous,
+        initial_temperature_c=pour_temp,
     )
+
+    # F2 thermal coupling. alpha_lattice is rescaled exactly the way
+    # lattice_units() rescales viscosity into nu_lattice, so it drops
+    # straight into physics.filling's explicit stencil as a dimensionless
+    # number -- see tests/test_filling_thermal.py for the stability margin
+    # this buys at realistic settings.
+    alpha_si = float(alloy.thermal_conductivity) / (
+        float(alloy.density_liquid) * float(alloy.specific_heat)
+    )
+    alpha_lattice = alpha_si * units.dt_s / (dx_m * dx_m)
+
+    # Gating-system surfaces (pour cup, sprue, runner, gate) and the casting
+    # itself sit in different sand contexts and lose heat at different rates
+    # -- see ThermalBoundaryParams.htc_gating's docstring for why an
+    # unconfigured gating surface would otherwise integrate adiabatically.
+    wall_htc_multiplier = float(getattr(filling, "wall_htc_multiplier", 1.0))
+    htc_gating = float(getattr(thermal_boundary, "htc_gating", 400.0)) * wall_htc_multiplier
+    htc_cast = float(getattr(thermal_boundary, "htc_cast_interface", 500.0)) * wall_htc_multiplier
+    htc_dense = np.where(is_gating_metal(solve_types), htc_gating, htc_cast)
 
     max_time = float(getattr(filling, "max_fill_time_s", 60.0))
     max_steps = int(max_time / units.dt_s)
@@ -898,6 +1037,24 @@ def run_filling_stage(
         1.0 + units.gravity_lattice * head_lattice / (1.0 / 3.0)
     )
 
+    # F3: air entrapment. The vent mask is reassembled at every periodic
+    # check (see below) because its "domain boundary gas" component is a
+    # live snapshot -- built once here, "static_vent" only covers the parts
+    # that do not change as the fill progresses (open riser tops, the
+    # inlet).
+    static_vent = _static_vent_mask(
+        solve_types, inlet, bool(getattr(filling, "vent_risers", 1))
+    )
+    boundary_mask = _domain_boundary_mask(solve_types.shape)
+    entrapment_check_interval = max(
+        1, int(getattr(filling, "entrapment_check_interval", 50))
+    )
+    # Peak rather than final: a pocket can be entrapped at one moment and
+    # vent later as the geometry around it changes, so checking only at the
+    # end understates the risk (design doc section 6.4).
+    peak_entrapped_voxels = 0
+    vent_warning: Optional[str] = None
+
     report_every = max(1, max_steps // 20)
     taken = 0
     for taken in range(1, max_steps + 1):
@@ -917,8 +1074,36 @@ def run_filling_stage(
             np.full(inlet.shape[0], inlet_density, dtype=np.float64),
             state.u[:, ix, iy, iz].astype(np.float64),
         ).astype(np.float32)
+        # Metal entering at the inlet is at the pour temperature -- pinned
+        # every step, same as mass and momentum above, so the source stays a
+        # true Dirichlet boundary rather than drifting as wall loss and
+        # diffusion nibble at it.
+        state.temperature[ix, iy, iz] = pour_temp
 
         step(state, units, track_free_surface=True)
+        advect_temperature(state, alpha_lattice)
+        apply_wall_heat_loss(
+            state,
+            htc_w_m2k=htc_dense,
+            mold_temperature_c=mold_temp,
+            density_kg_m3=float(alloy.density_liquid),
+            specific_heat_j_kgk=float(alloy.specific_heat),
+        )
+
+        if taken % entrapment_check_interval == 0:
+            # Per output frame, not per step (design doc 6.4): a
+            # connected-component labelling over the whole coarse grid every
+            # single lattice step would be the single most expensive thing
+            # in this loop.
+            vent_mask = static_vent | (boundary_mask & (state.flags == FLAG_GAS))
+            if vent_warning is None:
+                vent_warning = _entrapment_warning_if_no_vent(vent_mask)
+            entrapped_now = find_entrapped_gas(state.flags, vent_mask)
+            entrapped_now_fine = _upsample(entrapped_now, mapping.shape, coarsening)
+            entrapped_now_count = int(
+                np.count_nonzero(gather_to_voxels(mapping, entrapped_now_fine))
+            )
+            peak_entrapped_voxels = max(peak_entrapped_voxels, entrapped_now_count)
 
         if taken % report_every == 0:
             if cancel_callback is not None:
@@ -931,6 +1116,41 @@ def run_filling_stage(
             )
             if reached >= int(metal.sum()):
                 break
+
+    # Final entrapment snapshot -- evaluated unconditionally rather than
+    # relying on the last step happening to land on a check interval, so the
+    # reported "final" set always reflects the state actually handed off.
+    final_vent_mask = static_vent | (boundary_mask & (state.flags == FLAG_GAS))
+    if vent_warning is None:
+        vent_warning = _entrapment_warning_if_no_vent(final_vent_mask)
+    entrapped_coarse = find_entrapped_gas(state.flags, final_vent_mask)
+
+    entrapped_fine = _upsample(entrapped_coarse, mapping.shape, coarsening)
+    entrapped_voxels = gather_to_voxels(mapping, entrapped_fine).astype(bool)
+    entrapped_count = int(np.count_nonzero(entrapped_voxels))
+    # Peak, not just final: a pocket can be entrapped mid-fill and vent later
+    # as the geometry around it changes, so the final count alone
+    # understates the risk (design doc section 6.4). Tracked in voxel units
+    # throughout, at every periodic check during the loop above, so it is
+    # never below the final count.
+    peak_entrapped_count = max(entrapped_count, peak_entrapped_voxels)
+
+    # F3: cold shuts. Evaluated once on the completed fill/thermal fields --
+    # unlike entrapment there is no "peak" concept here: a seam does not heal
+    # once the fronts have met and cooled, so the end-of-fill field is the
+    # answer.
+    liquidus_c = float(getattr(alloy, "liquidus_temp", -np.inf))
+    cold_shut_coarse = find_cold_shuts(
+        state.fill_time_s,
+        state.temperature,
+        state.flags,
+        liquidus_c=liquidus_c,
+        arrival_gap_s=float(getattr(filling, "cold_shut_arrival_gap_s", 0.5)),
+        temperature_margin_c=float(getattr(filling, "cold_shut_temp_margin_c", 25.0)),
+    )
+    cold_shut_fine = _upsample(cold_shut_coarse, mapping.shape, coarsening)
+    cold_shut_voxels = gather_to_voxels(mapping, cold_shut_fine).astype(bool)
+    cold_shut_count = int(np.count_nonzero(cold_shut_voxels))
 
     filled_coarse = state.flags == FLAG_FLUID
     fill_time_coarse = np.asarray(state.fill_time_s, dtype=np.float64)
@@ -945,23 +1165,44 @@ def run_filling_stage(
     filled_count = int(np.count_nonzero(filled_voxels & voxel_metal))
     misrun_count = int(np.count_nonzero(voxel_metal & ~filled_voxels))
 
-    pour_temp = float(getattr(filling, "pour_temperature_c", 0.0)) or float(alloy.pouring_temp)
-    mold_temp = float(
-        getattr(getattr(params, "thermal_boundary", None), "mold_temperature", 21.0)
+    # F2: gather the temperature the fill actually left behind, rather than
+    # the two-constant (pour temp / mold temp) placeholder F1 used. Metal
+    # that entered first and travelled furthest has been advecting and
+    # losing heat to the mold the whole run, so it comes back cooler than
+    # metal still at the gate.
+    temperature_dense_fine = _upsample(
+        np.asarray(state.temperature, dtype=np.float64), mapping.shape, coarsening
     )
+    temperature_fill = gather_to_voxels(mapping, temperature_dense_fine)
 
-    # Every voxel must carry a finite temperature -- the seam validates that --
-    # so unfilled metal cannot simply be left blank. Seeding it at mold
+    filled_mask = filled_voxels & voxel_metal
+
+    # Every voxel must carry a finite temperature -- the seam validates that
+    # -- so unfilled metal cannot simply be left blank. Seeding it at mold
     # temperature says "no metal arrived here", which is what a misrun is. The
     # alternative, seeding it at pouring temperature, would hide the defect
     # behind a plausible-looking result.
     temperature = np.full(mapping.n_voxels, mold_temp, dtype=np.float64)
-    temperature[filled_voxels & voxel_metal] = pour_temp
+    temperature[filled_mask] = temperature_fill[filled_mask]
+
+    if np.any(filled_mask):
+        min_fill_temperature_c = float(temperature[filled_mask].min())
+        mean_fill_temperature_c = float(temperature[filled_mask].mean())
+    else:
+        min_fill_temperature_c = mold_temp
+        mean_fill_temperature_c = mold_temp
 
     if misrun_count:
         warnings.append(
             f"{misrun_count:,} metal voxels never filled (misrun): "
             f"{misrun_count / max(1, filled_count + misrun_count):.1%} of the metal"
+        )
+    liquidus_temp = float(getattr(alloy, "liquidus_temp", -np.inf))
+    if np.any(filled_mask) and min_fill_temperature_c < liquidus_temp:
+        warnings.append(
+            f"filled metal cooled below liquidus ({liquidus_temp:.0f} C) before "
+            f"handover: minimum fill temperature {min_fill_temperature_c:.0f} C -- "
+            f"incipient cold-shut risk"
         )
     solver_mode = str(getattr(analysis_options, "solver_mode", "") or "")
     if solver_mode and solver_mode != "thermal_coupled":
@@ -969,6 +1210,21 @@ def run_filling_stage(
             f"solver_mode is {solver_mode!r}; the seeded temperature field is "
             f"only consumed by 'thermal_coupled', so the fill's thermal result "
             f"will be ignored by the solidification solve."
+        )
+    # F3: air entrapment and cold shuts.
+    if vent_warning is not None:
+        warnings.append(vent_warning)
+    if entrapped_count:
+        warnings.append(
+            f"{entrapped_count:,} voxels of trapped air detected (no vent path "
+            f"reached, peak {peak_entrapped_count:,}): risk of gas porosity"
+        )
+    if cold_shut_count:
+        warnings.append(
+            f"{cold_shut_count:,} voxels show a cold-shut signature: fill "
+            f"fronts met after the metal had cooled to within "
+            f"{float(getattr(filling, 'cold_shut_temp_margin_c', 25.0)):.0f} C "
+            f"of the liquidus ({liquidus_c:.0f} C)"
         )
     for message in warnings:
         emit(f"Filling warning: {message}")
@@ -984,6 +1240,13 @@ def run_filling_stage(
         steps=taken,
         fill_seconds=taken * units.dt_s,
         coarsening=coarsening,
+        min_fill_temperature_c=min_fill_temperature_c,
+        mean_fill_temperature_c=mean_fill_temperature_c,
+        entrapped_voxel_count=entrapped_count,
+        peak_entrapped_voxel_count=peak_entrapped_count,
+        cold_shut_voxel_count=cold_shut_count,
+        entrapped_gas=entrapped_voxels,
+        cold_shut=cold_shut_voxels,
         warnings=tuple(warnings),
     )
 

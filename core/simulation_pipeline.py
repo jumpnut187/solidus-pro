@@ -381,6 +381,24 @@ def build_visualization_payload(
         if len(hotspots) == n_voxels:
             visualization_data["gas_porosity_hotspots"] = hotspots[indices].tolist()
 
+    # Mold-filling arrival time, in seconds, per voxel; -1 marks a voxel the
+    # fill never reached (a misrun). Only present when a filling stage ran,
+    # so a run without filling does not gain an empty "fill_time" mode.
+    fill_arrival_times = getattr(engine, "_fill_arrival_times", None)
+    if fill_arrival_times is not None:
+        fill_times = np.asarray(fill_arrival_times, dtype=np.float64)
+        if len(fill_times) == n_voxels:
+            visualization_data["fill_time"] = fill_times[indices].tolist()
+            filled_mask = fill_times >= 0.0
+            filled_count = int(np.sum(filled_mask))
+            unfilled_count = int(n_voxels - filled_count)
+            max_fill_time_s = float(np.max(fill_times[filled_mask])) if filled_count > 0 else 0.0
+            result_data["fill_time_stats"] = {
+                "max_fill_time_s": max_fill_time_s,
+                "filled_voxels": filled_count,
+                "unfilled_voxels": unfilled_count,
+            }
+
     return result_data, visualization_data
 
 

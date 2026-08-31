@@ -27,6 +27,9 @@ export function ResultLegend({ resultMode, resultFields, visible }: Props) {
   if (resultMode === 'fraction_liquid') {
     minLabel = 'Solid';
     maxLabel = 'Liquid';
+  } else if (resultMode === 'fill_time') {
+    minLabel = 'First filled';
+    maxLabel = resultFields.fill_time?.unfilled_voxels ? 'Last filled (misruns in grey)' : 'Last filled';
   } else {
     const field = resultFields.fields[resultMode];
     if (field) {
