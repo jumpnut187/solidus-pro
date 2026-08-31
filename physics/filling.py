@@ -47,6 +47,8 @@ import numpy as np
 
 from physics.fluid_flow import (
     CS2,
+    SMAGORINSKY_CS,
+    TRT_MAGIC_PARAMETER,
     LATTICE_VELOCITIES,
     LATTICE_WEIGHTS,
     OPPOSITE,
@@ -58,6 +60,10 @@ from physics.fluid_flow import (
     resolve_porous_velocity,
     smagorinsky_relaxation,
 )
+from physics.fluid_flow import NUMBA_AVAILABLE, lattice_tables
+
+if NUMBA_AVAILABLE:  # pragma: no cover - import-time branch
+    from physics.fluid_flow import collide_kernel, stream_kernel, free_surface_kernel
 
 # ---------------------------------------------------------------------------
 # Cell flags
@@ -171,6 +177,15 @@ class FillingState:
     porous: PorousZone
     step_count: int = 0
     inlet_mass: float = 0.0
+
+    # Numba-path scratch buffers, allocated once and reused across steps (see
+    # _collide_stream_numba and _free_surface_scratch). Declared here, rather
+    # than injected via plain attribute assignment, so they are typed instead
+    # of tripping mypy's attr-defined check on every scratch access.
+    _scratch_post: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
+    _scratch_out: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
+    _scratch_f_out: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
+    _scratch_mass_out: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
 
     @property
     def cell_volume_m3(self) -> float:
@@ -660,7 +675,14 @@ def gravity_force(
     """
     force = np.zeros((3,) + state.shape, dtype=np.float64)
     wet = (state.flags == FLAG_INTERFACE) | (state.flags == FLAG_FLUID)
-    magnitude = units.gravity_lattice * state.rho.astype(np.float64)
+    # Density from the CURRENT populations, not the cached state.rho, which
+    # still holds the previous step's value. Using the stale field lags the
+    # body force by one step -- small, but it is a real error and it made the
+    # NumPy and Numba paths disagree in the z component of every wet cell,
+    # which is how it was found.
+    magnitude = units.gravity_lattice * np.sum(
+        np.asarray(state.f, dtype=np.float64), axis=0
+    )
     for d in range(3):
         if direction[d]:
             force[d] = np.where(wet, magnitude * direction[d], 0.0)
@@ -674,6 +696,7 @@ def step(
     gravity_direction: Tuple[float, float, float] = (0.0, 0.0, -1.0),
     track_free_surface: bool = True,
     smagorinsky: bool = True,
+    use_numba: bool = True,
 ) -> FillingState:
     """
     Advance the solver one timestep.
@@ -694,6 +717,40 @@ def step(
     Returns:
         The same state object, advanced.
     """
+    if use_numba and NUMBA_AVAILABLE:
+        post, streamed = _collide_stream_numba(
+            state, units, gravity_direction, smagorinsky, track_free_surface
+        )
+        if track_free_surface:
+            f_out, mass_out = _free_surface_scratch(state)
+            C, Ci, W, OPP = lattice_tables()
+            free_surface_kernel(
+                post,
+                streamed,
+                state.flags,
+                state.rho.astype(np.float64),
+                state.u.astype(np.float64),
+                state.porous.porosity.astype(np.float64),
+                state.porous.entry_offset.astype(np.float64),
+                state.porous.primed,
+                C, Ci, W, OPP,
+                float(GAS_DENSITY),
+                state.mass,
+                mass_out,
+                f_out,
+            )
+            state.f = f_out.astype(np.float32)
+            # Copy back into the array state.mass has always pointed at, so
+            # mass_out (the cached scratch buffer) never becomes the same
+            # object as mass_in on the next step -- see _free_surface_scratch.
+            state.mass[...] = mass_out
+            state.step_count += 1
+            apply_transitions(state, state.step_count * state.dt_s)
+        else:
+            state.f = streamed.astype(np.float32)
+            state.step_count += 1
+        return state
+
     force = gravity_force(state, units, gravity_direction)
     rho, u = macroscopic(state, force)
     state.rho = rho.astype(np.float32)
@@ -749,6 +806,86 @@ def step(
         state.step_count += 1
 
     return state
+
+
+
+def _collide_stream_numba(
+    state: FillingState,
+    units: LatticeUnits,
+    gravity_direction: Tuple[float, float, float],
+    smagorinsky: bool,
+    track_free_surface: bool,
+):
+    """
+    Run the local pass and the streaming pass through the Numba kernels.
+
+    Reuses scratch buffers held on the state. Allocating two
+    (19, nx, ny, nz) float64 arrays every step would put most of the win back:
+    at a 12 in casting that is ~250 MB of churn per step.
+    """
+    C, _c_int, W, OPP = lattice_tables()
+    shape = state.shape
+
+    post = state._scratch_post
+    out = state._scratch_out
+    if post is None or post.shape[1:] != shape:
+        post = np.empty((Q,) + shape, dtype=np.float64)
+        out = np.empty((Q,) + shape, dtype=np.float64)
+        state._scratch_post = post
+        state._scratch_out = out
+
+    rho = np.empty(shape, dtype=np.float64)
+    u = np.empty((3,) + shape, dtype=np.float64)
+
+    collide_kernel(
+        state.f.astype(np.float64),
+        state.flags,
+        state.porous.porosity.astype(np.float64),
+        state.porous.drag_c0.astype(np.float64),
+        state.porous.drag_c1.astype(np.float64),
+        C, W, OPP,
+        float(units.tau),
+        float(units.gravity_lattice),
+        float(gravity_direction[0]),
+        float(gravity_direction[1]),
+        float(gravity_direction[2]),
+        float(SMAGORINSKY_CS),
+        bool(smagorinsky),
+        float(TRT_MAGIC_PARAMETER),
+        rho, u, post,
+    )
+    state.rho = rho.astype(np.float32)
+    state.u = u.astype(np.float32)
+
+    stream_kernel(post, state.flags, _c_int, OPP, bool(track_free_surface), out)
+    return post, out
+
+
+def _free_surface_scratch(state: FillingState) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Cache the ``free_surface_kernel`` output buffers on the state.
+
+    ``f_out`` is float64 while ``state.f`` is float32, so assigning
+    ``state.f = f_out.astype(np.float32)`` always copies and the two never
+    alias across steps.
+
+    ``mass_out`` is float64 like ``state.mass`` itself, so aliasing is a real
+    risk: if ``state.mass`` were ever pointed straight at this cached buffer,
+    the next step would hand the kernel the same array as both ``mass_in`` and
+    ``mass_out``, and neighbouring cells would read half-updated fill
+    fractions. ``step()`` avoids that by copying into ``state.mass`` in place
+    (``state.mass[...] = mass_out``) rather than rebinding the attribute, so
+    this buffer stays a distinct object forever.
+    """
+    shape = state.shape
+    f_out = state._scratch_f_out
+    mass_out = state._scratch_mass_out
+    if f_out is None or mass_out is None or f_out.shape[1:] != shape:
+        f_out = np.empty((Q,) + shape, dtype=np.float64)
+        mass_out = np.empty(shape, dtype=np.float64)
+        state._scratch_f_out = f_out
+        state._scratch_mass_out = mass_out
+    return f_out, mass_out
 
 
 def _stream_with_bounce_back(post: np.ndarray, obstacle: np.ndarray) -> np.ndarray:

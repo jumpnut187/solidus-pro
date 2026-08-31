@@ -894,3 +894,327 @@ def smagorinsky_relaxation(
     half = 1.0 / omega_plus - 0.5
     omega_minus = 1.0 / (magic_parameter / np.maximum(half, 1e-12) + 0.5)
     return omega_plus, omega_minus
+
+
+# ---------------------------------------------------------------------------
+# Numba kernels
+# ---------------------------------------------------------------------------
+#
+# The NumPy functions above are the reference implementation: readable, easy to
+# assert against analytically, and the thing the benchmarks were validated with.
+# They are also ~40x too slow, because every one of them allocates a full
+# (19, nx, ny, nz) temporary and runs on a single core -- np.roll alone is
+# called 90 times per step.
+#
+# These kernels fuse the whole local half of a step (moments, porous drag,
+# equilibrium, Smagorinsky, Guo forcing, TRT collision) into one parallel pass,
+# and streaming plus bounce-back into a second. tests/test_filling_parity.py
+# holds them to the NumPy path, mirroring how tests/test_parallel_kernel_parity
+# guards the existing solidification kernels.
+
+try:
+    from numba import njit, prange
+    NUMBA_AVAILABLE = True
+except ImportError:  # pragma: no cover - exercised only where numba is absent
+    NUMBA_AVAILABLE = False
+
+#: Float views of the lattice tables. Numba wants concrete dtypes, and the int8
+#: originals would force a cast in the inner loop.
+_C_F64 = LATTICE_VELOCITIES.astype(np.float64)
+_C_I64 = LATTICE_VELOCITIES.astype(np.int64)
+_W_F64 = LATTICE_WEIGHTS.astype(np.float64)
+_OPP_I64 = OPPOSITE.astype(np.int64)
+
+#: Cell flags, duplicated here so the kernels stay free of physics.filling.
+#: Kept in sync by tests/test_filling_parity.py.
+_FLAG_OBSTACLE = 0
+_FLAG_GAS = 1
+_FLAG_INTERFACE = 2
+_FLAG_FLUID = 3
+
+
+if NUMBA_AVAILABLE:
+
+    @njit(cache=True, inline="always")
+    def _equilibrium_i(i, rho, ux, uy, uz, usqr, inv_eps, C, W):
+        """One equilibrium population. Inlined into the kernels."""
+        cu = C[i, 0] * ux + C[i, 1] * uy + C[i, 2] * uz
+        return W[i] * rho * (1.0 + 3.0 * cu + 4.5 * cu * cu * inv_eps - 1.5 * usqr * inv_eps)
+
+    @njit(parallel=True, cache=True)
+    def collide_kernel(
+        f, flags, porosity, drag_c0, drag_c1,
+        C, W, OPP,
+        tau, gravity_lattice, gx, gy, gz,
+        smagorinsky_cs, use_smagorinsky, magic,
+        rho_out, u_out, post_out,
+    ):
+        """
+        Fused local pass: moments -> drag -> equilibrium -> Smagorinsky ->
+        Guo forcing -> TRT collision.
+
+        Every operation here is cell-local, which is what makes the whole thing
+        one parallel loop with no temporaries. Writes ``rho_out``, ``u_out``
+        and the post-collision populations ``post_out`` in place.
+        """
+        nx, ny, nz = flags.shape
+        for x in prange(nx):
+            for y in range(ny):
+                for z in range(nz):
+                    flag = flags[x, y, z]
+                    if flag == _FLAG_OBSTACLE:
+                        rho_out[x, y, z] = 0.0
+                        u_out[0, x, y, z] = 0.0
+                        u_out[1, x, y, z] = 0.0
+                        u_out[2, x, y, z] = 0.0
+                        for i in range(19):
+                            post_out[i, x, y, z] = 0.0
+                        continue
+
+                    # --- zeroth and first moments ---
+                    rho = 0.0
+                    mx = 0.0
+                    my = 0.0
+                    mz = 0.0
+                    for i in range(19):
+                        fi = f[i, x, y, z]
+                        rho += fi
+                        mx += C[i, 0] * fi
+                        my += C[i, 1] * fi
+                        mz += C[i, 2] * fi
+
+                    # --- gravity, wet cells only ---
+                    fx = 0.0
+                    fy = 0.0
+                    fz = 0.0
+                    if flag == _FLAG_FLUID or flag == _FLAG_INTERFACE:
+                        mag = gravity_lattice * rho
+                        fx = mag * gx
+                        fy = mag * gy
+                        fz = mag * gz
+
+                    # Guo half-force folded into the velocity.
+                    mx += 0.5 * fx
+                    my += 0.5 * fy
+                    mz += 0.5 * fz
+
+                    safe_rho = rho if rho > 1e-12 else 1.0
+                    ux = mx / safe_rho
+                    uy = my / safe_rho
+                    uz = mz / safe_rho
+
+                    # --- Guo-Zhao porous drag (identity off a filter) ---
+                    c0 = drag_c0[x, y, z]
+                    c1 = drag_c1[x, y, z]
+                    speed = np.sqrt(ux * ux + uy * uy + uz * uz)
+                    denom = c0 + np.sqrt(c0 * c0 + c1 * speed)
+                    ux /= denom
+                    uy /= denom
+                    uz /= denom
+
+                    if flag == _FLAG_GAS:
+                        ux = 0.0
+                        uy = 0.0
+                        uz = 0.0
+
+                    rho_out[x, y, z] = rho
+                    u_out[0, x, y, z] = ux
+                    u_out[1, x, y, z] = uy
+                    u_out[2, x, y, z] = uz
+
+                    eps = porosity[x, y, z]
+                    inv_eps = 1.0 / eps if eps > 0.0 else 1.0
+                    usqr = ux * ux + uy * uy + uz * uz
+
+                    # --- Smagorinsky, from the local non-equilibrium stress ---
+                    omega_plus = 1.0 / tau
+                    if use_smagorinsky and c1 == 0.0:
+                        q00 = 0.0; q01 = 0.0; q02 = 0.0
+                        q11 = 0.0; q12 = 0.0; q22 = 0.0
+                        for i in range(19):
+                            neq = f[i, x, y, z] - _equilibrium_i(
+                                i, rho, ux, uy, uz, usqr, inv_eps, C, W
+                            )
+                            cx = C[i, 0]; cy = C[i, 1]; cz = C[i, 2]
+                            q00 += cx * cx * neq
+                            q01 += cx * cy * neq
+                            q02 += cx * cz * neq
+                            q11 += cy * cy * neq
+                            q12 += cy * cz * neq
+                            q22 += cz * cz * neq
+                        qmag = np.sqrt(
+                            q00 * q00 + q11 * q11 + q22 * q22
+                            + 2.0 * (q01 * q01 + q02 * q02 + q12 * q12)
+                        )
+                        tau_eff = 0.5 * (
+                            tau + np.sqrt(
+                                tau * tau
+                                + 18.0 * 1.4142135623730951
+                                * smagorinsky_cs * smagorinsky_cs * qmag / safe_rho
+                            )
+                        )
+                        if tau_eff > 10.0:
+                            tau_eff = 10.0
+                        if tau_eff < tau:
+                            tau_eff = tau
+                        omega_plus = 1.0 / tau_eff
+
+                    half = 1.0 / omega_plus - 0.5
+                    if half < 1e-12:
+                        half = 1e-12
+                    omega_minus = 1.0 / (magic / half + 0.5)
+                    guo_prefactor = 1.0 - 0.5 * omega_minus
+
+                    # --- TRT collision with Guo source ---
+                    for i in range(19):
+                        ib = OPP[i]
+                        fi = f[i, x, y, z]
+                        fb = f[ib, x, y, z]
+                        ei = _equilibrium_i(i, rho, ux, uy, uz, usqr, inv_eps, C, W)
+                        eb = _equilibrium_i(ib, rho, ux, uy, uz, usqr, inv_eps, C, W)
+
+                        f_sym = 0.5 * (fi + fb)
+                        f_asym = 0.5 * (fi - fb)
+                        e_sym = 0.5 * (ei + eb)
+                        e_asym = 0.5 * (ei - eb)
+
+                        cx = C[i, 0]; cy = C[i, 1]; cz = C[i, 2]
+                        cu = cx * ux + cy * uy + cz * uz
+                        src = W[i] * guo_prefactor * (
+                            (3.0 * (cx - ux) + 9.0 * cu * cx) * fx
+                            + (3.0 * (cy - uy) + 9.0 * cu * cy) * fy
+                            + (3.0 * (cz - uz) + 9.0 * cu * cz) * fz
+                        )
+
+                        post_out[i, x, y, z] = (
+                            fi
+                            - omega_plus * (f_sym - e_sym)
+                            - omega_minus * (f_asym - e_asym)
+                            + src
+                        )
+
+    @njit(parallel=True, cache=True)
+    def stream_kernel(post, flags, C, OPP, clear_gas, out):
+        """
+        Pull streaming with halfway bounce-back.
+
+        Gathers into ``out`` so each thread owns one destination cell and no
+        atomics are needed. Wraps periodically to match the NumPy reference;
+        real domains are closed by obstacle cells, so the wrap never fires.
+
+        ``C`` must be the **integer** lattice table: it is used as an array
+        index here, not as arithmetic, and the float64 view would make every
+        offset a float.
+        """
+        nx, ny, nz = flags.shape
+        for x in prange(nx):
+            for y in range(ny):
+                for z in range(nz):
+                    if flags[x, y, z] == _FLAG_OBSTACLE:
+                        for i in range(19):
+                            out[i, x, y, z] = 0.0
+                        continue
+                    if clear_gas and flags[x, y, z] == _FLAG_GAS:
+                        for i in range(19):
+                            out[i, x, y, z] = 0.0
+                        continue
+
+                    out[0, x, y, z] = post[0, x, y, z]
+                    for i in range(1, 19):
+                        cx = C[i, 0]; cy = C[i, 1]; cz = C[i, 2]
+
+                        # The population arriving at x in direction i comes
+                        # from x - c_i. If that neighbour is solid, nothing
+                        # streams from it; instead this cell's own population
+                        # aimed that way bounces straight back reversed.
+                        #
+                        # The obstacle test is on x - c_i, NOT x + c_i. Testing
+                        # the downstream neighbour reflects the wrong
+                        # population and leaves density and velocity looking
+                        # correct -- they are computed from the pre-collision
+                        # field -- while quietly corrupting the populations and
+                        # the mass budget.
+                        sx = (x - cx) % nx
+                        sy = (y - cy) % ny
+                        sz = (z - cz) % nz
+                        if flags[sx, sy, sz] == _FLAG_OBSTACLE:
+                            out[i, x, y, z] = post[OPP[i], x, y, z]
+                        else:
+                            out[i, x, y, z] = post[i, sx, sy, sz]
+
+
+    @njit(parallel=True, cache=True)
+    def free_surface_kernel(
+        post, streamed, flags, rho, u, porosity, entry_offset, primed,
+        C, Ci, W, OPP, gas_density, mass_in, mass_out, f_out,
+    ):
+        """
+        Fused free-surface pass: gas-side reconstruction + Koerner mass exchange.
+
+        Both are per-cell with neighbour *reads* only, so they collapse into one
+        parallel loop. Doing them in NumPy cost more than the collision did: the
+        reconstruction built a full (19, nx, ny, nz) gas equilibrium for every
+        cell in the domain when only interface cells need one, and the mass
+        exchange ran 18 np.roll calls, each allocating a full grid.
+
+        Reads ``mass_in`` and writes ``mass_out`` so neighbour fill fractions
+        are all taken from the same instant; updating in place would let a cell
+        see some neighbours before and some after their update.
+        """
+        nx, ny, nz = flags.shape
+        for x in prange(nx):
+            for y in range(ny):
+                for z in range(nz):
+                    flag = flags[x, y, z]
+                    for i in range(19):
+                        f_out[i, x, y, z] = streamed[i, x, y, z]
+                    mass_out[x, y, z] = mass_in[x, y, z]
+                    if flag != _FLAG_INTERFACE and flag != _FLAG_FLUID:
+                        continue
+
+                    # --- gas-side reconstruction (interface cells only) ---
+                    if flag == _FLAG_INTERFACE:
+                        rho_g = gas_density
+                        if not primed[x, y, z]:
+                            rho_g += entry_offset[x, y, z]
+                        ux = u[0, x, y, z]
+                        uy = u[1, x, y, z]
+                        uz = u[2, x, y, z]
+                        usqr = ux * ux + uy * uy + uz * uz
+                        eps_p = porosity[x, y, z]
+                        inv_eps = 1.0 / eps_p if eps_p > 0.0 else 1.0
+                        for i in range(1, 19):
+                            bx = (x + Ci[i, 0]) % nx
+                            by = (y + Ci[i, 1]) % ny
+                            bz = (z + Ci[i, 2]) % nz
+                            if flags[bx, by, bz] != _FLAG_GAS:
+                                continue
+                            ib = OPP[i]
+                            ei = _equilibrium_i(i, rho_g, ux, uy, uz, usqr, inv_eps, C, W)
+                            eb = _equilibrium_i(ib, rho_g, ux, uy, uz, usqr, inv_eps, C, W)
+                            f_out[ib, x, y, z] = ei + eb - post[i, x, y, z]
+
+                    # --- Koerner mass exchange ---
+                    denom = rho[x, y, z] * porosity[x, y, z]
+                    eps_here = mass_in[x, y, z] / denom if denom > 0.0 else 0.0
+                    delta = 0.0
+                    for i in range(1, 19):
+                        sx = (x + Ci[i, 0]) % nx
+                        sy = (y + Ci[i, 1]) % ny
+                        sz = (z + Ci[i, 2]) % nz
+                        nflag = flags[sx, sy, sz]
+                        if nflag != _FLAG_INTERFACE and nflag != _FLAG_FLUID:
+                            continue
+                        nden = rho[sx, sy, sz] * porosity[sx, sy, sz]
+                        eps_nb = mass_in[sx, sy, sz] / nden if nden > 0.0 else 0.0
+                        ib = OPP[i]
+                        delta += (
+                            (f_out[ib, x, y, z] - post[i, x, y, z])
+                            * 0.5 * (eps_here + eps_nb)
+                        )
+                    mass_out[x, y, z] = mass_in[x, y, z] + delta
+
+
+def lattice_tables():
+    """The lattice tables in the dtypes the kernels expect."""
+    return _C_F64, _C_I64, _W_F64, _OPP_I64
