@@ -1175,7 +1175,19 @@ def run_filling_stage(
     )
     temperature_fill = gather_to_voxels(mapping, temperature_dense_fine)
 
-    filled_mask = filled_voxels & voxel_metal
+    # A cell can hold an arrival time and no temperature. fill_time_s is written
+    # once, when metal first reaches a cell, and is never cleared; the
+    # temperature field is NaN-reset whenever a cell drains back to gas. So any
+    # cell that filled and later drained -- routine wherever the front sloshes
+    # or a channel empties behind it -- carries a valid fill time alongside a
+    # NaN temperature.
+    #
+    # set_initial_temperature_field rejects non-finite values outright, so
+    # trusting fill_time alone here crashes the whole run at handover. It never
+    # showed up on a synthetic column, where nothing drains, only on real
+    # gating geometry. Require BOTH signals before treating a voxel as carrying
+    # metal temperature.
+    filled_mask = filled_voxels & voxel_metal & np.isfinite(temperature_fill)
 
     # Every voxel must carry a finite temperature -- the seam validates that
     # -- so unfilled metal cannot simply be left blank. Seeding it at mold
@@ -1184,6 +1196,12 @@ def run_filling_stage(
     # behind a plausible-looking result.
     temperature = np.full(mapping.n_voxels, mold_temp, dtype=np.float64)
     temperature[filled_mask] = temperature_fill[filled_mask]
+
+    if not np.all(np.isfinite(temperature)):
+        raise AssertionError(
+            "filling produced a non-finite handover temperature; "
+            "set_initial_temperature_field would reject it"
+        )
 
     if np.any(filled_mask):
         min_fill_temperature_c = float(temperature[filled_mask].min())

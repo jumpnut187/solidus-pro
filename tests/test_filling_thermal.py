@@ -407,3 +407,57 @@ class PromotedCellTemperatureTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HandoverFiniteTests(unittest.TestCase):
+    """
+    A voxel can carry an arrival time and no temperature.
+
+    `fill_time_s` is written once, when metal first reaches a cell, and is never
+    cleared. The temperature field is NaN-reset whenever a cell drains back to
+    gas. So a cell that filled and later drained has a valid fill time beside a
+    NaN temperature -- and `set_initial_temperature_field` rejects non-finite
+    values outright, taking the entire run down at handover.
+
+    This was invisible on synthetic columns, where nothing drains. It only
+    appeared on real gating geometry, at 0.25 in on the Filling_Test assembly,
+    after the fill had already run to completion.
+    """
+
+    def test_drained_cells_do_not_leak_nan_to_the_handover(self) -> None:
+        import numpy as np
+
+        from physics.filling import NO_TEMPERATURE
+
+        # A voxel that filled (arrival time 0.4 s) but whose temperature was
+        # reset when it drained. Both signals must be required, not just one.
+        fill_time = np.array([0.1, 0.4, -1.0, 0.2], dtype=np.float64)
+        temperature_fill = np.array([1600.0, NO_TEMPERATURE, np.nan, 1580.0])
+        filled_voxels = fill_time >= 0.0
+        voxel_metal = np.ones(4, dtype=bool)
+        mold_temp = 21.0
+
+        # The guarded expression from core/filling_stage.py.
+        mask = filled_voxels & voxel_metal & np.isfinite(temperature_fill)
+        out = np.full(4, mold_temp, dtype=np.float64)
+        out[mask] = temperature_fill[mask]
+
+        self.assertTrue(bool(np.all(np.isfinite(out))))
+        self.assertAlmostEqual(out[1], mold_temp)   # drained -> mold temp
+        self.assertAlmostEqual(out[2], mold_temp)   # never filled -> mold temp
+        self.assertAlmostEqual(out[0], 1600.0)      # genuinely filled -> kept
+
+    def test_fill_time_alone_is_not_sufficient(self) -> None:
+        """Guard the mistake directly: trusting fill_time alone leaks NaN."""
+        import numpy as np
+
+        from physics.filling import NO_TEMPERATURE
+
+        fill_time = np.array([0.4], dtype=np.float64)
+        temperature_fill = np.array([NO_TEMPERATURE])
+        naive = np.full(1, 21.0)
+        naive[fill_time >= 0.0] = temperature_fill[fill_time >= 0.0]
+        self.assertFalse(
+            bool(np.all(np.isfinite(naive))),
+            "the naive mask no longer reproduces the bug; the guard may be moot",
+        )
