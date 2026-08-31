@@ -1192,7 +1192,32 @@ if NUMBA_AVAILABLE:
                             ib = OPP[i]
                             ei = _equilibrium_i(i, rho_g, ux, uy, uz, usqr, inv_eps, C, W)
                             eb = _equilibrium_i(ib, rho_g, ux, uy, uz, usqr, inv_eps, C, W)
-                            f_out[ib, x, y, z] = ei + eb - post[i, x, y, z]
+                            # Floored at zero. Nothing in the Koerner closure
+                            # bounds this below: where the interface moves
+                            # fast, or a cell has most of its neighbours in
+                            # gas, ``post[i]`` can exceed ei + eb and the
+                            # reconstruction returns a negative population.
+                            # A negative population is a negative contribution
+                            # to density, and the equilibrium's quadratic-in-u
+                            # terms amplify whatever density it produces.
+                            #
+                            # Measured on the real assembly: isolated negatives
+                            # first appear at step 4,638 and self-heal for
+                            # thousands of steps, then cascade -- 1 cell at
+                            # step 12,606 to 417 by 12,651, density through
+                            # zero at 12,644, the whole field non-finite at
+                            # 12,650. See tests/test_filling_stability.py.
+                            #
+                            # The floor is a stability bound, not a physical
+                            # law, and it adds the mass it clips. It fires
+                            # rarely enough that total wet mass stayed at 0.69
+                            # of the wet-cell count across the run, so the
+                            # trade is a small, bounded mass gain in exchange
+                            # for the solve surviving at all.
+                            val = ei + eb - post[i, x, y, z]
+                            if val < 0.0:
+                                val = 0.0
+                            f_out[ib, x, y, z] = val
 
                     # --- Koerner mass exchange ---
                     denom = rho[x, y, z] * porosity[x, y, z]

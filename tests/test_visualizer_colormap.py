@@ -204,6 +204,9 @@ class VisualizerColormapTests(unittest.TestCase):
         viz._fill_time_cache = OrderedDict()
         viz._fill_time_cache_point_count = 0
         viz._fill_time_load_count = 0
+        viz._fill_animation_cache = OrderedDict()
+        viz._fill_animation_cache_point_count = 0
+        viz._fill_animation_load_count = 0
         viz.feed_modulus_leader = None
         viz.shrinkage_actor = None
         viz.hotspot_actor = None

@@ -21,7 +21,7 @@ import numpy as np
 import os
 import time
 import warnings
-from typing import Callable, Tuple, Dict, Optional, List
+from typing import Any, Callable, Tuple, Dict, Optional, List
 from collections import deque
 from scipy.spatial import cKDTree
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -250,6 +250,16 @@ class SolidificationEngine:
         # alloy.pouring_temp. See set_initial_temperature_field.
         self._initial_temperature_field: Optional[np.ndarray] = None
         self._fill_arrival_times: Optional[np.ndarray] = None
+        # Playback frames from the mold-filling stage, oldest first. Empty
+        # when filling did not run, or ran and diverged. Attached by
+        # simulation_pipeline the same way _fill_arrival_times is; declared
+        # here so the contract is visible rather than materialising from
+        # whichever caller happened to set it.
+        self._fill_frames: Tuple[Any, ...] = ()
+        # What the mold-filling stage concluded, attached even when its result
+        # was discarded. None means filling never ran. See
+        # get_filling_summary().
+        self._filling_summary: Optional[Dict[str, Any]] = None
         # Thread-budget side channel. Both pipelines attach a provider here
         # after construction and core/solidification_loop.py reads it back
         # through getattr. Declaring it makes that contract visible instead of
@@ -5440,6 +5450,50 @@ class SolidificationEngine:
         if finite.size == 0:
             return (0.0, 0.0)
         return (0.0, float(np.max(finite)))
+
+    def get_filling_summary(self) -> Optional[Dict[str, Any]]:
+        """
+        What the mold-filling stage concluded, or None if it never ran.
+
+        Present even when the fill was discarded as diverged -- that is the
+        case it exists for. Without it a run whose fill blew up and a run
+        where filling was never enabled both surface as "no Fill Time view",
+        and the user has no way to tell which happened.
+
+        Keys: ``status`` (complete/time_capped/stalled/diverged),
+        ``trustworthy``, ``diverged_at_step``, ``filled_voxel_count``,
+        ``misrun_voxel_count``, ``filled_fraction``, ``fill_seconds``,
+        ``choke_thickness_cells`` and ``warnings``.
+        """
+        return getattr(self, "_filling_summary", None)
+
+    def get_fill_animation_frames(self) -> Tuple[Any, ...]:
+        """
+        Playback frames from the mold-filling stage, oldest first.
+
+        Each frame carries ``time_s``, a per-voxel ``fill_fraction`` and a
+        per-voxel ``speed_m_s``. Empty when filling did not run, or ran and
+        diverged -- callers must treat empty as "no animation available"
+        rather than as an error.
+        """
+        return getattr(self, "_fill_frames", ()) or ()
+
+    def get_fill_animation_range(self) -> Tuple[float, float]:
+        """
+        Time span covered by the filling animation frames, in seconds.
+
+        Distinct from :meth:`get_fill_time_range`, which spans arrival times.
+        A stalled pour has frames running to the moment it gave up while its
+        last arrival time may be far earlier, so the two ranges differ.
+
+        Returns:
+            ``(first_frame_time, last_frame_time)``, or ``(0.0, 0.0)`` when
+            there are no frames.
+        """
+        frames = self.get_fill_animation_frames()
+        if not frames:
+            return (0.0, 0.0)
+        return (float(frames[0].time_s), float(frames[-1].time_s))
 
     def _calculate_feeding_paths(self):
         """

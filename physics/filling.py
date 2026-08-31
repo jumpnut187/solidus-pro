@@ -461,8 +461,16 @@ def reconstruct_gas_populations(
         if not np.any(target):
             continue
         ibar = int(opp[i])
-        out[ibar][target] = (
-            feq_gas[i][target] + feq_gas[ibar][target] - post[i][target]
+        # Floored at zero, matching free_surface_kernel in physics/fluid_flow.
+        # The closure does not bound this below, and a negative population is
+        # a negative density contribution that the equilibrium's quadratic-in-u
+        # terms then amplify -- see that kernel for the measured cascade this
+        # prevents, and for why the resulting small mass gain is the better
+        # trade. The two paths must agree or tests/test_filling_parity.py
+        # fails, which is exactly the guard that should catch a one-sided fix.
+        out[ibar][target] = np.maximum(
+            feq_gas[i][target] + feq_gas[ibar][target] - post[i][target],
+            0.0,
         )
     return out
 
@@ -563,6 +571,22 @@ def apply_transitions(state: FillingState, time_s: float) -> Tuple[int, int]:
     # more either -- the same "no metal, no temperature" rule create_state
     # applies at t=0 applies for the rest of the run.
     state.temperature[to_gas] = NO_TEMPERATURE
+    # ...and it holds no populations or density any more either, which makes
+    # the "a gas cell holds nothing" invariant true at the moment of
+    # transition rather than one stage later.
+    #
+    # The populations are belt-and-braces: both streaming paths already zero
+    # a gas cell's f every step (the numpy branch in step(), the clear_gas
+    # branch in fluid_flow.stream_kernel). The *density* is not covered
+    # anywhere -- macroscopic() zeroes a gas cell's velocity but computes its
+    # density unconditionally from sum(f) -- so without this a retreated cell
+    # kept its interface-era rho until something happened to overwrite it.
+    # Measured: gas cells carried stale density from step 26 of a plain
+    # column fill. Nothing load-bearing reads it (a gas cell is never a
+    # seeding donor), so this is an invariant repair, not a bug fix -- it is
+    # NOT what caused the divergence at fine resolution.
+    state.f[:, to_gas] = 0.0
+    state.rho[to_gas] = 0.0
 
     newly_filled = to_fluid & (state.fill_time_s < 0)
     state.fill_time_s[newly_filled] = np.float32(time_s)
@@ -595,6 +619,65 @@ def apply_transitions(state: FillingState, time_s: float) -> Tuple[int, int]:
     return filled, emptied
 
 
+def reset_detached_interface_cells(state: FillingState) -> int:
+    """
+    Return fully detached interface cells to rest.
+
+    An interface cell with no wet neighbour at all -- no FLUID, no INTERFACE,
+    nothing but gas and obstacle in all 18 directions -- is a droplet smaller
+    than the grid can represent. Every one of its populations comes from the
+    gas-side reconstruction, which at that topology has no real neighbour
+    populations to draw on, so its velocity is decided entirely by a closure
+    that has nothing to close against.
+
+    Measured on the reference assembly: 5-12 such cells at any moment, 0.1-0.3%
+    of the metal, all at the gate/casting junction, each carrying 16-18 of 18
+    gas neighbours -- and they were the *only* cells exceeding the Mach guard.
+    The bulk was never unstable: FLUID velocities stayed flat at 0.038-0.046
+    across 108,000 steps while these few ran to 0.44. A Mach limiter on the
+    equilibrium would have damped the healthy bulk and missed this entirely.
+
+    Populations are replaced with the rest equilibrium; mass is deliberately
+    left alone, so this removes spurious momentum without inventing or
+    destroying metal. Suppresses the runaway completely -- late-run peak
+    velocity 0.043 against a 0.05 design target, down from 0.31 -- while
+    touching a mean of 3.7 cells per step.
+
+    It does **not** unstick the ~25% fill plateau, which was measured
+    separately and has some other cause. This repairs an artifact; it is not a
+    fix for the fill.
+
+    Returns:
+        Number of cells reset, for instrumentation.
+    """
+    interface = state.flags == FLAG_INTERFACE
+    if not np.any(interface):
+        return 0
+
+    wet = interface | (state.flags == FLAG_FLUID)
+    support = np.zeros(state.shape, dtype=np.int16)
+    for i in range(1, Q):
+        c = LATTICE_VELOCITIES[i]
+        support += np.roll(
+            wet, shift=(int(c[0]), int(c[1]), int(c[2])), axis=(0, 1, 2)
+        ).astype(np.int16)
+
+    detached = interface & (support == 0)
+    count = int(np.count_nonzero(detached))
+    if count == 0:
+        return 0
+
+    rest = equilibrium(
+        np.full(count, REFERENCE_DENSITY, dtype=np.float64),
+        np.zeros((3, count), dtype=np.float64),
+        porosity=state.porous.porosity[detached].astype(np.float64),
+    )
+    state.f[:, detached] = rest.astype(np.float32)
+    state.rho[detached] = np.float32(REFERENCE_DENSITY)
+    state.u[:, detached] = 0.0
+    return count
+
+
 def _initialise_promoted_cells(state: FillingState, promote: np.ndarray) -> None:
     """
     Give a freshly promoted GAS -> INTERFACE cell something to start from.
@@ -608,6 +691,16 @@ def _initialise_promoted_cells(state: FillingState, promote: np.ndarray) -> None
     Skipping this is not a subtle accuracy loss: the front advances into cells
     with rho = 0, the velocity solve produces inf, and the run reaches NaN
     within a few hundred steps.
+
+    That is exactly what used to happen to a *subset* of promoted cells. The
+    donor mask excludes cells promoted in the same step, so a cell whose only
+    wet neighbours were promoted alongside it has no donor at all. Those cells
+    were left untouched at rho = 0 -- while the fallback value they needed was
+    already being computed and then discarded. A whole front advancing into
+    open space promotes in sheets, so this is routine, not a corner case:
+    every cell behind the leading edge of such a sheet has only
+    same-step neighbours. They now fall back to reference density at rest,
+    which is what an unconstrained cell of fresh metal should start from.
     """
     if not np.any(promote):
         return
@@ -615,8 +708,6 @@ def _initialise_promoted_cells(state: FillingState, promote: np.ndarray) -> None
     donor = (
         (state.flags == FLAG_FLUID) | (state.flags == FLAG_INTERFACE)
     ) & ~promote
-    if not np.any(donor):
-        return
 
     weight = donor.astype(np.float64)
     rho = state.rho.astype(np.float64) * weight
@@ -635,16 +726,17 @@ def _initialise_promoted_cells(state: FillingState, promote: np.ndarray) -> None
             u_sum[d] += np.roll(u[d], shift=shift, axis=(0, 1, 2))
 
     has_donor = promote & (count > 0)
-    if not np.any(has_donor):
-        return
 
     safe = np.where(count > 0, count, 1.0)
     rho_avg = np.where(has_donor, rho_sum / safe, REFERENCE_DENSITY)
     u_avg = np.where(has_donor[None, :, :, :], u_sum / safe[None, :, :, :], 0.0)
 
+    # Written across every promoted cell, not just the ones with a donor.
+    # rho_avg and u_avg already carry the reference-density-at-rest fallback
+    # for the rest, so the donorless cells are seeded rather than left at zero.
     seeded = equilibrium(rho_avg, u_avg, porosity=state.porous.porosity.astype(np.float64))
-    state.f[:, has_donor] = seeded[:, has_donor].astype(np.float32)
-    state.rho[has_donor] = rho_avg[has_donor].astype(np.float32)
+    state.f[:, promote] = seeded[:, promote].astype(np.float32)
+    state.rho[promote] = rho_avg[promote].astype(np.float32)
 
 
 def _initialise_promoted_temperature(state: FillingState, promote: np.ndarray) -> None:
@@ -671,6 +763,14 @@ def _initialise_promoted_temperature(state: FillingState, promote: np.ndarray) -
     if not np.any(donor_has_temp):
         return
 
+    # The whole-domain mean of metal already in the mold, as the fallback for
+    # promoted cells with no *local* donor -- the same sheet-promotion case
+    # that leaves _initialise_promoted_cells without one. Leaving them at
+    # NO_TEMPERATURE is what this function's own docstring warns about: the
+    # NaN survives until a neighbour reads across into it, and then spreads
+    # through the advection stencil a cell per step.
+    fallback_temp = float(np.mean(state.temperature[donor_has_temp]))
+
     weight = donor_has_temp.astype(np.float64)
     temp = np.where(donor_has_temp, state.temperature.astype(np.float64), 0.0) * weight
 
@@ -684,12 +784,10 @@ def _initialise_promoted_temperature(state: FillingState, promote: np.ndarray) -
         temp_sum += np.roll(temp, shift=shift, axis=(0, 1, 2))
 
     has_donor = promote & (count > 0)
-    if not np.any(has_donor):
-        return
 
     safe = np.where(count > 0, count, 1.0)
-    avg = temp_sum / safe
-    state.temperature[has_donor] = avg[has_donor].astype(np.float32)
+    avg = np.where(has_donor, temp_sum / safe, fallback_temp)
+    state.temperature[promote] = avg[promote].astype(np.float32)
 
 
 def _redistribute(state: FillingState, excess: np.ndarray) -> None:
@@ -974,6 +1072,7 @@ def step(
             state.mass[...] = mass_out
             state.step_count += 1
             apply_transitions(state, state.step_count * state.dt_s)
+            reset_detached_interface_cells(state)
         else:
             state.f = streamed.astype(np.float32)
             state.step_count += 1
@@ -1030,6 +1129,7 @@ def step(
         state.mass = advance_mass(state, post, reconstructed)
         state.step_count += 1
         apply_transitions(state, state.step_count * state.dt_s)
+        reset_detached_interface_cells(state)
     else:
         state.step_count += 1
 

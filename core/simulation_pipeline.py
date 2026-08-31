@@ -13,6 +13,11 @@ import os
 import numpy as np
 
 from core.filling_stage import maybe_run_filling
+
+try:
+    from core.error_logger import logger as _filling_logger
+except ImportError:  # pragma: no cover - headless/dummy fallback
+    from core.error_logger_dummy import logger as _filling_logger  # type: ignore
 from core.materials import get_alloy
 from core.part_manager import PartManager, PartType, build_part_manager, infer_part_type_from_filename
 from core.solidification import (
@@ -548,13 +553,24 @@ def run_pipeline(
     # or pass solver_mode="schedule_legacy" explicitly in analysis_options.
 
 
+    # Filling messages go to the log as well as the progress callback. The
+    # callback lands in a status-bar label that the next message overwrites
+    # seconds later, so without this the entire record of a fill -- including
+    # "the solver diverged and the results were discarded" -- existed only for
+    # as long as it took solidification to emit its first line. A run that
+    # threw its fill away looked identical to one where filling was never
+    # ticked.
+    def _filling_message(message: str) -> None:
+        _filling_logger.info(message)
+        _emit_message(progress_message_callback, message)
+
     filling_result = maybe_run_filling(
         voxel_mesh,
         alloy,
         analysis_options,
         inputs,
         cancel_callback=cancel_callback,
-        progress_message_callback=progress_message_callback,
+        progress_message_callback=_filling_message,
     )
 
     _emit_message(progress_message_callback, "Running solidification simulation...")
@@ -564,10 +580,40 @@ def run_pipeline(
     if inputs.thread_budget_provider is not None:
         engine._thread_budget_provider = inputs.thread_budget_provider
     if filling_result is not None:
+        # Attached whether or not the fill can be used. The Fill Time and Fill
+        # Animation views disappear from the results list when a fill is
+        # discarded, and a view that is simply absent is indistinguishable
+        # from an analysis that was never enabled. This is what lets the UI
+        # say which of the two happened, and why.
+        engine._filling_summary = {
+            "status": filling_result.status,
+            "trustworthy": filling_result.trustworthy,
+            "diverged_at_step": filling_result.diverged_at_step,
+            "filled_voxel_count": filling_result.filled_voxel_count,
+            "misrun_voxel_count": filling_result.misrun_voxel_count,
+            "filled_fraction": filling_result.filled_fraction,
+            "fill_seconds": filling_result.fill_seconds,
+            "choke_thickness_cells": filling_result.choke_thickness_cells,
+            "warnings": tuple(filling_result.warnings),
+        }
+
+    if filling_result is not None and not filling_result.trustworthy:
+        # A diverged fill still returns arrays of the right shape, so seeding
+        # from them would run a complete, plausible-looking solidification on
+        # numerical debris. Fall back to the two-constant placeholder and say
+        # so, rather than silently dressing up a failed solve as a result.
+        _filling_message(
+            f"Filling: DISCARDED -- the solver diverged at step "
+            f"{filling_result.diverged_at_step:,}. Solidification will use the "
+            f"uniform pour-temperature placeholder instead of the fill's "
+            f"thermal field, and no Fill Time result will be available."
+        )
+    elif filling_result is not None:
         engine.set_initial_temperature_field(
             filling_result.temperature_c,
             fill_arrival_times=filling_result.fill_time_s,
         )
+        engine._fill_frames = filling_result.frames
         # Report the handover explicitly. Without this the only sign a fill ran
         # is its progress chatter, so a run where filling was silently off is
         # indistinguishable from one where it ran and found nothing wrong.

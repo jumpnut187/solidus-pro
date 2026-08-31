@@ -231,7 +231,9 @@ class SolidificationParametersTests(unittest.TestCase):
     def test_filling_defaults_present(self) -> None:
         params = SolidificationParameters()
 
-        self.assertAlmostEqual(params.filling.pour_rate_lb_s, 5.0)
+        # 0 = derive from the square-root rule against the casting's own
+        # weight, not a fixed rate that suits one size of casting.
+        self.assertAlmostEqual(params.filling.pour_rate_lb_s, 0.0)
         self.assertAlmostEqual(params.filling.pour_time_s, 0.0)
         self.assertAlmostEqual(params.filling.pour_temperature_c, 0.0)
         self.assertAlmostEqual(params.filling.initial_head_in, 4.0)
@@ -259,7 +261,7 @@ class SolidificationParametersTests(unittest.TestCase):
         serialized = params.to_dict()
         self.assertIn("filling", serialized)
         self.assertIn("filter", serialized["filling"])
-        self.assertAlmostEqual(serialized["filling"]["pour_rate_lb_s"], 5.0)
+        self.assertAlmostEqual(serialized["filling"]["pour_rate_lb_s"], 0.0)
         self.assertAlmostEqual(serialized["filling"]["filter"]["porosity"], 0.85)
 
     def test_filling_filter_deep_merge_does_not_clobber_siblings(self) -> None:

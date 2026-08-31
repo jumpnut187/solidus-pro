@@ -59,6 +59,14 @@ POUR_DIRECTION = (0.0, 0.0, -1.0)
 #: color in the scene.
 FILL_TIME_MISRUN_COLOR = (0.55, 0.55, 0.55)
 
+#: Minimum fill_fraction to draw a voxel in the Fill Animation view. The
+#: partial-fill free surface (see the FillFrame docstring in
+#: core/filling_stage.py) trails a long tail of near-zero numerical noise
+#: behind the true front; a bare `> 0` threshold would fog the advancing
+#: front with a haze of barely-visible cubes instead of the clean wavefront
+#: a MagmaSoft-style fill plot shows.
+FILL_ANIMATION_WETTED_THRESHOLD = 0.05
+
 
 # ==================== Color Map Definitions ====================
 
@@ -934,6 +942,9 @@ class CastingVisualizer(QWidget):
         # Fill time actor (mold-filling arrival-time visualization)
         self.fill_time_actor = None
 
+        # Fill animation actor (mold-filling playback -- advancing free surface)
+        self.fill_animation_actor = None
+
         # Data
         self.current_mesh = None
         self.current_shrinkage_data = None
@@ -944,6 +955,7 @@ class CastingVisualizer(QWidget):
         self.current_gas_porosity_data = None
         self.current_fraction_liquid_data = None
         self.current_fill_time_data = None
+        self.current_fill_animation_data = None
 
         # Pre-rendered shrinkage cache for fast threshold updates
         # Maps threshold levels (0.05, 0.10, ..., 1.0) to pre-built VTK polydata
@@ -975,7 +987,15 @@ class CastingVisualizer(QWidget):
         self._fill_time_cache: OrderedDict[int, vtk.vtkPolyData] = OrderedDict()
         self._fill_time_cache_point_count = 0
         self._fill_time_load_count = 0
-        
+
+        # Fill animation frame cache: playback frame INDEX -> rendered polydata.
+        # Mirrors the fill time cache above, but keyed to the solver's own
+        # discrete frame index rather than a slider-derived time -- frames are
+        # actual solver states, not points on a continuous sweep.
+        self._fill_animation_cache: OrderedDict[int, vtk.vtkPolyData] = OrderedDict()
+        self._fill_animation_cache_point_count = 0
+        self._fill_animation_load_count = 0
+
         # ==================== NEW FEATURES ====================
         
         # Color mapping
@@ -1526,6 +1546,8 @@ class CastingVisualizer(QWidget):
             self._clip_actor(self.fraction_liquid_actor, enabled_planes)
         if self.fill_time_actor:
             self._clip_actor(self.fill_time_actor, enabled_planes)
+        if self.fill_animation_actor:
+            self._clip_actor(self.fill_animation_actor, enabled_planes)
 
         # Apply to mesh actor
         if self.mesh_actor:
@@ -1554,7 +1576,8 @@ class CastingVisualizer(QWidget):
     def _remove_cross_section_clipping(self):
         """Remove all clipping from actors"""
         actors = [self.shrinkage_actor, self.hotspot_actor, self.niyama_actor,
-                  self.fraction_liquid_actor, self.fill_time_actor, self.mesh_actor]
+                  self.fraction_liquid_actor, self.fill_time_actor,
+                  self.fill_animation_actor, self.mesh_actor]
         actors.extend(self.part_actors.values())
         
         for actor in actors:
@@ -2144,6 +2167,8 @@ class CastingVisualizer(QWidget):
         self._fraction_liquid_cache_point_count = 0
         self._fill_time_cache.clear()
         self._fill_time_cache_point_count = 0
+        self._fill_animation_cache.clear()
+        self._fill_animation_cache_point_count = 0
 
     def _store_fraction_liquid_cache(self, key: int, polydata: vtk.vtkPolyData) -> None:
         """Store a rendered fraction-liquid frame under an LRU, point-budgeted cache."""
@@ -2176,6 +2201,22 @@ class CastingVisualizer(QWidget):
         ) and len(self._fill_time_cache) > 1:
             _, oldest = self._fill_time_cache.popitem(False)  # oldest entry
             self._fill_time_cache_point_count -= oldest.GetNumberOfPoints()
+
+    def _store_fill_animation_cache(self, key: int, polydata: vtk.vtkPolyData) -> None:
+        """Store a rendered fill-animation frame under an LRU, point-budgeted cache."""
+        if key in self._fill_animation_cache:
+            self._fill_animation_cache.move_to_end(key)
+            return
+
+        self._fill_animation_cache[key] = polydata
+        self._fill_animation_cache_point_count += polydata.GetNumberOfPoints()
+
+        while (
+            len(self._fill_animation_cache) > self.FRACTION_LIQUID_CACHE_MAX_FRAMES
+            or self._fill_animation_cache_point_count > self.FRACTION_LIQUID_CACHE_MAX_POINTS
+        ) and len(self._fill_animation_cache) > 1:
+            _, oldest = self._fill_animation_cache.popitem(False)  # oldest entry
+            self._fill_animation_cache_point_count -= oldest.GetNumberOfPoints()
 
     def _get_shrinkage_threshold_levels(self, current_threshold: float) -> List[float]:
         """Return nearby threshold levels that should be pre-built."""
@@ -3211,6 +3252,174 @@ class CastingVisualizer(QWidget):
 
         return glyph3D.GetOutput()
 
+    def load_fill_animation(self, voxel_centers: np.ndarray,
+                             voxel_sizes: np.ndarray,
+                             fill_fraction: np.ndarray,
+                             speed_m_s: np.ndarray,
+                             max_speed: float,
+                             cache_key: Optional[int] = None):
+        """
+        Load and display the Fill Animation visualization.
+
+        Plays back the mold-filling solver's own transient state -- a
+        MagmaSoft-style advancing free surface -- rather than sweeping a
+        threshold over a single precomputed arrival-time scalar the way Fill
+        Time does. Each call renders one playback frame.
+
+        Args:
+            voxel_centers: Nx3 array of voxel centers.
+            voxel_sizes: N array of voxel sizes.
+            fill_fraction: N array of per-voxel metal content for this
+                frame, 0 (empty) to 1 (full). See FillFrame in
+                core/filling_stage.py.
+            speed_m_s: N array of per-voxel velocity magnitude for this
+                frame, metres per second.
+            max_speed: Maximum speed over the WHOLE animation (every frame),
+                used to normalize the color ramp so its span does not shift
+                frame to frame -- a per-frame rescale would make a steady
+                stream of metal appear to speed up and slow down.
+            cache_key: Deterministic playback frame index used to reuse the
+                previously rendered geometry for the same frame. When None
+                the geometry is always rebuilt.
+        """
+        if self.fill_animation_actor is not None:
+            self.renderer.RemoveActor(self.fill_animation_actor)
+
+        self.current_fill_animation_data = (voxel_centers, voxel_sizes, speed_m_s, max_speed)
+
+        polydata = None
+        if cache_key is not None and cache_key in self._fill_animation_cache:
+            polydata = self._fill_animation_cache[cache_key]
+            self._fill_animation_cache.move_to_end(cache_key)
+        else:
+            polydata = self._build_fill_animation_geometry(
+                voxel_centers, voxel_sizes, fill_fraction, speed_m_s, max_speed
+            )
+            if (
+                polydata is not None
+                and cache_key is not None
+                and polydata.GetNumberOfPoints() > 0
+            ):
+                self._store_fill_animation_cache(cache_key, polydata)
+
+        if polydata is None or polydata.GetNumberOfPoints() == 0:
+            print("No fill-animation voxels to display")
+            return
+
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputData(polydata)
+        mapper.SetScalarModeToUsePointData()
+
+        self.fill_animation_actor = vtk.vtkActor()
+        self.fill_animation_actor.SetMapper(mapper)
+
+        prop = self.fill_animation_actor.GetProperty()
+        prop.SetOpacity(0.85)
+        prop.SetInterpolationToFlat()
+
+        self.renderer.AddActor(self.fill_animation_actor)
+        self.render_window.Render()
+
+        self._fill_animation_load_count += 1
+        if self._fill_animation_load_count % self.FRACTION_LIQUID_LOAD_PRINT_INTERVAL == 0:
+            num_displayed = polydata.GetNumberOfCells() // 6
+            print(f"Displayed {num_displayed:,} fill-animation voxels")
+
+    def _build_fill_animation_geometry(self, voxel_centers: np.ndarray,
+                                        voxel_sizes: np.ndarray,
+                                        fill_fraction: np.ndarray,
+                                        speed_m_s: np.ndarray,
+                                        max_speed: float) -> Optional[vtk.vtkPolyData]:
+        """
+        Build Fill Animation visualization geometry for one playback frame.
+
+        Unlike Fill Time's threshold sweep over a single static field, each
+        call here renders one frame of the filling solver's own transient
+        state -- the metal actually flowing in, not a precomputed scalar.
+
+        Color convention:
+        - Only voxels with fill_fraction > FILL_ANIMATION_WETTED_THRESHOLD
+          are drawn (see that constant's comment for why zero is the wrong
+          cutoff).
+        - Blue -> cyan -> yellow -> red ramp = flow speed, slow to fast.
+          Same four stops as the 'niyama' entry in COLOR_MAPS. Normalized
+          against max_speed, the maximum over the WHOLE animation rather
+          than this frame -- see load_fill_animation for why.
+
+        Args:
+            voxel_centers: Nx3 array of voxel centers.
+            voxel_sizes: N array of voxel sizes.
+            fill_fraction: N array of per-voxel metal content this frame,
+                0 (empty) to 1 (full).
+            speed_m_s: N array of per-voxel velocity magnitude this frame,
+                metres per second.
+            max_speed: Whole-animation maximum speed, for a ramp that does
+                not rescale as playback advances.
+
+        Returns:
+            VTK polydata with colored cubes, or None if nothing passes the
+            wetted threshold.
+        """
+        fill_fraction = np.asarray(fill_fraction, dtype=np.float64)
+        mask = fill_fraction > FILL_ANIMATION_WETTED_THRESHOLD
+
+        filtered_centers = voxel_centers[mask]
+        filtered_sizes = voxel_sizes[mask]
+        filtered_speed = np.asarray(speed_m_s, dtype=np.float64)[mask]
+
+        n_voxels = len(filtered_centers)
+        if n_voxels == 0:
+            return None
+
+        centers_f32 = np.ascontiguousarray(filtered_centers, dtype=np.float32)
+        vtk_points_array = numpy_support.numpy_to_vtk(centers_f32, deep=True, array_type=vtk.VTK_FLOAT)
+        vtk_points_array.SetNumberOfComponents(3)
+
+        points = vtk.vtkPoints()
+        points.SetData(vtk_points_array)
+
+        scaled_sizes = np.ascontiguousarray(filtered_sizes * 0.85, dtype=np.float32)
+        vtk_scales = numpy_support.numpy_to_vtk(scaled_sizes, deep=True, array_type=vtk.VTK_FLOAT)
+        vtk_scales.SetName("Scales")
+
+        # Blue (slow) -> cyan -> yellow -> red (fast), normalized against the
+        # whole-animation max so a steady stream of metal reads as a steady
+        # color rather than drifting as the sweep progresses.
+        safe_max = max_speed if max_speed > 0.0 else 1.0
+        normalized = np.clip(filtered_speed / safe_max, 0.0, 1.0)
+        ramp_stops = (0.0, 0.33, 0.66, 1.0)
+        color_array = np.zeros((n_voxels, 3), dtype=np.uint8)
+        color_array[:, 0] = np.interp(normalized, ramp_stops, (0, 0, 255, 255)).astype(np.uint8)
+        color_array[:, 1] = np.interp(normalized, ramp_stops, (0, 255, 255, 0)).astype(np.uint8)
+        color_array[:, 2] = np.interp(normalized, ramp_stops, (255, 255, 0, 0)).astype(np.uint8)
+
+        vtk_colors = numpy_support.numpy_to_vtk(
+            np.ascontiguousarray(color_array), deep=True, array_type=vtk.VTK_UNSIGNED_CHAR
+        )
+        vtk_colors.SetName("Colors")
+        vtk_colors.SetNumberOfComponents(3)
+
+        pointsPolydata = vtk.vtkPolyData()
+        pointsPolydata.SetPoints(points)
+        pointsPolydata.GetPointData().SetScalars(vtk_colors)
+        pointsPolydata.GetPointData().AddArray(vtk_scales)
+
+        cubeSource = vtk.vtkCubeSource()
+        cubeSource.SetXLength(1.0)
+        cubeSource.SetYLength(1.0)
+        cubeSource.SetZLength(1.0)
+        cubeSource.Update()
+
+        glyph3D = vtk.vtkGlyph3D()
+        glyph3D.SetSourceConnection(cubeSource.GetOutputPort())
+        glyph3D.SetInputData(pointsPolydata)
+        glyph3D.SetScaleModeToScaleByScalar()
+        glyph3D.SetInputArrayToProcess(0, 0, 0, 0, "Scales")
+        glyph3D.SetColorModeToColorByScalar()
+        glyph3D.Update()
+
+        return glyph3D.GetOutput()
+
     def update_hotspot_threshold(self, threshold: float):
         """Update hot spot visualization threshold"""
         if self.current_hotspot_data is None:
@@ -4036,6 +4245,8 @@ class CastingVisualizer(QWidget):
             self.fraction_liquid_actor.SetVisibility(False)
         if self.fill_time_actor is not None:
             self.fill_time_actor.SetVisibility(False)
+        if self.fill_animation_actor is not None:
+            self.fill_animation_actor.SetVisibility(False)
         self.render_window.Render()
 
     def show_analysis(self, analysis_type: str):
@@ -4058,6 +4269,8 @@ class CastingVisualizer(QWidget):
             self.fraction_liquid_actor.SetVisibility(True)
         elif analysis_type == "fill_time" and self.fill_time_actor is not None:
             self.fill_time_actor.SetVisibility(True)
+        elif analysis_type == "fill_animation" and self.fill_animation_actor is not None:
+            self.fill_animation_actor.SetVisibility(True)
 
         self.render_window.Render()
 
@@ -4100,6 +4313,10 @@ class CastingVisualizer(QWidget):
             self.renderer.RemoveActor(self.fill_time_actor)
             self.fill_time_actor = None
 
+        if self.fill_animation_actor is not None:
+            self.renderer.RemoveActor(self.fill_animation_actor)
+            self.fill_animation_actor = None
+
         # Clear all cached result geometry
         self._clear_result_caches()
 
@@ -4111,6 +4328,7 @@ class CastingVisualizer(QWidget):
         self.current_sand_burn_in_data = None
         self.current_fraction_liquid_data = None
         self.current_fill_time_data = None
+        self.current_fill_animation_data = None
 
         self.render_window.Render()
     
@@ -4151,6 +4369,10 @@ class CastingVisualizer(QWidget):
         if self.fill_time_actor is not None:
             self.renderer.RemoveActor(self.fill_time_actor)
             self.fill_time_actor = None
+
+        if self.fill_animation_actor is not None:
+            self.renderer.RemoveActor(self.fill_animation_actor)
+            self.fill_animation_actor = None
 
         self._clear_result_caches()
 

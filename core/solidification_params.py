@@ -249,7 +249,11 @@ class FillingParams:
     encoding rather than an enum/str or bool -- introducing either would
     make the field invisible in both UIs.
     """
-    pour_rate_lb_s: float = 5.0
+    # 0 = derive from the square-root rule, t = sqrt(W): a casting of W pounds
+    # pours in sqrt(W) seconds, so the rate is W/sqrt(W) = sqrt(W) lb/s. The
+    # old fixed 5.0 was independent of the casting, which is only right at
+    # about 25 lb. See core.filling_stage.recommended_pour_rate_lb_s.
+    pour_rate_lb_s: float = 0.0
     pour_time_s: float = 0.0                # 0 = derive from rate and volume
     pour_temperature_c: float = 0.0         # 0 = use alloy.pouring_temp
     initial_head_in: float = 4.0

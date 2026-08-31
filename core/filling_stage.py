@@ -60,6 +60,13 @@ from core.part_manager import (
     PART_TYPE_RISER_POST,
     PART_TYPE_RUNNER,
     PART_TYPE_SPRUE,
+    is_metal,
+)
+from core.filter_database import (
+    POUR_MODE_BOTTOM,
+    POUR_MODE_LIP,
+    flow_rate_kg_s_for_area,
+    steel_class_for_alloy,
 )
 from physics.filling import PorousZone
 from physics.fluid_flow import (
@@ -101,6 +108,51 @@ COARSENING_PRIORITY: Tuple[int, ...] = (
     PART_TYPE_RISER,
     PART_TYPE_CAST,
 )
+
+#: Frames captured across a fill for playback. The solver overwrites its whole
+#: state every step, so without this the only surviving record of the pour is
+#: one write-once arrival time per cell -- enough to answer "when did this fill?"
+#: but not to show metal moving. 60 frames is smooth playback at a size that
+#: stays trivial next to the mesh itself (two float32 per voxel per frame:
+#: ~16 MB at 33k voxels).
+FILL_ANIMATION_FRAMES = 60
+
+#: How a filling run ended. See ``FillingResult.status``.
+STATUS_COMPLETE = "complete"
+STATUS_TIME_CAPPED = "time_capped"
+STATUS_STALLED = "stalled"
+STATUS_DIVERGED = "diverged"
+
+#: Cell thickness required at the narrowest gating section before the fill can
+#: be believed. Halfway bounce-back puts the walls at +-0.5 cells, so a channel
+#: one cell thick has no interior at all and seals shut; two is the bare
+#: minimum that admits any flow, and the field notes ask for three to four.
+#:
+#: This is a *thickness*, not a cross-sectional area. The first version of this
+#: check compared an area against 4 and so passed a wide, thin gate -- exactly
+#: the geometry that seals -- while looking like it had checked something.
+MIN_CHOKE_THICKNESS_CELLS = 2.0
+
+#: Total wet mass, as a multiple of the wet-cell count, above which the run is
+#: declared diverged. Every fluid cell holds mass ~= rho * porosity ~= 1 and
+#: every interface cell less, so the physical ceiling is the wet-cell count
+#: itself; 1.5x is margin, not a threshold to tune. Crossing it does not mean
+#: "slightly inaccurate", it means the free-surface bookkeeping has broken.
+DIVERGENCE_MASS_FACTOR = 1.5
+
+#: Steps between mass-conservation checks. Cheap next to a lattice step.
+DIVERGENCE_CHECK_INTERVAL = 200
+
+#: Consecutive progress reports with no newly filled metal before the run is
+#: called stalled. The front genuinely pauses while a cavity backs up, so a
+#: single flat report proves nothing.
+STALL_REPORTS = 5
+
+#: Steps that must elapse before a stall can be declared at all. Reports are
+#: spaced at ``max_steps / 20``, so on a short step budget five of them can
+#: pass within a handful of steps -- before the front has left the inlet. That
+#: is a run too young to judge, not a stalled one.
+STALL_MIN_STEPS = 2000
 
 
 @dataclass(frozen=True)
@@ -690,12 +742,132 @@ def measure_choke_area_cm2(dense_types: np.ndarray, dx_m: float) -> float:
     Returns:
         Choke area in cm^2, or 0.0 when no gating metal is present.
     """
+    cells = _min_flow_slice_cells(dense_types)
+    if cells <= 0:
+        return 0.0
+    return float(cells) * (dx_m * 100.0) ** 2
+
+
+def pour_weight_lb(voxel_mesh, alloy) -> float:
+    """
+    Total weight of metal to be poured, in pounds.
+
+    Everything the pour has to fill: the casting, the risers and the whole
+    gating system. Mold, cores and chills are excluded -- no metal goes into
+    them. Measured from the voxel volumes rather than the CAD bounding boxes so
+    it matches the geometry the solver actually sees.
+
+    Returns:
+        Pounds of metal, or 0.0 when the mesh carries no part types.
+    """
+    part_types = getattr(voxel_mesh, "voxel_part_types", None)
+    volumes = getattr(voxel_mesh, "voxel_volumes", None)
+    if part_types is None:
+        return 0.0
+
+    metal = is_metal(np.asarray(part_types, dtype=np.int32))
+    if not np.any(metal):
+        return 0.0
+
+    if volumes is not None and len(volumes) == len(metal):
+        volume_in3 = float(np.sum(np.asarray(volumes, dtype=np.float64)[metal]))
+    else:
+        sizes = np.asarray(voxel_mesh.voxel_sizes, dtype=np.float64)[metal]
+        volume_in3 = float(np.sum(sizes ** 3))
+
+    # density_liquid is kg/m^3; 1 in^3 = 1.6387064e-5 m^3, 1 kg = 2.20462262 lb.
+    kg = float(alloy.density_liquid) * volume_in3 * 1.6387064e-5
+    return kg * 2.20462262
+
+
+def filter_flow_limit_kg_s(
+    filter_zones: Sequence["FilterZoneSpec"],
+    alloy,
+    pour_mode_code: int = 0,
+) -> Tuple[Optional[float], Optional[str]]:
+    """
+    Mass flow the gating system's filters are rated to pass.
+
+    A ceramic foam filter is a rated restriction, not just a drag term: run
+    metal through it faster than its rating and it does not politely throttle,
+    it blinds off or breaks up and sends ceramic into the casting. The pour
+    rate therefore has a hard ceiling whenever a filter is in the flow path,
+    and that ceiling is a property of the filter the user already placed.
+
+    Filters are summed, not minimised: a gating system with several of them
+    runs one per ingate, in parallel, so the capacities add. Filters stacked
+    in series would share one rating instead -- that is not a layout this
+    reads from the geometry, and it is the rarer arrangement by far.
+
+    Args:
+        filter_zones: Resolved filter bodies; empty means no restriction.
+        alloy: Provides ``name``, to pick the Foseco steel table.
+        pour_mode_code: 0 = lip, 1 = bottom. Bottom pouring is rated higher.
+
+    Returns:
+        ``(limit_kg_s, note)``. ``limit_kg_s`` is None when no filter is
+        present or none can be rated; ``note`` explains the latter case and is
+        None otherwise.
+    """
+    if not filter_zones:
+        return None, None
+
+    steel_class = steel_class_for_alloy(getattr(alloy, "name", "") or "")
+    if steel_class is None:
+        # Refusing to guess, for the same reason flow_rate_kg_s_for_area
+        # refuses: substituting a steel figure for a non-ferrous alloy gives a
+        # plausible-looking rating that is wrong by tens of percent.
+        return None, (
+            f"{getattr(alloy, 'name', 'this alloy')} is not covered by the "
+            f"Foseco steel flow tables, so the filter's rated flow could not "
+            f"be checked -- verify the pour rate against the filter's own "
+            f"data sheet."
+        )
+
+    pour_mode = POUR_MODE_BOTTOM if int(pour_mode_code) == 1 else POUR_MODE_LIP
+    total = 0.0
+    for zone in filter_zones:
+        area_cm2 = float(zone.front_face_area_m2) * 1.0e4
+        if area_cm2 <= 0.0:
+            continue
+        total += flow_rate_kg_s_for_area(area_cm2, steel_class, pour_mode)
+    return (total if total > 0.0 else None), None
+
+
+def recommended_pour_rate_lb_s(weight_lb: float) -> float:
+    """
+    Pour rate from the foundry square-root rule.
+
+    ``t = sqrt(W)`` gives the pour time in seconds for a casting of ``W``
+    pounds, so the rate is ``W / t = W / sqrt(W) = sqrt(W)``. Pour time in
+    seconds and pour rate in lb/s are therefore the same number, which is the
+    whole convenience of the rule.
+
+    It replaces a fixed 5 lb/s default that was independent of the casting --
+    a 20 lb bracket and a 2,000 lb housing are not poured at the same rate,
+    and the mesh already knows which one it is looking at.
+
+    Returns:
+        Pounds per second, or 0.0 for a non-positive weight.
+    """
+    if weight_lb <= 0.0:
+        return 0.0
+    return float(np.sqrt(weight_lb))
+
+
+def _min_flow_slice_cells(dense_types: np.ndarray) -> int:
+    """
+    Cells in the smallest gating cross-section, on the fill grid.
+
+    A cross-sectional *area* in cell units, which is what
+    :func:`measure_choke_area_cm2` needs. It is emphatically NOT "cells
+    across" -- see :func:`measure_choke_thickness_cells`.
+    """
     dense_types = np.asarray(dense_types)
     flow = np.isin(dense_types, (PART_TYPE_SPRUE, PART_TYPE_RUNNER, PART_TYPE_GATE))
     if not np.any(flow):
-        return 0.0
+        return 0
 
-    cell_area_cm2 = (dx_m * 100.0) ** 2
     best = np.inf
     for axis in (0, 1, 2):
         counts = flow.sum(axis=tuple(a for a in (0, 1, 2) if a != axis))
@@ -703,13 +875,102 @@ def measure_choke_area_cm2(dense_types: np.ndarray, dx_m: float) -> float:
         if occupied.size:
             best = min(best, float(occupied.min()))
     if not np.isfinite(best):
+        return 0
+    return int(best)
+
+
+def measure_choke_thickness_cells(dense_types: np.ndarray) -> float:
+    """
+    Thickness of the thinnest gating section, in fill-grid cells.
+
+    This is the number that decides whether metal can get through: halfway
+    bounce-back puts the walls at +-0.5 cells, so a channel one cell thick has
+    no interior at all and seals shut regardless of how wide it is.
+
+    Cross-sectional *area* cannot answer that question, and the first version
+    of this check used area and was wrong for the case that matters most. A
+    gate is characteristically wide and thin -- the one on the reference
+    assembly is 4.0 x 0.5 in -- so on a coarse grid it presents a perfectly
+    healthy-looking 11-cell cross-section while being one cell thick. Area
+    passes; the metal does not.
+
+    Measured as the largest inscribed sphere along the flow path: the
+    Euclidean distance transform gives each cell's distance to the nearest
+    non-flow cell, so twice the maximum within a slice is the local channel
+    thickness, and the minimum of that over every slice is the narrowest
+    point. Taking a per-slice maximum first is what makes this robust -- a
+    plain minimum over the distance transform would return the half-cell at
+    every corner of every part and always report the same answer.
+
+    Returns:
+        Thickness in cells at the narrowest section, or 0.0 when there is no
+        gating metal.
+    """
+    from scipy import ndimage
+
+    dense_types = np.asarray(dense_types)
+    members = (PART_TYPE_SPRUE, PART_TYPE_RUNNER, PART_TYPE_GATE)
+    flow = np.isin(dense_types, members)
+    if not np.any(flow):
         return 0.0
-    return best * cell_area_cm2
+
+    # One transform over the whole flow path, so a gate cell touching the
+    # runner is interior rather than boundary -- measuring each part in
+    # isolation would report every junction as a constriction.
+    #
+    # Padded with one cell of background first. Without it a flow path that
+    # reaches the edge of the grid has nothing to measure to on that side, and
+    # a domain entirely full of gating metal returns the array diagonal rather
+    # than a thickness. The pad is physically right as well as defensive: the
+    # lattice ends in obstacle, not in more metal.
+    distance = ndimage.distance_transform_edt(
+        np.pad(flow, 1, mode="constant", constant_values=False)
+    )[1:-1, 1:-1, 1:-1]
+
+    thinnest = np.inf
+    for code in members:
+        part = dense_types == code
+        if not np.any(part):
+            continue
+        # The largest inscribed sphere anywhere in this part measures its
+        # thickest point across its *thinnest* dimension -- for a plate that
+        # is half the plate thickness however wide or long it is.
+        #
+        # 2*d - 1, not 2*d: distance_transform_edt measures to the nearest
+        # *background* cell, so a cell in a one-thick section reports 1.0 --
+        # the gap to the wall, not the metal. Doubling that would call a
+        # sealed one-cell channel two cells thick, which is precisely the
+        # answer this function exists to stop giving. Exact for odd
+        # thicknesses, one cell conservative for even ones, which errs toward
+        # warning.
+        thickness = float(distance[part].max()) * 2.0 - 1.0
+        thinnest = min(thinnest, thickness)
+
+    return 0.0 if not np.isfinite(thinnest) else max(0.0, float(thinnest))
 
 
 # ---------------------------------------------------------------------------
 # Stage orchestration
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FillFrame:
+    """
+    One instant of the pour, gathered onto voxels.
+
+    Attributes:
+        time_s: Physical time since the pour started.
+        fill_fraction: Per-voxel metal content, 0 (empty) to 1 (full). The
+            partial values are the free surface -- the interface layer is
+            exactly where 0 < eps < 1, so a threshold on this field draws the
+            advancing front rather than a staircase of whole cells.
+        speed_m_s: Per-voxel velocity magnitude, in metres per second.
+    """
+
+    time_s: float
+    fill_fraction: np.ndarray
+    speed_m_s: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -754,7 +1015,24 @@ class FillingResult:
         entrapped_gas: Per-voxel boolean, ``(n_voxels,)``, the final
             entrapped-gas set gathered the same way ``fill_time_s`` is.
         cold_shut: Per-voxel boolean, ``(n_voxels,)``, the cold-shut set.
+        frames: Playback snapshots of the pour, oldest first. Empty when the
+            run diverged, because a frame taken after the blow-up shows the
+            blow-up. See :class:`FillFrame`.
         warnings: Human-readable conditions worth surfacing.
+        status: How the run ended. One of ``STATUS_COMPLETE`` (every metal
+            cell filled), ``STATUS_TIME_CAPPED`` (still advancing when
+            ``max_fill_time_s`` ran out), ``STATUS_STALLED`` (the front stopped
+            advancing while metal remained unfilled) or ``STATUS_DIVERGED``
+            (the solver lost mass conservation -- the fields are numerically
+            meaningless and must not be trusted or handed downstream).
+
+            This distinction is the difference between "the metal could not
+            get there", "the run needed longer" and "the answer is garbage".
+            All three used to surface identically as a misrun count.
+        diverged_at_step: Lattice step at which divergence was detected, or 0.
+        choke_thickness_cells: Thickness of the thinnest gating section, in
+            fill-grid cells. Below ``MIN_CHOKE_THICKNESS_CELLS`` the channel
+            has no interior and halfway bounce-back seals it shut.
     """
 
     fill_time_s: np.ndarray
@@ -775,11 +1053,28 @@ class FillingResult:
     entrapped_gas: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=bool))
     cold_shut: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=bool))
     warnings: Tuple[str, ...] = ()
+    status: str = STATUS_COMPLETE
+    diverged_at_step: int = 0
+    choke_thickness_cells: float = 0.0
+    frames: Tuple[FillFrame, ...] = ()
 
     @property
     def filled_fraction(self) -> float:
         total = self.filled_voxel_count + self.misrun_voxel_count
         return self.filled_voxel_count / total if total else 0.0
+
+    @property
+    def trustworthy(self) -> bool:
+        """
+        Whether the fields may be used downstream.
+
+        A diverged run still carries a ``fill_time_s`` and a ``temperature_c``
+        of the right shape and dtype -- they are simply meaningless, because
+        the blow-up flags cells as filled that the metal never reached. Seeding
+        solidification from them produces a plausible-looking casting result
+        built on nothing, which is worse than not running the stage at all.
+        """
+        return self.status != STATUS_DIVERGED
 
 
 def _obstacle_mask(dense_types: np.ndarray) -> np.ndarray:
@@ -892,6 +1187,7 @@ def run_filling_stage(
     from physics.filling import (
         FLAG_FLUID,
         FLAG_GAS,
+        FLAG_INTERFACE,
         FLAG_OBSTACLE,
         REFERENCE_DENSITY,
         advect_temperature,
@@ -899,6 +1195,7 @@ def run_filling_stage(
         create_state,
         find_cold_shuts,
         find_entrapped_gas,
+        fluid_fraction,
         step,
     )
     from physics.fluid_flow import equilibrium, lattice_units
@@ -1030,12 +1327,131 @@ def run_filling_stage(
     # rho = rho_0 (1 + g h / c_s^2) in lattice units. Imposing a *pressure*
     # rather than a velocity is what lets the sprue choke meter the flow, which
     # is the behaviour Foseco's own gating guidance asks for.
-    head_lattice = float(inches_to_meters(
-        float(getattr(filling, "initial_head_in", 4.0))
-    )) / dx_m
+    head_m = float(inches_to_meters(float(getattr(filling, "initial_head_in", 4.0))))
+    head_lattice = head_m / dx_m
     inlet_density = REFERENCE_DENSITY * (
         1.0 + units.gravity_lattice * head_lattice / (1.0 / 3.0)
     )
+
+    # The inlet velocity, prescribed once and held constant.
+    #
+    # This is the whole reason the stage used to detonate. The old source
+    # rebuilt the inlet populations from ``state.u``, which is the *Guo
+    # force-corrected* velocity -- it already carries half of that step's
+    # gravitational impulse by construction (see guo_velocity's docstring).
+    # Feeding it back into equilibrium() re-imposed that half-impulse every
+    # step with nothing to remove it, so the inlet gained 0.5*g_lattice of
+    # velocity per step forever, crossed the Mach guard, and took the whole
+    # solve with it. The fill was being driven by that artifact: simply
+    # subtracting the half-force stops the runaway but also stops the pour
+    # (measured: 25% -> 1%), because a 0.16% density head alone cannot meter
+    # metal through a sprue at these timesteps.
+    #
+    # So the inlet prescribes a real velocity instead. Head mode uses
+    # Torricelli, sqrt(2 g h), which is the standard sprue-entry velocity and
+    # exactly the quantity ``initial_head_in`` was always describing. Velocity
+    # mode divides the requested pour rate by the inlet area. Both are capped
+    # at the Mach guard the timestep was sized for, because a boundary
+    # condition that violates the solver's own stability limit is not a
+    # boundary condition. Being constant, it cannot accumulate.
+    inlet_area_m2 = float(inlet.shape[0]) * dx_m * dx_m
+    inlet_mode = int(getattr(filling, "inlet_mode_code", 0))
+    if inlet_mode == 1:
+        # 0 means "derive", the same convention pour_time_s and
+        # pour_temperature_c already use. The square-root rule ties the rate to
+        # this casting's own weight; a fixed number cannot, and 5 lb/s is
+        # wrong for almost every casting that is not about 25 lb.
+        weight_lb = pour_weight_lb(voxel_mesh, alloy)
+        pour_rate_lb_s = float(getattr(filling, "pour_rate_lb_s", 0.0) or 0.0)
+        if pour_rate_lb_s <= 0.0:
+            pour_rate_lb_s = recommended_pour_rate_lb_s(weight_lb)
+            rate_source = f"sqrt of {weight_lb:.0f} lb"
+        else:
+            rate_source = "set"
+        if pour_rate_lb_s <= 0.0:
+            # No part types, so no weight to take a root of. Fall back to the
+            # head rather than dividing by zero and reporting a still pour.
+            warnings.append(
+                "velocity inlet requested but the pour weight could not be "
+                "measured; falling back to the metallostatic head."
+            )
+            inlet_mode = 0
+        else:
+            pour_rate_kg_s = pour_rate_lb_s * 0.45359237
+            u_inlet_physical = pour_rate_kg_s / max(
+                float(alloy.density_liquid) * inlet_area_m2, 1e-9
+            )
+            inlet_mode_label = (
+                f"velocity ({pour_rate_lb_s:.1f} lb/s, {rate_source}; "
+                f"{pour_rate_lb_s:.1f} s pour)"
+            )
+    if inlet_mode != 1:
+        u_inlet_physical = float(np.sqrt(2.0 * 9.81 * max(head_m, 1e-6)))
+        inlet_mode_label = f"head ({head_m * 39.3701:.1f} in)"
+
+    # The filter ceiling, applied to BOTH inlet modes. A filter restricts the
+    # flow path itself, so it binds whatever is driving the metal -- a deep
+    # head does not entitle the pour to exceed the filter's rating, it just
+    # means the sprue backs up. Capping here rather than only in velocity mode
+    # is the difference between modelling the restriction and ignoring it.
+    flow_limit_kg_s, flow_limit_note = filter_flow_limit_kg_s(
+        filter_zones, alloy, int(getattr(filling, "pour_mode_code", 0))
+    )
+    if flow_limit_note:
+        warnings.append(flow_limit_note)
+    if flow_limit_kg_s is not None:
+        u_filter_max = flow_limit_kg_s / max(
+            float(alloy.density_liquid) * inlet_area_m2, 1e-9
+        )
+        if u_inlet_physical > u_filter_max:
+            requested_lb_s = (
+                u_inlet_physical * float(alloy.density_liquid) * inlet_area_m2
+                / 0.45359237
+            )
+            warnings.append(
+                f"pour rate limited by the filter: {requested_lb_s:.1f} lb/s "
+                f"requested, {flow_limit_kg_s / 0.45359237:.1f} lb/s rated "
+                f"across {len(filter_zones)} filter(s). Running at the rating. "
+                f"Above it a ceramic foam filter blinds off or breaks up "
+                f"rather than throttling."
+            )
+            u_inlet_physical = u_filter_max
+            inlet_mode_label += ", filter-limited"
+
+    u_inlet_lattice = float(units.to_lattice_velocity(u_inlet_physical))
+    if u_inlet_lattice > units.u_max_lattice:
+        warnings.append(
+            f"inlet velocity {u_inlet_physical:.2f} m/s exceeds the Mach guard "
+            f"the timestep was sized for; clamped to "
+            f"{units.u_max_lattice * units.velocity_scale:.2f} m/s. Raise "
+            f"lattice_velocity_max or lower the pour rate."
+        )
+        u_inlet_lattice = float(units.u_max_lattice)
+
+    # Gravity points -Z (physics.filling.step's default), and metal enters
+    # falling, so the inlet drives along it.
+    inlet_u = np.zeros((3, inlet.shape[0]), dtype=np.float64)
+    inlet_u[2, :] = -u_inlet_lattice
+    inlet_rho = np.full(inlet.shape[0], inlet_density, dtype=np.float64)
+    emit(
+        f"Filling: inlet {inlet.shape[0]:,} cells, {inlet_mode_label}, "
+        f"{u_inlet_physical:.2f} m/s ({u_inlet_lattice:.4f} lattice)"
+    )
+
+    # An under-resolved choke is not a small inaccuracy -- it is the
+    # difference between a fill and a sealed channel -- and it is measured
+    # here rather than left for the user to infer from a misrun count.
+    choke_thickness_cells = measure_choke_thickness_cells(solve_types)
+    if 0.0 < choke_thickness_cells < MIN_CHOKE_THICKNESS_CELLS:
+        warnings.append(
+            f"the thinnest gating section is only "
+            f"{choke_thickness_cells:.1f} cells thick on a "
+            f"{dx_m * 1000:.1f} mm fill grid ("
+            f"{choke_thickness_cells * dx_m * 39.3701:.2f} in) -- below the "
+            f"{MIN_CHOKE_THICKNESS_CELLS:.0f} cells needed for the channel to "
+            f"have any interior. Halfway bounce-back will seal it and the fill "
+            f"will stall short. Reduce voxel size or fill_grid_coarsening."
+        )
 
     # F3: air entrapment. The vent mask is reassembled at every periodic
     # check (see below) because its "domain boundary gas" component is a
@@ -1056,24 +1472,57 @@ def run_filling_stage(
     vent_warning: Optional[str] = None
 
     report_every = max(1, max_steps // 20)
+    # Captured on an adaptive stride, not on max_steps / FILL_ANIMATION_FRAMES.
+    # A run almost never uses its whole budget -- a good pour finishes in a
+    # few seconds of a 60 s cap, and a stalled one gives up early -- so a
+    # stride sized for the budget yields a handful of frames exactly when the
+    # animation matters most. Instead sample finely and halve the stride
+    # whenever the buffer doubles, which keeps the frames evenly spaced across
+    # however long the run actually turns out to be, for a bounded cost.
+    frame_every = max(1, max_steps // (FILL_ANIMATION_FRAMES * 4))
+    frames: List[FillFrame] = []
+
+    def capture_frame(step_index: int) -> None:
+        """Gather the live free surface and velocity onto voxels."""
+        eps = np.clip(fluid_fraction(state), 0.0, 1.0)
+        eps[state.flags == FLAG_OBSTACLE] = 0.0
+        speed = np.sqrt(np.sum(np.square(state.u.astype(np.float64)), axis=0))
+        speed *= units.velocity_scale
+        frames.append(
+            FillFrame(
+                time_s=step_index * units.dt_s,
+                fill_fraction=gather_to_voxels(
+                    mapping, _upsample(eps, mapping.shape, coarsening)
+                ).astype(np.float32),
+                speed_m_s=gather_to_voxels(
+                    mapping, _upsample(speed, mapping.shape, coarsening)
+                ).astype(np.float32),
+            )
+        )
+
     taken = 0
+    ix, iy, iz = inlet[:, 0], inlet[:, 1], inlet[:, 2]
+    metal_total = int(metal.sum())
+    status = STATUS_TIME_CAPPED
+    diverged_at_step = 0
+    flat_reports = 0
+    last_reached = -1
     for taken in range(1, max_steps + 1):
-        # Hold the inlet full. A Dirichlet source is the stable choice for F1:
-        # it lets gravity and the geometry meter the flow rather than the
-        # boundary condition dictating it, which is what Foseco's own guidance
-        # asks for (the sprue choke should control, not the inlet).
-        ix, iy, iz = inlet[:, 0], inlet[:, 1], inlet[:, 2]
+        # Hold the inlet full, at the head pressure and the entry velocity
+        # prescribed above. The choke still meters the fill -- what the inlet
+        # sets is the sprue-entry condition, and everything downstream of it
+        # is decided by the geometry, which is what Foseco's guidance asks
+        # for. What it must not do is *accelerate*: see the derivation at
+        # inlet_u for why reading the velocity back out of the solver made
+        # this a pump rather than a boundary.
         state.flags[ix, iy, iz] = FLAG_FLUID
         state.mass[ix, iy, iz] = REFERENCE_DENSITY
-        # Re-impose the head pressure while KEEPING the cell's current
-        # velocity. Resetting to a zero-velocity equilibrium instead pins the
-        # source at rest every step, destroying the very momentum that drives
-        # the fill -- the metal then dribbles out of the inlet and the front
-        # never establishes.
-        state.f[:, ix, iy, iz] = equilibrium(
-            np.full(inlet.shape[0], inlet_density, dtype=np.float64),
-            state.u[:, ix, iy, iz].astype(np.float64),
-        ).astype(np.float32)
+        # Re-impose the reservoir: head pressure and the prescribed entry
+        # velocity, both constant. Rebuilding from the *prescribed* velocity
+        # rather than from ``state.u`` is what keeps this a boundary condition
+        # instead of a momentum pump -- see the derivation above the
+        # inlet_u definition.
+        state.f[:, ix, iy, iz] = equilibrium(inlet_rho, inlet_u).astype(np.float32)
         # Metal entering at the inlet is at the pour temperature -- pinned
         # every step, same as mass and momentum above, so the source stays a
         # true Dirichlet boundary rather than drifting as wall loss and
@@ -1089,6 +1538,37 @@ def run_filling_stage(
             density_kg_m3=float(alloy.density_liquid),
             specific_heat_j_kgk=float(alloy.specific_heat),
         )
+
+        if taken % frame_every == 0:
+            capture_frame(taken)
+            if len(frames) >= 2 * FILL_ANIMATION_FRAMES:
+                # Drop every other frame and sample half as often from here.
+                # The survivors stay evenly spaced, so playback never shows a
+                # dense early sequence followed by a sparse late one.
+                del frames[1::2]
+                frame_every *= 2
+
+        if taken % DIVERGENCE_CHECK_INTERVAL == 0:
+            # Mass conservation is the honest health check. The free surface
+            # can only hold as much mass as it has wet cells, so a total above
+            # that ceiling is not drift -- it is the collision operator having
+            # left the range where it means anything. Checking flags alone
+            # cannot see this: a blow-up promotes every cell to FLUID, which
+            # reads as a perfect 100% fill.
+            wet = (state.flags == FLAG_FLUID) | (state.flags == FLAG_INTERFACE)
+            wet_cells = int(np.count_nonzero(wet))
+            wet_mass = float(np.sum(state.mass[wet])) if wet_cells else 0.0
+            ceiling = DIVERGENCE_MASS_FACTOR * max(wet_cells, 1)
+            if (not np.isfinite(wet_mass)) or wet_mass > ceiling or wet_mass < 0.0:
+                status = STATUS_DIVERGED
+                diverged_at_step = taken
+                emit(
+                    f"Filling ABORTED: solver diverged at step {taken:,} "
+                    f"({taken * units.dt_s:.2f} s). Wet mass {wet_mass:.4g} "
+                    f"against a physical ceiling of {ceiling:.4g} over "
+                    f"{wet_cells:,} wet cells. Results discarded."
+                )
+                break
 
         if taken % entrapment_check_interval == 0:
             # Per output frame, not per step (design doc 6.4): a
@@ -1110,12 +1590,51 @@ def run_filling_stage(
                 cancel_callback()
             reached = int(np.count_nonzero((state.flags == FLAG_FLUID) & metal))
             emit(
-                f"Filling: {reached:,}/{int(metal.sum()):,} cells "
-                f"({reached / max(1, int(metal.sum())):.0%}) at "
+                f"Filling: {reached:,}/{metal_total:,} cells "
+                f"({reached / max(1, metal_total):.0%}) at "
                 f"{taken * units.dt_s:.2f} s"
             )
-            if reached >= int(metal.sum()):
+            if reached >= metal_total:
+                status = STATUS_COMPLETE
                 break
+            # A front that has stopped advancing will not restart: the metal
+            # either cannot get through the section ahead or has frozen the
+            # channel behind it. Running out the clock on that produces the
+            # same answer far more slowly, and reports it as a time cap --
+            # which reads as "needed longer" when it means "cannot get there".
+            #
+            # Measured against the high-water mark, not the previous report.
+            # A stalled front does not sit still: metal sloshes back and forth
+            # across the same cells, so the count ticks up and down by a few
+            # percent forever. Comparing consecutive reports resets on every
+            # one of those wobbles and never fires.
+            if reached > last_reached:
+                last_reached = reached
+                flat_reports = 0
+            else:
+                flat_reports += 1
+            if flat_reports >= STALL_REPORTS and taken >= STALL_MIN_STEPS:
+                status = STATUS_STALLED
+                emit(
+                    f"Filling stopped: the front has not advanced for "
+                    f"{flat_reports} consecutive reports, holding at "
+                    f"{reached:,}/{metal_total:,} cells "
+                    f"({reached / max(1, metal_total):.0%})."
+                )
+                break
+
+    if status == STATUS_DIVERGED:
+        # Every frame after the blow-up shows the blow-up, and the frames
+        # before it end mid-pour with no indication that what follows is
+        # rubbish. Playing that back would be the most convincing possible
+        # presentation of a failed solve, so there is nothing to play.
+        frames.clear()
+    else:
+        # The loop exits on a report boundary, which is up to report_every
+        # steps after the state the run actually ended in. Without this the
+        # last frame is not the final state -- most visibly on a complete
+        # fill, where playback would stop just short of full.
+        capture_frame(taken)
 
     # Final entrapment snapshot -- evaluated unconditionally rather than
     # relying on the last step happening to land on a check interval, so the
@@ -1225,6 +1744,29 @@ def run_filling_stage(
         min_fill_temperature_c = mold_temp
         mean_fill_temperature_c = mold_temp
 
+    if status == STATUS_DIVERGED:
+        # Said first and said plainly. Everything below this describes fields
+        # the solver produced after it stopped conserving mass, so a misrun
+        # count or a cold-shut count from here is an artefact of the blow-up,
+        # not a casting defect.
+        warnings.append(
+            f"SOLVER DIVERGED at step {diverged_at_step:,} -- this fill result is "
+            f"not physical and must not be used. Any misrun, entrapment or "
+            f"cold-shut figure below is an artefact of the divergence."
+        )
+    elif status == STATUS_STALLED:
+        warnings.append(
+            f"the fill stalled at {filled_count / max(1, filled_count + misrun_count):.0%} "
+            f"-- the front stopped advancing with metal still unfilled. This is "
+            f"a genuine misrun or an under-resolved section, not a time limit."
+        )
+    elif status == STATUS_TIME_CAPPED:
+        warnings.append(
+            f"the fill was still advancing when max_fill_time_s "
+            f"({max_time:.0f} s) ran out; it did not finish. Raise the cap "
+            f"before reading the misrun count as a defect."
+        )
+
     if misrun_count:
         warnings.append(
             f"{misrun_count:,} metal voxels never filled (misrun): "
@@ -1281,6 +1823,10 @@ def run_filling_stage(
         entrapped_gas=entrapped_voxels,
         cold_shut=cold_shut_voxels,
         warnings=tuple(warnings),
+        status=status,
+        diverged_at_step=diverged_at_step,
+        choke_thickness_cells=choke_thickness_cells,
+        frames=tuple(frames),
     )
 
 

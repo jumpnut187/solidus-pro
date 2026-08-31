@@ -30,7 +30,7 @@ import sys
 import os
 import time
 import gc
-from typing import Optional
+from typing import Optional, Dict, Any
 from datetime import datetime
 
 import numpy as np
@@ -56,7 +56,7 @@ from core.memory_limits import (
     get_system_memory_info,
     get_voxel_size_recommendations,
 )
-from .visualizer import CastingVisualizer, COLOR_MAPS
+from .visualizer import CastingVisualizer, COLOR_MAPS, FILL_ANIMATION_WETTED_THRESHOLD
 from .custom_slider import MarkedSlider
 from .dialogs import AnalysisOptionsDialog, DraggableDialog, PartsDialog
 from .project_state import build_project_state, load_project_state
@@ -121,6 +121,119 @@ def clamp_window_position(
         max(min_y, min(preferred_y, max_y)),
     )
 
+
+def format_filling_notice(summary: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """
+    Translate a mold-filling summary (SolidificationEngine.get_filling_summary)
+    into user-facing text, without touching Qt -- kept pure so it can be
+    exercised directly instead of only through a live GUI run.
+
+    A diverged fill is discarded by the pipeline before this ever runs; that
+    is correct numerically, but it made a blown-up fill look identical to a
+    run where filling was never enabled -- no Fill Time/Fill Animation entry,
+    no error, nothing. This function is the single place that turns whatever
+    get_filling_summary() reports into the words the user actually sees, so
+    every call site (message box, status line, sidebar summary) agrees.
+
+    Returns a dict with:
+      - "level": "none" (filling never ran), "info" (fill completed cleanly),
+        "warning" (stalled/time-capped -- suspicious but not discarded), or
+        "critical" (diverged -- discarded, and solidification used a
+        placeholder pour temperature as a result).
+      - "status_line": short text suitable for a status bar / summary label.
+      - "title": a dialog title, meaningful only when level != "none"/"info".
+      - "body": the full explanation, including the solver's own warnings.
+      - "tag": a short word (e.g. "DIVERGED") for appending to a compact
+        summary line; "" when filling never ran.
+    """
+    if not summary:
+        return {"level": "none", "status_line": "", "title": "", "body": "", "tag": ""}
+
+    status = summary.get("status")
+    warnings = summary.get("warnings") or ()
+    warning_text = "\n".join(f"  - {w}" for w in warnings)
+    filled_pct = summary.get("filled_fraction", 0.0) * 100.0
+
+    if status == "complete":
+        return {
+            "level": "info",
+            "status_line": f"✓ Fill complete ({filled_pct:.0f}% filled)",
+            "title": "",
+            "body": "",
+            "tag": "OK",
+        }
+
+    if status == "diverged":
+        step = summary.get("diverged_at_step", 0)
+        body = (
+            f"The mold-filling solver diverged at step {step:,}. Its results "
+            "were discarded -- Fill Time and Fill Animation are NOT shown "
+            "for this run.\n\n"
+            "Because filling never produced a trustworthy temperature "
+            "handover, solidification fell back to a uniform "
+            "pour-temperature placeholder instead of the actual fill "
+            "pattern. The solidification results below do not reflect how "
+            "this pour fills the mold and should be treated with reduced "
+            "confidence."
+        )
+        if warning_text:
+            body += "\n\nDetails from the solver:\n" + warning_text
+        return {
+            "level": "critical",
+            "status_line": (
+                "⚠ Filling diverged -- solidification used a "
+                "placeholder pour temperature"
+            ),
+            "title": "Mold Filling Diverged",
+            "body": body,
+            "tag": "DIVERGED",
+        }
+
+    if status == "stalled":
+        body = (
+            f"The fill stopped advancing at {filled_pct:.0f}% filled, with "
+            "metal still unfilled. This is a genuine misrun or an "
+            "under-resolved gating section -- the solver gave up because "
+            "the front was no longer moving, not because it ran out of "
+            "time."
+        )
+        if warning_text:
+            body += "\n\nDetails from the solver:\n" + warning_text
+        return {
+            "level": "warning",
+            "status_line": f"⚠ Fill stalled at {filled_pct:.0f}% filled",
+            "title": "Mold Filling Stalled",
+            "body": body,
+            "tag": "STALLED",
+        }
+
+    if status == "time_capped":
+        body = (
+            f"The fill reached {filled_pct:.0f}% filled but did not finish "
+            "before the configured max_fill_time_s limit. The reported "
+            "misrun voxel count reflects that time cap, not necessarily a "
+            "casting defect -- raise max_fill_time_s to confirm whether the "
+            "mold would eventually fill."
+        )
+        if warning_text:
+            body += "\n\nDetails from the solver:\n" + warning_text
+        return {
+            "level": "warning",
+            "status_line": f"⚠ Fill time-capped at {filled_pct:.0f}% filled",
+            "title": "Mold Filling Time-Capped",
+            "body": body,
+            "tag": "TIME-CAPPED",
+        }
+
+    # Unknown/future status value -- surface it rather than silently doing
+    # nothing, but don't guess at a severity we don't understand.
+    return {
+        "level": "info",
+        "status_line": f"Filling status: {status}",
+        "title": "Mold Filling",
+        "body": warning_text,
+        "tag": str(status).upper() if status else "?",
+    }
 
 
 # ==================== Material Properties Dialog ====================
@@ -1897,6 +2010,42 @@ class SolidificationParamsDialog(DraggableDialog):
     # Field definitions: (group_key, field_key, label, default, min, max, step, decimals, unit, tooltip)
     # A field is rendered as a slider+spin pair when its key is in SLIDER_FIELDS.
     SLIDER_FIELDS: set = {"feeding_zone_vertical_bias"}
+    #: Parameters that exist in SolidificationParameters and are serialized,
+    #: but which no solver actually reads. They are hidden rather than deleted:
+    #: the dataclass fields stay, so saved projects still round-trip, and a
+    #: hidden field simply keeps whatever value it already had.
+    #:
+    #: A control that promises to change the answer and does not is worse than
+    #: no control at all -- it invites someone to tune a knob, see nothing
+    #: move, and mistrust the whole dialog. Verified dead by searching
+    #: core/filling_stage.py, core/filter_database.py, physics/filling.py and
+    #: physics/fluid_flow.py for each name.
+    #:
+    #: **Remove a key from this set the moment its parameter is wired up.**
+    #: Each entry below names what would have to happen for it to come back:
+    #:
+    #: - ``pour_time_s``: a fixed pour duration, which would mean driving the
+    #:   inlet to empty a known volume in a set time rather than from head or
+    #:   rate.
+    #: - ``smagorinsky_cs``: the subgrid constant. Smagorinsky *is* active, but
+    #:   at the hardcoded SMAGORINSKY_CS in physics/fluid_flow.py; the value
+    #:   would have to be threaded through step() into the Numba kernels.
+    #: - ``rated_velocity_warn_factor`` / ``head_fraction_warn``: thresholds
+    #:   for filter warnings that were never emitted. The hard flow-rate cap
+    #:   in core.filling_stage.filter_flow_limit_kg_s now covers the first of
+    #:   these.
+    #: - ``priming_enabled`` / ``drag_enabled``: on/off switches for filter
+    #:   behaviour that is always on. The behaviour is implemented; only the
+    #:   switches are unread.
+    INERT_FIELD_KEYS: frozenset = frozenset({
+        "pour_time_s",
+        "smagorinsky_cs",
+        "rated_velocity_warn_factor",
+        "head_fraction_warn",
+        "priming_enabled",
+        "drag_enabled",
+    })
+
     FIELD_DEFS: list = [
         # Feeding
         ("feeding", "base_feeding_distance", "Base Feeding Distance", 6.0, 2.0, 24.0, 0.1, 2, "inches",
@@ -2000,8 +2149,10 @@ class SolidificationParamsDialog(DraggableDialog):
         # same "filling" group in the UI but are nested under
         # SolidificationParameters.filling.filter -- see FILLING_FILTER_KEYS
         # and the get_options()/set_options() nesting logic.)
-        ("filling", "pour_rate_lb_s", "Pour Rate", 5.0, 0.5, 50.0, 0.5, 2, "lb/s",
-         "Metal pour rate into the mold."),
+        ("filling", "pour_rate_lb_s", "Pour Rate", 0.0, 0.0, 50.0, 0.5, 2, "lb/s",
+         "Metal pour rate into the mold. 0 = derive from the square-root rule: "
+         "a casting of W lb pours in sqrt(W) seconds, so the rate is sqrt(W) "
+         "lb/s. Only used when Inlet Mode is 1 (velocity)."),
         ("filling", "pour_time_s", "Pour Time", 0.0, 0.0, 120.0, 1.0, 0, "seconds",
          "Fixed pour duration. 0 = derive from pour rate and casting volume."),
         ("filling", "pour_temperature_c", "Pour Temperature", 0.0, 0.0, 1700.0, 10.0, 0, "°C",
@@ -2079,9 +2230,11 @@ class SolidificationParamsDialog(DraggableDialog):
         self.tab_widget = QTabWidget()
         self.content_layout.addWidget(self.tab_widget)
 
-        # Group fields by tab
+        # Group fields by tab, skipping the ones nothing reads.
         groups = {}
         for fd in self.FIELD_DEFS:
+            if fd[1] in self.INERT_FIELD_KEYS:
+                continue
             grp = fd[0]
             if grp not in groups:
                 groups[grp] = []
@@ -2350,6 +2503,11 @@ class MainWindow(QMainWindow):
         self._is_playing_fraction_liquid = False
         self._fraction_liquid_playback_speed = 1.0
         self._fraction_liquid_render_count = 0
+
+        # Whole-animation speed ceiling for the Fill Animation color ramp.
+        # Computed once in _setup_result_type_options when results become
+        # available, not per slider tick -- see that method.
+        self._fill_animation_max_speed = 0.0
 
         # Progress tracking
         self.slice_start_times = []
@@ -3448,7 +3606,26 @@ class MainWindow(QMainWindow):
             self.analysis_summary_label.setText(f"Analyses: {', '.join(analyses)}")
         else:
             self.analysis_summary_label.setText("No analyses selected")
-    
+
+    def _append_filling_status_to_summary(self, notice: Dict[str, str]) -> None:
+        """
+        Append the mold-filling outcome to the sidebar's "Analyses: ..." line.
+
+        _update_analysis_summary() only knows what was REQUESTED before the
+        run (it runs from the options dialog, before a simulation exists);
+        this adds what filling actually concluded once the run is done, so a
+        diverged/stalled/time-capped fill is visible at a glance without
+        opening a dialog or noticing that "Fill Time" is missing from the
+        result-type combo.
+        """
+        tag = notice.get("tag", "") if notice else ""
+        if not tag:
+            return
+        label = getattr(self, "analysis_summary_label", None)
+        if label is None:
+            return
+        label.setText(f"{label.text()}  |  Fill: {tag}")
+
     def _current_simulation_has_risers(self) -> bool:
         """Return True when the current simulation contains RISER voxels."""
         if self.simulation_worker is None or self.simulation_worker.simulation is None:
@@ -3507,6 +3684,23 @@ class MainWindow(QMainWindow):
         slider_fraction = slider_clamped / float(FRACTION_LIQUID_TIME_SLIDER_MAX)
         return float(min_time + slider_fraction * (max_time - min_time))
 
+    @staticmethod
+    def _map_fill_animation_slider_frame(slider_value: int, frame_count: int) -> int:
+        """Map the shared slider to a playback frame INDEX, not a time.
+
+        Fill Animation plays back discrete solver states rather than
+        sweeping a continuous field (contrast _map_fraction_liquid_slider_time),
+        so the raw 0..FRACTION_LIQUID_TIME_SLIDER_MAX slider position maps
+        onto 0..frame_count-1 and rounds to the nearest whole frame -- there
+        is nothing to interpolate between two solver frames.
+        """
+        if frame_count <= 0:
+            return 0
+        slider_clamped = max(0, min(int(slider_value), FRACTION_LIQUID_TIME_SLIDER_MAX))
+        slider_fraction = slider_clamped / float(FRACTION_LIQUID_TIME_SLIDER_MAX)
+        frame_index = int(round(slider_fraction * (frame_count - 1)))
+        return max(0, min(frame_index, frame_count - 1))
+
     def _coerce_fraction_liquid_slider_value(self, raw_value: int) -> int:
         """Support loading older projects that persisted a 0-100 slider range."""
         value = int(raw_value)
@@ -3523,11 +3717,23 @@ class MainWindow(QMainWindow):
             self._start_fraction_liquid_playback()
 
     def _start_fraction_liquid_playback(self) -> None:
-        """Start fraction liquid playback."""
+        """Start fraction liquid playback.
+
+        Also drives Fill Animation playback -- both modes share this one
+        timer/button/slider, so the readiness check below branches on
+        whichever mode is currently active rather than duplicating the
+        timer plumbing for a second mode.
+        """
         if self.simulation_worker is None or self.simulation_worker.simulation is None:
             return
         sim = self.simulation_worker.simulation
-        if not sim.fraction_liquid_times:
+        if self._current_vis_mode == "fill_animation":
+            if not sim.get_fill_animation_frames():
+                return
+        elif self._current_vis_mode == "fill_time":
+            if getattr(sim, "_fill_arrival_times", None) is None:
+                return
+        elif not sim.fraction_liquid_times:
             return
 
         self._is_playing_fraction_liquid = True
@@ -3575,14 +3781,27 @@ class MainWindow(QMainWindow):
             self._start_fraction_liquid_playback()
 
     def _sync_fraction_liquid_playback_controls(self) -> None:
-        """Enable/disable playback controls based on mode and data readiness."""
-        is_fl = self._current_vis_mode == "fraction_liquid"
-        has_data = (
-            self.simulation_worker is not None
-            and self.simulation_worker.simulation is not None
-            and bool(self.simulation_worker.simulation.fraction_liquid_times)
+        """Enable/disable playback controls based on mode and data readiness.
+
+        Fill Animation and Fill Time reuse these same controls (see
+        _start_fraction_liquid_playback), so each gets its own readiness check
+        here alongside Fraction Liquid's. Fill Time was documented as
+        animating metal arrival but never had its Play button enabled, so the
+        only way to watch it was to drag the slider by hand.
+        """
+        sim = (
+            self.simulation_worker.simulation
+            if self.simulation_worker is not None
+            else None
         )
-        enabled = bool(is_fl and has_data)
+        ready = {
+            "fraction_liquid": sim is not None and bool(sim.fraction_liquid_times),
+            "fill_time": sim is not None
+            and getattr(sim, "_fill_arrival_times", None) is not None,
+            "fill_animation": sim is not None
+            and bool(sim.get_fill_animation_frames()),
+        }
+        enabled = bool(ready.get(self._current_vis_mode, False))
         self.fraction_liquid_play_pause_btn.setEnabled(enabled)
         self.fraction_liquid_speed_combo.setEnabled(enabled)
 
@@ -3601,6 +3820,7 @@ class MainWindow(QMainWindow):
             "Gas Porosity Risk": "gas_porosity",
             "Fraction Liquid": "fraction_liquid",
             "Fill Time": "fill_time",
+            "Fill Animation": "fill_animation",
             # Advanced analysis modes
             "Feeding Quality": "feeding_quality",
             "Thermal Stress": "thermal_stress",
@@ -3616,7 +3836,8 @@ class MainWindow(QMainWindow):
         # sweep the same slider widget, just over a different scalar field.
         is_fraction_liquid = (self._current_vis_mode == "fraction_liquid")
         is_fill_time = (self._current_vis_mode == "fill_time")
-        is_time_sliced = is_fraction_liquid or is_fill_time
+        is_fill_animation = (self._current_vis_mode == "fill_animation")
+        is_time_sliced = is_fraction_liquid or is_fill_time or is_fill_animation
         is_hot_tear = (self._current_vis_mode == "hot_tear")
         print(f"DEBUG: Setting time_slider_widget visible: {is_time_sliced}")
         self.time_slider_widget.setVisible(is_time_sliced)
@@ -3656,6 +3877,25 @@ class MainWindow(QMainWindow):
                 print(f"DEBUG: Fill time range: {min_time:.1f}s to {max_time:.1f}s")
                 # Trigger initial visualization at slider position
                 self._update_time_slider(self.time_slider.value())
+            else:
+                print("DEBUG: No simulation worker or simulation object!")
+        elif is_fill_animation:
+            self.time_slider_left_label.setText("⬛ Empty")
+            self.time_slider_title_label.setText("Fill Progress")
+            self.time_slider_right_label.setText("Full 🟦")
+            if self.simulation_worker and self.simulation_worker.simulation:
+                sim = self.simulation_worker.simulation
+                frames = sim.get_fill_animation_frames()
+                if frames:
+                    print(f"DEBUG: Fill animation frames: {len(frames)}")
+                    # self._fill_animation_max_speed is computed once, in
+                    # _setup_result_type_options, when results first become
+                    # available -- not here, since a mode switch back to
+                    # Fill Animation should not re-walk every frame.
+                    # Trigger initial visualization at slider position
+                    self._update_time_slider(self.time_slider.value())
+                else:
+                    print("DEBUG: NO fill animation frames found!")
             else:
                 print("DEBUG: No simulation worker or simulation object!")
         elif is_hot_tear:
@@ -3782,6 +4022,24 @@ class MainWindow(QMainWindow):
         )
 
     @staticmethod
+    def _compute_fill_animation_max_speed(frames) -> float:
+        """Whole-animation speed ceiling for the Fill Animation color ramp.
+
+        Called once, from _setup_result_type_options when results change --
+        NOT per slider tick. The ramp needs a fixed ceiling across every
+        frame (see load_fill_animation) so a steady stream of metal reads as
+        a steady color instead of rescaling as playback advances; walking
+        every frame's speed field on each of the ~1000 raw slider positions
+        during a drag would be needless repeated work for the same answer.
+        """
+        if not frames:
+            return 0.0
+        return max(
+            (float(np.max(frame.speed_m_s)) if frame.speed_m_s.size else 0.0)
+            for frame in frames
+        )
+
+    @staticmethod
     def _get_effective_shrinkage_threshold(
         intensities: np.ndarray,
         requested_threshold: float,
@@ -3813,12 +4071,16 @@ class MainWindow(QMainWindow):
     def _update_time_slider(self, value):
         """Handle time slider change for the active time-sliced visualization.
 
-        The slider is shared between Fraction Liquid and Fill Time; each
-        mode maps the same 0..FRACTION_LIQUID_TIME_SLIDER_MAX raw value onto
-        its own time range and scalar field.
+        The slider is shared between Fraction Liquid, Fill Time and Fill
+        Animation; each mode maps the same 0..FRACTION_LIQUID_TIME_SLIDER_MAX
+        raw value onto its own time range (or frame index) and scalar field.
         """
         if self._current_vis_mode == "fill_time":
             self._update_fill_time_slider(value)
+            return
+
+        if self._current_vis_mode == "fill_animation":
+            self._update_fill_animation_slider(value)
             return
 
         if self.simulation_worker is None or self.simulation_worker.simulation is None:
@@ -3949,11 +4211,74 @@ class MainWindow(QMainWindow):
             "Fill Time", 0.0, max_time if max_time > 0.0 else 1.0, "s", render=False
         )
 
+    def _update_fill_animation_slider(self, value):
+        """Handle time slider change while in Fill Animation mode.
+
+        Unlike Fill Time's continuous arrival-time threshold, there is no
+        field to threshold here -- the slider position maps onto a discrete
+        playback FRAME INDEX (see _map_fill_animation_slider_frame) and that
+        frame's own fill_fraction/speed_m_s are shown as-is.
+        """
+        if self.simulation_worker is None or self.simulation_worker.simulation is None:
+            return
+
+        sim = self.simulation_worker.simulation
+        frames = sim.get_fill_animation_frames()
+        if not frames:
+            print("DEBUG: No fill animation frames available!")
+            return
+
+        frame_index = self._map_fill_animation_slider_frame(value, len(frames))
+        frame = frames[frame_index]
+        filled = int(np.count_nonzero(frame.fill_fraction > FILL_ANIMATION_WETTED_THRESHOLD))
+        self.time_label.setText(f"{frame.time_s:.2f}s - {filled:,} voxels wetted")
+
+        self._update_fill_animation_visualization(frame_index, slider_value=value)
+
+    def _update_fill_animation_visualization(self, frame_index, slider_value=None):
+        """Update the Fill Animation visualization at a given frame index."""
+        if self.simulation_worker is None or self.simulation_worker.simulation is None:
+            return
+
+        voxel_mesh = self.simulation_worker.voxel_mesh
+        if voxel_mesh is None or voxel_mesh.voxel_centers is None:
+            return
+
+        sim = self.simulation_worker.simulation
+        frames = sim.get_fill_animation_frames()
+        if not frames:
+            return
+
+        frame_index = max(0, min(int(frame_index), len(frames) - 1))
+        frame = frames[frame_index]
+
+        self.visualizer.load_fill_animation(
+            voxel_mesh.voxel_centers,
+            voxel_mesh.voxel_sizes,
+            frame.fill_fraction,
+            frame.speed_m_s,
+            self._fill_animation_max_speed,
+            cache_key=slider_value,
+        )
+        max_speed_label = self._fill_animation_max_speed if self._fill_animation_max_speed > 0.0 else 1.0
+        self.visualizer.update_legend(
+            "Flow Speed", 0.0, max_speed_label, "m/s", render=False
+        )
+
     def _on_mesh_settings_confirmed(self, voxel_size, refinement, memory_mode):
         """Handle mesh settings confirmation from dialog"""
         self._current_voxel_size = voxel_size
         self._current_refinement = refinement
         self._current_memory_mode = memory_mode
+        # CAD is tessellated when the file is opened, but the voxel size is
+        # chosen here -- afterwards. Picking a finer grid now would otherwise
+        # leave the geometry coarser than the grid can resolve, so the STEP
+        # bodies are re-tessellated to match. No-op when the existing
+        # tessellation is already fine enough, which is the common case.
+        try:
+            self.part_manager.retessellate_for_voxel_size(voxel_size)
+        except Exception as exc:  # never block a mesh-size change on this
+            print(f"Warning: could not re-tessellate CAD for the new voxel size: {exc}")
         self._update_mesh_summary()
         self.mesh_setting_origin = "manual"
     
@@ -4125,8 +4450,14 @@ class MainWindow(QMainWindow):
 
                 ext = os.path.splitext(filepath)[1].lower()
                 if ext in (".step", ".stp"):
-                    # Multi-body assembly: one Part per body.
-                    new_ids = self.part_manager.load_assembly_parts(filepath)
+                    # Multi-body assembly: one Part per body. The voxel size
+                    # sets the tessellation density -- CAD finer than the grid
+                    # costs a great deal in containment testing and buys
+                    # nothing. If the user changes it later,
+                    # _on_mesh_settings_confirmed re-tessellates.
+                    new_ids = self.part_manager.load_assembly_parts(
+                        filepath, voxel_size_in=self._current_voxel_size
+                    )
                 else:
                     # Single-body CAD file (STL/OBJ/PLY/...).
                     part_id = self.part_manager.load_part(
@@ -4920,8 +5251,38 @@ class MainWindow(QMainWindow):
             
             # Visualize first available result type
             self._update_results_visualization()
-            
-            self.status_label.setText("✓ Visualization complete")
+
+            # Surface the mold-filling outcome, if filling ran at all. A
+            # diverged fill is correctly discarded by the pipeline before
+            # this point, but that made a blown-up fill look identical to a
+            # run where filling was never enabled -- no Fill Time/Fill
+            # Animation entry, no error, nothing. get_filling_summary()
+            # returns None when filling never ran, which keeps a plain
+            # solidification-only run silent here.
+            sim_worker = self.simulation_worker
+            sim = sim_worker.simulation if sim_worker is not None else None
+            get_summary = getattr(sim, "get_filling_summary", None)
+            filling_summary = get_summary() if get_summary is not None else None
+            notice = format_filling_notice(filling_summary)
+
+            if notice["level"] == "critical":
+                # Diverged: the solidification numbers below no longer
+                # reflect the actual pour, so this must not be a status-bar
+                # message the user can miss a second later. QMessageBox.warning
+                # blocks until acknowledged and cannot be dismissed by accident.
+                QMessageBox.warning(self, notice["title"], notice["body"])
+            elif notice["level"] == "warning":
+                # Stalled/time-capped are worth a heads-up but the fill data
+                # itself is still shown (unlike diverged) -- a lighter
+                # information dialog rather than a warning icon.
+                QMessageBox.information(self, notice["title"], notice["body"])
+
+            self.status_label.setText(notice["status_line"] or "✓ Visualization complete")
+            # Keep the sidebar's "Analyses: ..." summary in sync with what the
+            # filling stage actually concluded, not just what was requested --
+            # see _update_analysis_summary for the request-time text this
+            # appends to.
+            self._append_filling_status_to_summary(notice)
             self.progress_bar.setFormat("Complete")
         elif status == "cancelled":
             logger.info("Simulation cancelled", context={'alloy': self._current_alloy})
@@ -5591,6 +5952,44 @@ class MainWindow(QMainWindow):
             and getattr(self.simulation_worker.simulation, "_fill_arrival_times", None) is not None
         ):
             available_types.append("Fill Time")
+        # Fill Animation needs both the filling stage to have run AND actual
+        # playback frames -- a diverged fill returns an empty frame tuple
+        # (see FillingResult.frames), and there is nothing meaningful to
+        # play back in that case, so the mode simply does not appear rather
+        # than showing an empty or broken view.
+        fill_animation_frames = ()
+        if self.simulation_worker is not None and self.simulation_worker.simulation is not None:
+            fill_animation_frames = self.simulation_worker.simulation.get_fill_animation_frames()
+        if self._analysis_options.get('filling', False) and fill_animation_frames:
+            available_types.append("Fill Animation")
+            # Computed once here, when results change, rather than per
+            # slider tick -- see _compute_fill_animation_max_speed.
+            self._fill_animation_max_speed = self._compute_fill_animation_max_speed(
+                fill_animation_frames
+            )
+        else:
+            self._fill_animation_max_speed = 0.0
+
+        # "Fill Time" / "Fill Animation" can legitimately be missing above
+        # even with filling requested -- the analysis diverged, stalled, or
+        # was time-capped without frames. Rather than leave that absence
+        # unexplained (which is the original bug: a blown-up fill looked
+        # identical to filling never being enabled), put the reason on the
+        # combo's tooltip. Reuses format_filling_notice so the wording
+        # matches the message box shown right after the run finished.
+        combo_tooltip = "Choose which computed field to visualize."
+        if self._analysis_options.get('filling', False) and "Fill Time" not in available_types:
+            sim_for_tooltip = self.simulation_worker.simulation if self.simulation_worker is not None else None
+            get_summary = getattr(sim_for_tooltip, "get_filling_summary", None)
+            filling_summary = get_summary() if get_summary is not None else None
+            notice = format_filling_notice(filling_summary)
+            if notice["level"] in ("warning", "critical"):
+                combo_tooltip = (
+                    "Fill Time / Fill Animation hidden for this run -- "
+                    + notice["status_line"]
+                )
+        self.result_type_combo.setToolTip(combo_tooltip)
+
         # Advanced analysis types
         if self._analysis_options.get('feeding_path', False):
             available_types.append("Feeding Quality")
@@ -5628,6 +6027,7 @@ class MainWindow(QMainWindow):
                 "Gas Porosity Risk": "gas_porosity",
                 "Fraction Liquid": "fraction_liquid",
                 "Fill Time": "fill_time",
+                "Fill Animation": "fill_animation",
                 "Feeding Quality": "feeding_quality",
                 "Thermal Stress": "thermal_stress",
                 "Distortion": "distortion",
@@ -5684,6 +6084,14 @@ class MainWindow(QMainWindow):
             )
             self._update_fill_time_visualization(
                 time_value, slider_value=self.time_slider.value()
+            )
+        elif self._current_vis_mode == 'fill_animation':
+            frames = simulation.get_fill_animation_frames()
+            frame_index = self._map_fill_animation_slider_frame(
+                self.time_slider.value(), len(frames)
+            )
+            self._update_fill_animation_visualization(
+                frame_index, slider_value=self.time_slider.value()
             )
         # Advanced analysis visualizations
         elif self._current_vis_mode == 'feeding_quality':
@@ -6372,6 +6780,8 @@ class MainWindow(QMainWindow):
             title = "Fraction Liquid"
         elif self._current_vis_mode == 'fill_time':
             title = "Fill Time"
+        elif self._current_vis_mode == 'fill_animation':
+            title = "Flow Speed"
 
         self.visualizer.show_color_bar(title, show)
         
