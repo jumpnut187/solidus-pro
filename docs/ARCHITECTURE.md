@@ -33,8 +33,11 @@ main.py (desktop)                    run_web.py -> web/app_factory.py
                      PipelineResult
 ```
 
-`run_pipeline` has four callers: `ui/workers.py`, `web/routes.py`,
+`run_pipeline` has three production callers: `ui/workers.py`,
 `web/services/simulation_queue.py` and `core/surrogate/training.py`.
+`web/routes.py` no longer calls it -- that duplicate worker path was removed in
+4ee4509, and the web mapping now lives in
+`web/services/simulation_queue.py::build_pipeline_inputs`.
 
 `core/surrogate/pipeline.py` is a **sibling** pipeline: it reuses
 `prepare_mesh_and_geometry` and `run_post_analyses` but substitutes its own
@@ -88,9 +91,10 @@ gravity 9.81 m/s²). Use `physics.units`; never add another bare `0.0254`.
 
 ### Part types
 
-Codes are `PART_TYPE_CAST=0, RISER=1, CHILL=2, RISER_POST=3, CORE=4`, defined in
-`core/part_manager.py`. They are persisted in saved projects and encoded into ML
-training records, so they are **not free to renumber**.
+Codes are `PART_TYPE_CAST=0, RISER=1, CHILL=2, RISER_POST=3, CORE=4`, then the
+gating system in flow order: `POUR_CUP=5, SPRUE=6, RUNNER=7, FILTER=8, GATE=9`.
+Defined in `core/part_manager.py`. They are persisted in saved projects and
+encoded into ML training records, so they are **not free to renumber**.
 
 Use the predicates rather than integer comparisons:
 
@@ -102,39 +106,75 @@ Adding a part type means adding it to `METAL_PART_CODES` / `MOLD_PART_CODES`
 once, instead of auditing every comparison site. `tests/test_part_type_predicates.py`
 fails if a new type belongs to neither group.
 
+Two groupings exist beyond that binary, because two distinctions cut across it:
+
+- `SCORED_METAL_PART_CODES` vs `GATING_METAL_PART_CODES` -- a sprue holds metal
+  and solidifies, so it is metal, but it is not the casting and must never be
+  scored for shrinkage.
+- `FLOW_RESTRICTOR_PART_CODES` -- a ceramic FILTER groups with the mold
+  (refractory, never scored) but metal flows *through* it. Building an obstacle
+  mask from `is_mold()` alone would make it an impermeable wall and stop the
+  fill dead at the gate.
+
+**A new code produces no voxels until `AdaptiveVoxelMesh.assign_part_types`
+knows about it.** That function used to bucket parts with three literal
+comparisons, so CORE silently produced zero voxels for its entire existence. It
+is generic now, but `tests/test_part_assignment_generality.py` asserts every
+code claims voxels, because the failure mode is a part that vanishes with no
+error.
+
 **Adding a part type also changes the ML encoding.** `core/surrogate/fields.py`
 encodes channel 1 as `code / PART_TYPE_DIVISOR`, and that divisor is recorded in
 `ModelManifest.part_type_divisor`. `load_model` refuses artifacts whose recorded
 divisor differs from the current one, so bumping it forces a retrain instead of
 silently degrading predictions.
 
-## Where a new physics stage plugs in
+## The mold-filling stage
 
-For mold filling specifically:
+Built, and the pattern to copy for any future pre-solidification stage.
 
-1. **Insertion point** — `core/simulation_pipeline.py`, between
-   `prepare_mesh_and_geometry()` and constructing `SolidificationEngine`.
-2. **The seam to cut** — `core/solidification.py:407` currently does
-   `initial_temperatures = np.full(n_voxels, alloy.pouring_temp)`. That single
-   uniform assignment is the whole "pouring model" today. The line below it
-   already demonstrates the override pattern for chills, and
-   `HeatTransferModel.set_initial_temperature` accepts a full array.
-3. **Where the solver lives** — `physics/filling.py` (integrator) plus
-   `physics/fluid_flow.py` (kernels), mirroring `heat_transfer.py`'s shape.
-4. **Run it as a standalone pre-pass.** `HeatTransferModel` integrates all
-   `n_voxels` unconditionally and has no active-cell mask, so a growing fill
-   domain cannot reuse it directly. Give the filling solver its own state and
-   hand back only `fill_time[]` and `T_after_fill[]`. Do not retrofit an active
-   mask into the thermal model.
-5. **Inlet boundaries** — `BoundaryType.HEAT_FLUX` is implemented and
-   `clear_boundaries()` lets a moving front revise its wetted cell set each step.
-   `add_boundary` accepts arbitrary index sets and a `time_function`.
+**Shape.** `physics/fluid_flow.py` holds the D3Q19 lattice, TRT collision, Guo
+forcing, Smagorinsky closure and the ceramic-filter drag closure.
+`physics/filling.py` holds the free-surface solver: Koerner mass tracking, cell
+transitions, temperature advection and the defect indicators.
+`core/filling_stage.py` owns the mesh-to-lattice seam and orchestration. That
+split is what the layer contract forces -- `physics/` may not import `core/`,
+so anything that knows what a voxel mesh is has to live in `core/`.
 
-Material properties already present for a momentum solver: `dynamic_viscosity`
-(Pa·s), `get_dynamic_viscosity(T, fs)` (temperature- and mush-dependent),
-`vectorized_dynamic_viscosity`, `kinematic_viscosity`, Prandtl, `density_liquid`,
-permeability and a Darcy pressure drop. **Missing: surface tension**, needed for
-the Weber number and gate capillary behaviour.
+**Insertion.** `core/filling_stage.py::maybe_run_filling` is called from
+`run_pipeline` before `SolidificationEngine` is constructed, and again from
+`core/surrogate/pipeline.py`, which re-implements `run_pipeline`'s sequence
+rather than calling it. A stage wired into only one of those silently no-ops in
+the other.
+
+**Handover.** `SolidificationEngine.set_initial_temperature_field(temperatures,
+fill_arrival_times=...)`. It requires `(n_voxels,)` -- the OCCUPIED voxel count,
+not the dense lattice -- and every entry finite, so misrun cells are seeded at
+mold temperature rather than left blank. Only `thermal_coupled` consumes the
+field; `schedule_legacy` derives its own timing and ignores it, and the stage
+warns when it runs under that mode.
+
+**It runs as a standalone pre-pass**, with its own state. `HeatTransferModel`
+integrates all `n_voxels` unconditionally and has no active-cell mask, so a
+growing fill domain cannot reuse it. Do not retrofit one.
+
+**Two facts the mesh forces on any dense-grid stage.** `mesh.grid_shape` is a
+pre-voxelization bounding-box estimate and disagrees with the real extent --
+derive the shape from voxel centres instead. And `ijk = round((centre - min)/dx)`
+is bijective, verified across geometries and both voxelization paths, which is
+what makes a dense array representation viable at all.
+
+**Gating.** The stage runs only when `AnalysisOptions.filling` is set AND a
+`PourLocation` exists. Both UIs disable the toggle until a location is picked,
+clearing a location forces the flag off, and `maybe_run_filling` refuses
+regardless -- three independent layers, because a silently skipped stage is
+indistinguishable from one that ran and found nothing.
+
+Material properties for the momentum solver: `dynamic_viscosity` (Pa.s),
+`get_dynamic_viscosity(T, fs)` (scalar; the array form is the separately-named
+`vectorized_dynamic_viscosity`), `kinematic_viscosity`, `density_liquid`,
+`surface_tension` (added for the free-surface and capillary filter-priming
+terms), permeability and a Darcy pressure drop.
 
 ## Deleted, so you do not go looking
 
@@ -155,7 +195,7 @@ finished simulation, and filling runs *before* solidification.
 
 ## Known rough edges
 
-- `core/solidification.py` is ~5,400 lines in one class with ~90 attributes
+- `core/solidification.py` is ~5,800 lines in one class with ~90 attributes
   declared in `__init__` and more created outside it; access is largely
   defensive `getattr`.
 - `ui/main_window.py` is ~6,400 lines and mixes ten dialog classes with the
