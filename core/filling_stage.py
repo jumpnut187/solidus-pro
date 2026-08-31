@@ -140,6 +140,12 @@ MIN_CHOKE_THICKNESS_CELLS = 2.0
 #: "slightly inaccurate", it means the free-surface bookkeeping has broken.
 DIVERGENCE_MASS_FACTOR = 1.5
 
+#: Steps between progress-bar updates. Frequent enough that the bar moves
+#: smoothly on a run that takes minutes -- the text reports are twenty times
+#: sparser, which is right for a log and far too slow for a progress bar. A
+#: fill used to drive no bar at all, so the whole stage looked like a hang.
+PROGRESS_UPDATE_INTERVAL = 200
+
 #: Steps between mass-conservation checks. Cheap next to a lattice step.
 DIVERGENCE_CHECK_INTERVAL = 200
 
@@ -1165,6 +1171,7 @@ def run_filling_stage(
     *,
     cancel_callback=None,
     progress_message_callback=None,
+    detailed_progress_callback=None,
 ) -> Optional[FillingResult]:
     """
     Simulate the pour and return the state it leaves behind.
@@ -1539,6 +1546,15 @@ def run_filling_stage(
             specific_heat_j_kgk=float(alloy.specific_heat),
         )
 
+        if detailed_progress_callback is not None and (
+            taken % PROGRESS_UPDATE_INTERVAL == 0
+        ):
+            # Against the step budget, not the fill percentage. The bar has to
+            # move monotonically, and filled-cell counts do not: metal sloshes
+            # back and forth across the same cells while a front is stalled.
+            # A run that finishes early simply finishes early.
+            detailed_progress_callback(taken, max_steps, "Filling")
+
         if taken % frame_every == 0:
             capture_frame(taken)
             if len(frames) >= 2 * FILL_ANIMATION_FRAMES:
@@ -1838,6 +1854,7 @@ def maybe_run_filling(
     *,
     cancel_callback=None,
     progress_message_callback=None,
+    detailed_progress_callback=None,
 ) -> Optional[FillingResult]:
     """
     Run the filling stage if, and only if, it is both enabled and possible.
@@ -1882,5 +1899,6 @@ def maybe_run_filling(
         analysis_options,
         location,
         cancel_callback=cancel_callback,
+        detailed_progress_callback=detailed_progress_callback,
         progress_message_callback=progress_message_callback,
     )

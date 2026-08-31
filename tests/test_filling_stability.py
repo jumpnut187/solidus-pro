@@ -77,7 +77,8 @@ class _NamedAlloy(_Alloy):
         self.name = name
 
 
-def _run(mesh=None, options=None, messages=None, alloy=None, **filling_overrides):
+def _run(mesh=None, options=None, messages=None, alloy=None,
+         detailed_progress_callback=None, **filling_overrides):
     """Drive the real stage, optionally overriding FillingParams fields."""
     from core.filling_stage import maybe_run_filling
 
@@ -93,6 +94,7 @@ def _run(mesh=None, options=None, messages=None, alloy=None, **filling_overrides
         progress_message_callback=(
             messages.append if messages is not None else None
         ),
+        detailed_progress_callback=detailed_progress_callback,
     )
 
 
@@ -921,3 +923,54 @@ class DetachedInterfaceCellTests(unittest.TestCase):
             f"velocity is still climbing across the settled run: "
             f"{np.median(late[:quarter]):.4g} -> {np.median(late[-quarter:]):.4g}",
         )
+
+
+class ProgressReportingTests(unittest.TestCase):
+    """
+    A fill takes minutes and used to drive no progress bar at all.
+
+    Its messages went to a Qt status label and nothing else, so the console
+    printed the mesh stage, then `Interface bridges added...`, then nothing
+    for the whole solve. That reads as a hang rather than as work, and the
+    bridging stage -- which takes 0.4 s -- got the blame for it.
+    """
+
+    def test_the_fill_drives_a_progress_bar(self) -> None:
+        updates: list = []
+        _run(
+            mesh=_tower(nz=20),
+            max_fill_time_s=0.3,
+            detailed_progress_callback=lambda c, t, s: updates.append((c, t, s)),
+        )
+        self.assertTrue(updates, "the fill reported no progress at all")
+        self.assertTrue(all(stage == "Filling" for _, _, stage in updates))
+
+    def test_progress_is_monotonic(self) -> None:
+        """
+        Reported against the step budget, not filled cells. Metal sloshes back
+        and forth across the same cells while a front is stalled, so a
+        fill-percentage bar would run backwards.
+        """
+        updates: list = []
+        _run(
+            mesh=_tower(nz=20),
+            max_fill_time_s=0.3,
+            detailed_progress_callback=lambda c, t, s: updates.append((c, t, s)),
+        )
+        current = [c for c, _, _ in updates]
+        self.assertEqual(current, sorted(current))
+
+    def test_progress_never_exceeds_its_total(self) -> None:
+        updates: list = []
+        _run(
+            mesh=_tower(nz=20),
+            max_fill_time_s=0.3,
+            detailed_progress_callback=lambda c, t, s: updates.append((c, t, s)),
+        )
+        for current, total, _ in updates:
+            self.assertLessEqual(current, total)
+            self.assertGreater(total, 0)
+
+    def test_no_callback_is_fine(self) -> None:
+        """Every other caller passes nothing; it must stay optional."""
+        self.assertIsNotNone(_run(mesh=_tower(nz=12), max_fill_time_s=0.05))

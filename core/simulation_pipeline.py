@@ -561,6 +561,13 @@ def run_pipeline(
     # threw its fill away looked identical to one where filling was never
     # ticked.
     def _filling_message(message: str) -> None:
+        # Console as well as the log and the progress callback. The callback
+        # reaches a Qt status label and nothing else, so on the terminal the
+        # mesh stage chatters through every part and then goes completely
+        # silent for the minutes the fill takes -- which reads as a hang, not
+        # as work. Every other long stage in this pipeline prints; this one
+        # was the exception.
+        print(f"  {message}", flush=True)
         _filling_logger.info(message)
         _emit_message(progress_message_callback, message)
 
@@ -571,6 +578,7 @@ def run_pipeline(
         inputs,
         cancel_callback=cancel_callback,
         progress_message_callback=_filling_message,
+        detailed_progress_callback=detailed_progress_callback,
     )
 
     _emit_message(progress_message_callback, "Running solidification simulation...")
