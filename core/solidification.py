@@ -5791,7 +5791,12 @@ class SolidificationEngine:
                 float(np.max(fill_times[filled_mask])) if np.any(filled_mask) else 0.0
             )
             results['fill_time_filled_voxels'] = int(np.sum(filled_mask))
-            results['fill_time_unfilled_voxels'] = int(np.sum(~filled_mask))
+            # Only metal can misrun. Non-metal voxels carry NaN (see
+            # core.filling_stage), so `~filled_mask` alone would count the
+            # whole mold -- every core and chill -- as unfilled metal.
+            results['fill_time_unfilled_voxels'] = int(
+                np.sum(np.isfinite(fill_times) & ~filled_mask)
+            )
         
         # Feeding path results
         if self.analysis_options.feeding_path and self.feeding_path_result is not None:

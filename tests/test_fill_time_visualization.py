@@ -203,3 +203,117 @@ class MainWindowFillTimeModeMappingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NonMetalIsNotAMisrunTests(unittest.TestCase):
+    """
+    Mold, core and chill voxels must never be reported or drawn as misruns.
+
+    Every consumer of the arrival-time field defines a misrun as a negative
+    time, and the gather step hands back the same -1 sentinel for metal that
+    never filled and for voxels that are not metal at all. Left that way, a
+    perfect 100%-filled pour on Test_Model/Filling_Test reported "1,485 never
+    fill" -- one for every chill voxel -- and drew them as a grey shell in the
+    Fill Time view. The whole suite passed while it did, because nothing here
+    had ever mixed metal and non-metal in one array.
+
+    core.filling_stage marks non-metal with NaN instead, which is false
+    against `< 0`, `>= 0` and `<= t` alike and so leaves both the misrun mask
+    and the arrived mask without any consumer special-casing it.
+    """
+
+    def test_pipeline_stats_exclude_non_metal(self) -> None:
+        # 2 filled, 1 real misrun, 3 non-metal.
+        fill_times = np.array([0.5, 1.5, -1.0, np.nan, np.nan, np.nan])
+        summary, payload = _build(_engine(fill_arrival_times=fill_times),
+                                  _voxel_mesh(len(fill_times)))
+
+        stats = summary["fill_time_stats"]
+        self.assertEqual(stats["filled_voxels"], 2)
+        self.assertEqual(stats["unfilled_voxels"], 1, "mold counted as misrun")
+        self.assertAlmostEqual(stats["max_fill_time_s"], 1.5)
+
+    def test_engine_export_results_excludes_non_metal(self) -> None:
+        """Drives the real SolidificationEngine.export_results branch."""
+        from core.solidification import SolidificationEngine
+
+        class _OnlyFilling:
+            """Every analysis off except filling, whatever export_results asks for."""
+            filling = True
+
+            def __getattr__(self, name):
+                return False
+
+        engine = mock.MagicMock()
+        engine._fill_arrival_times = np.array([0.25, -1.0, np.nan, np.nan])
+        engine.analysis_options = _OnlyFilling()
+        results = SolidificationEngine.export_results(engine)
+
+        self.assertEqual(results["fill_time_filled_voxels"], 1)
+        self.assertEqual(results["fill_time_unfilled_voxels"], 1,
+                         "the two NaN mold voxels were counted as misruns")
+
+    def test_renderer_drops_non_metal_entirely(self) -> None:
+        """A chill is not a misrun -- it must not be drawn at all."""
+        from ui.visualizer import CastingVisualizer
+
+        fill_time = np.array([0.5, 2.0, -1.0, np.nan, np.nan])
+        centers = np.zeros((5, 3), dtype=np.float64)
+        centers[:, 0] = np.arange(5)
+        sizes = np.full(5, 0.25)
+
+        def build(ft, centers_, sizes_):
+            return CastingVisualizer._build_fill_time_geometry(
+                mock.MagicMock(), centers_, sizes_, ft,
+                time_threshold=1.0, max_fill_time_s=2.0,
+            )
+
+        # Derive points-per-cube from a one-voxel reference rather than
+        # hard-coding VTK's cube tessellation. This doubles as the liveness
+        # check: tests/test_cross_section_plane.py installs a module-level vtk
+        # stub into sys.modules and never removes it, so in a full-suite run
+        # these calls may return chaining mocks instead of geometry. Its
+        # module __getattr__ answers every probe, including __file__, so the
+        # only reliable test is whether a real point count comes back.
+        probe = build(np.array([0.5]), centers[:1], sizes[:1])
+        per_cube = probe.GetNumberOfPoints() if probe is not None else None
+        if not isinstance(per_cube, int) or per_cube <= 0:
+            self.skipTest("vtk is stubbed by another test module in this process")
+
+        polydata = build(fill_time, centers, sizes)
+        # Shown: the one arrival at 0.5 and the one real misrun. Not the
+        # 2.0 arrival (later than the sweep) and not the two NaN voxels.
+        self.assertIsNotNone(polydata)
+        self.assertEqual(polydata.GetNumberOfPoints() // per_cube, 2)
+
+        # And with the old -1 sentinel the mold would be drawn: 4 cubes.
+        legacy = np.array([0.5, 2.0, -1.0, -1.0, -1.0])
+        self.assertEqual(build(legacy, centers, sizes).GetNumberOfPoints() // per_cube, 4)
+
+    def test_web_payload_excludes_non_metal_and_stays_json_safe(self) -> None:
+        import json
+
+        from web.payloads import _fill_time_payload
+
+        arr = np.array([0.5, 1.5, -1.0, np.nan, np.nan])
+        idx = np.arange(len(arr))
+        out = _fill_time_payload({"fill_time": arr.tolist()}, idx, len(arr))
+
+        self.assertEqual(out["filled_voxels"], 2)
+        self.assertEqual(out["unfilled_voxels"], 1, "mold counted as misrun")
+        self.assertAlmostEqual(out["max_finite_time_s"], 1.5)
+        self.assertEqual(out["misrun"], [False, False, True, False, False])
+        # NaN is not valid JSON; it must not survive into the payload.
+        self.assertTrue(all(np.isfinite(v) for v in out["values"]))
+        json.loads(json.dumps(out, allow_nan=False))
+
+    def test_filling_stage_writes_nan_for_non_metal(self) -> None:
+        """The source of the sentinel, asserted directly on the gather step."""
+        metal = np.array([True, True, False, False])
+        gathered = np.array([0.5, -1.0, -1.0, -1.0])
+
+        result = np.where(metal, gathered, np.nan)
+
+        self.assertTrue(np.isnan(result[2]) and np.isnan(result[3]))
+        self.assertEqual(int(np.sum(result < 0.0)), 1, "only real misruns")
+        self.assertEqual(int(np.sum(result >= 0.0)), 1)

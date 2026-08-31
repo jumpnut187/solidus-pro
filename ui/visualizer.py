@@ -3059,7 +3059,8 @@ class CastingVisualizer(QWidget):
             voxel_centers: Nx3 array of voxel centers.
             voxel_sizes: N array of voxel sizes.
             fill_time: N array of per-voxel arrival time in seconds, with -1
-                marking a voxel the fill never reached.
+                marking metal the fill never reached and NaN marking a voxel
+                that is not metal (mold, core, chill) and so cannot fill.
             time_threshold: Sweep position in seconds. Voxels with
                 ``0 <= fill_time <= time_threshold`` are shown, colored by
                 arrival time; later voxels are hidden until the sweep
@@ -3125,6 +3126,9 @@ class CastingVisualizer(QWidget):
         Color convention:
         - Neutral grey (``FILL_TIME_MISRUN_COLOR``) = the fill never reached
           this voxel (misrun). Always shown, independent of the sweep.
+          Non-metal voxels are NaN rather than -1 and are dropped from the
+          view altogether -- a chill is not a misrun, and colouring it grey
+          would report a defect that does not exist.
         - Blue -> red ramp = arrival time, early to late. This is the
           conventional "flow front" palette (see e.g. MAGMASOFT/ProCAST fill
           plots): dark blue fills first, red fills last, so the eye reads
@@ -3133,7 +3137,8 @@ class CastingVisualizer(QWidget):
         Args:
             voxel_centers: Nx3 array of voxel centers.
             voxel_sizes: N array of voxel sizes.
-            fill_time: N array of arrival time in seconds, -1 = misrun.
+            fill_time: N array of arrival time in seconds; -1 = misrun,
+                NaN = not metal (excluded from the view entirely).
             time_threshold: Only arrived-by voxels (0 <= fill_time <=
                 time_threshold) are included, alongside every misrun voxel.
             max_fill_time_s: Full-timeline max, for a ramp that does not

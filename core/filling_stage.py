@@ -1165,6 +1165,21 @@ def run_filling_stage(
     filled_count = int(np.count_nonzero(filled_voxels & voxel_metal))
     misrun_count = int(np.count_nonzero(voxel_metal & ~filled_voxels))
 
+    # Mold, core and chill voxels can never fill, so they must not be able to
+    # read as misruns. Every consumer of this field -- the desktop renderer,
+    # the slider label, the web payload -- defines "misrun" as a negative
+    # arrival time, and gather_to_voxels hands back the -1 sentinel for all of
+    # them alike. Left as -1 they show up in the Fill Time view as a solid grey
+    # shell of "metal that never arrived": on Test_Model/Filling_Test that is
+    # 1,485 chill voxels reported as misruns against a true misrun count of 0.
+    #
+    # NaN is the sentinel for "this voxel is not metal, the question does not
+    # apply". It is not a second flavour of -1: NaN is false against `< 0`,
+    # `>= 0` and `<= t` alike, so it drops out of the misrun mask, the arrived
+    # mask and the time range without any consumer special-casing it, whereas
+    # any negative sentinel has to be excluded by hand everywhere.
+    fill_time_voxels = np.where(voxel_metal, fill_time_voxels, np.nan)
+
     # F2: gather the temperature the fill actually left behind, rather than
     # the two-constant (pour temp / mold temp) placeholder F1 used. Metal
     # that entered first and travelled furthest has been advecting and

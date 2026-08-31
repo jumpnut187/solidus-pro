@@ -634,7 +634,8 @@ def _fill_time_payload(
     """
     Build the Fill Time sweep field for the web viewer's time slider.
 
-    The raw per-voxel arrival time (seconds, -1 = misrun) is remapped to
+    The raw per-voxel arrival time (seconds, -1 = misrun, NaN = not metal) is
+    remapped to
     ``max_finite_time_s - t`` so the existing "value >= cutoff" active-voxel
     filter (see BabylonViewport's ``deriveActiveVoxels``) can sweep it the
     same way every other threshold-based mode does, just inverted: a cutoff
@@ -651,21 +652,29 @@ def _fill_time_payload(
     if len(arr) != expected_length:
         return None
 
+    # Three states, not two. `arr >= 0` is metal the fill reached, `arr < 0`
+    # is metal it never reached (a misrun), and NaN is a voxel that is not
+    # metal -- mold, core, chill -- where "did it fill?" has no meaning. Only
+    # the middle group may be flagged as a misrun; testing `arr < 0.0` alone
+    # was correct, but taking `~misrun` as "filled" swept the NaN mold in with
+    # the metal and poisoned max() with NaN.
     misrun = arr < 0.0
-    finite = arr[~misrun]
-    max_finite = float(np.max(finite)) if finite.size > 0 else 0.0
+    arrived = arr >= 0.0
+    max_finite = float(np.max(arr[arrived])) if np.any(arrived) else 0.0
 
+    # Non-metal keeps the -1 fill value and a false misrun flag, which leaves
+    # it out of both the sweep comparison and the always-visible misrun layer.
     transformed = np.full_like(arr, -1.0, dtype=np.float32)
     if max_finite > 0.0:
-        transformed[~misrun] = (max_finite - np.clip(arr[~misrun], 0.0, max_finite)).astype(np.float32)
+        transformed[arrived] = (max_finite - np.clip(arr[arrived], 0.0, max_finite)).astype(np.float32)
     else:
-        transformed[~misrun] = 0.0
+        transformed[arrived] = 0.0
 
     return {
         "values": transformed[idx].tolist(),
         "misrun": misrun[idx].tolist(),
         "max_finite_time_s": max_finite,
-        "filled_voxels": int(np.sum(~misrun)),
+        "filled_voxels": int(np.sum(arrived)),
         "unfilled_voxels": int(np.sum(misrun)),
     }
 

@@ -16,8 +16,11 @@ design document; `docs/filling_implementation.md` is the plan and
    that is deliberate, not a bug.
 3. Enable **Mold Filling (CFD)** and run. The header line lists it when it is
    active, so a log tells you whether the fill actually ran.
-4. Results → **Fill Time** animates metal arrival. Never-filled voxels stay grey
-   at every slider position — that is the misrun view.
+4. Results → **Fill Time** animates metal arrival. Never-filled *metal* stays
+   grey at every slider position — that is the misrun view. Only metal appears
+   in this view at all; mold, cores and chills are excluded, because "when did
+   it fill?" has no answer for them. The slider's "never fill" count is
+   therefore the misrun count, and on a clean pour it reads 0.
 
 ## Settings that matter
 
