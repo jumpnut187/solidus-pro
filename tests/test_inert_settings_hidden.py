@@ -5,6 +5,10 @@ round-trip tested -- and never read by any solver. A control that promises to
 change the answer and does not is worse than no control: it invites someone to
 tune a knob, watch nothing move, and mistrust the whole dialog.
 
+Five remain hidden. ``smagorinsky_cs`` was wired through ``physics.filling.step``
+into both collision paths and is shown again, which is the direction this file
+is meant to push: the set shrinks as knobs get connected, never the reverse.
+
 They are hidden rather than deleted, so saved projects still round-trip. The
 risk that creates is the opposite one -- that hiding a field quietly drops its
 stored value, or that a field gets hidden which something actually reads. Both
@@ -78,6 +82,7 @@ class InertFieldTests(unittest.TestCase):
         }
         for key in (
             "pour_rate_lb_s",
+            "smagorinsky_cs",
             "initial_head_in",
             "fill_grid_coarsening",
             "max_fill_time_s",
@@ -122,12 +127,12 @@ class StoredValueSurvivalTests(unittest.TestCase):
 
         params = SolidificationParameters()
         params.filling.pour_time_s = 12.5
-        params.filling.smagorinsky_cs = 0.22
+        params.filling.filter.priming_enabled = 0
 
         restored = SolidificationParameters.from_dict(params.to_dict())
 
         self.assertAlmostEqual(restored.filling.pour_time_s, 12.5)
-        self.assertAlmostEqual(restored.filling.smagorinsky_cs, 0.22)
+        self.assertEqual(restored.filling.filter.priming_enabled, 0)
 
 
 if __name__ == "__main__":

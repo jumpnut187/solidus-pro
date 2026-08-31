@@ -2027,9 +2027,6 @@ class SolidificationParamsDialog(DraggableDialog):
     #: - ``pour_time_s``: a fixed pour duration, which would mean driving the
     #:   inlet to empty a known volume in a set time rather than from head or
     #:   rate.
-    #: - ``smagorinsky_cs``: the subgrid constant. Smagorinsky *is* active, but
-    #:   at the hardcoded SMAGORINSKY_CS in physics/fluid_flow.py; the value
-    #:   would have to be threaded through step() into the Numba kernels.
     #: - ``rated_velocity_warn_factor`` / ``head_fraction_warn``: thresholds
     #:   for filter warnings that were never emitted. The hard flow-rate cap
     #:   in core.filling_stage.filter_flow_limit_kg_s now covers the first of
@@ -2039,7 +2036,6 @@ class SolidificationParamsDialog(DraggableDialog):
     #:   switches are unread.
     INERT_FIELD_KEYS: frozenset = frozenset({
         "pour_time_s",
-        "smagorinsky_cs",
         "rated_velocity_warn_factor",
         "head_fraction_warn",
         "priming_enabled",
@@ -2164,7 +2160,9 @@ class SolidificationParamsDialog(DraggableDialog):
         ("filling", "max_fill_time_s", "Max Fill Time", 60.0, 1.0, 600.0, 5.0, 0, "seconds",
          "Upper bound on simulated fill time before the filling stage is cut off."),
         ("filling", "smagorinsky_cs", "Smagorinsky Cs", 0.16, 0.05, 0.3, 0.01, 2, "",
-         "Smagorinsky constant for the LBM turbulence sub-grid model."),
+         "Smagorinsky constant for the LBM turbulence sub-grid model. 0.16 is "
+         "the standard value; raising it damps the fill front harder, lowering "
+         "it resolves more detail with less stability margin."),
         ("filling", "lattice_velocity_max", "Lattice Velocity Max", 0.05, 0.005, 0.2, 0.005, 3, "lattice units",
          "Maximum stable lattice velocity for the filling-stage LBM solver."),
         ("filling", "wall_htc_multiplier", "Wall HTC Multiplier", 1.0, 0.1, 5.0, 0.1, 2, "multiplier",

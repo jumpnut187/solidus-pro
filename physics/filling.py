@@ -1022,6 +1022,7 @@ def step(
     gravity_direction: Tuple[float, float, float] = (0.0, 0.0, -1.0),
     track_free_surface: bool = True,
     smagorinsky: bool = True,
+    smagorinsky_cs: float = SMAGORINSKY_CS,
     use_numba: bool = True,
 ) -> FillingState:
     """
@@ -1039,13 +1040,20 @@ def step(
             the solver runs single-phase. Used by the closed-box benchmarks
             (hydrostatic rest, Poiseuille), where introducing a free surface
             would confound what is being measured.
+        smagorinsky_cs: Subgrid constant, only consulted when ``smagorinsky``
+            is True. Both paths take it, so the two stay comparable; the
+            default is the module constant, which is what every benchmark in
+            the suite was validated against. Passing 0.0 zeroes the eddy
+            viscosity, leaving plain TRT at the molecular tau -- the same
+            algebra as ``smagorinsky=False``, not a degenerate case.
 
     Returns:
         The same state object, advanced.
     """
     if use_numba and NUMBA_AVAILABLE:
         post, streamed = _collide_stream_numba(
-            state, units, gravity_direction, smagorinsky, track_free_surface
+            state, units, gravity_direction, smagorinsky, track_free_surface,
+            smagorinsky_cs,
         )
         if track_free_surface:
             f_out, mass_out = _free_surface_scratch(state)
@@ -1099,6 +1107,7 @@ def step(
             feq,
             rho,
             units.tau,
+            smagorinsky_cs=smagorinsky_cs,
             suppress=state.porous.drag_c1 > 0.0,
         )
     else:
@@ -1143,6 +1152,7 @@ def _collide_stream_numba(
     gravity_direction: Tuple[float, float, float],
     smagorinsky: bool,
     track_free_surface: bool,
+    smagorinsky_cs: float = SMAGORINSKY_CS,
 ):
     """
     Run the local pass and the streaming pass through the Numba kernels.
@@ -1177,7 +1187,7 @@ def _collide_stream_numba(
         float(gravity_direction[0]),
         float(gravity_direction[1]),
         float(gravity_direction[2]),
-        float(SMAGORINSKY_CS),
+        float(smagorinsky_cs),
         bool(smagorinsky),
         float(TRT_MAGIC_PARAMETER),
         rho, u, post,

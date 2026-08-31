@@ -226,5 +226,80 @@ class KernelInvariantTests(unittest.TestCase):
         self.assertTrue(bool(np.all(np.isfinite(state.f))))
 
 
+class SmagorinskyConstantTests(unittest.TestCase):
+    """
+    ``smagorinsky_cs`` reached both collision paths, or it reached neither.
+
+    It used to reach neither: the dialog offered it and the project file stored
+    it while the kernels ran at the hardcoded module constant. Parity alone
+    could never have caught that -- the two paths agreed precisely *because*
+    both were ignoring the value -- so the liveness check below comes first,
+    and the cross-path check is then repeated at a Cs that is not the default.
+    """
+
+    #: Both inside the range the dialog offers, and far enough apart that the
+    #: eddy viscosity (which goes as Cs^2) cannot land on the same tau_eff.
+    CS_LOW = 0.05
+    CS_HIGH = 0.40
+
+    def _stepped(self, cs: float, *, use_numba: bool) -> np.ndarray:
+        state, units = _fixture()
+        step(state, units, use_numba=use_numba, smagorinsky_cs=cs)
+        return state.f.astype(np.float64)
+
+    def test_the_constant_changes_the_numpy_result(self) -> None:
+        """The knob is live. Without this, everything else here is vacuous."""
+        spread = float(
+            np.max(
+                np.abs(
+                    self._stepped(self.CS_HIGH, use_numba=False)
+                    - self._stepped(self.CS_LOW, use_numba=False)
+                )
+            )
+        )
+        self.assertGreater(
+            spread,
+            1e-6,
+            "changing smagorinsky_cs left the populations untouched -- the "
+            "knob is being ignored again",
+        )
+
+    @unittest.skipUnless(NUMBA_AVAILABLE, "numba is not installed")
+    def test_the_constant_changes_the_numba_result(self) -> None:
+        spread = float(
+            np.max(
+                np.abs(
+                    self._stepped(self.CS_HIGH, use_numba=True)
+                    - self._stepped(self.CS_LOW, use_numba=True)
+                )
+            )
+        )
+        self.assertGreater(spread, 1e-6)
+
+    @unittest.skipUnless(NUMBA_AVAILABLE, "numba is not installed")
+    def test_paths_agree_at_a_non_default_constant(self) -> None:
+        """A kernel that quietly kept the constant would show up right here."""
+        np.testing.assert_allclose(
+            self._stepped(self.CS_HIGH, use_numba=True),
+            self._stepped(self.CS_HIGH, use_numba=False),
+            rtol=1e-5,
+            atol=1e-7,
+        )
+
+    def test_zero_degrades_to_plain_trt(self) -> None:
+        """
+        Cs = 0 must be a usable setting, not a division by zero or a silent
+        fallback to the default: nu_t = Cs^2 |S| vanishes, tau_eff collapses to
+        the molecular tau, and the collision is exactly the one taken with the
+        subgrid model switched off. That equivalence is what lets the stage
+        accept 0 from settings.
+        """
+        zero, units = _fixture()
+        step(zero, units, use_numba=False, smagorinsky_cs=0.0)
+        disabled, units = _fixture()
+        step(disabled, units, use_numba=False, smagorinsky=False)
+        np.testing.assert_allclose(zero.f, disabled.f, rtol=1e-6, atol=1e-9)
+
+
 if __name__ == "__main__":
     unittest.main()

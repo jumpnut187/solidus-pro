@@ -70,6 +70,7 @@ from core.filter_database import (
 )
 from physics.filling import PorousZone
 from physics.fluid_flow import (
+    SMAGORINSKY_CS,
     ceramic_foam_permeability,
     forchheimer_inverse_length,
     porous_drag_coefficients,
@@ -132,6 +133,17 @@ STATUS_DIVERGED = "diverged"
 #: check compared an area against 4 and so passed a wide, thin gate -- exactly
 #: the geometry that seals -- while looking like it had checked something.
 MIN_CHOKE_THICKNESS_CELLS = 2.0
+
+#: Largest Smagorinsky constant the stage will accept from settings.
+#:
+#: The eddy viscosity goes as Cs^2, so the tolerated band is not a matter of
+#: taste: at 0.5 the subgrid viscosity is already ten times what the literature
+#: values (0.1-0.2, 0.16 for homogeneous isotropic turbulence) produce, and
+#: past that the closure stops behaving like a subgrid model and starts
+#: smearing the fill front into a diffusion problem -- while still returning a
+#: perfectly stable, perfectly wrong pour. Zero is legal and means exactly what
+#: it says: tau_eff collapses to tau and the collision is plain TRT.
+MAX_SMAGORINSKY_CS = 0.5
 
 #: Total wet mass, as a multiple of the wet-cell count, above which the run is
 #: declared diverged. Every fluid cell holds mass ~= rho * porosity ~= 1 and
@@ -1330,6 +1342,21 @@ def run_filling_stage(
 
     warnings: List[str] = []
 
+    # The subgrid constant the collision operator runs at. Out-of-range values
+    # are refused rather than clamped: silently pulling 1.2 back to 0.5 would
+    # still hand the user a viscosity 40x what they think they asked for, and
+    # the whole reason this knob is visible is that a control which quietly
+    # does something else is worse than no control. NaN fails the comparison
+    # too, which is the intent.
+    smagorinsky_cs = float(getattr(filling, "smagorinsky_cs", SMAGORINSKY_CS))
+    if not 0.0 <= smagorinsky_cs <= MAX_SMAGORINSKY_CS:
+        warnings.append(
+            f"smagorinsky_cs of {smagorinsky_cs:.3f} is outside the usable "
+            f"range 0-{MAX_SMAGORINSKY_CS:.1f} (literature values are "
+            f"0.1-0.2); running at the default {SMAGORINSKY_CS:.2f}."
+        )
+        smagorinsky_cs = float(SMAGORINSKY_CS)
+
     # Inlet density from the metallostatic head above the pour point:
     # rho = rho_0 (1 + g h / c_s^2) in lattice units. Imposing a *pressure*
     # rather than a velocity is what lets the sprue choke meter the flow, which
@@ -1536,7 +1563,7 @@ def run_filling_stage(
         # diffusion nibble at it.
         state.temperature[ix, iy, iz] = pour_temp
 
-        step(state, units, track_free_surface=True)
+        step(state, units, track_free_surface=True, smagorinsky_cs=smagorinsky_cs)
         advect_temperature(state, alpha_lattice)
         apply_wall_heat_loss(
             state,

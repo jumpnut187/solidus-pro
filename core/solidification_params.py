@@ -279,6 +279,49 @@ class FillingParams:
         self.entrapment_check_interval = _clamp_int(self.entrapment_check_interval, 1, 1000, 50)
 
 
+#: The pour rate FillingParams used to default to, before 0 ("derive from the
+#: square-root rule") replaced it. See migrate_legacy_pour_rate.
+LEGACY_DEFAULT_POUR_RATE_LB_S = 5.0
+
+
+def migrate_legacy_pour_rate(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Rewrite a stored pour rate of exactly 5 lb/s to 0, meaning "derive".
+
+    5.0 was the fixed default every project inherited, and it is the right
+    rate only for a casting of about 25 lb: a W-pound casting pours in
+    sqrt(W) seconds, so the rate is sqrt(W) lb/s -- 20 lb/s for a 400 lb
+    casting, 2 lb/s for a 4 lb one. Almost every stored 5.0 is therefore the
+    old default rather than a measured decision, and leaving it alone pours
+    every existing project at a rate chosen for none of them.
+
+    A deliberate 5.0 cannot be told apart from an inherited one, which is why
+    this is applied per *file version* rather than on every deserialization:
+    ui.project_state runs it only on projects saved before the migration
+    existed, and saving stamps the current schema version, so a user who
+    genuinely wants 5 lb/s can set it, save, and have it survive. Migrating on
+    every load would make that one value impossible to hold.
+
+    Args:
+        params: A serialized SolidificationParameters dict (to_dict shape).
+            Not mutated.
+
+    Returns:
+        A copy, with filling.pour_rate_lb_s rewritten where it applies.
+    """
+    migrated = dict(params)
+    filling = migrated.get('filling')
+    if not isinstance(filling, dict):
+        return migrated
+    try:
+        rate = float(filling['pour_rate_lb_s'])
+    except (KeyError, TypeError, ValueError):
+        return migrated
+    if rate != LEGACY_DEFAULT_POUR_RATE_LB_S:
+        return migrated
+    migrated['filling'] = {**filling, 'pour_rate_lb_s': 0.0}
+    return migrated
+
+
 @dataclass
 class HotTearParams:
     """Parameters for hot tear risk analysis."""

@@ -6,7 +6,11 @@ import trimesh
 
 from core.part_manager import PartManager, PartType
 from core.pour_location import PourLocation
-from ui.project_state import build_project_state, load_project_state
+from ui.project_state import (
+    PROJECT_SCHEMA_VERSION,
+    build_project_state,
+    load_project_state,
+)
 
 
 class ProjectStateTests(unittest.TestCase):
@@ -143,6 +147,88 @@ class ProjectStateTests(unittest.TestCase):
         self.assertEqual(loaded_part["position"], [1.0, 0.0, 0.0])
         self.assertEqual(loaded_part["rotation"], [2.0, 3.0, 0.0])
         self.assertEqual(loaded_part["color"], [0.8, 0.7, 0.7])
+
+
+class LegacyPourRateMigrationTests(unittest.TestCase):
+    """
+    A stored pour rate of exactly 5 lb/s is the old fixed default.
+
+    It is right only near a 25 lb casting -- the rate follows sqrt(W) -- so an
+    untouched project carrying it pours at a rate that was chosen for no
+    casting in particular. 0 means "derive from the square-root rule", which
+    is what those projects should have had all along.
+
+    The migration is gated on the schema version rather than run on every
+    load, because 5.0 typed deliberately looks identical to 5.0 inherited.
+    Saving stamps the current version, so a re-set 5.0 survives; that is the
+    half of this behaviour the version bump exists for.
+    """
+
+    def _loaded_rate(self, rate, *, version=1):
+        payload = {
+            "schema_version": version,
+            "simulation": {
+                "solidification_params": {"filling": {"pour_rate_lb_s": rate}}
+            },
+            "parts": [],
+        }
+        loaded = load_project_state(payload).to_dict()
+        return loaded["simulation"]["solidification_params"]["filling"][
+            "pour_rate_lb_s"
+        ]
+
+    def test_the_old_default_becomes_derive(self) -> None:
+        self.assertEqual(self._loaded_rate(5.0), 0.0)
+
+    def test_a_rate_just_below_is_left_alone(self) -> None:
+        """Only the exact old default is suspect; 4.9 was typed by someone."""
+        self.assertEqual(self._loaded_rate(4.9), 4.9)
+
+    def test_a_rate_just_above_is_left_alone(self) -> None:
+        self.assertEqual(self._loaded_rate(5.1), 5.1)
+
+    def test_derive_stays_derive(self) -> None:
+        self.assertEqual(self._loaded_rate(0.0), 0.0)
+
+    def test_a_current_project_keeps_a_deliberate_five(self) -> None:
+        """The whole point of the version gate: 5 lb/s must be settable."""
+        self.assertEqual(self._loaded_rate(5.0, version=PROJECT_SCHEMA_VERSION), 5.0)
+
+    def test_a_project_with_no_filling_block_loads(self) -> None:
+        loaded = load_project_state(
+            {"schema_version": 1, "simulation": {}, "parts": []}
+        ).to_dict()
+        self.assertEqual(loaded["simulation"]["solidification_params"], {})
+
+    def test_the_stored_payload_is_not_mutated(self) -> None:
+        """Migrating must not reach back into the caller's parsed file."""
+        payload = {
+            "schema_version": 1,
+            "simulation": {
+                "solidification_params": {"filling": {"pour_rate_lb_s": 5.0}}
+            },
+            "parts": [],
+        }
+        load_project_state(payload)
+        self.assertEqual(
+            payload["simulation"]["solidification_params"]["filling"][
+                "pour_rate_lb_s"
+            ],
+            5.0,
+        )
+
+    def test_an_older_project_is_reported_at_the_current_version(self) -> None:
+        """It has been migrated forward, so it must not still claim to be v1."""
+        loaded = load_project_state(
+            {"schema_version": 1, "simulation": {}, "parts": []}
+        ).to_dict()
+        self.assertEqual(loaded["schema_version"], PROJECT_SCHEMA_VERSION)
+
+    def test_an_unknown_version_is_still_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            load_project_state(
+                {"schema_version": 99, "simulation": {}, "parts": []}
+            )
 
 
 if __name__ == "__main__":

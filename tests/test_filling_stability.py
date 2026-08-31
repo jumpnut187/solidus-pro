@@ -974,3 +974,68 @@ class ProgressReportingTests(unittest.TestCase):
     def test_no_callback_is_fine(self) -> None:
         """Every other caller passes nothing; it must stay optional."""
         self.assertIsNotNone(_run(mesh=_tower(nz=12), max_fill_time_s=0.05))
+
+
+class SmagorinskyConstantTests(unittest.TestCase):
+    """
+    ``smagorinsky_cs`` now reaches the collision operator, which means the
+    stage is the last place a nonsense value can be caught.
+
+    It is refused rather than clamped. Pulling 1.2 back to 0.5 would still run
+    a subgrid viscosity many times what was asked for and report nothing, and
+    a settings field that quietly does something else is the exact failure
+    this parameter was hidden for in the first place.
+    """
+
+    def _warning(self, result):
+        return next(
+            (w for w in result.warnings if "smagorinsky_cs" in w), None
+        )
+
+    def test_a_usable_constant_passes_without_comment(self) -> None:
+        result = _run(mesh=_tower(nz=12), max_fill_time_s=0.05, smagorinsky_cs=0.2)
+        self.assertIsNotNone(result)
+        self.assertIsNone(self._warning(result))
+
+    def test_zero_is_accepted(self) -> None:
+        """0 means no eddy viscosity, which is a legitimate ask, not an error."""
+        result = _run(mesh=_tower(nz=12), max_fill_time_s=0.05, smagorinsky_cs=0.0)
+        self.assertIsNotNone(result)
+        self.assertIsNone(self._warning(result))
+
+    def test_a_negative_constant_falls_back_and_says_so(self) -> None:
+        result = _run(mesh=_tower(nz=12), max_fill_time_s=0.05, smagorinsky_cs=-0.5)
+        self.assertIsNotNone(result)
+        message = self._warning(result)
+        self.assertIsNotNone(message, f"no warning raised: {result.warnings}")
+        self.assertIn("0.16", message)
+
+    def test_an_absurd_constant_falls_back_and_says_so(self) -> None:
+        result = _run(mesh=_tower(nz=12), max_fill_time_s=0.05, smagorinsky_cs=5.0)
+        self.assertIsNotNone(result)
+        self.assertIsNotNone(
+            self._warning(result), f"no warning raised: {result.warnings}"
+        )
+
+    def test_the_stage_constant_reaches_the_solver(self) -> None:
+        """
+        End to end: the value read from settings has to be the value ``step``
+        is called with, not merely validated on the way past.
+        """
+        import physics.filling as pf
+
+        seen: list = []
+        original = pf.step
+
+        def traced(state, units, **kwargs):
+            seen.append(kwargs.get("smagorinsky_cs"))
+            return original(state, units, **kwargs)
+
+        pf.step = traced
+        try:
+            _run(mesh=_tower(nz=12), max_fill_time_s=0.02, smagorinsky_cs=0.23)
+        finally:
+            pf.step = original
+
+        self.assertTrue(seen, "the stage never stepped the solver")
+        self.assertTrue(all(cs == 0.23 for cs in seen), f"got {set(seen)}")

@@ -8,9 +8,21 @@ import os
 from typing import Any, Dict, List, Optional
 
 from core.part_manager import PartManager
+from core.solidification_params import migrate_legacy_pour_rate
 
 
-PROJECT_SCHEMA_VERSION = 1
+#: Version stamped on every project this build saves.
+#:
+#: 2 marks the pour-rate migration below. The bump is what makes that
+#: migration a one-time repair of old files rather than a rule that reapplies
+#: on every load: a value the user re-sets and saves comes back under version
+#: 2 and is left alone.
+PROJECT_SCHEMA_VERSION = 2
+
+#: Versions this build can still open. An older project is migrated forward on
+#: load (see load_project_state); an unrecognized one must fail loudly rather
+#: than be misread as the current shape.
+SUPPORTED_SCHEMA_VERSIONS = (1, 2)
 
 
 @dataclass(frozen=True)
@@ -82,12 +94,17 @@ def build_project_state(
 
 
 def load_project_state(payload: Dict[str, Any]) -> ProjectState:
-    """Validate and normalize a project payload."""
+    """Validate and normalize a project payload, migrating older versions.
+
+    What comes back is always at PROJECT_SCHEMA_VERSION: an older file is
+    brought forward here, so nothing downstream has to know which version it
+    was saved under.
+    """
     if not isinstance(payload, dict):
         raise ValueError("Project file must contain a JSON object")
 
     version = int(payload.get("schema_version", 0))
-    if version != PROJECT_SCHEMA_VERSION:
+    if version not in SUPPORTED_SCHEMA_VERSIONS:
         raise ValueError(f"Unsupported project schema version: {version}")
 
     simulation = payload.get("simulation")
@@ -119,8 +136,19 @@ def load_project_state(payload: Dict[str, Any]) -> ProjectState:
             }
         )
 
+    solidification_params = dict(simulation.get("solidification_params", {}))
+    if version < 2:
+        # A project written before the square-root pour rate existed carries
+        # the fixed 5 lb/s default it inherited. See
+        # core.solidification_params.migrate_legacy_pour_rate for why that is
+        # rewritten rather than honoured, and why the version gate is what
+        # keeps a deliberate 5 lb/s settable.
+        solidification_params = migrate_legacy_pour_rate(solidification_params)
+
     normalized = {
-        "schema_version": version,
+        # The payload returned is at the current schema, whatever the file
+        # said: every migration above has already been applied to it.
+        "schema_version": PROJECT_SCHEMA_VERSION,
         "saved_at": str(payload.get("saved_at", "")),
         "simulation": {
             "alloy_name": str(simulation.get("alloy_name", "WCB")),
@@ -129,7 +157,7 @@ def load_project_state(payload: Dict[str, Any]) -> ProjectState:
             "memory_mode": str(simulation.get("memory_mode", "auto")),
             "analysis_options": dict(simulation.get("analysis_options", {})),
             "performance_options": dict(simulation.get("performance_options", {})),
-            "solidification_params": dict(simulation.get("solidification_params", {})),
+            "solidification_params": solidification_params,
             # Absent on any project saved before pour locations existed --
             # None is the correct "not set" value for those older files.
             "pour_location": _normalize_pour_location(simulation.get("pour_location")),
