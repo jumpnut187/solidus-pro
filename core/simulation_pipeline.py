@@ -546,6 +546,17 @@ def run_pipeline(
             filling_result.temperature_c,
             fill_arrival_times=filling_result.fill_time_s,
         )
+        # Report the handover explicitly. Without this the only sign a fill ran
+        # is its progress chatter, so a run where filling was silently off is
+        # indistinguishable from one where it ran and found nothing wrong.
+        _emit_message(
+            progress_message_callback,
+            f"Filling: seeded initial temperature from the fill "
+            f"({filling_result.filled_voxel_count:,} voxels filled, "
+            f"{filling_result.misrun_voxel_count:,} misrun, "
+            f"{filling_result.filled_fraction:.0%} of the metal) in "
+            f"{filling_result.fill_seconds:.2f} s of pour",
+        )
 
     def on_sim_progress(current: int, total: int, stage: str) -> None:
         _check_cancel(cancel_callback)

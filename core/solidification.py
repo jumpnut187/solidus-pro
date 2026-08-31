@@ -157,6 +157,57 @@ NIYAMA_THRESHOLDS = {
 }
 
 
+
+#: Analysis flags that must appear in the run header, in report order.
+#:
+#: Hand-maintained lists like this go stale silently: ``filling`` was missing
+#: for its first several runs, so a run with the fill switched off looked
+#: identical to one where it ran and found nothing. ``tests/
+#: test_simulation_pipeline_options.py`` asserts this covers every analysis
+#: flag on AnalysisOptions, so the next addition cannot be forgotten the same way.
+#:
+#: Only genuine on/off analyses belong here. ``sand_restraint_index`` is a
+#: float parameter defaulting to 0.5, not a toggle -- listing it would report
+#: "Sand Restraint" on every run. Execution flags (use_gpu, use_incremental,
+#: solver_mode) are not analyses either.
+ANALYSIS_LABELS: Tuple[Tuple[str, str], ...] = (
+    ("shrinkage", "Shrinkage"),
+    ("hotspot", "Hot Spots"),
+    ("niyama", "Niyama"),
+    ("sand_burn_in", "Sand Burn-In"),
+    ("gas_porosity", "Gas Porosity"),
+    ("fraction_liquid", "Fraction Liquid"),
+    ("hot_tear", "Hot Tear"),
+    ("feeding_path", "Feeding Path"),
+    ("stress_analysis", "Stress"),
+    ("microstructure", "Microstructure"),
+    ("filling", "Mold Filling (CFD)"),
+)
+
+
+def describe_analyses(analysis_options, alloy=None) -> List[str]:
+    """
+    Human-readable names of the analyses a run has enabled.
+
+    Args:
+        analysis_options: An :class:`AnalysisOptions`.
+        alloy: Optional alloy, used to annotate the Niyama threshold.
+
+    Returns:
+        Labels in report order, for the enabled analyses only.
+    """
+    labels: List[str] = []
+    for attribute, label in ANALYSIS_LABELS:
+        if not getattr(analysis_options, attribute, False):
+            continue
+        if attribute == "niyama" and alloy is not None:
+            threshold = NIYAMA_THRESHOLDS.get(str(alloy.name).split()[0], 1.0)
+            labels.append(f"Niyama (threshold={threshold})")
+        else:
+            labels.append(label)
+    return labels
+
+
 class SolidificationEngine:
     """
     Simulates casting solidification with shrinkage and porosity prediction
@@ -849,19 +900,7 @@ class SolidificationEngine:
         print(f"Time step: {self.time_step}s")
         
         # Report analysis options
-        analyses = []
-        if self.analysis_options.shrinkage:
-            analyses.append("Shrinkage")
-        if self.analysis_options.hotspot:
-            analyses.append("Hot Spots")
-        if self.analysis_options.niyama:
-            analyses.append(f"Niyama (threshold={NIYAMA_THRESHOLDS.get(self.alloy.name.split()[0], 1.0)})")
-        if self.analysis_options.sand_burn_in:
-            analyses.append("Sand Burn-In")
-        if self.analysis_options.gas_porosity:
-            analyses.append("Gas Porosity")
-        if self.analysis_options.fraction_liquid:
-            analyses.append("Fraction Liquid")
+        analyses = describe_analyses(self.analysis_options, self.alloy)
         print(f"Analyses: {', '.join(analyses)}")
         print()
         print(f"  SOLVER MODE: {self._get_solver_mode().upper()}")

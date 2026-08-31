@@ -75,3 +75,80 @@ class SimulationPipelineOptionsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AnalysisHeaderTests(unittest.TestCase):
+    """
+    The run header lists which analyses are active. It is a hand-maintained
+    table, and `filling` was missing from it at first -- so a run with the fill
+    switched off printed exactly what a successful fill would have, and there
+    was no way to tell from the log which had happened.
+    """
+
+    #: Boolean fields on AnalysisOptions that are NOT analyses.
+    _NOT_ANALYSES = frozenset({"use_gpu", "use_incremental"})
+
+    def test_every_analysis_flag_is_reported(self) -> None:
+        """
+        The guard that matters: a new analysis flag must be added to
+        ANALYSIS_LABELS or this fails. Catches the omission class, not just
+        the one instance of it.
+        """
+        import dataclasses
+
+        from core.solidification import ANALYSIS_LABELS, AnalysisOptions
+
+        labelled = {attribute for attribute, _ in ANALYSIS_LABELS}
+        for f in dataclasses.fields(AnalysisOptions):
+            if f.type not in ("bool", bool) or f.name in self._NOT_ANALYSES:
+                continue
+            with self.subTest(flag=f.name):
+                self.assertIn(
+                    f.name, labelled,
+                    f"AnalysisOptions.{f.name} is an analysis toggle but is not "
+                    f"in ANALYSIS_LABELS, so runs will not report it",
+                )
+
+    def test_only_real_toggles_are_listed(self) -> None:
+        """
+        The inverse guard. sand_restraint_index is a float defaulting to 0.5,
+        so listing it would report "Sand Restraint" on every single run.
+        """
+        import dataclasses
+
+        from core.solidification import ANALYSIS_LABELS, AnalysisOptions
+
+        by_name = {f.name: f for f in dataclasses.fields(AnalysisOptions)}
+        for attribute, _ in ANALYSIS_LABELS:
+            with self.subTest(flag=attribute):
+                self.assertIn(attribute, by_name)
+                self.assertIn(by_name[attribute].type, ("bool", bool))
+
+    def test_filling_is_reported_only_when_enabled(self) -> None:
+        from core.solidification import AnalysisOptions, describe_analyses
+
+        options = AnalysisOptions()
+        self.assertNotIn("Mold Filling (CFD)", describe_analyses(options))
+        options.filling = True
+        self.assertIn("Mold Filling (CFD)", describe_analyses(options))
+
+    def test_disabled_analyses_are_omitted(self) -> None:
+        from core.solidification import AnalysisOptions, describe_analyses
+
+        options = AnalysisOptions(shrinkage=False, hotspot=False)
+        self.assertEqual(describe_analyses(options), [])
+
+    def test_niyama_carries_its_threshold(self) -> None:
+        from core.materials import get_alloy
+        from core.solidification import AnalysisOptions, describe_analyses
+
+        options = AnalysisOptions(shrinkage=False, hotspot=False, niyama=True)
+        labels = describe_analyses(options, get_alloy("WCB"))
+        self.assertEqual(len(labels), 1)
+        self.assertTrue(labels[0].startswith("Niyama (threshold="))
+
+    def test_niyama_without_an_alloy_still_reports(self) -> None:
+        from core.solidification import AnalysisOptions, describe_analyses
+
+        options = AnalysisOptions(shrinkage=False, hotspot=False, niyama=True)
+        self.assertEqual(describe_analyses(options), ["Niyama"])
