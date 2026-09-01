@@ -219,6 +219,89 @@ def _build_kdtree(points, **kwargs):
     return cKDTree(points, **kwargs)
 
 
+class _MidpointKDTree(cKDTree):
+    """
+    ``cKDTree`` that splits on the midpoint unless told otherwise.
+
+    Exists so that a *library's* tree can be given the same treatment
+    :func:`_build_kdtree` gives ours, without touching ``scipy.spatial``
+    itself. Subclassing rather than wrapping keeps every attribute, method
+    and ``isinstance`` check that trimesh may rely on.
+    """
+
+    def __init__(self, data, *args, **kwargs):
+        kwargs.setdefault("balanced_tree", False)
+        super().__init__(data, *args, **kwargs)
+
+
+def _use_midpoint_kdtree_in_trimesh_proximity() -> bool:
+    """
+    Make ``trimesh.proximity`` build its vertex kd-tree with midpoint splits.
+
+    Part assignment asks every candidate voxel how far it is from a part's
+    surface (:func:`_robust_contains_check_impl`), and that call lands in
+    ``trimesh.proximity.nearby_faces``, which builds its own tree:
+
+        kdtree = cKDTree(mesh.vertices[mesh.referenced_vertices])
+
+    with SciPy's default median rule. On the STEP assembly in
+    ``/Users/brendonjarett/Downloads/Test 2`` that build walks off the end of
+    the main thread's stack and kills the process: EXC_BAD_ACCESS /
+    KERN_PROTECTION_FAILURE inside ``build()``, exit 139, no traceback.
+    Deterministic -- reproduced on every attempt, on the 802-vertex sprue body
+    with only 100 query points.
+
+    Two things this is *not*, both measured rather than assumed:
+
+    * Not a duplicate-vertex problem. Those tessellations are ~50 % duplicates
+      (sprue: 802 vertices, 396 unique), but de-duplicating them first and
+      building the tree on the 396 unique points crashes exactly the same way,
+      three times out of three. ``merge_vertices`` is therefore not a fix.
+    * Not a depth problem the caller can outrun. The resulting tree is 8 levels
+      deep, and the *midpoint* tree on the same points is 9 -- deeper, and it
+      survives. Nor does stack size rescue it: the same build runs fine on a
+      worker thread with only 8 MB.
+
+    What is left is that SciPy's median build path corrupts the stack on this
+    input once the process is in the state importing this module puts it in
+    (Metal/MLX/Taichi and Numba all initialise here). The midpoint path does
+    not, on this input or on the voxel lattices :func:`_build_kdtree` already
+    protects. Both are one flag, so both take it.
+
+    Scoped to the one module attribute trimesh reads. ``scipy.spatial`` is
+    left alone: a global replacement would silently change the tree in every
+    library in the process, including ones whose crash this has not been
+    measured on.
+
+    Returns:
+        True when the patch is in place, False when ``trimesh.proximity``
+        holds no usable ``cKDTree`` to replace -- which is what trimesh
+        installs when SciPy is missing, and not a condition worth raising on,
+        since proximity queries are already unavailable in that build.
+    """
+    try:
+        from trimesh import proximity as trimesh_proximity
+    except Exception as exc:  # pragma: no cover - trimesh is a hard dependency
+        logger.debug(f"trimesh.proximity unavailable, kd-tree not patched: {exc}")
+        return False
+
+    existing = getattr(trimesh_proximity, "cKDTree", None)
+    if existing is _MidpointKDTree:
+        return True
+    if not isinstance(existing, type) or not issubclass(existing, cKDTree):
+        # trimesh substitutes an ExceptionWrapper when SciPy is absent.
+        return False
+
+    trimesh_proximity.cKDTree = _MidpointKDTree
+    return True
+
+
+#: Applied at import, because the crash is in a library call this module makes
+#: on behalf of every caller -- including the spawned part-assignment workers,
+#: which import this module to get their entry point.
+_use_midpoint_kdtree_in_trimesh_proximity()
+
+
 class AdaptiveVoxelMesh:
     """
     Creates adaptive voxel mesh for casting simulation
