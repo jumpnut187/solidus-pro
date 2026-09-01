@@ -947,7 +947,7 @@ if NUMBA_AVAILABLE:
         C, W, OPP,
         tau, gravity_lattice, gx, gy, gz,
         smagorinsky_cs, use_smagorinsky, magic,
-        rho_out, u_out, post_out,
+        rho_out, u_out, post_out, rho32_out, u32_out,
     ):
         """
         Fused local pass: moments -> drag -> equilibrium -> Smagorinsky ->
@@ -956,6 +956,23 @@ if NUMBA_AVAILABLE:
         Every operation here is cell-local, which is what makes the whole thing
         one parallel loop with no temporaries. Writes ``rho_out``, ``u_out``
         and the post-collision populations ``post_out`` in place.
+
+        ``rho32_out`` and ``u32_out`` receive the same moments rounded to
+        float32 -- the dtype the solver state stores them in. Written here
+        rather than as ``rho_out.astype(np.float32)`` afterwards for the same
+        reason ``free_surface_kernel`` writes its own float32 copy: the cast is
+        identical, it just happens on 18 threads instead of one. The float64
+        pair stays because the free-surface pass wants the unrounded velocity.
+
+        ``f`` is read through an explicit ``np.float64`` cast at every site so
+        the caller can hand it ``state.f`` (float32) directly instead of
+        materialising ``state.f.astype(np.float64)`` -- a 19 x N float64
+        temporary, ~390 MB of traffic per step at a 120^3 grid, and the single
+        largest line in the measured astype churn. The casts are not
+        cosmetic: without them ``0.5 * (fi + fb)`` in the TRT split would add
+        two float32 values in float32 and the kernel would stop matching the
+        NumPy reference bit-for-bit. float32 -> float64 is exact, so with them
+        the result is identical to the old pre-converted input.
         """
         nx, ny, nz = flags.shape
         for x in prange(nx):
@@ -967,6 +984,10 @@ if NUMBA_AVAILABLE:
                         u_out[0, x, y, z] = 0.0
                         u_out[1, x, y, z] = 0.0
                         u_out[2, x, y, z] = 0.0
+                        rho32_out[x, y, z] = 0.0
+                        u32_out[0, x, y, z] = 0.0
+                        u32_out[1, x, y, z] = 0.0
+                        u32_out[2, x, y, z] = 0.0
                         for i in range(19):
                             post_out[i, x, y, z] = 0.0
                         continue
@@ -977,7 +998,7 @@ if NUMBA_AVAILABLE:
                     my = 0.0
                     mz = 0.0
                     for i in range(19):
-                        fi = f[i, x, y, z]
+                        fi = np.float64(f[i, x, y, z])
                         rho += fi
                         mx += C[i, 0] * fi
                         my += C[i, 1] * fi
@@ -1021,6 +1042,10 @@ if NUMBA_AVAILABLE:
                     u_out[0, x, y, z] = ux
                     u_out[1, x, y, z] = uy
                     u_out[2, x, y, z] = uz
+                    rho32_out[x, y, z] = rho
+                    u32_out[0, x, y, z] = ux
+                    u32_out[1, x, y, z] = uy
+                    u32_out[2, x, y, z] = uz
 
                     eps = porosity[x, y, z]
                     inv_eps = 1.0 / eps if eps > 0.0 else 1.0
@@ -1032,7 +1057,7 @@ if NUMBA_AVAILABLE:
                         q00 = 0.0; q01 = 0.0; q02 = 0.0
                         q11 = 0.0; q12 = 0.0; q22 = 0.0
                         for i in range(19):
-                            neq = f[i, x, y, z] - _equilibrium_i(
+                            neq = np.float64(f[i, x, y, z]) - _equilibrium_i(
                                 i, rho, ux, uy, uz, usqr, inv_eps, C, W
                             )
                             cx = C[i, 0]; cy = C[i, 1]; cz = C[i, 2]
@@ -1068,8 +1093,11 @@ if NUMBA_AVAILABLE:
                     # --- TRT collision with Guo source ---
                     for i in range(19):
                         ib = OPP[i]
-                        fi = f[i, x, y, z]
-                        fb = f[ib, x, y, z]
+                        # Cast before the symmetric/antisymmetric split: see
+                        # the docstring -- fi + fb in float32 would not match
+                        # the NumPy path.
+                        fi = np.float64(f[i, x, y, z])
+                        fb = np.float64(f[ib, x, y, z])
                         ei = _equilibrium_i(i, rho, ux, uy, uz, usqr, inv_eps, C, W)
                         eb = _equilibrium_i(ib, rho, ux, uy, uz, usqr, inv_eps, C, W)
 
@@ -1146,7 +1174,7 @@ if NUMBA_AVAILABLE:
     @njit(parallel=True, cache=True)
     def free_surface_kernel(
         post, streamed, flags, rho, u, porosity, entry_offset, primed,
-        C, Ci, W, OPP, gas_density, mass_in, mass_out, f_out,
+        C, Ci, W, OPP, gas_density, mass_in, mass_out, f_out, f32_out,
     ):
         """
         Fused free-surface pass: gas-side reconstruction + Koerner mass exchange.
@@ -1160,6 +1188,28 @@ if NUMBA_AVAILABLE:
         Reads ``mass_in`` and writes ``mass_out`` so neighbour fill fractions
         are all taken from the same instant; updating in place would let a cell
         see some neighbours before and some after their update.
+
+        Two population outputs, deliberately:
+
+        * ``f_out`` is float64 and is what the mass exchange below reads its own
+          reconstructed populations back out of. It has to stay float64 --
+          ``physics.filling.advance_mass`` feeds the float64 ``reconstructed``
+          array into the exchange too, and rounding it to float32 first would
+          make the two paths solve slightly different problems.
+        * ``f32_out`` is the float32 copy that becomes ``state.f``. Writing it
+          here rather than as ``f_out.astype(np.float32)`` afterwards moves a
+          19 x N conversion (~390 MB of traffic per step at 120^3) out of the
+          serial NumPy tail and into this already-parallel loop. Every cell of
+          every direction is assigned unconditionally at the top, so the buffer
+          is fully defined on return.
+
+        ``rho`` is read through an explicit ``np.float64`` cast so the caller
+        can pass ``state.rho`` (float32) directly. That is not a shortcut, it is
+        the parity requirement: the NumPy path's fill fraction comes from
+        ``fluid_fraction``, which reads ``state.rho.astype(np.float64)`` -- the
+        float32-rounded density, not the raw float64 the collision produced.
+        ``u``, by contrast, is the raw float64 velocity, because that is exactly
+        what the NumPy path hands ``reconstruct_gas_populations``.
         """
         nx, ny, nz = flags.shape
         for x in prange(nx):
@@ -1167,7 +1217,9 @@ if NUMBA_AVAILABLE:
                 for z in range(nz):
                     flag = flags[x, y, z]
                     for i in range(19):
-                        f_out[i, x, y, z] = streamed[i, x, y, z]
+                        val0 = streamed[i, x, y, z]
+                        f_out[i, x, y, z] = val0
+                        f32_out[i, x, y, z] = val0
                     mass_out[x, y, z] = mass_in[x, y, z]
                     if flag != _FLAG_INTERFACE and flag != _FLAG_FLUID:
                         continue
@@ -1218,6 +1270,7 @@ if NUMBA_AVAILABLE:
                             if val < 0.0:
                                 val = 0.0
                             f_out[ib, x, y, z] = val
+                            f32_out[ib, x, y, z] = val
 
                     # --- Koerner mass exchange ---
                     #
@@ -1230,7 +1283,7 @@ if NUMBA_AVAILABLE:
                     # drifting. Pairs touching a filter keep the eps average
                     # because a full porous cell holds rho * porosity, not rho.
                     por_here = porosity[x, y, z]
-                    denom = rho[x, y, z] * por_here
+                    denom = np.float64(rho[x, y, z]) * por_here
                     eps_here = mass_in[x, y, z] / denom if denom > 0.0 else 0.0
                     eps_here_c = eps_here
                     if eps_here_c < 0.0:
@@ -1247,7 +1300,7 @@ if NUMBA_AVAILABLE:
                             continue
                         por_nb = porosity[sx, sy, sz]
                         if por_here < 1.0 or por_nb < 1.0:
-                            nden = rho[sx, sy, sz] * por_nb
+                            nden = np.float64(rho[sx, sy, sz]) * por_nb
                             eps_nb = (
                                 mass_in[sx, sy, sz] / nden if nden > 0.0 else 0.0
                             )
@@ -1255,7 +1308,7 @@ if NUMBA_AVAILABLE:
                         elif flag == _FLAG_FLUID or nflag == _FLAG_FLUID:
                             weight = 1.0
                         else:
-                            nden = rho[sx, sy, sz] * por_nb
+                            nden = np.float64(rho[sx, sy, sz]) * por_nb
                             eps_nb = (
                                 mass_in[sx, sy, sz] / nden if nden > 0.0 else 0.0
                             )
@@ -1269,6 +1322,223 @@ if NUMBA_AVAILABLE:
                             (f_out[ib, x, y, z] - post[i, x, y, z]) * weight
                         )
                     mass_out[x, y, z] = mass_in[x, y, z] + delta
+
+    # -----------------------------------------------------------------------
+    # Thermal kernels
+    # -----------------------------------------------------------------------
+    #
+    # The two thermal passes were the last pure-NumPy work left in the per-step
+    # loop, and at a 120^3 grid they cost 20 ms and 10 ms of a 106 ms step --
+    # single-threaded, so they were also the Amdahl ceiling on the whole solve
+    # (step() alone scales 402 ms -> 81 ms from 1 to 18 threads; the serial
+    # tail does not scale at all).
+    #
+    # Each mirrors a NumPy reference in physics.filling -- advect_temperature
+    # and apply_wall_heat_loss -- which stays the NUMBA_AVAILABLE == False
+    # fallback. tests/test_filling_parity.py::ThermalKernelParityTests holds
+    # the pairs together; a one-sided edit to either half fails there.
+
+    @njit(parallel=True, cache=True)
+    def advect_temperature_kernel(temperature, u, flags, alpha, temp_out):
+        """
+        Upwind advection plus a 6-point Laplacian over wet cells, one step.
+
+        Parity contract with :func:`physics.filling.advect_temperature`, which
+        is the readable reference:
+
+        * Non-wet cells (anything but INTERFACE or FLUID) are copied through
+          untouched, sentinel NaN included. A gas cell has no temperature to
+          advect and inventing one would turn a misrun into a plausible-looking
+          cold casting.
+        * A neighbour that is not wet contributes the cell's *own* value, which
+          is the Neumann (zero-gradient) boundary the NumPy path spells
+          ``_neighbour_or_self``. That is what keeps NaN out of the stencil.
+        * ``t_plus`` is the neighbour at index **+1** along the axis. The NumPy
+          reference reaches it with ``np.roll(shift=-1)``, which brings index+1
+          down to index -- the sign flips when a roll becomes index arithmetic,
+          the same way it does in :func:`stream_kernel`, and getting it backwards
+          silently reverses the upwind direction while leaving the Laplacian
+          (which is symmetric) looking correct.
+        * Wraps periodically, matching ``np.roll``. Real domains are closed by
+          obstacle cells, which are not wet, so the wrap contributes the
+          Neumann branch rather than a value from the far side.
+
+        Arithmetic is float64 throughout with an explicit cast on every float32
+        read, and the accumulation order matches the reference's axis loop, so
+        the two agree bit-for-bit rather than merely closely. ``temp_out`` must
+        be a different array from ``temperature``: every cell reads its
+        neighbours' *old* values.
+        """
+        nx, ny, nz = flags.shape
+        for x in prange(nx):
+            for y in range(ny):
+                for z in range(nz):
+                    flag = flags[x, y, z]
+                    if flag != _FLAG_INTERFACE and flag != _FLAG_FLUID:
+                        temp_out[x, y, z] = temperature[x, y, z]
+                        continue
+
+                    t_here = np.float64(temperature[x, y, z])
+                    convective = 0.0
+                    laplacian = 0.0
+                    for axis in range(3):
+                        ax = 1 if axis == 0 else 0
+                        ay = 1 if axis == 1 else 0
+                        az = 1 if axis == 2 else 0
+
+                        xp = (x + ax) % nx
+                        yp = (y + ay) % ny
+                        zp = (z + az) % nz
+                        fp = flags[xp, yp, zp]
+                        if fp == _FLAG_INTERFACE or fp == _FLAG_FLUID:
+                            t_plus = np.float64(temperature[xp, yp, zp])
+                        else:
+                            t_plus = t_here
+
+                        xm = (x - ax) % nx
+                        ym = (y - ay) % ny
+                        zm = (z - az) % nz
+                        fm = flags[xm, ym, zm]
+                        if fm == _FLAG_INTERFACE or fm == _FLAG_FLUID:
+                            t_minus = np.float64(temperature[xm, ym, zm])
+                        else:
+                            t_minus = t_here
+
+                        u_axis = np.float64(u[axis, x, y, z])
+                        # Upwind: the gradient comes from whichever side the
+                        # flow arrives from. A NaN velocity fails the test and
+                        # takes the forward branch, exactly as np.where does.
+                        if u_axis >= 0.0:
+                            gradient = t_here - t_minus
+                        else:
+                            gradient = t_plus - t_here
+                        convective += u_axis * gradient
+                        laplacian += t_plus + t_minus - 2.0 * t_here
+
+                    temp_out[x, y, z] = t_here - convective + alpha * laplacian
+
+    @njit(parallel=True, cache=True)
+    def wall_heat_loss_kernel(
+        temperature, flags, h_scalar, h_field, h_is_field,
+        mold_temperature_c, dt_s, rho_cp_dx, temp_out,
+    ):
+        """
+        Lumped heat loss through faces that border an OBSTACLE cell.
+
+        ``dT = -h * n_faces * (T - T_mold) * dt / (rho cp dx)``, once per
+        exposed face, so a corner cell loses proportionally more than a cell
+        with one flat wall. Parity contract with
+        :func:`physics.filling.apply_wall_heat_loss`.
+
+        The exposed-face count is recomputed per cell from the six *face*
+        neighbours -- not the 18-direction lattice neighbourhood; a diagonal
+        touch shares no area with the mold. Six uint8 reads per cell inside an
+        already-parallel loop is cheaper than the six full-grid ``np.roll``
+        calls the NumPy path needs, and it cannot go stale: the NumPy fallback
+        caches the count on the state instead (see
+        ``physics.filling._wall_exposed_faces``) precisely because rebuilding it
+        every step was 10 ms of the measured 106 ms step for geometry that has
+        not changed since ``create_state``.
+
+        ``h`` arrives either as a scalar or as a full field -- gating and
+        casting surfaces carry different HTCs -- and Numba cannot branch on an
+        argument's type, so the caller passes both plus ``h_is_field``. The
+        unused one is a 1x1x1 dummy.
+
+        ``rho_cp_dx`` is ``density * specific_heat * dx`` precomputed by the
+        caller in that order, so the division rounds identically to the NumPy
+        expression.
+        """
+        nx, ny, nz = flags.shape
+        for x in prange(nx):
+            for y in range(ny):
+                for z in range(nz):
+                    flag = flags[x, y, z]
+                    if flag != _FLAG_INTERFACE and flag != _FLAG_FLUID:
+                        temp_out[x, y, z] = temperature[x, y, z]
+                        continue
+
+                    exposed = 0
+                    if flags[(x + 1) % nx, y, z] == _FLAG_OBSTACLE:
+                        exposed += 1
+                    if flags[(x - 1) % nx, y, z] == _FLAG_OBSTACLE:
+                        exposed += 1
+                    if flags[x, (y + 1) % ny, z] == _FLAG_OBSTACLE:
+                        exposed += 1
+                    if flags[x, (y - 1) % ny, z] == _FLAG_OBSTACLE:
+                        exposed += 1
+                    if flags[x, y, (z + 1) % nz] == _FLAG_OBSTACLE:
+                        exposed += 1
+                    if flags[x, y, (z - 1) % nz] == _FLAG_OBSTACLE:
+                        exposed += 1
+
+                    t_here = np.float64(temperature[x, y, z])
+                    if exposed == 0:
+                        # No exposed face means q_wall is exactly zero here,
+                        # not merely small. The NumPy path reaches the same
+                        # value through ``T + 0.0``.
+                        temp_out[x, y, z] = t_here
+                        continue
+
+                    h = h_field[x, y, z] if h_is_field else h_scalar
+                    coeff = h * np.float64(exposed) * dt_s / rho_cp_dx
+                    temp_out[x, y, z] = t_here + (
+                        -coeff * (t_here - mold_temperature_c)
+                    )
+
+    # -----------------------------------------------------------------------
+    # Free-surface neighbourhood scans
+    # -----------------------------------------------------------------------
+
+    @njit(parallel=True, cache=True)
+    def interface_neighbourhood_kernel(flags, Ci, gasless_out, detached_out):
+        """
+        Classify every INTERFACE cell by what its 18 lattice neighbours hold.
+
+        Two boolean outputs, both False everywhere the cell is not INTERFACE:
+
+        * ``gasless_out`` -- no neighbour is GAS. The front has closed over
+          this cell; :func:`physics.filling.heal_submerged_interface` is what
+          acts on it.
+        * ``detached_out`` -- no neighbour is wet (INTERFACE or FLUID). A
+          droplet smaller than the grid can represent;
+          :func:`physics.filling.reset_detached_interface_cells` acts on it.
+
+        Both replace an 18 x ``np.roll`` full-grid scan -- 10 ms and 3 ms of a
+        measured 106 ms step at 120^3, to find a handful of cells each. Both
+        results are produced in one sweep because the 18 neighbour flags are
+        already loaded, but the two callers **must** call this separately:
+        ``apply_transitions`` and ``heal_submerged_interface`` each mutate
+        ``flags`` before the next one looks, and precomputing across that
+        boundary would answer a question about a lattice that no longer exists.
+
+        The 18 directions are ``LATTICE_VELOCITIES[1:]`` -- D3Q19 minus rest,
+        the same neighbourhood the front advances along. The set is closed
+        under negation, so counting ``x + c_i`` gives the same totals as the
+        NumPy references' ``x - c_i`` rolls; only the count is used, never the
+        direction.
+        """
+        nx, ny, nz = flags.shape
+        for x in prange(nx):
+            for y in range(ny):
+                for z in range(nz):
+                    if flags[x, y, z] != _FLAG_INTERFACE:
+                        gasless_out[x, y, z] = False
+                        detached_out[x, y, z] = False
+                        continue
+                    gas = 0
+                    wet = 0
+                    for i in range(1, 19):
+                        sx = (x + Ci[i, 0]) % nx
+                        sy = (y + Ci[i, 1]) % ny
+                        sz = (z + Ci[i, 2]) % nz
+                        nflag = flags[sx, sy, sz]
+                        if nflag == _FLAG_GAS:
+                            gas += 1
+                        elif nflag == _FLAG_INTERFACE or nflag == _FLAG_FLUID:
+                            wet += 1
+                    gasless_out[x, y, z] = gas == 0
+                    detached_out[x, y, z] = wet == 0
 
 
 def lattice_tables():

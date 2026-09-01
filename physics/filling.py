@@ -63,7 +63,14 @@ from physics.fluid_flow import (
 from physics.fluid_flow import NUMBA_AVAILABLE, lattice_tables
 
 if NUMBA_AVAILABLE:  # pragma: no cover - import-time branch
-    from physics.fluid_flow import collide_kernel, stream_kernel, free_surface_kernel
+    from physics.fluid_flow import (
+        advect_temperature_kernel,
+        collide_kernel,
+        free_surface_kernel,
+        interface_neighbourhood_kernel,
+        stream_kernel,
+        wall_heat_loss_kernel,
+    )
 
 # ---------------------------------------------------------------------------
 # Cell flags
@@ -128,6 +135,20 @@ class PorousZone:
     ``drag_c1 = 0.0`` give ``u = v`` exactly, which makes a no-filter run
     bit-identical to a filter run with the drag switched off.
 
+    The four coefficient arrays are stored float32 to match the populations but
+    are consumed in float64 everywhere -- the solver used to spell that
+    ``.astype(np.float64)`` at a dozen call sites, all inside the per-step loop.
+    None of them changes after the zone is built (``core/filling_stage.py``
+    stamps the filter cells in while assembling the zone, before the first
+    step), so the float64 views below are built once and cached. That is
+    9 of the 38 measured per-step ``astype`` calls at a 120^3 grid.
+
+    **The cache assumes immutability.** Mutating ``porosity``, ``drag_c0``,
+    ``drag_c1`` or ``entry_offset`` in place after the solver has taken a step
+    leaves the float64 view stale, and the two would then disagree silently.
+    Build the zone, then hand it over. ``primed`` is the one array that *does*
+    change during a run, which is exactly why it is not cached.
+
     Attributes:
         porosity: Void fraction; 1.0 outside filters.
         drag_c0: Guo-Zhao linear coefficient; 0.5 outside.
@@ -141,6 +162,21 @@ class PorousZone:
     drag_c1: np.ndarray
     entry_offset: np.ndarray
     primed: np.ndarray
+
+    # Lazily built float64 views of the four static coefficient arrays. Typed
+    # fields rather than plain attribute assignment so mypy sees them.
+    _porosity_f64: Optional[np.ndarray] = field(
+        default=None, repr=False, compare=False
+    )
+    _drag_c0_f64: Optional[np.ndarray] = field(
+        default=None, repr=False, compare=False
+    )
+    _drag_c1_f64: Optional[np.ndarray] = field(
+        default=None, repr=False, compare=False
+    )
+    _entry_offset_f64: Optional[np.ndarray] = field(
+        default=None, repr=False, compare=False
+    )
 
     @classmethod
     def inert(cls, shape: Tuple[int, int, int]) -> "PorousZone":
@@ -160,6 +196,42 @@ class PorousZone:
             np.any(self.drag_c0 != 0.5)
         )
 
+    @property
+    def porosity_f64(self) -> np.ndarray:
+        """``porosity`` in float64, built once. See the class docstring."""
+        cached = self._porosity_f64
+        if cached is None or cached.shape != self.porosity.shape:
+            cached = self.porosity.astype(np.float64)
+            self._porosity_f64 = cached
+        return cached
+
+    @property
+    def drag_c0_f64(self) -> np.ndarray:
+        """``drag_c0`` in float64, built once. See the class docstring."""
+        cached = self._drag_c0_f64
+        if cached is None or cached.shape != self.drag_c0.shape:
+            cached = self.drag_c0.astype(np.float64)
+            self._drag_c0_f64 = cached
+        return cached
+
+    @property
+    def drag_c1_f64(self) -> np.ndarray:
+        """``drag_c1`` in float64, built once. See the class docstring."""
+        cached = self._drag_c1_f64
+        if cached is None or cached.shape != self.drag_c1.shape:
+            cached = self.drag_c1.astype(np.float64)
+            self._drag_c1_f64 = cached
+        return cached
+
+    @property
+    def entry_offset_f64(self) -> np.ndarray:
+        """``entry_offset`` in float64, built once. See the class docstring."""
+        cached = self._entry_offset_f64
+        if cached is None or cached.shape != self.entry_offset.shape:
+            cached = self.entry_offset.astype(np.float64)
+            self._entry_offset_f64 = cached
+        return cached
+
 
 @dataclass
 class FillingState:
@@ -171,6 +243,19 @@ class FillingState:
     the conserved quantity, and accumulating a global sum over millions of
     cells in float32 loses precisely the digits the conservation assertion is
     checking.
+
+    What float32 storage buys is narrower here than it looks, and the honest
+    version is worth recording. The *arithmetic* is float64 on both paths, and
+    the kernels' working buffers (``_scratch_post``, ``_scratch_out``,
+    ``_scratch_f_out``) are float64, so the traffic inside a step is not halved
+    -- only the resident field and the populations the collision kernel reads
+    are. Until this optimisation pass the saving was worse than nothing on the
+    numba path: ``state.f.astype(np.float64)`` rebuilt a 19 x N float64 copy
+    every step, so float32 storage bought a conversion pass and a large
+    allocation on top of the float64 traffic it was supposed to avoid. The
+    kernels now cast per-element as they read, so the claim above is at least
+    true of the read side. Making the *kernels* compute in float32 is a separate
+    question and is deliberately not done: it would change the numerics.
 
     Attributes:
         shape: Grid shape ``(nx, ny, nz)``.
@@ -216,10 +301,23 @@ class FillingState:
     _scratch_out: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
     _scratch_f_out: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
     _scratch_mass_out: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
+    # Float64 moment buffers the collision kernel writes. Held rather than
+    # np.empty'd per step: at 120^3 that was 55 MB of allocate-and-free churn
+    # every step for arrays whose contents are overwritten in full anyway.
+    # Read-only inputs to nothing, so they cannot alias an input array.
+    _scratch_rho64: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
+    _scratch_u64: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
     # Per-cell count of consecutive steps spent as a gasless interface cell,
     # for heal_submerged_interface's dwell. Lazily allocated, int16, capped at
     # the dwell so it cannot overflow on long runs.
     _submerged_streak: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
+    # Exposed mold-wall face count per cell, for apply_wall_heat_loss' NumPy
+    # fallback. Obstacle cells never change after create_state, so this is
+    # static geometry -- see _wall_exposed_faces for the measurement that
+    # motivated caching it.
+    _scratch_exposed_faces: Optional[np.ndarray] = field(
+        default=None, repr=False, compare=False
+    )
 
     @property
     def cell_volume_m3(self) -> float:
@@ -340,7 +438,7 @@ def fluid_fraction(state: FillingState) -> np.ndarray:
     on a 100 kg pour is a quarter-kilogram discrepancy -- enough to break the
     0.1 % conservation assertion and look like a leak elsewhere.
     """
-    denominator = state.rho.astype(np.float64) * state.porous.porosity.astype(np.float64)
+    denominator = state.rho.astype(np.float64) * state.porous.porosity_f64
     with np.errstate(divide="ignore", invalid="ignore"):
         eps = np.where(denominator > 0, state.mass / denominator, 0.0)
     return eps
@@ -396,8 +494,8 @@ def macroscopic(
     if not state.porous.is_inert:
         v = resolve_porous_velocity(
             v,
-            state.porous.drag_c0.astype(np.float64),
-            state.porous.drag_c1.astype(np.float64),
+            state.porous.drag_c0_f64,
+            state.porous.drag_c1_f64,
         )
 
     # Empty and solid cells carry no meaningful velocity.
@@ -465,7 +563,7 @@ def reconstruct_gas_populations(
 
     post = np.asarray(f_post_collision, dtype=np.float64)
     rho_g = gas_density(state)
-    feq_gas = equilibrium(rho_g, u, porosity=state.porous.porosity.astype(np.float64))
+    feq_gas = equilibrium(rho_g, u, porosity=state.porous.porosity_f64)
     opp = OPPOSITE.astype(np.intp)
 
     out = streamed.copy()
@@ -570,7 +668,7 @@ def advance_mass(
     # and the filter's own bookkeeping would drift out of band instead. Filter
     # cells are few and their eps is bounded by the priming logic, so every
     # pair touching one keeps the eps-average weighting it has always had.
-    porous = np.asarray(state.porous.porosity, dtype=np.float64) < 1.0
+    porous = state.porous.porosity_f64 < 1.0
     any_porous = bool(porous.any())
 
     axes = (0, 1, 2)
@@ -629,7 +727,7 @@ def apply_transitions(state: FillingState, time_s: float) -> Tuple[int, int]:
     if filled == 0 and emptied == 0:
         return 0, 0
 
-    full_mass = state.rho.astype(np.float64) * state.porous.porosity.astype(np.float64)
+    full_mass = state.rho.astype(np.float64) * state.porous.porosity_f64
 
     excess = np.zeros(state.shape, dtype=np.float64)
     excess[to_fluid] = state.mass[to_fluid] - full_mass[to_fluid]
@@ -691,8 +789,37 @@ def apply_transitions(state: FillingState, time_s: float) -> Tuple[int, int]:
     return filled, emptied
 
 
+def _interface_neighbourhood(state: FillingState) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Run :func:`physics.fluid_flow.interface_neighbourhood_kernel` on the
+    current flags.
+
+    Returns:
+        ``(gasless, detached)`` -- boolean masks of INTERFACE cells with no GAS
+        neighbour and with no wet neighbour respectively, over the 18-direction
+        lattice neighbourhood. False everywhere else.
+
+    Fresh arrays, not held buffers, and called separately by each caller. The
+    flags mutate between :func:`apply_transitions`,
+    :func:`heal_submerged_interface` and
+    :func:`reset_detached_interface_cells` -- each converts cells the next one
+    then has to see -- so a shared result computed once per step would answer
+    the question about the wrong lattice. Two bool grids is 3.5 MB at 120^3;
+    the 36 full-grid ``np.roll`` calls they replace were 13 ms of a 106 ms step.
+    """
+    _C, Ci, _W, _OPP = lattice_tables()
+    gasless = np.empty(state.shape, dtype=bool)
+    detached = np.empty(state.shape, dtype=bool)
+    interface_neighbourhood_kernel(state.flags, Ci, gasless, detached)
+    return gasless, detached
+
+
 def heal_submerged_interface(
-    state: FillingState, time_s: float, dwell_steps: int = HEAL_DWELL_STEPS
+    state: FillingState,
+    time_s: float,
+    dwell_steps: int = HEAL_DWELL_STEPS,
+    *,
+    use_numba: bool = True,
 ) -> int:
     """
     Convert a *submerged* interface cell -- one with no gas neighbour -- to FLUID.
@@ -757,6 +884,8 @@ def heal_submerged_interface(
         time_s: Current physical time, recorded as the arrival time.
         dwell_steps: Consecutive gasless steps required before conversion.
             Tests of the conversion mechanics pass 1 to fire immediately.
+        use_numba: Take the neighbourhood kernel when it is available. Mirrors
+            :func:`step`'s parameter of the same name.
 
     Returns:
         Number of cells healed, for instrumentation. Over a real fill this
@@ -774,8 +903,15 @@ def heal_submerged_interface(
         return 0
 
     # The same neighbourhood apply_transitions advances the front with, so
-    # "has a gas neighbour" means the same thing in both directions.
-    submerged = interface & ~_dilate(state.flags == FLAG_GAS)
+    # "has a gas neighbour" means the same thing in both directions. The two
+    # spellings are held to exact equality by
+    # tests/test_filling_parity.py::InterfaceNeighbourhoodParityTests -- the
+    # kernel counts x + c_i where the dilate reaches x - c_i, which gives the
+    # same answer only because the 18-direction set is closed under negation.
+    if use_numba and NUMBA_AVAILABLE:
+        submerged, _detached = _interface_neighbourhood(state)
+    else:
+        submerged = interface & ~_dilate(state.flags == FLAG_GAS)
     # The streak is the dwell's whole state: persistence, not instantaneous
     # topology, is what separates a stranded cell from a sloshing one. Capped
     # at the dwell so an int16 cannot overflow on a 400,000-step run.
@@ -789,7 +925,7 @@ def heal_submerged_interface(
     submerged = ripe
     streak[ripe] = 0
 
-    full_mass = state.rho.astype(np.float64) * state.porous.porosity.astype(np.float64)
+    full_mass = state.rho.astype(np.float64) * state.porous.porosity_f64
     deficit = np.zeros(state.shape, dtype=np.float64)
     deficit[submerged] = state.mass[submerged] - full_mass[submerged]
 
@@ -843,7 +979,9 @@ def ensure_interface_skin(state: FillingState, halo: np.ndarray) -> int:
     return count
 
 
-def reset_detached_interface_cells(state: FillingState) -> int:
+def reset_detached_interface_cells(
+    state: FillingState, *, use_numba: bool = True
+) -> int:
     """
     Return fully detached interface cells to rest.
 
@@ -871,6 +1009,11 @@ def reset_detached_interface_cells(state: FillingState) -> int:
     separately and has some other cause. This repairs an artifact; it is not a
     fix for the fill.
 
+    Args:
+        state: Solver state, mutated in place.
+        use_numba: Take the neighbourhood kernel when it is available. Mirrors
+            :func:`step`'s parameter of the same name.
+
     Returns:
         Number of cells reset, for instrumentation.
     """
@@ -878,15 +1021,22 @@ def reset_detached_interface_cells(state: FillingState) -> int:
     if not np.any(interface):
         return 0
 
-    wet = interface | (state.flags == FLAG_FLUID)
-    support = np.zeros(state.shape, dtype=np.int16)
-    for i in range(1, Q):
-        c = LATTICE_VELOCITIES[i]
-        support += np.roll(
-            wet, shift=(int(c[0]), int(c[1]), int(c[2])), axis=(0, 1, 2)
-        ).astype(np.int16)
+    # Only the *count* of wet neighbours matters, never the direction, which is
+    # why the kernel's x + c_i and the rolls' x - c_i below give the same mask:
+    # the 18-direction set is closed under negation. Held to exact equality by
+    # tests/test_filling_parity.py::InterfaceNeighbourhoodParityTests.
+    if use_numba and NUMBA_AVAILABLE:
+        _gasless, detached = _interface_neighbourhood(state)
+    else:
+        wet = interface | (state.flags == FLAG_FLUID)
+        support = np.zeros(state.shape, dtype=np.int16)
+        for i in range(1, Q):
+            c = LATTICE_VELOCITIES[i]
+            support += np.roll(
+                wet, shift=(int(c[0]), int(c[1]), int(c[2])), axis=(0, 1, 2)
+            ).astype(np.int16)
+        detached = interface & (support == 0)
 
-    detached = interface & (support == 0)
     count = int(np.count_nonzero(detached))
     if count == 0:
         return 0
@@ -958,7 +1108,7 @@ def _initialise_promoted_cells(state: FillingState, promote: np.ndarray) -> None
     # Written across every promoted cell, not just the ones with a donor.
     # rho_avg and u_avg already carry the reference-density-at-rest fallback
     # for the rest, so the donorless cells are seeded rather than left at zero.
-    seeded = equilibrium(rho_avg, u_avg, porosity=state.porous.porosity.astype(np.float64))
+    seeded = equilibrium(rho_avg, u_avg, porosity=state.porous.porosity_f64)
     state.f[:, promote] = seeded[:, promote].astype(np.float32)
     state.rho[promote] = rho_avg[promote].astype(np.float32)
 
@@ -1098,7 +1248,9 @@ def _neighbour_or_self(
     return np.where(rolled_wet, rolled, field)
 
 
-def advect_temperature(state: FillingState, alpha_lattice: float) -> np.ndarray:
+def advect_temperature(
+    state: FillingState, alpha_lattice: float, *, use_numba: bool = True
+) -> np.ndarray:
     """
     Advance the temperature field one lattice step: upwind advection plus
     diffusion, over metal cells only.
@@ -1115,15 +1267,39 @@ def advect_temperature(state: FillingState, alpha_lattice: float) -> np.ndarray:
     advected. A gas cell has no temperature to advect, and computing one
     would silently manufacture a value for a cell the fill has not reached.
 
+    The NumPy body below is the reference implementation and the
+    ``NUMBA_AVAILABLE == False`` fallback. It is also, at a 120^3 grid, 20 ms
+    of a 106 ms step -- twelve full-grid ``np.roll`` calls on a single core,
+    which made it the largest single item in the serial tail that capped
+    thread scaling. :func:`physics.fluid_flow.advect_temperature_kernel` is the
+    parallel twin; the two are held together by
+    ``tests/test_filling_parity.py::ThermalKernelParityTests``.
+
     Args:
         state: Solver state, mutated in place.
         alpha_lattice: Thermal diffusivity in lattice units
             (``alpha_SI * dt_s / dx_m**2``), the same rescaling
             :func:`physics.fluid_flow.lattice_units` applies to viscosity.
+        use_numba: Take the kernel when it is available. Mirrors
+            :func:`step`'s parameter of the same name so a caller -- or a
+            parity test -- can pin either path.
 
     Returns:
         The updated ``state.temperature``.
     """
+    if use_numba and NUMBA_AVAILABLE:
+        # A fresh output array, not a held scratch buffer: every cell reads its
+        # neighbours' pre-step values, so the output must never be the input,
+        # and the reference path also rebinds a new array here. One (nx, ny, nz)
+        # float32 allocation is 7 MB at 120^3 -- noise against the 12 full-grid
+        # rolls it replaces.
+        out = np.empty(state.shape, dtype=np.float32)
+        advect_temperature_kernel(
+            state.temperature, state.u, state.flags, float(alpha_lattice), out
+        )
+        state.temperature = out
+        return state.temperature
+
     wet = (state.flags == FLAG_INTERFACE) | (state.flags == FLAG_FLUID)
     if not np.any(wet):
         return state.temperature
@@ -1155,6 +1331,45 @@ def advect_temperature(state: FillingState, alpha_lattice: float) -> np.ndarray:
     return state.temperature
 
 
+def _wall_exposed_faces(state: FillingState) -> np.ndarray:
+    """
+    Number of the six face neighbours that are OBSTACLE, per cell.
+
+    Cached on the state, because this is **static geometry**. The obstacle set
+    is written once by :func:`create_state` and nothing in the solver ever
+    converts a cell to or from ``FLAG_OBSTACLE`` -- the transitions move cells
+    between GAS, INTERFACE and FLUID, and the filling stage's inlet pin writes
+    FLAG_FLUID. Rebuilding it cost six full-grid ``np.roll`` calls every step,
+    which at a 120^3 grid was most of ``apply_wall_heat_loss``' 10 ms of a
+    106 ms step, spent re-deriving a mold that had not moved.
+
+    Six faces, not the 18-direction lattice neighbourhood: a diagonal touch
+    shares no area with the mold, so it conducts nothing. This is the same
+    distinction :func:`find_entrapped_gas` makes for gas connectivity.
+
+    Only the NumPy fallback needs this. The kernel counts the six neighbours
+    per cell as it goes -- six uint8 reads inside a loop that is already
+    parallel is cheaper than a cache lookup plus the risk of the cache being
+    wrong.
+
+    Returns:
+        Float64 ``(nx, ny, nz)``, values 0-6. Float rather than integer because
+        it is multiplied straight into the float64 loss coefficient, and
+        promoting there instead would change nothing but cost a pass.
+    """
+    cached = state._scratch_exposed_faces
+    if cached is not None and cached.shape == state.shape:
+        return cached
+
+    obstacle = state.flags == FLAG_OBSTACLE
+    exposed = np.zeros(state.shape, dtype=np.float64)
+    for axis in range(3):
+        for shift in (-1, 1):
+            exposed += np.roll(obstacle, shift=shift, axis=axis)
+    state._scratch_exposed_faces = exposed
+    return exposed
+
+
 def apply_wall_heat_loss(
     state: FillingState,
     *,
@@ -1162,6 +1377,7 @@ def apply_wall_heat_loss(
     mold_temperature_c: float,
     density_kg_m3: float,
     specific_heat_j_kgk: float,
+    use_numba: bool = True,
 ) -> np.ndarray:
     """
     Lose heat through faces that border an OBSTACLE cell (the mold wall).
@@ -1174,6 +1390,11 @@ def apply_wall_heat_loss(
     ``core/filling_stage.py`` resolves ``htc_gating`` vs ``htc_cast_interface``
     per cell and passes the result down as a plain array.
 
+    The NumPy body below is the reference and the ``NUMBA_AVAILABLE == False``
+    fallback; :func:`physics.fluid_flow.wall_heat_loss_kernel` is the parallel
+    twin. Either way the exposed-face count is no longer rebuilt from scratch
+    every step -- see :func:`_wall_exposed_faces`.
+
     Args:
         state: Solver state, mutated in place. Uses ``state.dx_m``,
             ``state.dt_s`` and ``state.flags``.
@@ -1183,17 +1404,44 @@ def apply_wall_heat_loss(
         mold_temperature_c: Ambient mold temperature, degrees Celsius.
         density_kg_m3: Liquid metal density.
         specific_heat_j_kgk: Liquid metal specific heat.
+        use_numba: Take the kernel when it is available. Mirrors
+            :func:`step`'s parameter of the same name.
 
     Returns:
         The updated ``state.temperature``.
     """
-    wet = (state.flags == FLAG_INTERFACE) | (state.flags == FLAG_FLUID)
-    obstacle = state.flags == FLAG_OBSTACLE
+    # Grouped exactly as the NumPy expression below groups it, so the division
+    # rounds the same way on both paths.
+    rho_cp_dx = density_kg_m3 * specific_heat_j_kgk * state.dx_m
 
-    exposed_faces = np.zeros(state.shape, dtype=np.float64)
-    for axis in range(3):
-        for shift in (-1, 1):
-            exposed_faces += np.roll(obstacle, shift=shift, axis=axis)
+    if use_numba and NUMBA_AVAILABLE:
+        h_arr = np.asarray(htc_w_m2k, dtype=np.float64)
+        h_is_field = h_arr.ndim == 3
+        if h_is_field:
+            # Numba wants a real array, not a broadcast view: a 0-stride
+            # dimension is not something the kernel's indexing can rely on.
+            h_field = np.ascontiguousarray(h_arr)
+            h_scalar = 0.0
+        else:
+            h_field = np.zeros((1, 1, 1), dtype=np.float64)
+            h_scalar = float(h_arr)
+        out = np.empty(state.shape, dtype=np.float32)
+        wall_heat_loss_kernel(
+            state.temperature,
+            state.flags,
+            h_scalar,
+            h_field,
+            h_is_field,
+            float(mold_temperature_c),
+            float(state.dt_s),
+            float(rho_cp_dx),
+            out,
+        )
+        state.temperature = out
+        return state.temperature
+
+    wet = (state.flags == FLAG_INTERFACE) | (state.flags == FLAG_FLUID)
+    exposed_faces = _wall_exposed_faces(state)
 
     losing = wet & (exposed_faces > 0)
     if not np.any(losing):
@@ -1201,9 +1449,7 @@ def apply_wall_heat_loss(
 
     h = np.broadcast_to(np.asarray(htc_w_m2k, dtype=np.float64), state.shape)
     T = state.temperature.astype(np.float64)
-    coeff = (
-        h * exposed_faces * state.dt_s / (density_kg_m3 * specific_heat_j_kgk * state.dx_m)
-    )
+    coeff = h * exposed_faces * state.dt_s / rho_cp_dx
     delta = np.where(losing, -coeff * (T - mold_temperature_c), 0.0)
     state.temperature = np.where(wet, (T + delta), T).astype(np.float32)
     return state.temperature
@@ -1282,29 +1528,41 @@ def step(
         The same state object, advanced.
     """
     if use_numba and NUMBA_AVAILABLE:
-        post, streamed = _collide_stream_numba(
+        post, streamed, u64 = _collide_stream_numba(
             state, units, gravity_direction, smagorinsky, track_free_surface,
             smagorinsky_cs,
         )
         if track_free_surface:
             f_out, mass_out = _free_surface_scratch(state)
             C, Ci, W, OPP = lattice_tables()
+            # A fresh float32 array rather than a held buffer, so state.f keeps
+            # the "new object every step" identity the NumPy path also has -- a
+            # caller that captured the previous state.f still sees the previous
+            # step. The kernel fills it in parallel, which is the point: the
+            # f_out.astype(np.float32) it replaces was a serial 19 x N pass.
+            f32_out = np.empty((Q,) + state.shape, dtype=np.float32)
             free_surface_kernel(
                 post,
                 streamed,
                 state.flags,
-                state.rho.astype(np.float64),
-                state.u.astype(np.float64),
-                state.porous.porosity.astype(np.float64),
-                state.porous.entry_offset.astype(np.float64),
+                # float32 density on purpose: the NumPy path's fill fraction
+                # comes from fluid_fraction, which reads state.rho rounded to
+                # float32. The raw float64 would be *more* accurate and less
+                # in parity. u, in contrast, is the raw float64 -- that is
+                # exactly what reconstruct_gas_populations receives over there.
+                state.rho,
+                u64,
+                state.porous.porosity_f64,
+                state.porous.entry_offset_f64,
                 state.porous.primed,
                 C, Ci, W, OPP,
                 float(GAS_DENSITY),
                 state.mass,
                 mass_out,
                 f_out,
+                f32_out,
             )
-            state.f = f_out.astype(np.float32)
+            state.f = f32_out
             # Copy back into the array state.mass has always pointed at, so
             # mass_out (the cached scratch buffer) never becomes the same
             # object as mass_in on the next step -- see _free_surface_scratch.
@@ -1323,7 +1581,7 @@ def step(
     state.rho = rho.astype(np.float32)
     state.u = u.astype(np.float32)
 
-    porosity = state.porous.porosity.astype(np.float64)
+    porosity = state.porous.porosity_f64
     feq = equilibrium(rho, u, porosity=porosity)
 
     f_now = state.f.astype(np.float64)
@@ -1393,27 +1651,58 @@ def _collide_stream_numba(
     Reuses scratch buffers held on the state. Allocating two
     (19, nx, ny, nz) float64 arrays every step would put most of the win back:
     at a 12 in casting that is ~250 MB of churn per step.
+
+    Nothing here converts dtypes any more, and that was worth ~26 ms of a
+    measured 106 ms step at 120^3 (38 ``astype`` calls per step across the
+    loop):
+
+    * ``state.f`` goes to ``collide_kernel`` as float32. The kernel casts each
+      population to float64 as it reads it, so the arithmetic -- and the result
+      -- is unchanged; what disappears is a 19 x N float64 temporary built and
+      thrown away every step.
+    * ``porosity`` / ``drag_c0`` / ``drag_c1`` never change after the zone is
+      built, so their float64 views are cached on :class:`PorousZone`.
+    * ``rho`` and ``u`` are held float64 buffers instead of per-step
+      ``np.empty``. The float64 ``u`` is also returned, so the free-surface
+      kernel can read it directly rather than round-tripping through float32.
+
+    Returns:
+        ``(post, streamed, u64)`` -- the post-collision populations, the
+        post-streaming populations, and the float64 velocity. All three are
+        buffers owned by the state; the caller must not hold them past the step.
     """
     C, _c_int, W, OPP = lattice_tables()
     shape = state.shape
 
     post = state._scratch_post
     out = state._scratch_out
-    if post is None or post.shape[1:] != shape:
+    if post is None or out is None or post.shape[1:] != shape:
         post = np.empty((Q,) + shape, dtype=np.float64)
         out = np.empty((Q,) + shape, dtype=np.float64)
         state._scratch_post = post
         state._scratch_out = out
 
-    rho = np.empty(shape, dtype=np.float64)
-    u = np.empty((3,) + shape, dtype=np.float64)
+    rho = state._scratch_rho64
+    u = state._scratch_u64
+    if rho is None or u is None or rho.shape != shape:
+        rho = np.empty(shape, dtype=np.float64)
+        u = np.empty((3,) + shape, dtype=np.float64)
+        state._scratch_rho64 = rho
+        state._scratch_u64 = u
+
+    # Fresh float32 moment arrays, filled by the kernel rather than by a
+    # follow-up astype. New objects every step, matching what the NumPy path's
+    # ``rho.astype(np.float32)`` produced; np.empty does not touch the pages, so
+    # the kernel's parallel write is also the first touch.
+    rho32 = np.empty(shape, dtype=np.float32)
+    u32 = np.empty((3,) + shape, dtype=np.float32)
 
     collide_kernel(
-        state.f.astype(np.float64),
+        state.f,
         state.flags,
-        state.porous.porosity.astype(np.float64),
-        state.porous.drag_c0.astype(np.float64),
-        state.porous.drag_c1.astype(np.float64),
+        state.porous.porosity_f64,
+        state.porous.drag_c0_f64,
+        state.porous.drag_c1_f64,
         C, W, OPP,
         float(units.tau),
         float(units.gravity_lattice),
@@ -1423,22 +1712,24 @@ def _collide_stream_numba(
         float(smagorinsky_cs),
         bool(smagorinsky),
         float(TRT_MAGIC_PARAMETER),
-        rho, u, post,
+        rho, u, post, rho32, u32,
     )
-    state.rho = rho.astype(np.float32)
-    state.u = u.astype(np.float32)
+    state.rho = rho32
+    state.u = u32
 
     stream_kernel(post, state.flags, _c_int, OPP, bool(track_free_surface), out)
-    return post, out
+    return post, out, u
 
 
 def _free_surface_scratch(state: FillingState) -> Tuple[np.ndarray, np.ndarray]:
     """
     Cache the ``free_surface_kernel`` output buffers on the state.
 
-    ``f_out`` is float64 while ``state.f`` is float32, so assigning
-    ``state.f = f_out.astype(np.float32)`` always copies and the two never
-    alias across steps.
+    ``f_out`` is the float64 population buffer the kernel reads its own
+    reconstructed values back out of during the mass exchange. It never becomes
+    ``state.f``: the kernel writes the float32 copy that does into a separate
+    argument, so this buffer stays private to the kernel and cannot alias an
+    input on the next step.
 
     ``mass_out`` is float64 like ``state.mass`` itself, so aliasing is a real
     risk: if ``state.mass`` were ever pointed straight at this cached buffer,
