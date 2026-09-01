@@ -672,6 +672,97 @@ def apply_transitions(state: FillingState, time_s: float) -> Tuple[int, int]:
     return filled, emptied
 
 
+def heal_submerged_interface(state: FillingState, time_s: float) -> int:
+    """
+    Convert a *submerged* interface cell -- one with no gas neighbour -- to FLUID.
+
+    Koerner's scheme reinitialises the flags every step so the interface stays
+    exactly one cell thick between metal and gas. This implementation had only
+    half of that: :func:`apply_transitions` converts a cell whose *fill level*
+    crosses the band, and promotes/demotes its neighbours to keep the layer
+    closed. Nothing converted a cell that the front had simply closed over.
+
+    Such a cell can never convert on its own. Under Koerner et al. (2005),
+    Table 1 -- see :func:`advance_mass` -- any pair involving a FLUID cell
+    exchanges at weight 1, so once every neighbour is wet or solid the
+    direction sum telescopes and ``dm`` is exactly the cell's own ``drho``.
+    Its mass therefore tracks its density and ``eps = m / (rho * porosity)``
+    freezes at whatever the passing front left, forever, a hair either side of
+    a threshold it cannot reach. It is not stuck for a physical reason: the
+    metal around it is full, and the only thing saying otherwise is a flag.
+
+    Measured before this rule existed:
+
+    * ``_walled_tower(nz=4, width=4)`` ended a head-mode pour with 40 cells
+      FLUID and 24 INTERFACE, and **all twenty-four** of those had no gas
+      neighbour left, at eps between 0.02 and 0.99. It reported
+      ``time_capped`` with 24 misruns in a cavity that was physically full.
+    * ``Test_Model/Full_Gating_Test`` stranded 796 such cells -- 8.6 % of the
+      metal -- at the 45 s cap.
+    * ``Test_Model/Filling_Test`` ended with 1,191 of its 1,322 remaining
+      interface cells frozen this way.
+
+    The old eps-pair weighting hid the gap rather than filling it: it let a
+    FLUID cell's mass drift, and the drift happened to carry these cells past
+    the transition threshold and convert them. That same drift is the +-70,000
+    per-cell runaway :class:`~tests.test_filling_stability.FluidMassTracksDensityTests`
+    documents. Removing it exposed this; it did not cause it.
+
+    Mass bookkeeping mirrors :func:`apply_transitions`' ``to_fluid`` path
+    exactly -- mass snapped to ``rho * porosity``, arrival time stamped if
+    unset, filter cell primed -- with the sign reversed: the cell is normally
+    *under* full, so the excess handed to :func:`_redistribute` is a deficit,
+    and the neighbouring interface cells give the metal up rather than receive
+    it. ``_redistribute`` is linear in that argument and needs no sign branch.
+    Where a healed cell has no interface neighbour left to draw on -- a whole
+    submerged pocket healing at once, which is the common case -- the deficit
+    is stranded back onto the cell itself. Nothing is created and nothing is
+    lost: total mass is conserved exactly, and the price is a FLUID cell that
+    holds less than a full cell's metal. That is the honest outcome; the metal
+    genuinely is not there, and inventing it would be a leak dressed up as a
+    fill.
+
+    The reverse rule -- an interface cell with no *fluid* neighbour becoming
+    GAS -- is deliberately not implemented here. Only the freeze was measured.
+
+    Args:
+        state: Solver state, mutated in place.
+        time_s: Current physical time, recorded as the arrival time.
+
+    Returns:
+        Number of cells healed, for instrumentation. Over a real fill this
+        count decays to zero rather than plateauing: a healed cell is FLUID,
+        and only a genuinely draining neighbour can send it back to the
+        interface, through ``apply_transitions``' existing retreat path.
+    """
+    interface = state.flags == FLAG_INTERFACE
+    if not np.any(interface):
+        return 0
+
+    # The same neighbourhood apply_transitions advances the front with, so
+    # "has a gas neighbour" means the same thing in both directions.
+    submerged = interface & ~_dilate(state.flags == FLAG_GAS)
+    count = int(np.count_nonzero(submerged))
+    if count == 0:
+        return 0
+
+    full_mass = state.rho.astype(np.float64) * state.porous.porosity.astype(np.float64)
+    deficit = np.zeros(state.shape, dtype=np.float64)
+    deficit[submerged] = state.mass[submerged] - full_mass[submerged]
+
+    state.mass[submerged] = full_mass[submerged]
+    state.flags[submerged] = FLAG_FLUID
+    newly_filled = submerged & (state.fill_time_s < 0)
+    state.fill_time_s[newly_filled] = np.float32(time_s)
+    state.porous.primed[submerged] = True
+
+    # No gas neighbour means no gas *cell* to promote either, so unlike
+    # apply_transitions there is no front to advance here -- the layer this
+    # cell belonged to has already closed.
+    _redistribute(state, deficit)
+    return count
+
+
 def ensure_interface_skin(state: FillingState, halo: np.ndarray) -> int:
     """
     Promote gas cells in ``halo`` to interface, seeded from their wet neighbours.
@@ -1120,7 +1211,14 @@ def step(
 
     Order: macroscopic moments -> collide (TRT + Guo forcing) -> stream ->
     bounce-back on obstacles -> reconstruct gas-side populations -> mass
-    exchange -> cell transitions.
+    exchange -> cell transitions -> flag reinitialisation.
+
+    The two free-surface passes at the end are separate on purpose.
+    :func:`apply_transitions` converts a cell whose *fill level* crossed the
+    band; :func:`heal_submerged_interface` converts one the front merely closed
+    over, which no fill level will ever convert. Both paths below call them in
+    the same order, so the numba and numpy branches stay structurally
+    identical rather than merely agreeing by accident.
 
     Args:
         state: Solver state, mutated in place and returned.
@@ -1170,6 +1268,7 @@ def step(
             state.mass[...] = mass_out
             state.step_count += 1
             apply_transitions(state, state.step_count * state.dt_s)
+            heal_submerged_interface(state, state.step_count * state.dt_s)
             reset_detached_interface_cells(state)
         else:
             state.f = streamed.astype(np.float32)
@@ -1228,6 +1327,7 @@ def step(
         state.mass = advance_mass(state, post, reconstructed)
         state.step_count += 1
         apply_transitions(state, state.step_count * state.dt_s)
+        heal_submerged_interface(state, state.step_count * state.dt_s)
         reset_detached_interface_cells(state)
     else:
         state.step_count += 1

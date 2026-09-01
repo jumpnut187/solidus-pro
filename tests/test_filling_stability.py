@@ -112,6 +112,114 @@ def _walled_tower(nz=12, width=3):
     return mesh
 
 
+def _walled_tower_with_a_sealed_pocket(nz=12, width=3):
+    """
+    ``_walled_tower`` plus one metal cell the metal can never reach.
+
+    The tower alone can no longer be used to watch an inlet back up. Since
+    :func:`~physics.filling.heal_submerged_interface`, a walled tower fills
+    and the stage exits on the step it reports ``complete`` -- measured, 4,939
+    steps at 0.82 s against a 1.5 s cap -- so the run ends at the moment the
+    column reaches the inlet and the backed-up regime never happens inside it.
+    (Before the heal the same fixture ran the full cap with 24 of its cells
+    stuck as frozen interface, which is what made it look backed up; that
+    "collapse" was the bug being measured, not the boundary.)
+
+    One sealed pocket restores the regime honestly: the corner cell of the
+    mold block is marked metal, every one of its 18 neighbours is core, so the
+    fill can never reach it, the run cannot report ``complete``, and the tower
+    goes on being poured into long after it is full. That is a genuine misrun,
+    not a contrivance -- an unvented pocket is exactly the geometry the misrun
+    count exists to report.
+    """
+    mesh = _walled_tower(nz=nz, width=width)
+    index = np.rint(np.asarray(mesh.voxel_centers) / DX).astype(int)
+    corner = (index[:, 0] == 0) & (index[:, 1] == 0) & (index[:, 2] == 0)
+    assert int(corner.sum()) == 1, "the fixture lost its corner cell"
+    mesh.voxel_part_types[corner] = PART_TYPE_CAST
+    return mesh
+
+
+def _gasless_interface_cells(state):
+    """
+    Interface cells with no gas neighbour left, in the neighbourhood
+    ``_dilate`` uses to advance the front.
+
+    This is the mechanism :func:`~physics.filling.heal_submerged_interface`
+    exists to remove, measured directly rather than through a status string.
+    """
+    import physics.filling as pf
+
+    gas = state.flags == pf.FLAG_GAS
+    has_gas_neighbour = np.zeros_like(gas)
+    for i in range(1, pf.Q):
+        c = pf.LATTICE_VELOCITIES[i]
+        has_gas_neighbour |= np.roll(
+            gas, shift=(int(c[0]), int(c[1]), int(c[2])), axis=(0, 1, 2)
+        )
+    return (state.flags == pf.FLAG_INTERFACE) & ~has_gas_neighbour
+
+
+def _closed_box_state(n=10):
+    """A sealed box of FLUID, with no free surface anywhere to start from."""
+    import physics.filling as pf
+    from physics.fluid_flow import lattice_units
+
+    nu, dx_m = 0.006 / 7200.0, 0.0152
+    obstacle = np.zeros((n, n, n), dtype=bool)
+    obstacle[0] = obstacle[-1] = True
+    obstacle[:, 0] = obstacle[:, -1] = True
+    obstacle[:, :, 0] = obstacle[:, :, -1] = True
+    units = lattice_units(dx_m, nu, u_max_physical_m_s=2.8)
+    state = pf.create_state(
+        obstacle, dx_m=dx_m, dt_s=units.dt_s, initial_fluid=~obstacle
+    )
+    return state, units
+
+
+def _submerged_pair():
+    """
+    A closed box holding one submerged interface cell and one that is not.
+
+    ``(5, 5, 5)`` is under-full at eps 0.40 with nothing but fluid around it --
+    the frozen cell. ``(5, 5, 6)`` sits at eps 0.80 and keeps a gas neighbour
+    above it, so the heal must leave it alone; it is the only cell that can
+    take ``(5, 5, 5)``'s deficit, which makes the transfer readable in one
+    subtraction.
+    """
+    import physics.filling as pf
+
+    state, units = _closed_box_state()
+    state.flags[5, 5, 5] = pf.FLAG_INTERFACE
+    state.mass[5, 5, 5] = 0.40
+    state.flags[5, 5, 6] = pf.FLAG_INTERFACE
+    state.mass[5, 5, 6] = 0.80
+    state.flags[5, 5, 7] = pf.FLAG_GAS
+    state.mass[5, 5, 7] = 0.0
+    state.f[:, 5, 5, 7] = 0.0
+    return state, units
+
+
+def _final_state(run_kwargs):
+    """Run the real stage and hand back the solver state it finished on."""
+    import physics.filling as pf
+
+    held = {}
+    original = pf.step
+
+    def traced(state, units, **kwargs):
+        original(state, units, **kwargs)
+        held["state"] = state
+        return state
+
+    pf.step = traced
+    try:
+        result = _run(**run_kwargs)
+    finally:
+        pf.step = original
+    return result, held["state"]
+
+
 def _pour_at_top(mesh):
     from core.pour_location import PourLocation
 
@@ -443,6 +551,38 @@ class FluidMassTracksDensityTests(unittest.TestCase):
             )
         self.assertAlmostEqual(pf.total_mass(state) / start, 1.0, places=9)
 
+    def test_a_closed_box_conserves_its_mass_exactly_while_healing(self) -> None:
+        """
+        The same invariant with
+        :func:`~physics.filling.heal_submerged_interface` actually firing.
+
+        The plain closed box has no interface cells at all, so the heal is
+        inert in it and the test above cannot see this. Seeding a 27-cell
+        submerged pocket at random fill levels makes the heal convert every one
+        of them on the first step, hand out the deficits, and strand what it
+        cannot place. Measured: mass ratio 1.000000000000000 over 2,000 steps,
+        i.e. 2.2e-16 -- one ulp, not a leak.
+        """
+        import physics.filling as pf
+
+        state, units = self._closed_box()
+        pocket = np.zeros(state.shape, dtype=bool)
+        pocket[4:7, 4:7, 4:7] = True
+        pocket &= state.flags == pf.FLAG_FLUID
+        state.flags[pocket] = pf.FLAG_INTERFACE
+        rng = np.random.default_rng(0)
+        state.mass[pocket] = rng.uniform(0.05, 0.9, int(np.count_nonzero(pocket)))
+        self.assertEqual(int(np.count_nonzero(pocket)), 27, "fixture drifted")
+
+        start = pf.total_mass(state)
+        for _ in range(2000):
+            pf.step(state, units)
+        self.assertEqual(
+            int(np.count_nonzero(state.flags == pf.FLAG_INTERFACE)), 0,
+            "the submerged pocket was not healed",
+        )
+        self.assertAlmostEqual(pf.total_mass(state) / start, 1.0, places=13)
+
     def test_no_interface_cell_is_created_out_of_nothing(self) -> None:
         """A box with no free surface must not grow one."""
         import physics.filling as pf
@@ -501,25 +641,7 @@ class StatusReportingTests(unittest.TestCase):
     """
 
     def test_a_full_fill_reports_complete(self) -> None:
-        """
-        A cavity that genuinely fills reports ``complete`` and no misrun.
-
-        The fixture is deliberately shallow. Under Koerner's mass-exchange
-        weighting -- see :class:`FluidMassTracksDensityTests` -- an interface
-        cell whose neighbours are all wet or solid exchanges at weight 1 in
-        every direction, so its mass change is exactly its own density change
-        and it stops filling: a *submerged* interface cell is frozen wherever
-        the front left it. Measured on ``_walled_tower(nz=4, width=4)``, the
-        run ends with 44 FLUID cells and 20 INTERFACE cells, and all twenty of
-        those have no gas neighbour left, at eps between 0.05 and 0.84.
-
-        That is a gap in the flag bookkeeping, not in the weighting: Koerner's
-        scheme reinitialises a gasless interface cell to FLUID and this
-        implementation has no such rule. It was invisible while the old
-        weighting let FLUID mass drift upward past the transition threshold
-        and convert those cells anyway -- and that drift is the +-70,000
-        runaway. Removing the drift exposed the gap; it did not cause it.
-        """
+        """A cavity that genuinely fills reports ``complete`` and no misrun."""
         result = _run(mesh=_walled_tower(nz=2, width=2),
                       **_head_mode(max_fill_time_s=2.0))
         self.assertIsNotNone(result)
@@ -546,6 +668,217 @@ class StatusReportingTests(unittest.TestCase):
                 STATUS_DIVERGED,
             }),
             4,
+        )
+
+
+class SubmergedInterfaceHealingTests(unittest.TestCase):
+    """
+    The regression test for the frozen submerged interface cell.
+
+    Under Koerner's mass-exchange weighting -- see
+    :class:`FluidMassTracksDensityTests` -- an interface cell whose neighbours
+    are all wet or solid exchanges at weight 1 in every direction, so its mass
+    change is exactly its own density change and ``eps`` freezes wherever the
+    passing front left it. It can never reach the transition threshold, so
+    without a flag rule to convert it, it is stranded for the rest of the run.
+
+    Measured on ``_walled_tower(nz=4, width=4)`` before
+    :func:`~physics.filling.heal_submerged_interface` existed: the run hit the
+    2 s cap after 10,189 steps with 40 cells FLUID and 24 INTERFACE, **all
+    twenty-four** of them with no gas neighbour left, at eps between 0.02 and
+    0.99 -- reported as ``time_capped`` with 24 misruns, 37.5 % of the metal,
+    in a cavity that was physically full. On ``Test_Model/Full_Gating_Test``
+    the same freeze stranded 796 cells, 8.6 % of the metal.
+
+    That is a gap in the flag bookkeeping, not in the weighting: Koerner's
+    scheme reinitialises a gasless interface cell to FLUID and this
+    implementation had no such rule. It was invisible while the old weighting
+    let FLUID mass drift upward past the transition threshold and convert
+    those cells anyway -- and that drift is the +-70,000 runaway. Removing the
+    drift exposed the gap; it did not cause it.
+    """
+
+    def test_a_shallow_walled_tower_fills_completely(self) -> None:
+        """
+        The discriminating case. With the heal removed this fails on every
+        assertion below: ``time_capped``, 24 misruns, 24 gasless cells.
+        """
+        result, state = _final_state(dict(
+            mesh=_walled_tower(nz=4, width=4),
+            **_head_mode(max_fill_time_s=2.0),
+        ))
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, STATUS_COMPLETE)
+        self.assertEqual(result.misrun_voxel_count, 0)
+
+    def test_no_interface_cell_is_left_without_a_gas_neighbour(self) -> None:
+        """
+        The mechanism, asserted directly rather than through a status string.
+
+        A status can come out right for the wrong reason; a gasless interface
+        cell is the thing that cannot happen. Measured before the heal: 24 of
+        24 surviving interface cells on this fixture had no gas neighbour.
+        """
+        _, state = _final_state(dict(
+            mesh=_walled_tower(nz=4, width=4),
+            **_head_mode(max_fill_time_s=2.0),
+        ))
+        stranded = _gasless_interface_cells(state)
+        self.assertEqual(
+            int(np.count_nonzero(stranded)), 0,
+            f"{int(np.count_nonzero(stranded))} interface cells were left "
+            f"submerged, which no fill level can ever convert",
+        )
+
+    def test_a_deeper_tower_leaves_none_either(self) -> None:
+        """The same, on a fixture deep enough to have a running front."""
+        result, state = _final_state(dict(
+            mesh=_walled_tower(nz=12),
+            **_head_mode(max_fill_time_s=1.5),
+        ))
+        self.assertEqual(result.status, STATUS_COMPLETE)
+        self.assertEqual(
+            int(np.count_nonzero(_gasless_interface_cells(state))), 0
+        )
+
+    def test_a_submerged_cell_converts_and_pays_its_neighbours(self) -> None:
+        """
+        A cell built submerged by hand, on a lattice small enough that the
+        bookkeeping can be read off directly.
+
+        The cell is under-full, so what it hands :func:`_redistribute` is a
+        *deficit*: the neighbouring interface cells give the metal up rather
+        than receive it. Measured here: the healed cell goes from 0.40 to a
+        full 1.0 and its single interface neighbour from 0.80 to 0.20, an
+        exchange of exactly 0.60, with the domain total unchanged to the last
+        bit.
+        """
+        import physics.filling as pf
+
+        state, units = _submerged_pair()
+        neighbour_before = float(state.mass[5, 5, 6])
+        total_before = pf.total_mass(state)
+
+        healed = pf.heal_submerged_interface(state, 0.0)
+
+        self.assertEqual(healed, 1, "the submerged cell was not converted")
+        self.assertEqual(int(state.flags[5, 5, 5]), int(pf.FLAG_FLUID))
+        self.assertAlmostEqual(
+            float(state.mass[5, 5, 5]), float(state.rho[5, 5, 5]), places=6,
+            msg="a healed cell was not snapped to a full cell's mass",
+        )
+        self.assertEqual(
+            int(state.flags[5, 5, 6]), int(pf.FLAG_INTERFACE),
+            "the cell that still has a gas neighbour must not be healed",
+        )
+        self.assertAlmostEqual(
+            float(state.mass[5, 5, 6]) - neighbour_before, -0.60, places=9,
+            msg="the deficit did not land on the neighbouring interface cell",
+        )
+        self.assertAlmostEqual(
+            pf.total_mass(state), total_before, places=9,
+            msg="healing moved mass in or out of the domain",
+        )
+
+    def test_it_converts_within_a_few_steps_of_a_real_run(self) -> None:
+        """The same cell, reached through :func:`~physics.filling.step`."""
+        import physics.filling as pf
+
+        state, units = _submerged_pair()
+        for _ in range(3):
+            pf.step(state, units)
+            if int(state.flags[5, 5, 5]) == int(pf.FLAG_FLUID):
+                break
+        self.assertEqual(
+            int(state.flags[5, 5, 5]), int(pf.FLAG_FLUID),
+            "a submerged interface cell survived three steps",
+        )
+
+    def test_it_leaves_a_cell_with_a_gas_neighbour_alone(self) -> None:
+        """The rule keys on topology, not on fill level."""
+        import physics.filling as pf
+
+        state, _ = _submerged_pair()
+        state.mass[5, 5, 5] = 0.40
+        before = state.mass[5, 5, 6]
+        # Open the submerged cell to the cavity as well.
+        state.flags[5, 5, 4] = pf.FLAG_GAS
+        state.mass[5, 5, 4] = 0.0
+        state.f[:, 5, 5, 4] = 0.0
+        self.assertEqual(pf.heal_submerged_interface(state, 0.0), 0)
+        self.assertEqual(int(state.flags[5, 5, 5]), int(pf.FLAG_INTERFACE))
+        self.assertEqual(float(state.mass[5, 5, 6]), float(before))
+
+    def test_a_pocket_with_no_recipient_strands_rather_than_leaks(self) -> None:
+        """
+        The one case ``_redistribute`` cannot balance, measured rather than
+        assumed.
+
+        When a whole submerged pocket heals at once there is no interface cell
+        left next to it to take the deficit -- which is the common case, not a
+        corner one. ``_redistribute`` strands the deficit back on the donor, so
+        nothing is created and nothing is lost: the price is a FLUID cell
+        holding less than a full cell's metal, and the measured leakage is
+        exactly zero. Inventing the missing metal instead would be a leak
+        dressed up as a fill.
+        """
+        import physics.filling as pf
+
+        state, _ = _closed_box_state()
+        state.flags[5, 5, 5] = pf.FLAG_INTERFACE
+        state.mass[5, 5, 5] = 0.40
+        before = pf.total_mass(state)
+
+        self.assertEqual(pf.heal_submerged_interface(state, 0.0), 1)
+        self.assertEqual(int(state.flags[5, 5, 5]), int(pf.FLAG_FLUID))
+        self.assertEqual(
+            float(state.mass[5, 5, 5]), 0.40,
+            "the stranded deficit was not returned to the cell it came from",
+        )
+        self.assertEqual(
+            pf.total_mass(state), before,
+            f"healing leaked {pf.total_mass(state) - before:+.3e} lattice mass",
+        )
+
+    def test_conversions_decay_rather_than_plateau(self) -> None:
+        """
+        Ping-pong check. A healed cell is FLUID, and only a genuinely draining
+        neighbour sends it back to the interface through
+        ``apply_transitions``' retreat path -- so the count must fall away, not
+        settle onto a per-step floor.
+
+        Measured on a closed box seeded with a 27-cell submerged pocket: 27
+        conversions on the first step and zero on all 1,999 after it.
+        """
+        import physics.filling as pf
+
+        state, units = _closed_box_state()
+        pocket = np.zeros(state.shape, dtype=bool)
+        pocket[4:7, 4:7, 4:7] = True
+        pocket &= state.flags == pf.FLAG_FLUID
+        state.flags[pocket] = pf.FLAG_INTERFACE
+        rng = np.random.default_rng(0)
+        state.mass[pocket] = rng.uniform(0.05, 0.9, int(np.count_nonzero(pocket)))
+
+        counts: list[int] = []
+        original = pf.heal_submerged_interface
+
+        def traced(s, t):
+            healed = original(s, t)
+            counts.append(healed)
+            return healed
+
+        pf.heal_submerged_interface = traced
+        try:
+            for _ in range(300):
+                pf.step(state, units)
+        finally:
+            pf.heal_submerged_interface = original
+
+        self.assertEqual(counts[0], int(np.count_nonzero(pocket)))
+        self.assertEqual(
+            sum(counts[1:]), 0,
+            f"healing kept firing after the pocket closed: {counts[1:20]}",
         )
 
 
@@ -957,23 +1290,27 @@ class PressureInletTests(unittest.TestCase):
         Delivery is reported as weight, so a pour that reports 0 lb has not
         happened however many cells its flag count claims.
 
-        Measured: 84 % of cells FLUID, 96 % by mass, 0.3 lb delivered. It does
-        not report ``complete`` and cannot. ``_tower`` has no obstacle cells at
-        all, so both streaming paths wrap periodically -- see
-        :func:`_walled_tower`'s docstring -- and the bottom layer drains into
-        the inlet pinned at the top. The 13 cells left over are that seam. The
-        run used to report ``complete`` because FLUID mass drifted past the
-        transition threshold and converted them; see
-        :class:`FluidMassTracksDensityTests`.
+        Measured: ``complete`` in 1,148 steps at 0.17 s, all 80 cells FLUID,
+        95 % by mass, 0.3 lb delivered against a 0.33 lb tower.
+
+        The full assertion is back. It was weakened to "84 % of cells" for one
+        round, when the corrected Koerner pair weighting stopped FLUID mass
+        drifting past the transition threshold and the 13 cells the front had
+        closed over were left frozen as submerged interface -- a gap in the
+        flag bookkeeping, not in the weighting. Now that
+        :func:`~physics.filling.heal_submerged_interface` reinitialises them,
+        this fixture completes on its own merits and the test can ask for
+        completion again rather than for 80 % of it.
         """
         messages: list = []
         result = _run(
             mesh=_tower(nz=20), messages=messages, **_head_mode(max_fill_time_s=0.5)
         )
         self.assertIsNotNone(result)
-        self.assertNotEqual(result.status, STATUS_DIVERGED)
-        self.assertGreater(
-            result.filled_fraction, 0.8,
+        self.assertEqual(result.status, STATUS_COMPLETE)
+        self.assertEqual(result.misrun_voxel_count, 0)
+        self.assertEqual(
+            result.filled_fraction, 1.0,
             f"the pour barely moved: {result.filled_fraction:.3f} of cells",
         )
         self.assertGreater(self._poured_lb(messages), 0.0)
@@ -985,15 +1322,24 @@ class PressureInletTests(unittest.TestCase):
         Total domain mass changes only through the inlet pin -- the solver
         conserves the rest, which :class:`MassConservationTests` checks -- so
         its per-step increment *is* the net injection. In a closed tower with
-        the metal nowhere left to go, that increment must collapse. Measured:
-        0.0151 lattice-mass/step over the first quarter of the run against
-        0.000025 over the last, a factor of 600. The old pin instead kept
-        writing its prescribed velocity and deleted the metal streaming back
-        into it, which is how delivery went negative on the real assembly.
+        the metal nowhere left to go, that increment must collapse. The old pin
+        instead kept writing its prescribed velocity and deleted the metal
+        streaming back into it, which is how delivery went negative on the real
+        assembly.
+
+        The fixture is :func:`_walled_tower_with_a_sealed_pocket`, not the
+        plain tower: since the submerged-interface heal a plain walled tower
+        reports ``complete`` and the stage exits on that step, so the run now
+        ends at the moment the column reaches the inlet and never spends any
+        time backed up. One unreachable pocket keeps the pour running after the
+        tower is full. Measured on it: 0.0158 lattice-mass/step over the first
+        quarter against 3.3e-7 over the last, a factor of 49,000 -- and the
+        decile trace shows delivery holding near 0.02 through the fill and
+        falling off a cliff the moment the column closes on the inlet.
         """
         import physics.filling as pf
 
-        mesh = _walled_tower(nz=12)
+        mesh = _walled_tower_with_a_sealed_pocket(nz=12)
         totals: list[float] = []
         original = pf.step
 
@@ -1009,6 +1355,10 @@ class PressureInletTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertNotEqual(result.status, STATUS_DIVERGED)
+        self.assertNotEqual(
+            result.status, STATUS_COMPLETE,
+            "the sealed pocket filled, so the run never backed up",
+        )
         delivery = np.diff(np.asarray(totals, dtype=np.float64))
         self.assertGreater(delivery.size, 400, "run too short to judge")
         quarter = delivery.size // 4
@@ -1262,11 +1612,13 @@ class MassProgressReportingTests(unittest.TestCase):
         0.6 lb delivered. The balance is the seed ``create_state`` starts with,
         which came in before the inlet did anything.
 
-        The run gets there at 92 % of cells and 98 % by mass rather than at
-        ``complete``: ``_tower`` is a torus, and its bottom layer drains into
-        the inlet at the top -- see
-        :meth:`PressureInletTests.test_a_head_driven_pour_fills_and_delivers_metal`.
-        The delivered weight is what this test is about, and it is unchanged.
+        The run reports ``complete`` at 98 % by mass, in 2,060 steps at 0.25 s.
+        It was reading 92 % of cells for one round while the front's own
+        leavings sat frozen as submerged interface cells -- see
+        :meth:`PressureInletTests.test_a_head_driven_pour_fills_and_delivers_metal`
+        -- and the completion assertion is restored with the heal. The
+        delivered weight is what this test is about, and it is unchanged
+        either way.
         """
         from core.filling_stage import pour_weight_lb
 
@@ -1274,8 +1626,8 @@ class MassProgressReportingTests(unittest.TestCase):
         messages: list = []
         result = _run(mesh=mesh, messages=messages, **_head_mode(max_fill_time_s=1.0))
         self.assertIsNotNone(result)
-        self.assertNotEqual(result.status, STATUS_DIVERGED)
-        self.assertGreater(result.filled_fraction, 0.9)
+        self.assertEqual(result.status, STATUS_COMPLETE)
+        self.assertEqual(result.filled_fraction, 1.0)
         weight_lb = pour_weight_lb(mesh, _Alloy())
         poured_lb = self._poured_lb(messages)
         self.assertGreater(
@@ -1299,13 +1651,22 @@ class MassProgressReportingTests(unittest.TestCase):
         self.assertLess(STALL_MASS_FRACTION_EPSILON, 0.01)
 
     def test_a_stall_is_reported_with_both_measures(self) -> None:
-        """A stall message that gives only a cell count hides the disagreement."""
+        """
+        A stall message that gives only a cell count hides the disagreement.
+
+        The fixture is :func:`_walled_tower_with_a_sealed_pocket`, whose one
+        unreachable cell makes the stall deterministic. A plain walled tower
+        cannot be used: since the submerged-interface heal it fills and reports
+        ``complete``, so the assertion had to be guarded by a skip. The skip is
+        gone -- the pocket stalls every run, at 108/109 cells.
+        """
         messages: list = []
-        _run(mesh=_walled_tower(nz=12), messages=messages,
-             **_head_mode(max_fill_time_s=1.5))
+        result = _run(mesh=_walled_tower_with_a_sealed_pocket(nz=12),
+                      messages=messages, **_head_mode(max_fill_time_s=1.5))
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, STATUS_STALLED)
         stall = [m for m in messages if "has not advanced" in m]
-        if not stall:
-            self.skipTest("this fixture did not stall on this run")
+        self.assertTrue(stall, f"a stalled run reported no stall: {messages}")
         self.assertIn("by mass", stall[0])
 
 

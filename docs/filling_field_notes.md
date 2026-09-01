@@ -7,69 +7,93 @@ design document; `docs/filling_implementation.md` is the plan and
 
 ## Current state — read this first
 
-**The filling stage is not validated: no configuration yet produces a
-*complete* fill.** What has changed is that neither test model diverges any
-more. The two mechanisms that used to end these runs in a blow-up are gone,
-and what stops a fill now is a third, identified thing.
+**A configuration now produces a genuine `complete` fill, and it survives the
+whole pipeline.** `Test_Model/Full_Gating_Test` at 0.20 in voxels with
+`fill_grid_coarsening` 2 — the shipped default, giving a 0.40 in fill grid —
+fills every one of its 9,251 metal voxels in 15.0 s of simulated pour,
+72,206 steps, 129 s wall, **0 misruns and no warnings at all**. `max|u|` is
+0.019 against the 0.05 Mach guard and **no wet cell exceeds it at any point**.
+That is the first completed run this stage has produced; every "complete"
+cited before the build report was a blow-up.
 
-*Measured on `Test_Model/Full_Gating_Test` at 0.20 in voxels, coarsening 1* —
-a bottom-gated rig built so a head-driven fill can finish. **No divergence.**
-The run uses the whole 45 s cap (433,247 steps, 54 min wall) and ends
-`time_capped`, still advancing, at 8,459 of 9,251 metal cells FLUID (91 %),
-97 % by mass, 18.5 lb delivered into a 19.3 lb model. `max|u|` holds at 0.033
-against the 0.05 Mach guard, with the 99th percentile over wet cells at 0.015,
-and per-cell FLUID mass stays inside [0.978, 1.007] for the entire run. The
-previous inlet diverged this model at step 30,600 with 24 % by mass.
+Driven end to end through `core.simulation_pipeline.run_pipeline` (WCB,
+`thermal_coupled`, shrinkage + hotspot + Niyama + feeding path), the fill is
+`complete` and `trustworthy`, seeds solidification from its own thermal field
+rather than the two-constant placeholder, and solidification then runs its full
+1,372 s horizon and returns solidification times for all 9,251 voxels. **No
+NaN reaches any handed-over field.** The defect picture is the one the geometry
+predicts: the casting is clean (shrinkage max 0.21, nothing above 0.5) and the
+riser carries a pipe (max 0.79, 50 voxels above 0.5), which is feeding working.
+The sprue and runner score highest of all (0.87) because nothing feeds a
+gating system — expected, and not a casting defect.
 
-Arrival is physically ordered — mean `fill_time_s` by part: sprue 0.52 s, gate
-0.87 s, runner 1.55 s, casting 2.60 s, riser 4.52 s; by *first* arrival, sprue
-0.00 s, runner 0.23 s, casting 0.45 s, gate 0.50 s, riser 0.62 s. (The runner's
-*mean* trails the gate's because a handful of runner cells at the far end
-arrive as late as 31 s; its front gets there first.) The pour itself is quick
-and about the right speed: 11.5 lb of the 18.5 is delivered by 4.5 s, against
-the ~4.4 s the √W rule gives for this weight. The remaining 40 s is the solver
-topping up the last interface cells, not metal still flowing.
+**What made this possible was the flag-reinitialisation rule the previous
+round identified as missing** — `physics.filling.heal_submerged_interface`. An
+interface cell the front has closed over exchanges at weight 1 on every link
+to a FLUID neighbour, so its mass change is its own density change and its
+fill fraction freezes wherever the front left it; nothing could ever convert
+it. Körner's scheme reinitialises such a cell to FLUID, and now so does this
+one, with the mass deficit pushed through the same `_redistribute` the
+transition path uses. Total mass is conserved exactly (a closed box holds to
+one ulp over 2,000 steps); where a whole submerged pocket heals at once and no
+interface cell is left beside it to draw on, the deficit is stranded back onto
+the donor rather than invented.
 
-*Measured on `Test_Model/Filling_Test` at 0.20 in voxels, coarsening 2* — the
-harder model, whose 0.5 in gate is 3 cells on this grid. **No divergence**
-(the previous run diverged at step 251,000). It runs the full 60 s cap
-(327,200 steps, 42 min wall) and ends `time_capped`, still advancing, at 58 %
-of cells and 78 % by mass, 55.4 lb into a 63.6 lb model. Nothing anywhere in
-the domain exceeds the Mach guard — 0 of 3,845 wet cells over 0.05, with
-`max|u|` 0.0155 and the 99th percentile 0.0098 — and per-cell FLUID mass stays
-inside [0.9970, 1.0033] against the ±70,000 the old weighting reached. The
-sample-to-sample wet-mass alternation is gone: the last twenty samples rise
-monotonically, 3,355.4 → 3,374.0.
+The narrower rule — convert only when *every* neighbour is FLUID or obstacle,
+which is literally the weight-1 condition — was tried and does not work:
+measured across three fixtures, **not one** stranded cell met it. Every
+stranded cell had another interface cell beside it. The topological rule (no
+gas neighbour) is the one that matches the failure.
 
-The gating system is *not* the bottleneck at this resolution, which is worth
-saying because the 3-cell gate was the obvious suspect. By mass the sprue is
-98.3 % full, the runner 94.9 % and the gate 96.3 %; the shortfall is the
-casting (83.2 % by mass, 57.0 % of its cells FLUID) and the riser (54.9 % /
-29.0 %). Of the 1,322 interface cells left at the cap, **1,191 have no gas
-neighbour** — see below. Chills correctly take no metal at all.
+### What the rule costs, and where it still hurts
 
-**What stops both runs short is a gap in the flag bookkeeping, not the flow.**
-Under Körner's mass-exchange weighting an interface cell whose neighbours are
-all wet or solid exchanges at weight 1 in every direction, so its mass change
-is exactly its own density change — and a *submerged* interface cell therefore
-freezes wherever the front left it, at whatever ε it had. Measured on a
-synthetic bounded cavity (`_walled_tower(nz=4, width=4)`): the run ends with 44
-FLUID cells and 20 INTERFACE cells, and **all twenty have no gas neighbour
-left**, at ε between 0.05 and 0.84. The same signature on the real model —
-1,191 of `Filling_Test`'s 1,322 remaining interface cells, ε 0.000 to 1.002.
+A healed cell is flagged FLUID at whatever fill fraction it had. That is
+usually almost nothing — the cell-weighted mean fill fraction at the moment of
+healing is **0.978** — but it accumulates: on the runs below, 1.9–4.2 % of the
+metal volume ends up inside cells flagged full that hold less than a full
+cell's metal. The mass accounting stays honest (18.0 lb delivered against
+93.5 % of the metal volume wet: the two agree to within 1 %), but "100 % of
+cells FLUID" means "the cavity is closed", not "the cavity is full".
 
-Körner's scheme reinitialises such a cell to FLUID; this implementation has no
-such rule. It was invisible while the mass exchange let FLUID mass drift upward
-past the transition threshold and convert those cells anyway — that drift *was*
-the ±70,000 runaway, so removing it exposed this, it did not cause it. Adding
-the reinitialisation rule is the next piece of work: it needs a mass account
-for the deficit it fills, which is why it was not bolted on to the weighting
-fix.
+**On a model with a thick, sloshing front the rule ping-pongs, and that is not
+fixed.** A healed cell whose neighbour later drains is demoted back to
+interface by the retreat path, refills, and is healed again — and each cycle
+pulls its deficit out of the *advancing* front. Measured on `Filling_Test`:
+828,368 heal events over 327,200 steps on a 4,346-cell domain, roughly 190
+conversions per cell. On a run that finishes, the count decays to nothing —
+`Full_Gating_Test` at coarsening 2 does its last heal at step 57,545 of
+72,206 and none in the final fifth of the run. It is runs that *don't* finish
+where it churns.
 
-Do not run this stage in a field test expecting a completed fill. If you run
-it anyway, read the status field before reading anything else — see "If
-something goes wrong" — and do not treat a `stalled` run's numbers as more
-than a record of where and how it stopped.
+*Measured on `Test_Model/Full_Gating_Test` at 0.20 in, coarsening 1* (the fine
+grid, 45 s cap). Still `time_capped` — 433,247 steps, 58 min wall — but at
+8,753 of 9,251 cells (94.6 %, up from 91 %), 94 % by mass, 18.0 lb into a
+19.25 lb model, and **zero interface cells left without a gas neighbour**,
+against 796 last round. The residual is the riser, which is 66 % FLUID and
+still rising when the clock runs out; everything upstream is 99.5–100 % full.
+Arrival is physically ordered — mean `fill_time_s` sprue 0.35 s, runner 0.97 s,
+gate 1.19 s, casting 5.23 s, riser 17.57 s.
+
+**The transient Mach excursion documented last round is gone.** `max|u|` is
+0.042 at the cap with the 99th percentile at 0.021, and **0 of 8,996 wet cells
+are over the guard** — against a 0.457 peak and 87 of 866 samples over it
+before. Give this grid a cap well past 45 s, or run it at the default
+coarsening 2, which finishes.
+
+*Measured on `Test_Model/Filling_Test` at 0.20 in, coarsening 2* — the harder
+model, whose 0.5 in gate is 3 cells on this grid. `time_capped` at the 60 s
+cap (327,200 steps, 37 min wall), 41 % of cells and 52 % by mass, 36.6 lb into
+a 63.6 lb model. **All 1,191 frozen submerged interface cells are gone** — 0
+remain — and `max|u|` is 0.029 with 0 of 2,506 wet cells over the guard.
+
+**This model delivers less metal than it did last round (36.6 lb against
+55.4 lb, 41 % of cells against 58 %), and the ping-pong above is the leading
+suspect.** The choke is now plainly visible where it was not before: 2 of 154
+gate cells are FLUID and only 186 of 714 gate voxels ever see metal. Whether
+the front is being held back by the heal draining it, or the previous run's
+higher numbers were frozen interface cells holding mass they could never
+convert, is not yet separated. Do not read this model's fill percentage as a
+result either way.
 
 ## Running a fill
 
@@ -107,10 +131,10 @@ timestep. Halving resolution is about 16x less work.
 Resolution also decides whether a fill can even attempt to work: the metal
 has to get through the thinnest section of the gating, and a channel one cell
 across is sealed by halfway bounce-back — the walls sit at ±0.5 cells and
-leave no interior. But resolution is not sufficient on its own — see "Current
-state" above: the two models tested fail by different mechanisms (mass drift in
-a full channel on `Filling_Test`, an under-covered inlet on
-`Full_Gating_Test`), and neither has been made to complete.
+leave no interior. It cuts both ways, though, and not in the direction you
+would guess: see "Current state" above, where `Full_Gating_Test` completes at
+coarsening 2 and is still filling at coarsening 1. Finer is not automatically
+better here until the grid-convergence question is settled.
 `fill_grid_coarsening` multiplies
 the mesh size, so mesh 0.50 with coarsening 2 gives a 1.00 in fill grid —
 check the product, not the mesh, when reporting any result.
@@ -143,21 +167,23 @@ active but at a hardcoded constant; the removed knob fed nothing.
 
 Every claim below previously assumed a completed fill existed to validate
 against. It didn't — the "complete" result this document used to cite was a
-numerical blow-up (see the build report). Until a configuration produces a
-genuine `complete` run, treat the following as suspended, not merely
-cautious:
+numerical blow-up (see the build report). One configuration now does complete
+(`Full_Gating_Test`, coarsening 2), so these are no longer suspended outright;
+they rest on a single model at a single resolution, which is one data point,
+not a validation:
 
-**Currently unverified, pending a completed run:**
+**Verified on one model at one resolution, unverified in general:**
 - *Fill sequence* — the order regions fill, and where the front goes. On
-  `Filling_Test` at coarsening 2 the sequence is now plausible for most of the
-  run — sprue full, then runner, then casting, with velocity inside the Mach
-  guard — but the mass drift described in "Current state" is accumulating
-  underneath it the whole time, so it is not yet evidence of anything. On
-  `Full_Gating_Test` the front is a jet spraying down an empty sprue and is
-  not physical at all.
+  `Full_Gating_Test` this is now right at both resolutions: runner and gate
+  first, then the sprue backing up, then the casting, then the riser last
+  (mean arrival 1.16 / 1.20 / 1.37 / 3.48 / 8.78 s at coarsening 2), with every
+  wet cell inside the Mach guard. The jet down an empty sprue is gone — the
+  inlet is the sprue's whole mouth now. On `Filling_Test` the sequence is
+  plausible as far as it gets, but it does not get far; see "Current state".
 - *Misrun.* Meaningful only against a fill that completed, or stalled for an
-  understood reason. Right now every stall or divergence *is* the open
-  problem, not a measurement you can build on.
+  understood reason. `Full_Gating_Test` at coarsening 2 reports 0, which is
+  correct for that geometry. A `time_capped` run's misrun count is still just
+  a record of where the clock stopped it — the stage says so in a warning.
 - *Relative comparisons at fixed resolution* — gating layout A against B, or
   pour point A against B. Not established: the two models tested so far
   fail by different mechanisms, so there is no known-good baseline yet to
@@ -193,12 +219,13 @@ metallostatic pressure.
   kernel of this shape. Remaining levers are the float32/float64 conversion glue
   (~27 % of a step) and dense-box iteration, which wastes ~6.8x at the 0.147
   occupancy typical of gating assemblies.
-- **Grid convergence is unvalidated.** The design doc asks for results to
-  converge as `fill_grid_coarsening` → 1; that has not been demonstrated and
-  cannot be until a run completes. Both models now end the same way — capped
-  while still advancing, with the residual dominated by frozen submerged
-  interface cells — so the two configurations at least fail by the *same*
-  mechanism now, which they did not before.
+- **Grid convergence is unvalidated, and the two grids now disagree.** The
+  design doc asks for results to converge as `fill_grid_coarsening` → 1.
+  `Full_Gating_Test` completes at coarsening 2 in 15 s of pour and is still
+  filling its riser at coarsening 1 after 45 s, so the finer grid is not merely
+  slower to compute — its front advances differently in *simulated* time. That
+  is the next thing to measure, and until it is, quote the fill grid with every
+  result.
 - **The inlet** imposes a *pressure* in head mode: the metallostatic head
   rho = rho_0 (1 + g h / c_s^2), with the velocity measured back out of the
   inlet cells' own populations each step and clamped at the Mach guard. It is
