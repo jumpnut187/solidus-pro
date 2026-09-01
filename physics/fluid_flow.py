@@ -678,6 +678,13 @@ def resolve_porous_velocity(v: np.ndarray, c0: np.ndarray, c1: np.ndarray) -> np
 
     ``u = v / (c0 + sqrt(c0^2 + c1 |v|))``
 
+    **This is only half of Guo-Zhao.** It gives the velocity the drag leaves,
+    which is what the equilibrium is built from -- but an equilibrium is not
+    where a force acts, and the collision's momentum budget still needs the
+    drag as an actual body force. That is :func:`porous_drag_force`, and using
+    this function without it means a filter cell has no terminal velocity at
+    all; see that docstring for what it cost.
+
     Args:
         v: Provisional velocity, shape ``(3, ...)``.
         c0: Linear drag coefficient, broadcastable.
@@ -696,6 +703,98 @@ def resolve_porous_velocity(v: np.ndarray, c0: np.ndarray, c1: np.ndarray) -> np
     denominator = c0 + np.sqrt(c0 * c0 + c1 * speed)
     resolved: np.ndarray = v / denominator
     return resolved
+
+
+def porous_drag_force(
+    rho: np.ndarray, u: np.ndarray, c0: np.ndarray, c1: np.ndarray
+) -> np.ndarray:
+    """
+    The Guo-Zhao drag as a **body force**, so the populations actually feel it.
+
+    ``F_drag = -2 rho [ (2 c0 - 1) + c1 |u| ] u``
+
+    Why this has to exist, and what it cost not to
+    ----------------------------------------------
+    :func:`resolve_porous_velocity` is only half of Guo-Zhao. It answers "given
+    the provisional velocity ``v``, what velocity ``u`` does the drag leave?" --
+    and the solver was using that answer *only* to build the equilibrium. The
+    drag never entered the Guo source, so it never entered the collision's
+    momentum budget. Over one collision the populations gain exactly the source
+    force (see :func:`guo_force_terms`), and that force was gravity alone.
+
+    So a filter cell had no terminal velocity. Measured on a periodic block of
+    4.3 mm filter cells (porosity 0.85, 10 ppi, WCB) with nothing but gravity,
+    both solver paths agreeing bit-for-bit: ``sum_i c_i f_i`` grew by
+    ``g_lattice`` every single step, without bound, against an algebraic
+    terminal of ``u = 2.2e-3``. By step 10,000 the cell was at ``u = 0.11``,
+    twice the Mach guard the timestep was chosen for; by step 50,000 it was at
+    ``0.33`` and **1,080 of the block's 4,104 populations were negative** -- five
+    per cell, in every cell, and they never healed. That is the porous-cell
+    negative-population signature seen on the real assembly, where 60x more of
+    the negatives sat in filter cells than their 1.4 % of the mesh would
+    predict, and where the fill aborted on the precursor guard at step 12,000.
+
+    The negatives are not a reconstruction artefact and no floor fixes them.
+    With ``omega_minus ~ 5.6e-5`` the TRT barely relaxes the antisymmetric part,
+    so once the equilibrium is built from a braked ``u`` while the populations
+    carry an unbraked momentum, the gap ``f_asym - e_asym`` is frozen in and
+    grows. When ``|f_asym|`` passes ``f_sym`` the upstream population of the
+    pair goes negative and stays negative.
+
+    Where the formula comes from
+    ----------------------------
+    Guo-Zhao's closed form is the statement ``u = v + (dt/2) F/rho`` with
+    ``F`` the full porous force evaluated at ``u``; inverting the quadratic that
+    :func:`resolve_porous_velocity` solves gives ``v = 2 c0 u + c1 |u| u``, so
+
+        F/rho = 2 (u - v) = -2 [ (2 c0 - 1) + c1 |u| ] u
+
+    which is ``-(eps nu / k1) u - (eps c_F / sqrt(k1)) |u| u`` written in the
+    coefficients the zone already stores. Two consequences worth relying on:
+
+    * It is a function of the **resolved** ``u`` alone, so nothing upstream has
+      to hand back the provisional ``v``.
+    * Off a filter ``c0`` is exactly 0.5 and ``c1`` exactly 0, so this returns
+      exactly ``0.0`` and adding it to the gravity force is bit-identical to not
+      adding it. A no-filter build is unchanged, which is what makes
+      ``Full_Gating_Test`` a clean regression sentinel for this change.
+
+    The half-force correction needs no adjustment: ``u`` as
+    :func:`macroscopic` already returns it *is* ``v + F_drag/(2 rho)``. Only the
+    Guo source was missing the term.
+
+    Two deliberate omissions, both second-order and both separate questions
+    from whether the drag is applied at all:
+
+    * Guo-Zhao scale the body force itself by the porosity (``eps G``, not
+      ``G``). Left alone: it changes the drive inside a filter by 15 %, and the
+      closed form stays self-consistent either way because the same gravity
+      force is used in the half-force correction and in the source.
+    * Guo-Zhao's source term divides its *quadratic* part by ``eps``, the way
+      :func:`equilibrium` does. :func:`guo_force_terms` keeps the ``eps = 1``
+      form. That part is even in ``c_i`` and so carries no momentum, which is
+      why it is not what this function is fixing.
+
+    Args:
+        rho: Density, shape ``(...)``.
+        u: Resolved velocity, shape ``(3, ...)``.
+        c0: Linear drag coefficient, broadcastable to ``rho``.
+        c1: Quadratic drag coefficient, broadcastable to ``rho``.
+
+    Returns:
+        Body force per unit volume, shape ``(3, ...)``, opposing ``u``.
+    """
+    rho = np.asarray(rho, dtype=np.float64)
+    u = np.asarray(u, dtype=np.float64)
+    c0 = np.asarray(c0, dtype=np.float64)
+    c1 = np.asarray(c1, dtype=np.float64)
+    # Spelled out rather than via einsum so the accumulation order matches
+    # collide_kernel's ``ux*ux + uy*uy + uz*uz`` exactly; the two paths are held
+    # to each other by tests/test_filling_parity.py.
+    speed = np.sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2])
+    coefficient = 2.0 * rho * ((2.0 * c0 - 1.0) + c1 * speed)
+    drag: np.ndarray = -coefficient * u
+    return drag
 
 
 def capillary_entry_pressure(
@@ -1134,6 +1233,28 @@ if NUMBA_AVAILABLE:
                         ux = 0.0
                         uy = 0.0
                         uz = 0.0
+
+                    # --- the drag, as a force this time ---
+                    #
+                    # Dividing by ``denom`` above brakes the velocity the
+                    # equilibrium is built from; on its own it does nothing to
+                    # the momentum the populations carry, because over one
+                    # collision that changes by exactly the Guo source (see
+                    # guo_force_terms) and the source was gravity alone. A
+                    # filter cell therefore had no terminal velocity at all --
+                    # see porous_drag_force for the measurement and for why
+                    # this is where the persistent negative populations inside
+                    # ceramic filters came from.
+                    #
+                    # Off a filter ``c0`` is exactly 0.5 and ``c1`` exactly 0,
+                    # so ``drag`` is exactly 0.0 and fx/fy/fz are unchanged
+                    # bit-for-bit. Gas cells have u = 0 by the branch above and
+                    # fx = fy = fz = 0 already, so they are untouched too.
+                    speed_u = np.sqrt(ux * ux + uy * uy + uz * uz)
+                    drag = 2.0 * rho * ((2.0 * c0 - 1.0) + c1 * speed_u)
+                    fx -= drag * ux
+                    fy -= drag * uy
+                    fz -= drag * uz
 
                     rho_out[x, y, z] = rho
                     u_out[0, x, y, z] = ux

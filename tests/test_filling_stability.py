@@ -49,6 +49,7 @@ from core.filling_stage import (
 from core.part_manager import (
     PART_TYPE_CAST,
     PART_TYPE_CORE,
+    PART_TYPE_FILTER,
     PART_TYPE_GATE,
     PART_TYPE_RUNNER,
 )
@@ -109,6 +110,35 @@ def _walled_tower(nz=12, width=3):
         float(metal_centers[:, 0].mean()),
         float(metal_centers[:, 1].mean()),
     )
+    return mesh
+
+
+def _filtered_tower(nz=14, width=3, band=(5, 7)):
+    """
+    ``_walled_tower`` with a ceramic slab laid across the channel.
+
+    The band is three cells deep on purpose. Two cells trips the
+    "``the filter is 1.0 cells thick``" seal warning -- ``cells_along_flow``
+    divides the cell count by the front-face area, so a two-cell band on a
+    3x3 channel measures one cell along the flow and halfway bounce-back
+    closes it. Three cells is the marginal-but-usable resolution the stage
+    warns about rather than refuses, which is also what the real assembly's
+    filters resolve to.
+
+    Filter cells are flow restrictors, not metal: ``_obstacle_mask`` lets the
+    metal through them and ``_metal_mask`` leaves them out of the fill target,
+    exactly as on a real assembly. So the tower still reports 100 % when the
+    metal has crossed the slab and filled the chamber below.
+    """
+    mesh = _walled_tower(nz=nz, width=width)
+    index = np.rint(np.asarray(mesh.voxel_centers) / DX).astype(int)
+    in_band = (
+        (mesh.voxel_part_types == PART_TYPE_CAST)
+        & (index[:, 2] >= band[0])
+        & (index[:, 2] <= band[1])
+    )
+    assert int(in_band.sum()) == width * width * (band[1] - band[0] + 1)
+    mesh.voxel_part_types[in_band] = PART_TYPE_FILTER
     return mesh
 
 
@@ -2355,3 +2385,275 @@ class SmagorinskyConstantTests(unittest.TestCase):
 
         self.assertTrue(seen, "the stage never stepped the solver")
         self.assertTrue(all(cs == 0.23 for cs in seen), f"got {set(seen)}")
+
+
+class PorousDragForceTests(unittest.TestCase):
+    """
+    A filter cell has to have a terminal velocity.
+
+    The regression test for the round-3 failure. ``resolve_porous_velocity``
+    answers "given the provisional velocity, what does the Guo-Zhao drag leave?"
+    and the solver was using that answer only to build the equilibrium. The drag
+    never reached the Guo source, so it never reached the collision's momentum
+    budget -- over one collision the populations gain exactly the source force,
+    and the source was gravity alone.
+
+    A filter cell therefore accelerated for ever. Measured here before the fix,
+    on the block below: ``sum_i c_i f_i`` grew by ``gravity_lattice`` every step
+    without bound, reached ``u = 0.11`` by step 10,000 -- twice the Mach guard
+    the timestep was sized for -- and by step 50,000 held 1,080 negative
+    populations, five in every one of the block's 216 cells, which never healed.
+
+    That is what put the negatives inside the real assembly's ceramic filters:
+    60x more of them than the filter's 1.4 % of the mesh would predict, all in
+    interface cells, persistent across thousands of steps, aborting the fill on
+    the precursor guard at step 12,000. No floor on the reconstruction can fix
+    it -- with ``omega_minus ~ 5.6e-5`` the TRT barely relaxes the antisymmetric
+    part, so the gap between a braked equilibrium and an unbraked momentum is
+    frozen in and grows until ``|f_asym|`` passes ``f_sym``.
+
+    The fixture is deliberately *not* a free surface: no interface cells, no
+    reconstruction, no mass exchange. It is the collision on its own, so a
+    failure here cannot be blamed on the Koerner closure.
+    """
+
+    #: 10 ppi ceramic foam at the nominal porosity, on the real assembly's
+    #: 4.3 mm fill grid. Not arbitrary: this is the filter Test 2 ships.
+    DX_M = 0.0043
+    NU_SI = 0.006 / 7200.0
+    POROSITY = 0.85
+    PORE_D_M = 2.54e-3
+
+    def _block(self, n=6):
+        """A periodic block of filter, full of metal, with nothing else in it."""
+        from physics.filling import PorousZone, create_state
+        from physics.fluid_flow import (
+            ceramic_foam_permeability,
+            forchheimer_inverse_length,
+            lattice_units,
+            porous_drag_coefficients,
+        )
+
+        units = lattice_units(
+            self.DX_M, self.NU_SI, u_max_physical_m_s=float(np.sqrt(2 * 9.81 * 0.4))
+        )
+        k1 = ceramic_foam_permeability(self.POROSITY, self.PORE_D_M)
+        c0, c1 = porous_drag_coefficients(
+            self.POROSITY,
+            k1,
+            forchheimer_inverse_length(k1),
+            nu_lattice=units.nu_lattice,
+            dx_m=self.DX_M,
+        )
+        zone = PorousZone.inert((n, n, n))
+        zone.porosity[...] = np.float32(self.POROSITY)
+        zone.drag_c0[...] = np.float32(c0)
+        zone.drag_c1[...] = np.float32(c1)
+        state = create_state(
+            np.zeros((n, n, n), dtype=bool),
+            dx_m=self.DX_M,
+            dt_s=units.dt_s,
+            initial_fluid=np.ones((n, n, n), dtype=bool),
+            porous=zone,
+        )
+        return state, units, c0, c1
+
+    @staticmethod
+    def _terminal_u(gravity_lattice, c0, c1):
+        """
+        The velocity at which the drag force cancels gravity.
+
+        ``F_drag / rho = -2 [ (2 c0 - 1) + c1 |u| ] u``, so the balance is
+        ``g = 2 (2 c0 - 1) u + 2 c1 u^2``. Written out rather than measured
+        against the previous sample, because "it stopped changing" is also true
+        of a solve that has quietly stalled.
+        """
+        a = 2.0 * c1
+        b = 2.0 * (2.0 * c0 - 1.0)
+        return float((-b + np.sqrt(b * b + 4.0 * a * gravity_lattice)) / (2.0 * a))
+
+    def _momentum_z(self, state):
+        from physics.fluid_flow import LATTICE_VELOCITIES, Q
+
+        f = np.asarray(state.f, dtype=np.float64)
+        out = np.zeros(state.shape)
+        for i in range(Q):
+            if LATTICE_VELOCITIES[i, 2]:
+                out += LATTICE_VELOCITIES[i, 2] * f[i]
+        return out
+
+    def _settles(self, use_numba, steps):
+        from physics.filling import step as filling_step
+
+        state, units, c0, c1 = self._block()
+        for _ in range(steps):
+            filling_step(
+                state, units, track_free_surface=False, use_numba=use_numba
+            )
+        f = np.asarray(state.f, dtype=np.float64)
+        return (
+            float(self._momentum_z(state).mean()),
+            self._terminal_u(units.gravity_lattice, c0, c1),
+            int(np.count_nonzero(f < 0.0)),
+        )
+
+    def test_the_numba_path_settles_at_the_algebraic_terminal_velocity(self) -> None:
+        settled, expected, negatives = self._settles(True, 20_000)
+        self.assertEqual(negatives, 0, "a porous cell went negative")
+        # Downward, and within 1 % of the balance point. Before the fix this
+        # was -0.246 against the same -0.00219, and still falling.
+        self.assertAlmostEqual(settled, -expected, delta=0.01 * expected)
+
+    def test_the_numpy_path_settles_at_the_same_place(self) -> None:
+        """
+        Fewer steps because the NumPy reference is ~40x slower; it converges in
+        well under a thousand, so this is not a weaker assertion, only a
+        cheaper one. The point is that the fix landed in both paths -- a
+        one-sided edit here is the failure ``tests/test_filling_parity`` exists
+        to catch, and this is the second lock on it.
+        """
+        settled, expected, negatives = self._settles(False, 2_000)
+        self.assertEqual(negatives, 0, "a porous cell went negative")
+        self.assertAlmostEqual(settled, -expected, delta=0.01 * expected)
+
+    def test_the_drag_force_is_exactly_zero_off_a_filter(self) -> None:
+        """
+        The whole no-filter regression argument rests on this being *exactly*
+        zero rather than merely small: an inert zone is ``c0 = 0.5, c1 = 0``, so
+        adding this to the gravity force must not change a single bit of a
+        filterless run.
+        """
+        from physics.fluid_flow import porous_drag_force
+
+        rng = np.random.default_rng(11)
+        rho = 1.0 + 0.01 * rng.standard_normal((4, 4, 4))
+        u = 0.05 * rng.standard_normal((3, 4, 4, 4))
+        force = porous_drag_force(
+            rho, u, np.full((4, 4, 4), 0.5), np.zeros((4, 4, 4))
+        )
+        np.testing.assert_array_equal(np.abs(force), np.zeros((3, 4, 4, 4)))
+
+    def test_the_drag_force_always_opposes_the_flow(self) -> None:
+        """A drag term that can push is catastrophic and easy to sign-slip."""
+        from physics.fluid_flow import porous_drag_force
+
+        rng = np.random.default_rng(3)
+        rho = np.abs(rng.standard_normal((5, 5, 5))) + 0.5
+        u = rng.standard_normal((3, 5, 5, 5))
+        force = porous_drag_force(
+            rho, u, np.full((5, 5, 5), 0.71), np.full((5, 5, 5), 1.4)
+        )
+        along = np.einsum("i...,i...->...", force, u)
+        self.assertTrue(bool(np.all(along <= 0.0)), "the drag pushed the flow")
+
+
+class MetalThroughAFilterTests(unittest.TestCase):
+    """
+    End to end: metal has to cross a ceramic slab and keep filling.
+
+    :class:`PorousDragForceTests` pins the mechanism on a bare collision. This
+    pins the consequence on the real stage, which is where it was found. On the
+    same fixture before the fix, at these settings, the run went **non-finite at
+    step 3,800** and reported ``diverged`` with 36 % of the metal missing; the
+    two-cell variant of the same slab reached 18 of 18 filter cells negative and
+    ``|u|`` of 1.47 -- twenty-nine times the Mach guard -- before the precursor
+    guard stopped it.
+
+    One run, shared across the assertions: the stage is the expensive part and
+    every question below is about the same trajectory.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import physics.filling as pf
+
+        cls.samples: list[dict] = []
+        original = pf.step
+
+        def traced(state, units, **kwargs):
+            original(state, units, **kwargs)
+            if state.step_count % 100:
+                return state
+            f = np.asarray(state.f, dtype=np.float64)
+            wet = (state.flags == pf.FLAG_FLUID) | (
+                state.flags == pf.FLAG_INTERFACE
+            )
+            porous = np.asarray(state.porous.porosity) < 1.0
+            negative = np.any(f < 0.0, axis=0) & wet
+            wet_cells = int(np.count_nonzero(wet))
+            cls.samples.append(
+                {
+                    "step": state.step_count,
+                    "negative_porous": int(np.count_nonzero(negative & porous)),
+                    "negative_clear": int(np.count_nonzero(negative & ~porous)),
+                    "wet_porous": int(np.count_nonzero(porous & wet)),
+                    "wet_cells": wet_cells,
+                    "wet_mass": float(np.sum(state.mass[wet])) if wet_cells else 0.0,
+                    "finite": bool(
+                        np.all(np.isfinite(f)) and np.all(np.isfinite(state.mass))
+                    ),
+                    "max_u": float(np.abs(np.asarray(state.u)).max()),
+                }
+            )
+            return state
+
+        pf.step = traced
+        try:
+            cls.result = _run(mesh=_filtered_tower(), max_fill_time_s=1.0)
+        finally:
+            pf.step = original
+
+    def test_the_fill_completes_through_the_slab(self) -> None:
+        self.assertIsNotNone(self.result)
+        self.assertEqual(self.result.status, STATUS_COMPLETE, self.result.warnings)
+        self.assertEqual(self.result.filled_fraction, 1.0)
+
+    def test_the_slab_wets_all_the_way_through(self) -> None:
+        """
+        "Completed" is not the same as "the metal went through the filter" --
+        a slab the front merely closed around would also finish. Every porous
+        cell has to end up holding metal.
+        """
+        wet_porous = [s["wet_porous"] for s in self.samples]
+        self.assertTrue(self.samples, "the stage never stepped the solver")
+        self.assertEqual(max(wet_porous), 27, "the slab never fully wetted")
+
+    def test_no_porous_cell_ever_holds_a_negative_population(self) -> None:
+        offenders = [s for s in self.samples if s["negative_porous"]]
+        self.assertEqual(
+            [(s["step"], s["negative_porous"]) for s in offenders[:5]],
+            [],
+            "porous cells went negative",
+        )
+
+    def test_nothing_else_goes_negative_either(self) -> None:
+        """
+        Asserted separately so a future failure says *where*. The drag fix is
+        about filter cells; if clear cells start going negative that is a
+        different bug and should not be read as this one recurring.
+        """
+        offenders = [s for s in self.samples if s["negative_clear"]]
+        self.assertEqual(
+            [(s["step"], s["negative_clear"]) for s in offenders[:5]], []
+        )
+
+    def test_the_field_stays_finite_and_subsonic(self) -> None:
+        self.assertEqual([s["step"] for s in self.samples if not s["finite"]], [])
+        worst = max(s["max_u"] for s in self.samples)
+        # The Mach guard the timestep was sized for, with room for the front.
+        self.assertLess(worst, 0.05, f"|u| reached {worst}")
+
+    def test_wet_mass_stays_under_the_physical_ceiling_through_the_slab(self) -> None:
+        """
+        Mass conservation across the porous band. The free surface can hold at
+        most one cell's worth per wet cell, so a total above that is the
+        bookkeeping having come apart -- and the porosity branch of the mass
+        exchange, which weights pairs touching a filter by the eps average, is
+        exactly the place it could.
+        """
+        breaches = [
+            (s["step"], s["wet_mass"], s["wet_cells"])
+            for s in self.samples
+            if s["wet_mass"] > DIVERGENCE_MASS_FACTOR * max(s["wet_cells"], 1)
+        ]
+        self.assertEqual(breaches[:3], [])

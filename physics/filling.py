@@ -57,6 +57,7 @@ from physics.fluid_flow import (
     collide_trt,
     equilibrium,
     guo_force_terms,
+    porous_drag_force,
     resolve_porous_velocity,
     smagorinsky_relaxation,
 )
@@ -1857,6 +1858,18 @@ def step(
     rho, u = macroscopic(state, force)
     state.rho = rho.astype(np.float32)
     state.u = u.astype(np.float32)
+
+    # The Guo-Zhao drag, added to the body force so the collision's momentum
+    # budget carries it. ``macroscopic`` has already braked ``u`` with it, but
+    # the equilibrium is not where a force acts: without this term the
+    # populations inside a filter accelerate under gravity for ever and the
+    # frozen antisymmetric non-equilibrium drives them negative. Exactly zero
+    # off a filter, so a no-filter run is bit-identical. See
+    # physics.fluid_flow.porous_drag_force. Mirrored in collide_kernel.
+    if not state.porous.is_inert:
+        force = force + porous_drag_force(
+            rho, u, state.porous.drag_c0_f64, state.porous.drag_c1_f64
+        )
 
     porosity = state.porous.porosity_f64
     feq = equilibrium(rho, u, porosity=porosity)
