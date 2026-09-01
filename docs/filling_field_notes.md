@@ -290,10 +290,18 @@ metallostatic pressure.
 - *Run status is `time_capped`* — the pour was still advancing when
   `max_fill_time_s` ran out. Give it more headroom and rerun.
 - *Fill stalls at a low percentage* — check the choke resolution first.
-  Report it with the fill grid size, not the mesh size. The choke warning now
+  Report it with the fill grid size, not the mesh size. The choke warning
   measures thickness with a distance transform rather than cross-sectional
-  area, so it correctly flags a wide, thin gate — the geometry that actually
-  seals — which the first version of this check missed.
+  area, so it can flag a wide, thin gate — the geometry that actually seals —
+  which the first version of this check missed. It is now **per part and per
+  cell**: the median local thickness over each of the sprue, runner, filter
+  and gate, on the grid that was solved rather than the mesh it came from.
+  Taking one maximum per part, as the second version did, let a single fat
+  cell at the gate's root speak for the whole plate: on the `Test 2` assembly
+  at 8.6 mm the gates are 11 × 13 × 2 — sealed — and the check reported 3.00
+  cells and said nothing. Below 2 cells is a hard warning naming the part;
+  exactly 3 is a softer note, because 3 is the floor at which this solver has
+  ever produced a usable fill.
 - *"no pour location has been selected"* — the gate working; set one.
 - *Filling absent from the run header* — the analysis was not enabled.
 - *Every gas pocket reads as entrapped* — the vent mask is empty. The stage

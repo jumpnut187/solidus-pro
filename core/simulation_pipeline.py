@@ -602,6 +602,11 @@ def run_pipeline(
             "filled_fraction": filling_result.filled_fraction,
             "fill_seconds": filling_result.fill_seconds,
             "choke_thickness_cells": filling_result.choke_thickness_cells,
+            # Which body is the narrowest, not just how narrow. One scalar
+            # for "the gating system" cannot tell an operator whether to
+            # re-mesh the gate or the sprue.
+            "choke_thickness_by_part": dict(filling_result.choke_thickness_by_part),
+            "narrowest_choke_part": filling_result.narrowest_choke_part,
             "warnings": tuple(filling_result.warnings),
         }
 

@@ -5463,7 +5463,8 @@ class SolidificationEngine:
         Keys: ``status`` (complete/time_capped/stalled/diverged),
         ``trustworthy``, ``diverged_at_step``, ``filled_voxel_count``,
         ``misrun_voxel_count``, ``filled_fraction``, ``fill_seconds``,
-        ``choke_thickness_cells`` and ``warnings``.
+        ``choke_thickness_cells``, ``choke_thickness_by_part``,
+        ``narrowest_choke_part`` and ``warnings``.
         """
         return getattr(self, "_filling_summary", None)
 

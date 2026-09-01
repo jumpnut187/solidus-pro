@@ -1009,6 +1009,168 @@ class ChokeResolutionTests(unittest.TestCase):
         )
 
 
+def _plate_welded_to_a_block():
+    """
+    The masking case, in miniature.
+
+    A wide, thin gate plate -- 11 x 14 cells across and **two** thick, the
+    shape the ``Test 2`` gates take on their solved 8.6 mm grid -- fed by a
+    fat runner block, with the gate's own root swelling into a lump where the
+    two meet. That lump is the whole problem: it belongs to the gate, so a
+    per-part maximum reads the lump and calls the plate 3.5 cells thick.
+    """
+    dense = np.full((20, 18, 14), EMPTY_CELL, dtype=np.int8)
+    dense[1:8, 5:12, 3:10] = PART_TYPE_RUNNER      # 7 x 7 x 7 junction block
+    dense[8:19, 2:16, 6:8] = PART_TYPE_GATE        # 11 x 14 x 2 plate
+    dense[8:11, 7:10, 4:10] = PART_TYPE_GATE       # the fat root, 3 x 3 x 6
+    return dense
+
+
+def _generous_channel():
+    """A runner and gate both five cells across -- resolved, and silent."""
+    dense = np.full((16, 12, 12), EMPTY_CELL, dtype=np.int8)
+    dense[1:8, 3:8, 3:8] = PART_TYPE_RUNNER
+    dense[8:15, 3:8, 3:8] = PART_TYPE_GATE
+    return dense
+
+
+class ChokeMaskingTests(unittest.TestCase):
+    """
+    The regression test for a check that measured the right quantity and then
+    took the wrong end of its distribution.
+
+    On ``Test 2`` at its solved 8.6 mm grid the gates voxelize to 11 x 13 x 2
+    plates -- sealed -- and the stage reported 3.00 cells and said nothing,
+    because one fat cell where each gate met the runner set the maximum for
+    the whole plate. 85 % of those gate cells had a single cell of wall
+    clearance.
+    """
+
+    def setUp(self) -> None:
+        from core.filling_stage import (
+            measure_choke_thickness_by_part,
+            narrowest_choke_part_code,
+        )
+
+        self.dense = _plate_welded_to_a_block()
+        self.by_part = measure_choke_thickness_by_part(self.dense)
+        self.narrowest = narrowest_choke_part_code(self.by_part)
+
+    def test_the_block_really_does_mask_the_plate(self) -> None:
+        """
+        Without this the rest of the class could pass on a fixture that had
+        no fat junction to be fooled by. The old statistic was a per-part
+        maximum over the distance transform; compute it here and watch it
+        wave the plate through.
+        """
+        from scipy import ndimage
+
+        flow = np.isin(self.dense, (PART_TYPE_RUNNER, PART_TYPE_GATE))
+        distance = ndimage.distance_transform_edt(np.pad(flow, 1))[1:-1, 1:-1, 1:-1]
+        old_gate_thickness = float(distance[self.dense == PART_TYPE_GATE].max()) * 2 - 1
+        self.assertGreaterEqual(old_gate_thickness, 3.0)
+
+    def test_the_robust_measure_reports_the_plate(self) -> None:
+        """
+        Two cells across reads as 1.0: ``distance_transform_edt`` measures the
+        gap to the wall, not the metal, so the measure is ``2*d - 1`` -- exact
+        for odd thicknesses, one cell conservative for even ones. What matters
+        is that it is the plate being reported and not the block.
+        """
+        self.assertEqual(self.by_part[PART_TYPE_GATE], 1.0)
+        self.assertLessEqual(self.by_part[PART_TYPE_GATE], MIN_CHOKE_THICKNESS_CELLS)
+
+    def test_the_fat_junction_is_not_reported_as_thin(self) -> None:
+        """The 7-cell block is 7 cells; robustness must cut only one way."""
+        self.assertGreaterEqual(self.by_part[PART_TYPE_RUNNER], 5.0)
+
+    def test_the_narrowest_part_is_named(self) -> None:
+        self.assertEqual(self.narrowest, PART_TYPE_GATE)
+
+    def test_the_scalar_summary_is_the_thinnest_part(self) -> None:
+        self.assertEqual(
+            measure_choke_thickness_cells(self.dense),
+            min(self.by_part.values()),
+        )
+
+    def test_a_generous_channel_measures_five_cells(self) -> None:
+        from core.filling_stage import measure_choke_thickness_by_part
+
+        by_part = measure_choke_thickness_by_part(_generous_channel())
+        for code, thickness in by_part.items():
+            with self.subTest(part=code):
+                self.assertGreaterEqual(thickness, 5.0)
+
+
+class ChokeWarningTests(unittest.TestCase):
+    """
+    Whether the user hears about it, through the channel the Foseco filter
+    warning already uses.
+    """
+
+    def _run_dense(self, dense):
+        """Drive the real stage over an arbitrary dense part-type grid."""
+        filled = dense != EMPTY_CELL
+        centers = np.asarray(np.nonzero(filled)).T.astype(np.float64) * DX
+        mesh = _FakeMesh(centers, dense[filled], DX)
+        mesh._top_z = float(centers[:, 2].max())
+        highest = centers[int(np.argmax(centers[:, 2]))]
+        mesh._pour_xy = (float(highest[0]), float(highest[1]))
+        return _run(mesh=mesh, max_fill_time_s=0.02)
+
+    def test_a_two_cell_gate_warns_and_names_the_part(self) -> None:
+        result = self._run_dense(_plate_welded_to_a_block())
+        self.assertIsNotNone(result)
+        self.assertEqual(result.narrowest_choke_part, "gate")
+        self.assertEqual(result.choke_thickness_by_part["gate"], 1.0)
+        hard = [w for w in result.warnings if "cells thick" in w]
+        self.assertTrue(hard, f"no choke warning raised: {result.warnings}")
+        self.assertIn("gate", hard[0])
+        self.assertIn("cannot be trusted", hard[0])
+
+    def test_a_five_cell_channel_says_nothing(self) -> None:
+        """
+        Neither the hard warning nor the marginal note. ``Full_Gating_Test``
+        at its shipped defaults measures 5, 7 and 5 cells across its sprue,
+        runner and gate, and a warning there would be noise.
+        """
+        result = self._run_dense(_generous_channel())
+        self.assertIsNotNone(result)
+        self.assertGreaterEqual(result.choke_thickness_cells, 5.0)
+        self.assertFalse(
+            [w for w in result.warnings if "cells thick" in w or "cells across" in w],
+            f"warned about a five-cell channel: {result.warnings}",
+        )
+
+    def test_the_choke_area_is_the_grid_that_was_solved(self) -> None:
+        """
+        The stage used to report the *mesh* grid's choke area next to results
+        produced on the coarsened one. On ``Test 2`` those are 2.98 and
+        7.46 cm^2 -- not a rounding difference, and the Foseco filter ratio is
+        checked against this number.
+
+        A 5 x 5 column, so the two grids genuinely disagree: 25 fine cells
+        against 9 coarse ones of four times the area, 36/25 rather than 1.
+        ``_Params.filling`` is one shared instance across the whole module, so
+        the coarsening is put back by hand -- leaving it set silently halves
+        every later fixture's resolution.
+        """
+        from tests.test_filling_stage import _Params
+
+        mesh = _tower(nx=5, ny=5, nz=8, part_type=PART_TYPE_GATE)
+        previous = _Params.filling.fill_grid_coarsening
+        try:
+            result = _run(mesh=mesh, max_fill_time_s=0.02, fill_grid_coarsening=2)
+        finally:
+            _Params.filling.fill_grid_coarsening = previous
+        self.assertIsNotNone(result)
+        self.assertEqual(result.coarsening, 2)
+        self.assertGreater(result.choke_area_cm2, result.choke_area_fine_cm2)
+        self.assertAlmostEqual(
+            result.choke_area_cm2 / result.choke_area_fine_cm2, 36.0 / 25.0, places=6
+        )
+
+
 class FrameCaptureTests(unittest.TestCase):
     """
     The solver overwrites its whole state every step, so without capture the

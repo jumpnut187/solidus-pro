@@ -134,6 +134,39 @@ STATUS_DIVERGED = "diverged"
 #: the geometry that seals -- while looking like it had checked something.
 MIN_CHOKE_THICKNESS_CELLS = 2.0
 
+#: Thickness at which a channel is resolved well enough to stop apologising for.
+#:
+#: Three is the observed floor, not a round number: ``Test_Model/Filling_Test``
+#: on a 0.20 in fill grid puts three cells across its 0.5 in gate, and that run
+#: time-caps at 57 % of cells with two of 154 gate cells ever going FLUID (see
+#: ``docs/filling_field_notes.md``). Above the hard minimum, below this, the
+#: fill is marginal rather than wrong -- worth saying, in a softer voice.
+MARGINAL_CHOKE_THICKNESS_CELLS = 3.0
+
+#: Parts the metal has to flow *through* on its way to the casting.
+#:
+#: The filter is included, unlike in :func:`_min_flow_slice_cells`. Thickness is
+#: measured on the connected channel, and a filter sitting between the runner
+#: and the gate is part of that channel -- leaving it out would put a wall
+#: across the flow path and report the runner and gate as pinched at a junction
+#: that is actually open. It is also a body worth measuring in its own right: a
+#: filter thinner than the cells that carry the metal across it is not a
+#: restriction the solver can represent.
+_METAL_PATH_CODES: Tuple[int, ...] = (
+    PART_TYPE_SPRUE,
+    PART_TYPE_RUNNER,
+    PART_TYPE_FILTER,
+    PART_TYPE_GATE,
+)
+
+#: How the metal-path parts are named in warnings, in flow order.
+_METAL_PATH_LABELS: Dict[int, str] = {
+    PART_TYPE_SPRUE: "sprue",
+    PART_TYPE_RUNNER: "runner",
+    PART_TYPE_FILTER: "filter",
+    PART_TYPE_GATE: "gate",
+}
+
 #: Largest Smagorinsky constant the stage will accept from settings.
 #:
 #: The eddy viscosity goes as Cs^2, so the tolerated band is not a matter of
@@ -782,6 +815,14 @@ def measure_choke_area_cm2(dense_types: np.ndarray, dx_m: float) -> float:
     sprue, runner and gate. The pour cup is excluded: it is a reservoir, not a
     metering section, and its cross-section is irrelevant to the choke.
 
+    **Measure this on the grid that is actually solved.** A cell count times a
+    cell area is a property of a particular lattice, not of the CAD, and the
+    two disagree by more than rounding: on the ``Test 2`` assembly the fine
+    mesh gives 2.98 cm^2 and the coarsened grid the solver runs on gives
+    7.46 cm^2. The stage used to report the fine-grid figure next to results
+    produced on the coarse one, which invited a filter-ratio check against a
+    choke the fill never had. ``FillingResult`` now carries both, labelled.
+
     Returns:
         Choke area in cm^2, or 0.0 when no gating metal is present.
     """
@@ -922,9 +963,80 @@ def _min_flow_slice_cells(dense_types: np.ndarray) -> int:
     return int(best)
 
 
-def measure_choke_thickness_cells(dense_types: np.ndarray) -> float:
+def _local_thickness_cells(region: np.ndarray) -> np.ndarray:
     """
-    Thickness of the thinnest gating section, in fill-grid cells.
+    Channel thickness at every cell of a boolean region, in cells.
+
+    A cell's thickness is the diameter of the **largest inscribed sphere that
+    covers it**, not the distance from it to the nearest wall. The difference
+    is the whole point. A distance transform reports 1.0 for every surface
+    cell of every body, thick or thin, so any statistic taken over those
+    numbers -- median, percentile, anything but the maximum -- says 1.0 about
+    a solid block. Only the maximum carries thickness information, and the
+    maximum is exactly what a fat junction hijacks.
+
+    Computed the standard way (Hildebrand & Ruegsegger): take the distance
+    transform ``d``, then for each radius ``r``, every cell within ``r`` of a
+    cell whose ``d >= r`` is covered by a sphere of that radius. Sweeping
+    ``r`` downward in half-cell steps and keeping the largest that reaches
+    each cell gives the map. Rounding the radii down to a half cell is
+    deliberate: it can only under-report thickness, and under-reporting errs
+    toward warning.
+
+    Thickness is ``2*r - 1``, not ``2*r``, for the reason the scalar measure
+    has always used: ``distance_transform_edt`` measures to the nearest
+    *background* cell, so a cell in a one-thick section reports 1.0 -- the gap
+    to the wall, not the metal. Exact for odd thicknesses, one cell
+    conservative for even ones.
+
+    Args:
+        region: Boolean mask of the connected material to measure.
+
+    Returns:
+        Float array shaped like ``region``: thickness in cells inside the
+        region, 0.0 outside it.
+    """
+    from scipy import ndimage
+
+    region = np.asarray(region, dtype=bool)
+    out = np.zeros(region.shape, dtype=np.float64)
+    if not np.any(region):
+        return out
+
+    # Cropped to the region's own bounding box, with a cell of margin. The
+    # sweep below runs one distance transform per radius, so the cost is worth
+    # bounding; nothing outside the box can change a result inside it.
+    occupied = np.nonzero(region)
+    box = tuple(
+        slice(int(axis.min()), int(axis.max()) + 1) for axis in occupied
+    )
+    # Padded with one cell of background. Without it a channel that reaches
+    # the edge of the grid has nothing to measure to on that side, and a
+    # domain entirely full of metal returns the array diagonal rather than a
+    # thickness. The pad is physically right as well as defensive: the lattice
+    # ends in obstacle, not in more metal.
+    sub = np.pad(region[box], 1, mode="constant", constant_values=False)
+
+    distance = ndimage.distance_transform_edt(sub)
+    largest = np.zeros_like(distance)
+    radius = np.floor(float(distance.max()) * 2.0) / 2.0
+    while radius >= 0.5:
+        seeds = distance >= radius
+        if np.any(seeds):
+            # Distance from every cell to the nearest sphere centre of this
+            # radius; a cell within `radius` of one is inside that sphere.
+            reach = ndimage.distance_transform_edt(~seeds)
+            np.maximum(largest, np.where(reach <= radius, radius, 0.0), out=largest)
+        radius -= 0.5
+
+    inner = largest[(slice(1, -1),) * largest.ndim]
+    out[box] = np.where(region[box], 2.0 * inner - 1.0, 0.0)
+    return out
+
+
+def measure_choke_thickness_by_part(dense_types: np.ndarray) -> Dict[int, float]:
+    """
+    Robust channel thickness of each metal-path part, in fill-grid cells.
 
     This is the number that decides whether metal can get through: halfway
     bounce-back puts the walls at +-0.5 cells, so a channel one cell thick has
@@ -937,59 +1049,92 @@ def measure_choke_thickness_cells(dense_types: np.ndarray) -> float:
     healthy-looking 11-cell cross-section while being one cell thick. Area
     passes; the metal does not.
 
-    Measured as the largest inscribed sphere along the flow path: the
-    Euclidean distance transform gives each cell's distance to the nearest
-    non-flow cell, so twice the maximum within a slice is the local channel
-    thickness, and the minimum of that over every slice is the narrowest
-    point. Taking a per-slice maximum first is what makes this robust -- a
-    plain minimum over the distance transform would return the half-cell at
-    every corner of every part and always report the same answer.
+    The version after that measured thickness, but as **one maximum per
+    part**, and a maximum is the wrong end of the distribution. Measured on
+    the ``Test 2`` assembly at its solved 8.6 mm grid: the gates voxelize to
+    11 x 13 x 2 plates -- two cells thick, sealed -- yet the check reported
+    3.00 cells and stayed silent, because a single fat cell where each gate
+    meets the runner set the maximum for the entire plate. The thin plate is
+    the part the metal has to cross; the fillet at its root is not.
+
+    So the statistic is the **median** thickness over the part's own cells,
+    taken from :func:`_local_thickness_cells`. Justified against four measured
+    grids rather than chosen for elegance:
+
+    ======================================  =====  ======  ======  ====
+    grid                                    sprue  runner  filter  gate
+    ======================================  =====  ======  ======  ====
+    ``Test 2``, 8.6 mm (the failing case)     5      4       7      1
+    ``Test 2``, 4.3 mm                       11      7      15      3
+    ``Full_Gating_Test``, 0.20 in             5      7       -      5
+    ``Filling_Test``, 0.20 in                 7      7       -      3
+    ======================================  =====  ======  ======  ====
+
+    The failing gate reads 1 and warns; the same gate on the finer grid reads
+    3 and does not; ``Full_Gating_Test`` is silent at 5 and up;
+    ``Filling_Test`` reads the 3 its field notes record for that gate.
+
+    The *minimum* would fail two of the four. ``Full_Gating_Test``'s sprue has
+    one 1-cell corner on an otherwise 5-cell channel, and ``Test 2`` at 4.3 mm
+    has the same in its runner and filter -- three false alarms on grids that
+    resolve their gating perfectly well. The 25th percentile agrees with the
+    median on all four; it is simply nearer that noise floor for no gain.
+
+    What the median gives up, honestly: a short pinch in an otherwise
+    generous channel is voted down by the rest of the part. Persistent
+    thinness is what it detects, which is the failure mode that stops a fill;
+    a one-cell nick in a runner is not.
+
+    Returns:
+        ``{part code: thickness in cells}`` for every metal-path part present.
+        Empty when the grid holds no gating metal.
+    """
+    dense_types = np.asarray(dense_types)
+    # One map over the whole connected path, so a gate cell touching the
+    # runner is interior rather than boundary -- measuring each part in
+    # isolation would report every junction as a constriction.
+    thickness = _local_thickness_cells(np.isin(dense_types, _METAL_PATH_CODES))
+
+    by_part: Dict[int, float] = {}
+    for code in _METAL_PATH_CODES:
+        part = dense_types == code
+        if not np.any(part):
+            continue
+        by_part[code] = max(0.0, float(np.median(thickness[part])))
+    return by_part
+
+
+def narrowest_choke_part_code(by_part: Dict[int, float]) -> Optional[int]:
+    """
+    The metal-path part code with the smallest robust thickness.
+
+    Ties break in flow order (sprue first), so the message names the part
+    furthest upstream -- the one the metal meets first.
+    """
+    if not by_part:
+        return None
+    return min(
+        (code for code in _METAL_PATH_CODES if code in by_part),
+        key=lambda code: by_part[code],
+    )
+
+
+def measure_choke_thickness_cells(dense_types: np.ndarray) -> float:
+    """
+    Thickness of the thinnest gating section, in fill-grid cells.
+
+    The scalar summary of :func:`measure_choke_thickness_by_part` -- the
+    smallest of the per-part figures. See that function for what is measured
+    and why the median rather than the maximum.
 
     Returns:
         Thickness in cells at the narrowest section, or 0.0 when there is no
         gating metal.
     """
-    from scipy import ndimage
-
-    dense_types = np.asarray(dense_types)
-    members = (PART_TYPE_SPRUE, PART_TYPE_RUNNER, PART_TYPE_GATE)
-    flow = np.isin(dense_types, members)
-    if not np.any(flow):
+    by_part = measure_choke_thickness_by_part(dense_types)
+    if not by_part:
         return 0.0
-
-    # One transform over the whole flow path, so a gate cell touching the
-    # runner is interior rather than boundary -- measuring each part in
-    # isolation would report every junction as a constriction.
-    #
-    # Padded with one cell of background first. Without it a flow path that
-    # reaches the edge of the grid has nothing to measure to on that side, and
-    # a domain entirely full of gating metal returns the array diagonal rather
-    # than a thickness. The pad is physically right as well as defensive: the
-    # lattice ends in obstacle, not in more metal.
-    distance = ndimage.distance_transform_edt(
-        np.pad(flow, 1, mode="constant", constant_values=False)
-    )[1:-1, 1:-1, 1:-1]
-
-    thinnest = np.inf
-    for code in members:
-        part = dense_types == code
-        if not np.any(part):
-            continue
-        # The largest inscribed sphere anywhere in this part measures its
-        # thickest point across its *thinnest* dimension -- for a plate that
-        # is half the plate thickness however wide or long it is.
-        #
-        # 2*d - 1, not 2*d: distance_transform_edt measures to the nearest
-        # *background* cell, so a cell in a one-thick section reports 1.0 --
-        # the gap to the wall, not the metal. Doubling that would call a
-        # sealed one-cell channel two cells thick, which is precisely the
-        # answer this function exists to stop giving. Exact for odd
-        # thicknesses, one cell conservative for even ones, which errs toward
-        # warning.
-        thickness = float(distance[part].max()) * 2.0 - 1.0
-        thinnest = min(thinnest, thickness)
-
-    return 0.0 if not np.isfinite(thinnest) else max(0.0, float(thinnest))
+    return max(0.0, float(min(by_part.values())))
 
 
 # ---------------------------------------------------------------------------
@@ -1036,7 +1181,10 @@ class FillingResult:
         inlet_voxel_count: Voxels the pour location resolved to.
         filled_voxel_count: Metal voxels the fill reached.
         misrun_voxel_count: Metal voxels it did not.
-        choke_area_cm2: Narrowest gating cross-section, measured.
+        choke_area_cm2: Narrowest gating cross-section, measured **on the grid
+            the solver ran** -- the coarsened one, when
+            ``fill_grid_coarsening`` is above 1. That is the choke the fill
+            actually had.
         filter_zones: One entry per ceramic filter found.
         steps: Lattice steps taken.
         fill_seconds: Physical time simulated.
@@ -1074,8 +1222,19 @@ class FillingResult:
             All three used to surface identically as a misrun count.
         diverged_at_step: Lattice step at which divergence was detected, or 0.
         choke_thickness_cells: Thickness of the thinnest gating section, in
-            fill-grid cells. Below ``MIN_CHOKE_THICKNESS_CELLS`` the channel
-            has no interior and halfway bounce-back seals it shut.
+            fill-grid cells. At or below ``MIN_CHOKE_THICKNESS_CELLS`` the
+            channel has no interior and halfway bounce-back seals it shut.
+        choke_thickness_by_part: ``{"sprue"|"runner"|"filter"|"gate":
+            thickness in cells}`` for every metal-path part present, so a
+            reader can see *which* body is under-resolved rather than only
+            that something is.
+        narrowest_choke_part: Name of the thinnest of them, or ``""`` when the
+            grid holds no gating metal.
+        choke_area_fine_cm2: The same cross-section measured on the *mesh*
+            grid, before coarsening. Reported alongside ``choke_area_cm2``
+            rather than instead of it, because the two answer different
+            questions -- what the geometry has, and what the solver saw. They
+            are not close: 2.98 against 7.46 cm^2 on the ``Test 2`` assembly.
     """
 
     fill_time_s: np.ndarray
@@ -1099,6 +1258,9 @@ class FillingResult:
     status: str = STATUS_COMPLETE
     diverged_at_step: int = 0
     choke_thickness_cells: float = 0.0
+    choke_thickness_by_part: Dict[str, float] = field(default_factory=dict)
+    narrowest_choke_part: str = ""
+    choke_area_fine_cm2: float = 0.0
     frames: Tuple[FillFrame, ...] = ()
 
     @property
@@ -1693,17 +1855,59 @@ def run_filling_stage(
     # An under-resolved choke is not a small inaccuracy -- it is the
     # difference between a fill and a sealed channel -- and it is measured
     # here rather than left for the user to infer from a misrun count.
-    choke_thickness_cells = measure_choke_thickness_cells(solve_types)
-    if 0.0 < choke_thickness_cells < MIN_CHOKE_THICKNESS_CELLS:
-        warnings.append(
-            f"the thinnest gating section is only "
-            f"{choke_thickness_cells:.1f} cells thick on a "
-            f"{dx_m * 1000:.1f} mm fill grid ("
-            f"{choke_thickness_cells * dx_m * 39.3701:.2f} in) -- below the "
-            f"{MIN_CHOKE_THICKNESS_CELLS:.0f} cells needed for the channel to "
-            f"have any interior. Halfway bounce-back will seal it and the fill "
-            f"will stall short. Reduce voxel size or fill_grid_coarsening."
+    #
+    # Measured on solve_types: the grid the solver runs on, not the mesh it
+    # was coarsened from. A gate that is four cells across the mesh is two
+    # across a coarsening of 2, and it is the two that seals.
+    #
+    # Reported per part, and warned about per part. One number for "the gating
+    # system" cannot say which body the metal will not cross, and the answer
+    # is usually the gate while the sprue and runner are fine.
+    choke_by_part = measure_choke_thickness_by_part(solve_types)
+    choke_thickness_cells = (
+        min(choke_by_part.values()) if choke_by_part else 0.0
+    )
+    narrowest_code = narrowest_choke_part_code(choke_by_part)
+    if choke_by_part:
+        emit(
+            "Filling: channel thickness on the "
+            f"{dx_m * 1000:.1f} mm fill grid -- "
+            + ", ".join(
+                f"{_METAL_PATH_LABELS[code]} {choke_by_part[code]:.1f} cells"
+                for code in _METAL_PATH_CODES
+                if code in choke_by_part
+            )
+            + (
+                f" (narrowest: {_METAL_PATH_LABELS[narrowest_code]})"
+                if narrowest_code is not None
+                else ""
+            )
         )
+    for code in _METAL_PATH_CODES:
+        thickness = choke_by_part.get(code)
+        if thickness is None or thickness <= 0.0:
+            continue
+        label = _METAL_PATH_LABELS[code]
+        inches = thickness * dx_m * 39.3701
+        if thickness <= MIN_CHOKE_THICKNESS_CELLS:
+            warnings.append(
+                f"the {label} is {thickness:.1f} cells thick on a "
+                f"{dx_m * 1000:.1f} mm fill grid ({inches:.2f} in) -- at or "
+                f"below the {MIN_CHOKE_THICKNESS_CELLS:.0f} cells a channel "
+                f"needs before it has any interior. Halfway bounce-back seals "
+                f"it: this grid cannot resolve the {label}, and the fill "
+                f"through it cannot be trusted whatever this run reports. "
+                f"Reduce voxel size or fill_grid_coarsening."
+            )
+        elif thickness <= MARGINAL_CHOKE_THICKNESS_CELLS:
+            warnings.append(
+                f"the {label} resolves to {thickness:.1f} cells across on a "
+                f"{dx_m * 1000:.1f} mm fill grid ({inches:.2f} in), which is "
+                f"the floor at which this solver has ever produced a usable "
+                f"fill -- Test_Model/Filling_Test, whose gate is also three "
+                f"cells, time-caps at 57% of cells. Treat the flow through "
+                f"the {label} as marginal, not as a result."
+            )
 
     # F3: air entrapment. The vent mask is reassembled at every periodic
     # check (see below) because its "domain boundary gas" component is a
@@ -2171,7 +2375,7 @@ def run_filling_stage(
         inlet_voxel_count=int(inlet.shape[0]),
         filled_voxel_count=filled_count,
         misrun_voxel_count=misrun_count,
-        choke_area_cm2=measure_choke_area_cm2(fine_types, mapping.dx_m),
+        choke_area_cm2=measure_choke_area_cm2(solve_types, dx_m),
         filter_zones=filter_zones,
         steps=taken,
         fill_seconds=taken * units.dt_s,
@@ -2187,6 +2391,16 @@ def run_filling_stage(
         status=status,
         diverged_at_step=diverged_at_step,
         choke_thickness_cells=choke_thickness_cells,
+        choke_thickness_by_part={
+            _METAL_PATH_LABELS[code]: value
+            for code, value in choke_by_part.items()
+        },
+        narrowest_choke_part=(
+            _METAL_PATH_LABELS[narrowest_code]
+            if narrowest_code is not None
+            else ""
+        ),
+        choke_area_fine_cm2=measure_choke_area_cm2(fine_types, mapping.dx_m),
         frames=tuple(frames),
     )
 
