@@ -1220,8 +1220,23 @@ if NUMBA_AVAILABLE:
                             f_out[ib, x, y, z] = val
 
                     # --- Koerner mass exchange ---
-                    denom = rho[x, y, z] * porosity[x, y, z]
+                    #
+                    # Pair weighting, in exact parity with
+                    # physics.filling.advance_mass -- read its docstring for
+                    # why. Koerner's Table 1 averages the fill fraction over
+                    # interface-interface pairs only; a pair involving a FLUID
+                    # cell exchanges at weight 1, which makes a FLUID cell's
+                    # mass change equal its own density change and so stops it
+                    # drifting. Pairs touching a filter keep the eps average
+                    # because a full porous cell holds rho * porosity, not rho.
+                    por_here = porosity[x, y, z]
+                    denom = rho[x, y, z] * por_here
                     eps_here = mass_in[x, y, z] / denom if denom > 0.0 else 0.0
+                    eps_here_c = eps_here
+                    if eps_here_c < 0.0:
+                        eps_here_c = 0.0
+                    elif eps_here_c > 1.0:
+                        eps_here_c = 1.0
                     delta = 0.0
                     for i in range(1, 19):
                         sx = (x + Ci[i, 0]) % nx
@@ -1230,12 +1245,28 @@ if NUMBA_AVAILABLE:
                         nflag = flags[sx, sy, sz]
                         if nflag != _FLAG_INTERFACE and nflag != _FLAG_FLUID:
                             continue
-                        nden = rho[sx, sy, sz] * porosity[sx, sy, sz]
-                        eps_nb = mass_in[sx, sy, sz] / nden if nden > 0.0 else 0.0
+                        por_nb = porosity[sx, sy, sz]
+                        if por_here < 1.0 or por_nb < 1.0:
+                            nden = rho[sx, sy, sz] * por_nb
+                            eps_nb = (
+                                mass_in[sx, sy, sz] / nden if nden > 0.0 else 0.0
+                            )
+                            weight = 0.5 * (eps_here + eps_nb)
+                        elif flag == _FLAG_FLUID or nflag == _FLAG_FLUID:
+                            weight = 1.0
+                        else:
+                            nden = rho[sx, sy, sz] * por_nb
+                            eps_nb = (
+                                mass_in[sx, sy, sz] / nden if nden > 0.0 else 0.0
+                            )
+                            if eps_nb < 0.0:
+                                eps_nb = 0.0
+                            elif eps_nb > 1.0:
+                                eps_nb = 1.0
+                            weight = 0.5 * (eps_here_c + eps_nb)
                         ib = OPP[i]
                         delta += (
-                            (f_out[ib, x, y, z] - post[i, x, y, z])
-                            * 0.5 * (eps_here + eps_nb)
+                            (f_out[ib, x, y, z] - post[i, x, y, z]) * weight
                         )
                     mass_out[x, y, z] = mass_in[x, y, z] + delta
 

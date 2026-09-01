@@ -483,7 +483,7 @@ def advance_mass(
     """
     Koerner mass exchange over one step.
 
-    ``dm_i = (f_ibar(x + c_i, t) - f_i(x, t)) (eps(x) + eps(x + c_i)) / 2``
+    ``dm_i = (f_ibar(x + c_i, t) - f_i(x, t)) * w_i``
 
     Both populations in that difference are **post-collision, pre-streaming**
     values: ``f_ibar`` at the neighbour is the mass heading *into* x, and
@@ -497,8 +497,36 @@ def advance_mass(
     while everything else about the run looks healthy.
 
     Exchange happens only between cells that both hold metal (FLUID or
-    INTERFACE). A FLUID cell surrounded by fluid nets zero, so only the front
-    actually moves mass.
+    INTERFACE). The pair weight ``w_i`` follows Koerner et al. (2005), Table 1:
+    the fill-fraction average applies to interface-interface pairs *only*, and
+    any pair involving a FLUID cell exchanges at weight 1.
+
+    That distinction is load-bearing. At weight 1 the sum over directions
+    telescopes -- ``sum_i f_ibar(x + c_i)`` is everything streaming in and
+    ``sum_i f_i(x)`` is everything streaming out -- so ``dm`` is exactly the
+    cell's own density change over the step. A FLUID cell's mass therefore
+    tracks its density identically and cannot drift. Wall bounce-back does not
+    spoil it: a direction whose neighbour is an obstacle streams ``f_ibar(x) =
+    f_i(x)`` straight back, so its pair contributes zero and skipping obstacle
+    neighbours is identical to including them.
+
+    Weighting a FLUID cell's exchanges by ``(eps_x + eps_nb)/2`` instead breaks
+    the identity. ``eps = m / (rho * porosity)`` is 1 only to round-off, and the
+    weight *scales the exchange amplitude*, so drift in eps amplifies its own
+    exchanges -- a random walk with step size proportional to the error.
+    Measured with the sprue of ``Test_Model/Filling_Test`` running completely
+    full (332 of 332 cells FLUID): per-cell FLUID mass reached +-70,000 and wet
+    mass alternated sample-to-sample until the divergence guard fired at step
+    251,000. The old docstring claimed "a FLUID cell surrounded by fluid nets
+    zero"; under eps weighting that is true only for perfectly uniform eps,
+    which is exactly what the drift destroys.
+
+    Interface-interface pairs keep the eps average, clamped to ``[0, 1]``: the
+    transition hysteresis lets an interface cell sit slightly outside the band,
+    and an out-of-band eps would amplify exchanges the same way.
+
+    Pairs touching a filter are the one exception -- see the porosity branch in
+    the body.
 
     Args:
         state: Solver state, before the mass update.
@@ -510,18 +538,43 @@ def advance_mass(
     """
     outgoing = np.asarray(f_post_collision, dtype=np.float64)
     incoming = np.asarray(f_streamed, dtype=np.float64)
-    eps = fluid_fraction(state)
-    wet = (state.flags == FLAG_INTERFACE) | (state.flags == FLAG_FLUID)
+    eps_raw = fluid_fraction(state)
+    eps = np.clip(eps_raw, 0.0, 1.0)
+    fluid = state.flags == FLAG_FLUID
+    wet = (state.flags == FLAG_INTERFACE) | fluid
     opp = OPPOSITE.astype(np.intp)
 
+    # Inside a filter a full cell holds ``rho * porosity``, not ``rho`` --
+    # fluid_fraction and apply_transitions both define it that way. Weight-1
+    # exchange makes mass track *rho*, so in a porous cell it would walk away
+    # from ``rho * porosity`` by ``(1 - porosity)`` times the density change,
+    # and the filter's own bookkeeping would drift out of band instead. Filter
+    # cells are few and their eps is bounded by the priming logic, so every
+    # pair touching one keeps the eps-average weighting it has always had.
+    porous = np.asarray(state.porous.porosity, dtype=np.float64) < 1.0
+    any_porous = bool(porous.any())
+
+    axes = (0, 1, 2)
     delta = np.zeros(state.shape, dtype=np.float64)
     for i in range(1, Q):
         c = LATTICE_VELOCITIES[i]
         shift = (-int(c[0]), -int(c[1]), -int(c[2]))
-        neighbour_wet = np.roll(wet, shift=shift, axis=(0, 1, 2))
-        eps_neighbour = np.roll(eps, shift=shift, axis=(0, 1, 2))
+        neighbour_wet = np.roll(wet, shift=shift, axis=axes)
         ibar = int(opp[i])
-        exchange = (incoming[ibar] - outgoing[i]) * 0.5 * (eps + eps_neighbour)
+
+        weight = np.where(
+            fluid | np.roll(fluid, shift=shift, axis=axes),
+            1.0,
+            0.5 * (eps + np.roll(eps, shift=shift, axis=axes)),
+        )
+        if any_porous:
+            weight = np.where(
+                porous | np.roll(porous, shift=shift, axis=axes),
+                0.5 * (eps_raw + np.roll(eps_raw, shift=shift, axis=axes)),
+                weight,
+            )
+
+        exchange = (incoming[ibar] - outgoing[i]) * weight
         delta += np.where(wet & neighbour_wet, exchange, 0.0)
 
     return state.mass + delta

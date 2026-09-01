@@ -16,6 +16,7 @@ import numpy as np
 from core.filling_stage import (
     COARSENING_PRIORITY,
     EMPTY_CELL,
+    _expand_inlet_to_mouth,
     build_filter_zone_specs,
     build_grid_mapping,
     build_porous_zone,
@@ -31,6 +32,7 @@ from core.filling_stage import (
 from core.part_manager import (
     PART_TYPE_CAST,
     PART_TYPE_CHILL,
+    PART_TYPE_CORE,
     PART_TYPE_FILTER,
     PART_TYPE_GATE,
     PART_TYPE_RUNNER,
@@ -637,3 +639,212 @@ class SolverModeWarningTests(unittest.TestCase):
             any("schedule_legacy" in w for w in result.warnings),
             f"no warning about the ignored seed: {result.warnings}",
         )
+
+
+def _sprue_grid(nx=7, ny=7, nz=6, lo=2, hi=4):
+    """A 3x3 sprue bore standing in otherwise empty space."""
+    types = np.full((nx, ny, nz), EMPTY_CELL, dtype=np.int8)
+    types[lo:hi + 1, lo:hi + 1, :] = PART_TYPE_SPRUE
+    return types
+
+
+class InletMouthWideningTests(unittest.TestCase):
+    """
+    The pour location picks the feature; its whole mouth is the inlet.
+
+    Measured on ``Test_Model/Full_Gating_Test``: the 1.5-voxel resolution
+    radius picked 8 cells of the sprue top's cross-section (48 on the current
+    mesh). The 8-cell jet atomised on the way down the sprue and the run
+    diverged at 24 % by mass. Widening it to the whole mouth clears that: the
+    same model now runs the full 45 s cap without diverging, at 91 % of cells
+    and 97 % by mass. See :func:`core.filling_stage._expand_inlet_to_mouth`.
+    """
+
+    def test_a_single_seed_widens_to_the_whole_mouth(self) -> None:
+        """One cell on a 3x3 sprue top becomes all nine."""
+        types = _sprue_grid()
+        seed = np.array([[3, 3, 5]], dtype=np.int64)
+        widened = _expand_inlet_to_mouth(seed, types)
+        self.assertEqual(widened.shape[0], 9)
+        self.assertEqual(
+            {tuple(c) for c in widened},
+            {(x, y, 5) for x in (2, 3, 4) for y in (2, 3, 4)},
+        )
+
+    def test_it_does_not_leak_into_an_adjacent_part(self) -> None:
+        """
+        A runner sharing the layer, touching the sprue, stays out.
+
+        This is the property that keeps the widening a *geometry* step rather
+        than a flood over all the metal in the assembly.
+        """
+        types = _sprue_grid()
+        types[5, 2:5, 5] = PART_TYPE_RUNNER  # face-adjacent to the sprue
+        types[1, 1, 5] = PART_TYPE_CAST      # corner-adjacent to the sprue
+        widened = _expand_inlet_to_mouth(np.array([[3, 3, 5]]), types)
+        codes = types[widened[:, 0], widened[:, 1], widened[:, 2]]
+        self.assertEqual(set(np.unique(codes).tolist()), {int(PART_TYPE_SPRUE)})
+        self.assertEqual(widened.shape[0], 9)
+
+    def test_it_does_not_leak_into_a_non_metal_neighbour(self) -> None:
+        """A core touching the mouth is mold, not inlet."""
+        types = _sprue_grid()
+        types[5, 2:5, 5] = PART_TYPE_CORE
+        widened = _expand_inlet_to_mouth(np.array([[3, 3, 5]]), types)
+        self.assertEqual(widened.shape[0], 9)
+        self.assertTrue(bool(np.all(widened[:, 0] <= 4)))
+
+    def test_it_does_not_leave_the_layer(self) -> None:
+        """The bore below the mouth is not inlet; only the top face is."""
+        types = _sprue_grid()
+        widened = _expand_inlet_to_mouth(np.array([[3, 3, 5]]), types)
+        self.assertEqual(set(np.unique(widened[:, 2]).tolist()), {5})
+
+    def test_a_seed_already_covering_the_mouth_is_unchanged(self) -> None:
+        """Widening is idempotent, so it can be applied unconditionally."""
+        types = _sprue_grid()
+        mouth = np.array(
+            [[x, y, 5] for x in (2, 3, 4) for y in (2, 3, 4)], dtype=np.int64
+        )
+        widened = _expand_inlet_to_mouth(mouth, types)
+        np.testing.assert_array_equal(
+            widened, np.unique(mouth, axis=0)
+        )
+        np.testing.assert_array_equal(
+            _expand_inlet_to_mouth(widened, types), widened
+        )
+
+    def test_seeds_below_the_top_layer_are_kept(self) -> None:
+        """The seeds are a floor on the result, not a starting guess."""
+        types = _sprue_grid()
+        seed = np.array([[3, 3, 5], [3, 3, 4]], dtype=np.int64)
+        widened = _expand_inlet_to_mouth(seed, types)
+        self.assertEqual(widened.shape[0], 10)
+        self.assertIn((3, 3, 4), {tuple(c) for c in widened})
+
+    def test_a_bare_casting_widens_over_its_own_top_face(self) -> None:
+        """No gating in the model is not a special case."""
+        types = np.full((5, 5, 4), EMPTY_CELL, dtype=np.int8)
+        types[1:4, 1:4, :] = PART_TYPE_CAST
+        widened = _expand_inlet_to_mouth(np.array([[2, 2, 3]]), types)
+        self.assertEqual(widened.shape[0], 9)
+
+    def test_an_empty_inlet_stays_empty(self) -> None:
+        """An unresolvable pour point is reported upstream, not widened."""
+        types = _sprue_grid()
+        widened = _expand_inlet_to_mouth(
+            np.zeros((0, 3), dtype=np.int64), types
+        )
+        self.assertEqual(widened.shape, (0, 3))
+
+    def test_two_separate_mouths_do_not_merge(self) -> None:
+        """Flood-fill connectivity, not "every cell of this type"."""
+        types = np.full((9, 5, 4), EMPTY_CELL, dtype=np.int8)
+        types[1:4, 1:4, :] = PART_TYPE_SPRUE
+        types[6:9, 1:4, :] = PART_TYPE_SPRUE  # a second, disconnected sprue
+        widened = _expand_inlet_to_mouth(np.array([[2, 2, 3]]), types)
+        self.assertEqual(widened.shape[0], 9)
+        self.assertTrue(bool(np.all(widened[:, 0] <= 3)))
+
+    def _wide_bore(self, width=7, nz=6, dx=0.25):
+        """
+        A metal bore wider than the resolution radius, inside a mold.
+
+        Bounded rather than a bare block: a fully-occupied mesh has no
+        obstacle cells, so the lattice wraps periodically -- see
+        ``tests/test_filling_stability._walled_tower``.
+        """
+        from core.pour_location import PourLocation
+
+        n = width + 2
+        centers = lattice_centers((n, n, nz + 2), dx=dx, origin=(0.0, 0.0, 0.0))
+        index = np.rint(np.asarray(centers) / dx).astype(int)
+        types = np.full(len(centers), PART_TYPE_CORE, dtype=np.int8)
+        inside = (
+            (index[:, 0] >= 1) & (index[:, 0] <= width)
+            & (index[:, 1] >= 1) & (index[:, 1] <= width)
+            & (index[:, 2] >= 1) & (index[:, 2] <= nz)
+        )
+        types[inside] = PART_TYPE_CAST
+        mesh = _FakeMesh(centers, types, dx)
+        metal = np.asarray(centers)[inside]
+        pour = PourLocation(point_in=(
+            float(metal[:, 0].mean()),
+            float(metal[:, 1].mean()),
+            float(metal[:, 2].max()),
+        ))
+        return mesh, pour
+
+    def _brief_options(self):
+        """Options with their own FillingParams, capped to a few steps.
+
+        ``_Options`` shares one class-level ``_Filling``, so overriding on it
+        would leak into every other test in the file.
+        """
+        params = _Params()
+        params.filling = _Filling()
+        params.filling.max_fill_time_s = 1e-4
+        options = _Options()
+        options.solidification_params = params
+        return options
+
+    def test_the_stage_widens_a_real_pour_to_the_whole_mouth(self) -> None:
+        """End to end: the pinned inlet is the mouth, not the click."""
+        from core.filling_stage import (
+            _resolve_inlet_cells, build_grid_mapping, coarsen_part_types,
+            dense_part_types, maybe_run_filling,
+        )
+
+        mesh, pour = self._wide_bore()
+        mapping = build_grid_mapping(np.asarray(mesh.voxel_centers), 0.25)
+        types = coarsen_part_types(
+            dense_part_types(mapping, mesh.voxel_part_types), 1
+        )
+        seeds = _resolve_inlet_cells(pour, mapping, types, 1)
+        self.assertLess(seeds.shape[0], 49, "fixture no longer under-resolves")
+
+        messages: list = []
+        result = maybe_run_filling(
+            mesh, _Alloy(), self._brief_options(), _Inputs(pour),
+            progress_message_callback=messages.append,
+        )
+        self.assertIsNotNone(result)
+        # 49 for the 7x7 mouth, plus the seeds one layer down that the
+        # resolution radius also picked up and that the union keeps.
+        self.assertGreaterEqual(result.inlet_voxel_count, 49)
+        widened = _expand_inlet_to_mouth(seeds, types)
+        self.assertEqual(result.inlet_voxel_count, widened.shape[0])
+        self.assertEqual(int((widened[:, 2] == widened[:, 2].max()).sum()), 49)
+
+    def test_the_stage_reports_the_widening(self) -> None:
+        """The emit has to say the inlet is not where the user clicked."""
+        from core.filling_stage import maybe_run_filling
+
+        mesh, pour = self._wide_bore()
+        messages: list = []
+        maybe_run_filling(
+            mesh, _Alloy(), self._brief_options(), _Inputs(pour),
+            progress_message_callback=messages.append,
+        )
+        inlet_lines = [m for m in messages if m.startswith("Filling: inlet")]
+        self.assertTrue(inlet_lines, f"no inlet line in {messages}")
+        self.assertIn(
+            "inlet 54 cells (14 at the pour point, widened to the cast mouth)",
+            inlet_lines[0],
+        )
+
+    def test_an_already_full_mouth_is_reported_without_a_widening_note(
+        self,
+    ) -> None:
+        """A 2x2 column resolves to its whole mouth already; say nothing."""
+        from core.filling_stage import maybe_run_filling
+
+        mesh = _column_mesh()
+        messages: list = []
+        maybe_run_filling(
+            mesh, _Alloy(), self._brief_options(), _Inputs(_top_pour(mesh)),
+            progress_message_callback=messages.append,
+        )
+        inlet_lines = [m for m in messages if m.startswith("Filling: inlet")]
+        self.assertTrue(inlet_lines, f"no inlet line in {messages}")
+        self.assertNotIn("widened", inlet_lines[0])

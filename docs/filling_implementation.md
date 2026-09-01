@@ -209,9 +209,25 @@ Use `physics.units.GRAVITY_M_S2`; do not re-introduce a literal.
 Cell flags: `OBSTACLE`, `GAS`, `INTERFACE`, `FLUID`. Fluid fraction ε = m/ρ.
 
 ```
-Δm_i(x, t+1) = ( f_ī(x + c_i, t) − f_i(x, t) ) · ( ε(x) + ε(x + c_i) ) / 2
+Δm_i(x, t+1) = ( f_ī(x + c_i, t) − f_i(x, t) ) · w_i
 m(x, t+1)    = m(x, t) + Σ_i Δm_i
+
+w_i = 1                                if x or x + c_i is FLUID
+    = ( ε(x) + ε(x + c_i) ) / 2        if both are INTERFACE
 ```
+
+**The ε average applies to interface–interface pairs only** — Körner et al.
+(2005), Table 1. This document used to give the average for every pair, and
+the solver implemented it that way; the consequence is in
+`docs/filling_field_notes.md`. At w = 1 the direction sum telescopes into the
+cell's own density change, so a FLUID cell's mass tracks ρ and cannot drift.
+Weighting a FLUID cell's exchanges by ε instead makes the weight *be* the
+drift, and the drift then scales its own exchanges: on `Filling_Test`, per-cell
+mass in the full sprue reached ±70,000 and the run diverged at step 251,000.
+
+Pairs touching a filter keep the ε average, because inside a filter a full cell
+holds ρ·porosity rather than ρ and the w = 1 identity would walk the mass off
+that definition.
 
 Interface cells have no neighbour populations on the gas side; reconstruct:
 

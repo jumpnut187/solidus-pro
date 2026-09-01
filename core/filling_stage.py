@@ -1186,6 +1186,79 @@ def _resolve_inlet_cells(
     return selected
 
 
+def _expand_inlet_to_mouth(
+    inlet: np.ndarray,
+    dense_types: np.ndarray,
+) -> np.ndarray:
+    """
+    Widen the resolved inlet from a point to the whole mouth of its feature.
+
+    The pour location's job is to pick *which* feature is poured into. The
+    physical inlet is that feature's entire top cross-section, because a
+    pouring basin sits on the full mouth of the sprue, not on a spot in the
+    middle of it.
+
+    Measured on ``Test_Model/Full_Gating_Test``: :func:`_resolve_inlet_cells`'
+    1.5-voxel radius picked 8 cells of the sprue top's cross-section -- 44
+    cells when that was first measured, 48 on the current mesh. The 8-cell jet
+    atomised on the way down the sprue and the run diverged at 24 % by mass.
+    Feeding the same pour through the whole mouth -- changing nothing else --
+    cleared the divergence and ran the sprue full.
+
+    The flood is confined to the seeds' own top layer and to the part types the
+    seeds are standing on, so a pour cup widens over the cup, a sprue over the
+    sprue and a bare casting over its own top face. None of them leak into a
+    neighbouring part that happens to share the layer, and none of them leak
+    downwards into the feature's bore.
+
+    It widens the layer the click landed in, not "the topmost layer of the
+    feature", so a pour location placed on a *side* face resolves to the whole
+    horizontal cross-section at that height rather than to a patch of the
+    flank. That is the intended reading -- the click chooses the feature and
+    the metal enters across it -- but it is why the UI asks for a point on the
+    top face of the sprue.
+
+    Args:
+        inlet: ``(n, 3)`` seed cells, as :func:`_resolve_inlet_cells` returns.
+        dense_types: The part-type grid those cells index into.
+
+    Returns:
+        ``(m, 3)`` int64 cells: the seeds plus the flooded mouth, ``m >= n``.
+    """
+    from scipy import ndimage
+
+    seeds = np.asarray(inlet, dtype=np.int64).reshape(-1, 3)
+    if seeds.shape[0] == 0:
+        return seeds
+
+    types = np.asarray(dense_types)
+    z_top = int(seeds[:, 2].max())
+    top = seeds[seeds[:, 2] == z_top]
+    layer = types[:, :, z_top]
+
+    # Only the types the seeds actually stand on, and only metal ones: the
+    # flood must not walk out of the feature being poured into.
+    codes = np.unique(layer[top[:, 0], top[:, 1]])
+    member = np.isin(layer, codes) & _metal_mask(layer)
+    if not member.any():
+        return seeds
+
+    # 8-connectivity in the plane. A sprue mouth is a disc drawn on a lattice;
+    # its corner-touching cells are one body, not several.
+    labels, _ = ndimage.label(member, structure=np.ones((3, 3), dtype=bool))
+    seed_labels = np.unique(labels[top[:, 0], top[:, 1]])
+    seed_labels = seed_labels[seed_labels > 0]
+    if seed_labels.size == 0:
+        return seeds
+
+    mx, my = np.nonzero(np.isin(labels, seed_labels))
+    mouth = np.column_stack(
+        (mx, my, np.full(mx.shape[0], z_top))
+    ).astype(np.int64)
+    widened: np.ndarray = np.unique(np.vstack((seeds, mouth)), axis=0)
+    return widened
+
+
 def _voxel_centers_from_mapping(mapping: GridMapping) -> np.ndarray:
     """Reconstruct voxel centres in inches from the mapping."""
     return mapping.origin_in[None, :] + mapping.voxel_to_grid.astype(np.float64) * mapping.dx_in
@@ -1244,7 +1317,7 @@ def run_filling_stage(
         step,
     )
     from physics.fluid_flow import LATTICE_VELOCITIES, equilibrium, lattice_units
-    from core.part_manager import is_gating_metal
+    from core.part_manager import CODE_TO_PART_TYPE, is_gating_metal
 
     def emit(message: str) -> None:
         if progress_message_callback is not None:
@@ -1274,13 +1347,38 @@ def run_filling_stage(
     coarsening = max(1, int(getattr(filling, "fill_grid_coarsening", 2)))
     solve_types = coarsen_part_types(fine_types, coarsening)
 
-    inlet = _resolve_inlet_cells(pour_location, mapping, solve_types, coarsening)
-    if inlet.shape[0] == 0:
+    inlet_seeds = _resolve_inlet_cells(pour_location, mapping, solve_types, coarsening)
+    if inlet_seeds.shape[0] == 0:
         emit(
             "Filling stage skipped: the pour location does not resolve to any "
             "metal cell. Move it onto the pour cup, sprue or casting."
         )
         return None
+
+    # The click picks the feature; the mouth of that feature is the inlet. This
+    # is geometry resolution rather than boundary mechanics, so it applies to
+    # both inlet modes. In velocity mode the prescribed mass rate is divided by
+    # the now-larger inlet area, which lowers the imposed velocity for the same
+    # kg/s -- correct, and exactly what a basin sitting on the whole sprue
+    # does. See _expand_inlet_to_mouth for the measurement that made this
+    # necessary: 8 cells of a sprue mouth is a jet, not a pour.
+    inlet = _expand_inlet_to_mouth(inlet_seeds, solve_types)
+    inlet_seed_count = int(inlet_seeds.shape[0])
+    inlet_widening = ""
+    if inlet.shape[0] > inlet_seed_count:
+        mouth_top = inlet[:, 2] == inlet[:, 2].max()
+        mouth_names = [
+            CODE_TO_PART_TYPE[int(code)].value.replace("_", " ")
+            for code in np.unique(
+                solve_types[inlet[mouth_top, 0], inlet[mouth_top, 1],
+                            inlet[mouth_top, 2]]
+            )
+            if int(code) in CODE_TO_PART_TYPE
+        ]
+        inlet_widening = (
+            f" ({inlet_seed_count:,} at the pour point, widened to the "
+            f"{'/'.join(mouth_names) or 'poured feature'} mouth)"
+        )
 
     dx_m = mapping.dx_m * coarsening
     nu = float(alloy.dynamic_viscosity) / float(alloy.density_liquid)
@@ -1542,7 +1640,8 @@ def run_filling_stage(
             inlet.shape[0], float(REFERENCE_DENSITY), dtype=np.float64
         )
         emit(
-            f"Filling: inlet {inlet.shape[0]:,} cells, {inlet_mode_label}, "
+            f"Filling: inlet {inlet.shape[0]:,} cells{inlet_widening}, "
+            f"{inlet_mode_label}, "
             f"{u_inlet_physical:.2f} m/s ({u_inlet_lattice:.4f} lattice)"
         )
     else:
@@ -1553,7 +1652,8 @@ def run_filling_stage(
             state.porous.porosity[ix, iy, iz], dtype=np.float64
         )
         emit(
-            f"Filling: inlet {inlet.shape[0]:,} cells, {inlet_mode_label} "
+            f"Filling: inlet {inlet.shape[0]:,} cells{inlet_widening}, "
+            f"{inlet_mode_label} "
             f"pressure boundary, rho {inlet_density:.5f} "
             f"(+{(inlet_density / REFERENCE_DENSITY - 1.0) * 100.0:.3f}% over "
             f"reference); velocity follows the flow, capped at "

@@ -25,6 +25,7 @@ from physics.fluid_flow import NUMBA_AVAILABLE, lattice_units
 from physics.filling import (
     FLAG_FLUID,
     FLAG_GAS,
+    FLAG_INTERFACE,
     PorousZone,
     create_state,
     step,
@@ -35,8 +36,19 @@ WCB_NU = 0.006 / 7200.0
 DX_M = 0.0152
 
 
-def _fixture(n: int = 14, *, with_filter: bool = False, seed: int = 7):
-    """A partly filled box, optionally with a filter slab across the middle."""
+def _fixture(
+    n: int = 14, *, with_filter: bool = False, submerge: bool = False, seed: int = 7
+):
+    """
+    A partly filled box, optionally with a filter slab across the middle.
+
+    ``submerge`` fills *over* that slab and marks it primed, so the filter
+    cells are wet. The default fixture leaves them dry, which means it never
+    reaches the porosity branch of the mass exchange -- the branch that keeps
+    the eps average for pairs touching a filter, because a full porous cell
+    holds ``rho * porosity`` rather than ``rho``. See
+    :func:`physics.filling.advance_mass`.
+    """
     obstacle = np.zeros((n, n, n), dtype=bool)
     obstacle[0] = obstacle[-1] = True
     obstacle[:, 0] = obstacle[:, -1] = True
@@ -44,7 +56,10 @@ def _fixture(n: int = 14, *, with_filter: bool = False, seed: int = 7):
 
     units = lattice_units(DX_M, WCB_NU, u_max_physical_m_s=2.8)
     fluid = np.zeros((n, n, n), dtype=bool)
-    fluid[1:-1, 1:-1, n // 2 :] = True
+    if submerge:
+        fluid[1:-1, 1:-1, 1 : n - 3] = True
+    else:
+        fluid[1:-1, 1:-1, n // 2 :] = True
 
     porous = None
     if with_filter:
@@ -58,6 +73,8 @@ def _fixture(n: int = 14, *, with_filter: bool = False, seed: int = 7):
     state = create_state(
         obstacle, dx_m=DX_M, dt_s=units.dt_s, initial_fluid=fluid, porous=porous
     )
+    if submerge:
+        state.porous.primed[...] = True
     # Perturb so the comparison is not made on a trivially symmetric field.
     rng = np.random.default_rng(seed)
     state.f = (state.f * (1.0 + 0.01 * rng.standard_normal(state.f.shape))).astype(
@@ -146,6 +163,49 @@ class PorousParityTests(unittest.TestCase):
         state, _ = _fixture(with_filter=True)
         self.assertFalse(state.porous.is_inert)
         self.assertGreater(float(state.porous.drag_c1.max()), 0.0)
+
+    def test_the_filter_is_actually_wet_when_submerged(self) -> None:
+        """
+        Guard the other half: the mass exchange's porosity branch is only
+        reached by a pair where one cell has ``porosity < 1`` *and* holds
+        metal. The default fixture starts the metal above the slab, so it
+        never gets there.
+        """
+        dry, _ = _fixture(with_filter=True)
+        wet, _ = _fixture(with_filter=True, submerge=True)
+        porous = np.asarray(dry.porous.porosity) < 1.0
+        self.assertGreater(int(np.count_nonzero(porous)), 0)
+
+        def _wet_porous(state):
+            holds_metal = (state.flags == FLAG_FLUID) | (
+                state.flags == FLAG_INTERFACE
+            )
+            return int(np.count_nonzero(porous & holds_metal))
+
+        self.assertEqual(_wet_porous(dry), 0)
+        self.assertGreater(_wet_porous(wet), 0)
+
+    def test_populations_agree_through_a_wet_filter(self) -> None:
+        a, b, units = _twin(with_filter=True, submerge=True)
+        step(a, units, use_numba=True)
+        step(b, units, use_numba=False)
+        np.testing.assert_allclose(a.f, b.f, rtol=1e-5, atol=1e-7)
+
+    def test_mass_agrees_through_a_wet_filter(self) -> None:
+        """
+        The pair weighting inside a filter, in both paths, held to round-off.
+
+        This is the only test that reaches the porosity branch, and it is a
+        branch the two implementations have to agree on exactly or the fast
+        path is quietly solving a different problem inside every filter.
+        """
+        a, b, units = _twin(with_filter=True, submerge=True)
+        for _ in range(30):
+            step(a, units, use_numba=True)
+            step(b, units, use_numba=False)
+        np.testing.assert_allclose(a.mass, b.mass, rtol=1e-9, atol=1e-12)
+        np.testing.assert_array_equal(a.flags, b.flags)
+        self.assertAlmostEqual(total_mass(a), total_mass(b), places=9)
 
 
 @unittest.skipUnless(NUMBA_AVAILABLE, "numba is not installed")

@@ -7,35 +7,64 @@ design document; `docs/filling_implementation.md` is the plan and
 
 ## Current state — read this first
 
-**The filling stage is not validated. No configuration produces a verified
-complete fill.** The velocity runaway this section used to describe is gone —
-the inlet is a pressure boundary now, not a prescribed velocity (see "Known
-limits") — but two problems behind it are not, and they are different from
-each other.
-
-*Measured after the change, on `Test_Model/Filling_Test` at 0.20 in voxels,
-coarsening 2:* the run reaches 38 % by mass and 33 % of cells, runs the sprue
-completely full (332 of 332 cells FLUID), and holds `max|u|` at 0.0195 against
-the 0.05 Mach guard for 250,000 steps — where the previous inlet reached 0.44
-and detonated at step 126,400. It then diverges anyway at step 251,000, and the
-velocity is not why: `max|u|` is still 0.0179 at the abort. **Per-cell mass in
-the full sprue drifts to ±10,000 against a physical range of [0, ~1].** A FLUID
-cell is full by definition and `advance_mass` assumes a fluid cell surrounded
-by fluid nets zero; it does not, because the exchange is weighted by
-`(eps + eps_neighbour)/2` and any drift in `eps` feeds itself. The old inlet
-never ran a channel full, so this only shows up now.
+**The filling stage is not validated: no configuration yet produces a
+*complete* fill.** What has changed is that neither test model diverges any
+more. The two mechanisms that used to end these runs in a blow-up are gone,
+and what stops a fill now is a third, identified thing.
 
 *Measured on `Test_Model/Full_Gating_Test` at 0.20 in voxels, coarsening 1* —
-a bottom-gated rig built so a head-driven fill can finish: the run diverges at
-step 30,600 with 24 % by mass. The inlet layers stay physical there
-(per-cell mass within [-0.008, +1.57], no oscillation), and the sprue's
-velocity is downward at every layer rather than in suction. What fails is that
-the sprue never runs full: the inlet covers 8 cells of a 44-cell cross-section,
-so metal enters as a jet, free-falls down a mostly-empty sprue and atomizes
-into half-filled interface cells, 90 % of which exceed the Mach guard. Widening
-the inlet to the full cross-section and changing nothing else reaches 99 % of
-cells and 92 % by mass with 54 misrun voxels and no divergence — see "Known
-limits".
+a bottom-gated rig built so a head-driven fill can finish. **No divergence.**
+The run uses the whole 45 s cap (433,247 steps, 54 min wall) and ends
+`time_capped`, still advancing, at 8,459 of 9,251 metal cells FLUID (91 %),
+97 % by mass, 18.5 lb delivered into a 19.3 lb model. `max|u|` holds at 0.033
+against the 0.05 Mach guard, with the 99th percentile over wet cells at 0.015,
+and per-cell FLUID mass stays inside [0.978, 1.007] for the entire run. The
+previous inlet diverged this model at step 30,600 with 24 % by mass.
+
+Arrival is physically ordered — mean `fill_time_s` by part: sprue 0.52 s, gate
+0.87 s, runner 1.55 s, casting 2.60 s, riser 4.52 s; by *first* arrival, sprue
+0.00 s, runner 0.23 s, casting 0.45 s, gate 0.50 s, riser 0.62 s. (The runner's
+*mean* trails the gate's because a handful of runner cells at the far end
+arrive as late as 31 s; its front gets there first.) The pour itself is quick
+and about the right speed: 11.5 lb of the 18.5 is delivered by 4.5 s, against
+the ~4.4 s the √W rule gives for this weight. The remaining 40 s is the solver
+topping up the last interface cells, not metal still flowing.
+
+*Measured on `Test_Model/Filling_Test` at 0.20 in voxels, coarsening 2* — the
+harder model, whose 0.5 in gate is 3 cells on this grid. **No divergence**
+(the previous run diverged at step 251,000). It runs the full 60 s cap
+(327,200 steps, 42 min wall) and ends `time_capped`, still advancing, at 58 %
+of cells and 78 % by mass, 55.4 lb into a 63.6 lb model. Nothing anywhere in
+the domain exceeds the Mach guard — 0 of 3,845 wet cells over 0.05, with
+`max|u|` 0.0155 and the 99th percentile 0.0098 — and per-cell FLUID mass stays
+inside [0.9970, 1.0033] against the ±70,000 the old weighting reached. The
+sample-to-sample wet-mass alternation is gone: the last twenty samples rise
+monotonically, 3,355.4 → 3,374.0.
+
+The gating system is *not* the bottleneck at this resolution, which is worth
+saying because the 3-cell gate was the obvious suspect. By mass the sprue is
+98.3 % full, the runner 94.9 % and the gate 96.3 %; the shortfall is the
+casting (83.2 % by mass, 57.0 % of its cells FLUID) and the riser (54.9 % /
+29.0 %). Of the 1,322 interface cells left at the cap, **1,191 have no gas
+neighbour** — see below. Chills correctly take no metal at all.
+
+**What stops both runs short is a gap in the flag bookkeeping, not the flow.**
+Under Körner's mass-exchange weighting an interface cell whose neighbours are
+all wet or solid exchanges at weight 1 in every direction, so its mass change
+is exactly its own density change — and a *submerged* interface cell therefore
+freezes wherever the front left it, at whatever ε it had. Measured on a
+synthetic bounded cavity (`_walled_tower(nz=4, width=4)`): the run ends with 44
+FLUID cells and 20 INTERFACE cells, and **all twenty have no gas neighbour
+left**, at ε between 0.05 and 0.84. The same signature on the real model —
+1,191 of `Filling_Test`'s 1,322 remaining interface cells, ε 0.000 to 1.002.
+
+Körner's scheme reinitialises such a cell to FLUID; this implementation has no
+such rule. It was invisible while the mass exchange let FLUID mass drift upward
+past the transition threshold and convert those cells anyway — that drift *was*
+the ±70,000 runaway, so removing it exposed this, it did not cause it. Adding
+the reinitialisation rule is the next piece of work: it needs a mass account
+for the deficit it fills, which is why it was not bolted on to the weighting
+fix.
 
 Do not run this stage in a field test expecting a completed fill. If you run
 it anyway, read the status field before reading anything else — see "If
@@ -164,11 +193,12 @@ metallostatic pressure.
   kernel of this shape. Remaining levers are the float32/float64 conversion glue
   (~27 % of a step) and dense-box iteration, which wastes ~6.8x at the 0.147
   occupancy typical of gating assemblies.
-- **Grid convergence is unvalidated**, and now more than aspirational: see
-  "Current state" — the two resolutions tested fail by different mechanisms,
-  not merely by different fill percentages. The design doc asks for results
-  to converge as `fill_grid_coarsening` → 1; that has not been demonstrated
-  and cannot be, until a run completes.
+- **Grid convergence is unvalidated.** The design doc asks for results to
+  converge as `fill_grid_coarsening` → 1; that has not been demonstrated and
+  cannot be until a run completes. Both models now end the same way — capped
+  while still advancing, with the residual dominated by frozen submerged
+  interface cells — so the two configurations at least fail by the *same*
+  mechanism now, which they did not before.
 - **The inlet** imposes a *pressure* in head mode: the metallostatic head
   rho = rho_0 (1 + g h / c_s^2), with the velocity measured back out of the
   inlet cells' own populations each step and clamped at the Mach guard. It is
@@ -177,14 +207,17 @@ metallostatic pressure.
   prescribed rate and then went negative while the sprue sat in suction.
   Velocity mode still prescribes pour rate ÷ inlet area, because there the
   user is asserting a delivery rate.
-- **The inlet still covers only a 1.5-voxel radius**, which is the measured
-  blocker on `Full_Gating_Test`: 8 cells of a 44-cell sprue cross-section, so
-  the metal enters as a jet down a mostly-empty sprue and atomizes into
-  low-fill interface cells rather than running the sprue full. Substituting a
-  full-cross-section inlet — the Zou–He inlet spanning the sprue that this
-  document has always named as the intended replacement — and changing nothing
-  else takes that model from *diverged at 24 % by mass* to *99 % of cells and
-  92 % by mass with 54 misrun voxels, still advancing at the time cap*.
+- **The inlet is the poured feature's whole mouth**, not the 1.5-voxel radius
+  the pour point resolves to. The click chooses *which* feature is poured into;
+  `_expand_inlet_to_mouth` then floods that feature's own top layer (2-D,
+  8-connected, confined to the part types the seeds stand on) and pins the
+  union. On `Full_Gating_Test` that is 48 cells instead of 8. The 8-cell inlet
+  was the measured blocker: metal entered as a jet, free-fell down a mostly
+  empty sprue and atomised into low-fill interface cells, 90 % of which
+  exceeded the Mach guard, and the run diverged at 24 % by mass. In velocity
+  mode the prescribed rate is now divided by the larger area, so the imposed
+  velocity drops for the same kg/s — which is what a basin sitting on the whole
+  sprue does.
 - **No fluidity-spiral validation.** F2's thermal field is checked against
   physical invariants — bounded by pour and mold temperature, metal further
   from the inlet is cooler — not against measured spiral lengths, and no run
