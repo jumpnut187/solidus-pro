@@ -89,6 +89,7 @@ export const solidificationDefaults = {
     pour_temperature_c: 0,
     initial_head_in: 4,
     fill_grid_coarsening: 2,
+    choke_auto_resolution: 1,
     max_fill_time_s: 60,
     smagorinsky_cs: 0.16,
     lattice_velocity_max: 0.05,

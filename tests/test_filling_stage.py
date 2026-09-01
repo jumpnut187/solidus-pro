@@ -26,8 +26,13 @@ from core.filling_stage import (
     filter_geometry_from_mesh,
     gather_to_voxels,
     measure_choke_area_cm2,
+    measure_choke_thickness_by_part,
     scatter_to_grid,
     thickness_correction,
+)
+from core.filling_stage import (
+    MIN_CHOKE_THICKNESS_CELLS,
+    choose_fill_coarsening,
 )
 from core.part_manager import (
     PART_TYPE_CAST,
@@ -848,3 +853,267 @@ class InletMouthWideningTests(unittest.TestCase):
         inlet_lines = [m for m in messages if m.startswith("Filling: inlet")]
         self.assertTrue(inlet_lines, f"no inlet line in {messages}")
         self.assertNotIn("widened", inlet_lines[0])
+
+
+def _choke_rig(gate_thickness, sprue_thickness=8, n=24):
+    """
+    A synthetic sprue-and-gate on the mesh grid, sized in fine cells.
+
+    A square sprue column of ``sprue_thickness`` cells, crossed by a gate
+    plate ``gate_thickness`` cells thick. Coarsening halves both, so the
+    gate's thickness at any factor is predictable and the auto-resolution
+    decision can be exercised without running a fill.
+
+    Verified against measure_choke_thickness_by_part rather than assumed:
+    a 4-cell gate reads 3.0 cells at coarsening 1 and 1.0 at coarsening 2,
+    which is exactly the "resolved / sealed" pair the decision turns on.
+    """
+    grid = np.full((n, n, n), EMPTY_CELL, dtype=np.int8)
+    a = (n - sprue_thickness) // 2
+    grid[a:a + sprue_thickness, a:a + sprue_thickness, 8:] = PART_TYPE_SPRUE
+    b = (n - gate_thickness) // 2
+    grid[:, a:a + sprue_thickness, b:b + gate_thickness] = PART_TYPE_GATE
+    return grid
+
+
+class ChokeAutoResolutionTests(unittest.TestCase):
+    """
+    Requirement: a gating channel too thin for the grid refines the grid.
+
+    A channel at or below MIN_CHOKE_THICKNESS_CELLS has no interior once
+    halfway bounce-back has placed the walls, so it seals and the fill
+    through it is fiction. Warning about a grid the stage picked itself is
+    only half an answer when it could pick a better one.
+
+    The decision is exercised on synthetic type grids: it is pure geometry,
+    and running fills to test it would test the solver instead.
+    """
+
+    def test_a_sealed_gate_forces_the_grid_finer(self) -> None:
+        grid = _choke_rig(gate_thickness=4)
+        # Precondition: the case is the one being claimed.
+        self.assertLessEqual(
+            measure_choke_thickness_by_part(coarsen_part_types(grid, 2))[PART_TYPE_GATE],
+            MIN_CHOKE_THICKNESS_CELLS,
+        )
+        decision = choose_fill_coarsening(grid, 2)
+        self.assertEqual(decision.coarsening, 1)
+        self.assertEqual(decision.configured, 2)
+        self.assertTrue(decision.refined)
+        self.assertTrue(decision.resolved)
+        self.assertEqual(decision.forced_by, PART_TYPE_GATE)
+        self.assertGreater(
+            decision.by_part[PART_TYPE_GATE], MIN_CHOKE_THICKNESS_CELLS
+        )
+
+    def test_the_chosen_grid_comes_back_with_the_decision(self) -> None:
+        """The caller must not have to re-derive -- or re-downsample -- it."""
+        grid = _choke_rig(gate_thickness=4)
+        decision = choose_fill_coarsening(grid, 2)
+        np.testing.assert_array_equal(
+            decision.solve_types, coarsen_part_types(grid, decision.coarsening)
+        )
+
+    def test_a_resolved_gate_is_left_alone(self) -> None:
+        """The common case: nothing is sealed, so nothing is paid for."""
+        grid = _choke_rig(gate_thickness=6)
+        decision = choose_fill_coarsening(grid, 2)
+        self.assertEqual(decision.coarsening, 2)
+        self.assertFalse(decision.refined)
+        self.assertTrue(decision.resolved)
+        self.assertIsNone(decision.forced_by)
+
+    def test_a_gate_that_cannot_be_fixed_lands_at_one_and_says_so(self) -> None:
+        """
+        Two fine cells across is the mesh's fault, not the coarsening's.
+
+        Refining to 1 cannot help, so the decision stops there, reports
+        resolved=False, and the caller keeps the hard warning. An honest
+        misrun beats a silent one.
+        """
+        grid = _choke_rig(gate_thickness=2)
+        decision = choose_fill_coarsening(grid, 2)
+        self.assertEqual(decision.coarsening, 1)
+        self.assertFalse(decision.resolved)
+        self.assertEqual(decision.forced_by, PART_TYPE_GATE)
+        self.assertLessEqual(
+            decision.by_part[PART_TYPE_GATE], MIN_CHOKE_THICKNESS_CELLS
+        )
+
+    def test_the_switch_off_pins_the_configured_coarsening(self) -> None:
+        """
+        A user who pinned the grid gets the grid they pinned.
+
+        The measurement still happens -- forced_by still names the sealed
+        part, so the caller's warning is unaffected -- it simply is not acted
+        on.
+        """
+        grid = _choke_rig(gate_thickness=4)
+        decision = choose_fill_coarsening(grid, 2, enabled=False)
+        self.assertEqual(decision.coarsening, 2)
+        self.assertFalse(decision.refined)
+        self.assertFalse(decision.resolved)
+        self.assertEqual(decision.forced_by, PART_TYPE_GATE)
+        self.assertFalse(decision.enabled)
+
+    def test_it_steps_down_rather_than_jumping_to_one(self) -> None:
+        """
+        The cheapest grid that carries the fill, not the finest available.
+
+        This rig is sealed at coarsening 4 and clear at 3, so 3 is the
+        answer -- refining to 1 would cost 64x the cells for nothing.
+        """
+        grid = _choke_rig(gate_thickness=6)
+        self.assertLessEqual(
+            measure_choke_thickness_by_part(coarsen_part_types(grid, 4))[PART_TYPE_GATE],
+            MIN_CHOKE_THICKNESS_CELLS,
+        )
+        decision = choose_fill_coarsening(grid, 4)
+        self.assertEqual(decision.coarsening, 3)
+        self.assertTrue(decision.resolved)
+
+    def test_coarsening_one_is_returned_untouched(self) -> None:
+        """Nothing to refine to; the measurement still has to be honest."""
+        grid = _choke_rig(gate_thickness=2)
+        decision = choose_fill_coarsening(grid, 1)
+        self.assertEqual(decision.coarsening, 1)
+        self.assertFalse(decision.resolved)
+        self.assertEqual(decision.cells_configured, decision.cells_chosen)
+
+    def test_a_grid_with_no_gating_metal_is_a_no_op(self) -> None:
+        grid = np.full((8, 8, 8), PART_TYPE_CAST, dtype=np.int8)
+        decision = choose_fill_coarsening(grid, 2)
+        self.assertEqual(decision.coarsening, 2)
+        self.assertEqual(decision.by_part, {})
+        self.assertTrue(decision.resolved)
+
+
+def _isolated_options():
+    """
+    A fresh options tree, unshared with any other test module.
+
+    ``_Options`` hands out the module-level ``_Params``, whose ``filling`` is
+    a single shared instance -- and ``tests/test_filling_stability`` imports
+    ``_Options`` and writes FillingParams overrides straight onto it, which
+    survive into whatever runs next. A test that has to run at the shipped
+    defaults cannot use the shared one: under full-suite ordering it inherits
+    a lattice velocity cap and a smagorinsky constant chosen for somebody
+    else's fixture, and the tiny column then diverges.
+    """
+    class _IsolatedParams:
+        filling = _Filling()
+        thermal_boundary = _ThermalBoundary()
+
+    options = _Options(filling=True)
+    options.solidification_params = _IsolatedParams()
+    return options
+
+
+class DeliveryLedgerTests(unittest.TestCase):
+    """
+    Requirement: the poured counter is the integral of what was injected.
+
+    The inlet now adds mass in two places -- the pressure pin's refill and
+    the metered top-up into the throat -- and a delivery figure that did not
+    account for both would be the same lie the old self-metering inlet told,
+    just from the other direction.
+
+    Measured across the step boundary: everything the stage adds happens
+    between one call to physics.filling.step and the next, so differencing
+    the domain's total mass there captures exactly the injected term and
+    nothing the free-surface pass does inside the step.
+    """
+
+    def test_poured_equals_the_mass_actually_injected(self) -> None:
+        import physics.filling as physics_filling
+        from core.filling_stage import maybe_run_filling
+        from physics.filling import REFERENCE_DENSITY
+
+        mesh = _column_mesh(nz=8)
+        options = _isolated_options()
+        # run_filling_stage imports both of these by name inside the call, so
+        # the module attributes are what it will bind.
+        original_step = physics_filling.step
+        original_skin = physics_filling.ensure_interface_skin
+        original_create = physics_filling.create_state
+        seen = {
+            "between_steps": 0.0, "skin": 0.0, "seed": 0.0, "previous_exit": None,
+        }
+
+        def recording_create_state(*args, **kwargs):
+            # create_state seeds the pour point FLUID *and* an interface skin
+            # around it at half fill. That mass was placed before the pour
+            # started and is not delivery, so it is measured rather than
+            # assumed -- the skin's share is 4.5 of 11.5 on this column, and
+            # hard-coding either number would make the test a copy of the
+            # implementation.
+            state = original_create(*args, **kwargs)
+            seen["seed"] = float(np.sum(state.mass))
+            return state
+
+        def recording_skin(state, halo, **kwargs):
+            # The inlet's interface skin seeds newly promoted cells, and that
+            # seeding is a mass source the pour ledger deliberately does not
+            # claim. Measured so the ledger can be checked against the
+            # injection alone.
+            before = float(np.sum(state.mass))
+            promoted = original_skin(state, halo, **kwargs)
+            seen["skin"] += float(np.sum(state.mass)) - before
+            return promoted
+
+        def recording_step(state, units, **kwargs):
+            entry = float(np.sum(state.mass))
+            previous = seen["previous_exit"]
+            seen["between_steps"] += entry - (previous if previous is not None else 0.0)
+            out = original_step(state, units, **kwargs)
+            seen["previous_exit"] = float(np.sum(state.mass))
+            return out
+
+        physics_filling.step = recording_step
+        physics_filling.ensure_interface_skin = recording_skin
+        physics_filling.create_state = recording_create_state
+        try:
+            result = maybe_run_filling(
+                mesh, _Alloy(), options, _Inputs(_top_pour(mesh, nz=8)),
+            )
+        finally:
+            physics_filling.step = original_step
+            physics_filling.ensure_interface_skin = original_skin
+            physics_filling.create_state = original_create
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        # Everything that entered state.mass between one step and the next,
+        # less the two sources that are not the pour: the cells create_state
+        # seeded before the loop, and the interface skin's seeding.
+        dx_m = float(0.25 * 0.0254) * result.coarsening
+        lb_per_mass = (
+            _Alloy.density_liquid * dx_m ** 3
+            / float(REFERENCE_DENSITY) / 0.45359237
+        )
+        injected = seen["between_steps"] - seen["seed"] - seen["skin"]
+        self.assertGreater(seen["seed"], 0.0)
+        self.assertGreater(result.delivered_lb, 0.0)
+        self.assertAlmostEqual(
+            result.delivered_lb / lb_per_mass,
+            injected,
+            delta=1e-9 * max(1.0, abs(injected)),
+        )
+
+    def test_the_target_rate_is_reported(self) -> None:
+        """Starvation has to be legible without instrumenting the solver."""
+        from core.filling_stage import maybe_run_filling
+
+        mesh = _column_mesh(nz=8)
+        messages: list = []
+        result = maybe_run_filling(
+            mesh, _Alloy(), _isolated_options(), _Inputs(_top_pour(mesh, nz=8)),
+            progress_message_callback=messages.append,
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertGreater(result.target_delivery_lb_s, 0.0)
+        self.assertTrue(
+            any("metering" in m for m in messages),
+            f"the setup line does not name the target rate: {messages}",
+        )

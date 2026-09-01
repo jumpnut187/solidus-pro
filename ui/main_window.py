@@ -2157,6 +2157,13 @@ class SolidificationParamsDialog(DraggableDialog):
          "Initial metallostatic head height at the start of the pour."),
         ("filling", "fill_grid_coarsening", "Fill Grid Coarsening", 2, 1, 8, 1, 0, "× voxel",
          "Coarsening factor applied to the solidification grid for the filling-stage lattice."),
+        ("filling", "choke_auto_resolution", "Auto Refine Under-Resolved Chokes", 1, 0, 1, 1, 0, "bool",
+         "When on (1), the fill grid is refined automatically -- Fill Grid "
+         "Coarsening is stepped down toward 1 -- until every gating channel "
+         "(sprue, runner, filter, gate) is more than two cells thick. A "
+         "channel two cells or thinner has no interior and seals shut. Off "
+         "(0) pins the coarsening exactly as set; the under-resolution "
+         "warning still fires either way."),
         ("filling", "max_fill_time_s", "Max Fill Time", 60.0, 1.0, 600.0, 5.0, 0, "seconds",
          "Upper bound on simulated fill time before the filling stage is cut off."),
         ("filling", "smagorinsky_cs", "Smagorinsky Cs", 0.16, 0.05, 0.3, 0.01, 2, "",

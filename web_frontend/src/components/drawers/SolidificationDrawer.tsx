@@ -119,6 +119,7 @@ const GROUPS: ParamGroup[] = [
       { key: 'pour_temperature_c', label: 'Pour Temperature (0=alloy default)', min: 0, max: 1700, step: 10, unit: 'C' },
       { key: 'initial_head_in', label: 'Initial Head', min: 0.5, max: 24, step: 0.5, unit: 'in' },
       { key: 'fill_grid_coarsening', label: 'Fill Grid Coarsening', min: 1, max: 8, step: 1, unit: '× voxel' },
+      { key: 'choke_auto_resolution', label: 'Auto Refine Under-Resolved Chokes (0/1)', min: 0, max: 1, step: 1 },
       { key: 'max_fill_time_s', label: 'Max Fill Time', min: 1, max: 600, step: 5, unit: 's' },
       { key: 'smagorinsky_cs', label: 'Smagorinsky Cs', min: 0.05, max: 0.3, step: 0.01 },
       { key: 'lattice_velocity_max', label: 'Lattice Velocity Max', min: 0.005, max: 0.2, step: 0.005 },

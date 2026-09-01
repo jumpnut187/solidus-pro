@@ -70,6 +70,7 @@ from core.filter_database import (
 )
 from physics.filling import PorousZone
 from physics.fluid_flow import (
+    CS2 as LATTICE_CS2,
     SMAGORINSKY_CS,
     ceramic_foam_permeability,
     forchheimer_inverse_length,
@@ -199,18 +200,20 @@ DIVERGENCE_CHECK_INTERVAL = 200
 #: up, so a single flat report proves nothing.
 STALL_REPORTS = 5
 
-#: Blend weight for the inlet's measured velocity, ``u = (1-b) u_prev + b u_raw``.
+#: Blend weight for the inlet's driven velocity, ``u = (1-b) u_prev + b u_new``.
 #:
-#: A numerical filter on a boundary measurement, not a physical term. The
-#: pressure inlet reads its velocity out of the populations every step, so
-#: population noise in the inlet layer feeds straight back into what the
-#: boundary writes. Measured on a 2x2x40 column, unfiltered: peak |u| in the
-#: two cells below the inlet reached 0.183 against a 0.05 Mach guard, swinging
-#: 0.05 <-> 0.18 report to report and still rising at the end of the run. At
-#: b = 0.2 the same run peaks at 0.077 and fills in 2,060 steps; at b = 0.05 it
-#: peaks at 0.053 but takes 3,296. It damps the boundary's response, it does
-#: not bias it: the filter has unit gain, so a steady flow settles on exactly
-#: the velocity it was measuring.
+#: A numerical filter on the boundary's response, not a physical term. The
+#: head inlet sets its entry velocity from the density difference across the
+#: mouth every step, and that density is read off a handful of cells whose
+#: population noise would otherwise feed straight back into what the boundary
+#: writes -- through a square root, whose slope near zero is unbounded.
+#: Measured on a 2x2x40 column, unfiltered: peak |u| in the two cells below
+#: the inlet reached 0.183 against a 0.05 Mach guard, swinging 0.05 <-> 0.18
+#: report to report and still rising at the end of the run. At b = 0.2 the
+#: same run peaks at 0.077 and fills in 2,060 steps; at b = 0.05 it peaks at
+#: 0.053 but takes 3,296. It damps the boundary's response, it does not bias
+#: it: the filter has unit gain, so a steady back-pressure settles on exactly
+#: the velocity that back-pressure calls for.
 INLET_VELOCITY_BETA = 0.2
 
 #: Extra fraction of the metal's full mass that must arrive between reports for
@@ -223,6 +226,81 @@ INLET_VELOCITY_BETA = 0.2
 #: eps ~ 0.5, advancing, with the cell count flat. A stall now requires both
 #: measures to be flat.
 STALL_MASS_FRACTION_EPSILON = 0.001
+
+#: Discharge coefficient for metal leaving a pouring basin into the sprue.
+#:
+#: Torricelli's ``sqrt(2 g h)`` is the ideal efflux velocity of an inviscid jet
+#: from a sharp-edged orifice; the real one is lower, because the stream
+#: contracts (vena contracta) and loses energy at the entrance. Foundry gating
+#: practice puts the combined coefficient for a basin-and-sprue entrance at
+#: 0.7-0.9 depending on how well the sprue is radiused, and Campbell's
+#: *Castings* uses the same band. 0.8 is the middle of it, and it is a
+#: coefficient on the *target*: the solver still meters delivery against
+#: back-pressure, so getting this slightly wrong shifts how hard the basin
+#: pushes, not whether the fill is conservative.
+INLET_DISCHARGE_COEFFICIENT = 0.8
+
+#: How far below the inlet mouth metered delivery may place metal, in cells.
+#:
+#: The pressure pin holds the inlet cells themselves full; this is the depth of
+#: the *throat* just below them that the basin is allowed to top up when the
+#: pin alone under-delivers. It has to be more than one cell -- a single layer
+#: fills and converts to FLUID within a step or two of the front leaving it,
+#: which throttles delivery to zero while the sprue below is still empty -- and
+#: it must stay shallow, because metal placed here arrives without having
+#: fallen. Three cells is one lattice-step of travel at the Mach guard plus
+#: margin, and on both test rigs the metered top-up is exhausted in the first
+#: layer or two whenever the sprue is running.
+INLET_DELIVERY_DEPTH_CELLS = 3
+
+#: Integrator gain on the head inlet's delivery-rate controller.
+#:
+#: Per step, the imposed entry velocity moves by ``gain x relative rate error
+#: x u_target``, clipped to what the head can drive. The scale factor makes
+#: the gain dimensionless: at a 100 % shortfall the velocity walks a fiftieth
+#: of the ideal entry velocity per step, so it crosses the two-to-three times
+#: the ideal that the lid's reflection actually needs inside about 150 steps
+#: -- fast against the tens of thousands a pour takes, slow against the ~5
+#: steps the low-pass on the back-pressure measurement settles in, so the loop
+#: cannot chase its own filter.
+INLET_RATE_GAIN = 0.02
+
+#: Checks kept in the negative-population precursor window, and the share of
+#: them that must show negatives before the run is aborted.
+#:
+#: A negative population is not survivable in the long run -- see the measured
+#: cascade in ``free_surface_kernel`` -- but an *isolated* one is routine and
+#: self-heals, so the signal is prevalence, not presence. Calibrated against
+#: two instrumented runs, counting wet cells holding at least one negative
+#: population at every :data:`DIVERGENCE_CHECK_INTERVAL`:
+#:
+#:   * ``Full_Gating_Test`` at shipped defaults, a healthy 43,323-step pour
+#:     that completes: **zero** cells with a negative population at every one
+#:     of 86 samples across the whole run. Peak prevalence 0.000.
+#:   * ``Test 2`` at coarsening 2, which dies non-finite at step 63,708:
+#:     negatives first appear at step 11,500 and are then present in 125 of
+#:     211 samples (59 %), in bursts of 1-20 checks separated by clean runs.
+#:
+#: So the healthy run sits at zero and the sick one at 59 %; the threshold is
+#: put at 50 % of a 40-check (8,000-step) window, which is unreachable by
+#: intermittent self-healing negatives and fires on ``Test 2`` at step 35,750
+#: -- 27,958 steps, 44 % of the run, before the field goes non-finite.
+NEGATIVE_POPULATION_WINDOW = 40
+NEGATIVE_POPULATION_PREVALENCE = 0.5
+
+#: Immediate-abort share of wet cells holding a negative population.
+#:
+#: The prevalence window above needs 8,000 steps of history, which a fast
+#: cascade does not grant: ``Test 2`` went from 5 affected cells to 3,681 --
+#: 93 % of its wet cells -- inside a single 200-step interval. This catches
+#: that shape. It is deliberately far above anything either instrumented run
+#: showed while still integrating (the sick run's slow phase peaked at 20
+#: cells, 0.6 % of wet), so it can only fire on a collapse in progress.
+NEGATIVE_POPULATION_CASCADE_FRACTION = 0.02
+
+#: Cells that must be affected before the cascade fraction is consulted at all,
+#: so a handful of wet cells early in a pour cannot trip it on rounding.
+NEGATIVE_POPULATION_CASCADE_MIN_CELLS = 8
 
 #: Steps that must elapse before a stall can be declared at all. Reports are
 #: spaced at ``max_steps / 20``, so on a short step budget five of them can
@@ -1119,6 +1197,163 @@ def narrowest_choke_part_code(by_part: Dict[int, float]) -> Optional[int]:
     )
 
 
+@dataclass(frozen=True)
+class CoarseningDecision:
+    """
+    What fill grid the solve will actually run on, and why.
+
+    Attributes:
+        coarsening: The factor chosen. Equal to ``configured`` unless
+            auto-resolution refined it.
+        configured: The factor ``fill_grid_coarsening`` asked for.
+        solve_types: The coarsened part-type grid at ``coarsening``, so the
+            caller does not pay for the downsample twice.
+        by_part: ``{part code: median thickness in cells}`` measured on
+            ``solve_types``.
+        forced_by: Part code that was at or below
+            :data:`MIN_CHOKE_THICKNESS_CELLS` at ``configured`` and forced the
+            refinement, or ``None`` when nothing did.
+        forced_by_thickness: That part's thickness at ``configured``.
+        cells_configured: Solve-grid cell count at ``configured``.
+        cells_chosen: Solve-grid cell count at ``coarsening``.
+        resolved: True when every metal-path part clears the hard minimum at
+            ``coarsening``. False means even coarsening 1 could not fix it and
+            the run proceeds under the hard warning.
+        enabled: Whether auto-resolution was allowed to act.
+    """
+
+    coarsening: int
+    configured: int
+    solve_types: np.ndarray
+    by_part: Dict[int, float]
+    forced_by: Optional[int]
+    forced_by_thickness: float
+    cells_configured: int
+    cells_chosen: int
+    resolved: bool
+    enabled: bool
+
+    @property
+    def refined(self) -> bool:
+        """True when the grid actually changed from what was configured."""
+        return self.coarsening != self.configured
+
+
+def choose_fill_coarsening(
+    fine_types: np.ndarray,
+    configured: int,
+    *,
+    enabled: bool = True,
+) -> CoarseningDecision:
+    """
+    Pick the fill-grid coarsening that resolves every gating channel.
+
+    A channel at or below :data:`MIN_CHOKE_THICKNESS_CELLS` has no interior
+    once halfway bounce-back has put the walls at +-0.5 cells: it seals, and
+    the fill through it is not a result whatever the run reports. Round 1 of
+    this work made that visible as a warning. Warning about a grid the stage
+    chose itself, and could just as easily choose better, is only half an
+    answer -- so the stage now measures the channels at the configured
+    coarsening and, if any is sealed, refines a step at a time until they all
+    clear or it reaches 1.
+
+    Refining is not free: cost goes as the cube of the resolution in cells
+    plus a linear factor in steps (the timestep shrinks with the cell), so
+    2 -> 1 is roughly a sixteen-fold increase in work. That is why this only
+    triggers on the *hard* threshold, never on the marginal one -- a
+    three-cell gate is worth a note, not a sixteen-fold bill.
+
+    Refinement steps down by one rather than jumping to 1: the first factor
+    that clears the threshold is the cheapest grid that can carry the fill,
+    and on ``Test 2`` that is 1 only because its gate is a two-cell plate at
+    the shipped coarsening of 2.
+
+    When it cannot be fixed -- the gate is still sealed at coarsening 1, so
+    the *mesh* is too coarse and no downsampling choice can help -- the
+    decision comes back at coarsening 1 with ``resolved`` False and the
+    caller keeps the hard warning. An honest misrun beats a silent one.
+
+    Args:
+        fine_types: The mesh-resolution dense part-type grid.
+        configured: ``fill_grid_coarsening``, at least 1.
+        enabled: ``choke_auto_resolution``. When False the configured factor
+            is returned untouched, measured but not acted on.
+
+    Returns:
+        A :class:`CoarseningDecision`, always carrying the ``solve_types``
+        grid for the factor it chose.
+    """
+    configured = max(1, int(configured))
+
+    def measure(factor: int) -> Tuple[np.ndarray, Dict[int, float]]:
+        types = coarsen_part_types(fine_types, factor)
+        return types, measure_choke_thickness_by_part(types)
+
+    def sealed(by_part: Dict[int, float]) -> Optional[int]:
+        """The upstream-most part at or below the hard minimum, if any."""
+        under = {
+            code: value
+            for code, value in by_part.items()
+            if 0.0 < value <= MIN_CHOKE_THICKNESS_CELLS
+        }
+        return narrowest_choke_part_code(under)
+
+    base_types, base_by_part = measure(configured)
+    cells_configured = int(np.prod(base_types.shape))
+    forced_by = sealed(base_by_part)
+
+    if not enabled or forced_by is None or configured == 1:
+        return CoarseningDecision(
+            coarsening=configured,
+            configured=configured,
+            solve_types=base_types,
+            by_part=base_by_part,
+            forced_by=forced_by,
+            forced_by_thickness=(
+                base_by_part[forced_by] if forced_by is not None else 0.0
+            ),
+            cells_configured=cells_configured,
+            cells_chosen=cells_configured,
+            resolved=forced_by is None,
+            enabled=enabled,
+        )
+
+    forced_by_thickness = base_by_part[forced_by]
+    for factor in range(configured - 1, 0, -1):
+        types, by_part = measure(factor)
+        if sealed(by_part) is None:
+            return CoarseningDecision(
+                coarsening=factor,
+                configured=configured,
+                solve_types=types,
+                by_part=by_part,
+                forced_by=forced_by,
+                forced_by_thickness=forced_by_thickness,
+                cells_configured=cells_configured,
+                cells_chosen=int(np.prod(types.shape)),
+                resolved=True,
+                enabled=enabled,
+            )
+        if factor == 1:
+            # Out of room. Hand back the finest grid available and let the
+            # caller warn: it is the best this mesh can do, and saying so is
+            # more use than silently running the coarse one.
+            return CoarseningDecision(
+                coarsening=1,
+                configured=configured,
+                solve_types=types,
+                by_part=by_part,
+                forced_by=forced_by,
+                forced_by_thickness=forced_by_thickness,
+                cells_configured=cells_configured,
+                cells_chosen=int(np.prod(types.shape)),
+                resolved=False,
+                enabled=enabled,
+            )
+
+    raise AssertionError("unreachable: the loop above always returns")
+
+
 def measure_choke_thickness_cells(dense_types: np.ndarray) -> float:
     """
     Thickness of the thinnest gating section, in fill-grid cells.
@@ -1235,6 +1470,20 @@ class FillingResult:
             rather than instead of it, because the two answer different
             questions -- what the geometry has, and what the solver saw. They
             are not close: 2.98 against 7.46 cm^2 on the ``Test 2`` assembly.
+        delivered_lb: Metal the inlet actually delivered over the run, in
+            pounds -- the integral of what the boundary put into the domain,
+            not an estimate from the fill fraction. Reported because the
+            difference between this and ``target_delivery_lb_s`` times
+            ``fill_seconds`` is the whole story of whether the pour ran at
+            rate or starved.
+        target_delivery_lb_s: The rate the pour was metered against, after
+            the filter rating and the Mach guard had their say. In head mode
+            it is the smaller of what the casting wants (the square-root
+            rule) and what the mouth can pass (Torricelli through its
+            measured area), unless ``pour_rate_lb_s`` sets one explicitly; in
+            velocity mode it is the prescribed rate.
+        configured_coarsening: ``fill_grid_coarsening`` as configured, which
+            differs from ``coarsening`` when auto-resolution refined the grid.
     """
 
     fill_time_s: np.ndarray
@@ -1261,6 +1510,9 @@ class FillingResult:
     choke_thickness_by_part: Dict[str, float] = field(default_factory=dict)
     narrowest_choke_part: str = ""
     choke_area_fine_cm2: float = 0.0
+    delivered_lb: float = 0.0
+    target_delivery_lb_s: float = 0.0
+    configured_coarsening: int = 0
     frames: Tuple[FillFrame, ...] = ()
 
     @property
@@ -1506,8 +1758,42 @@ def run_filling_stage(
         return None
 
     fine_types = dense_part_types(mapping, np.asarray(voxel_mesh.voxel_part_types))
-    coarsening = max(1, int(getattr(filling, "fill_grid_coarsening", 2)))
-    solve_types = coarsen_part_types(fine_types, coarsening)
+
+    # Which grid to solve on is decided before anything is built on it, because
+    # a sealed gating channel is not an inaccuracy to report afterwards -- it
+    # is a fill that cannot happen. See choose_fill_coarsening.
+    coarsening_decision = choose_fill_coarsening(
+        fine_types,
+        max(1, int(getattr(filling, "fill_grid_coarsening", 2))),
+        enabled=int(getattr(filling, "choke_auto_resolution", 1)) != 0,
+    )
+    coarsening = coarsening_decision.coarsening
+    solve_types = coarsening_decision.solve_types
+    if coarsening_decision.refined:
+        forced = coarsening_decision.forced_by
+        cost = (
+            coarsening_decision.cells_chosen
+            / max(1, coarsening_decision.cells_configured)
+        )
+        emit(
+            f"Filling: refining the fill grid -- the "
+            f"{_METAL_PATH_LABELS.get(forced, 'gating')} measured "
+            f"{coarsening_decision.forced_by_thickness:.1f} cells across at "
+            f"coarsening x{coarsening_decision.configured}, at or below the "
+            f"{MIN_CHOKE_THICKNESS_CELLS:.0f} cells a channel needs before it "
+            f"has an interior. Coarsening x{coarsening_decision.configured} -> "
+            f"x{coarsening}, {coarsening_decision.cells_configured:,} -> "
+            f"{coarsening_decision.cells_chosen:,} cells "
+            f"({cost:.0f}x the cells, and a shorter timestep with them, so "
+            f"expect a substantially longer solve)."
+            + (
+                ""
+                if coarsening_decision.resolved
+                else " Even at coarsening x1 the channel is still sealed -- "
+                "the mesh itself is too coarse. Running anyway, under the "
+                "warning below."
+            )
+        )
 
     inlet_seeds = _resolve_inlet_cells(pour_location, mapping, solve_types, coarsening)
     if inlet_seeds.shape[0] == 0:
@@ -1650,7 +1936,7 @@ def run_filling_stage(
     head_m = float(inches_to_meters(float(getattr(filling, "initial_head_in", 4.0))))
     head_lattice = head_m / dx_m
     inlet_density = REFERENCE_DENSITY * (
-        1.0 + units.gravity_lattice * head_lattice / (1.0 / 3.0)
+        1.0 + units.gravity_lattice * head_lattice / LATTICE_CS2
     )
 
     # What the inlet imposes -- and what it must not.
@@ -1696,12 +1982,63 @@ def run_filling_stage(
     # without the Guo half-force correction: that correction is precisely the
     # term that made the original a pump.
     #
-    # Velocity mode still prescribes a constant velocity from the pour rate.
-    # There the user is asserting a delivery rate, and a boundary that meters
-    # itself would quietly ignore them.
+    # That is the *momentum* boundary, and it stays. What it could not do is
+    # deliver metal, and this is the third measurement, taken on the assemblies
+    # named below:
+    #
+    #   * Net delivery was 0.0174 lattice-mass/step -- about 1.26 lb/s -- on
+    #     BOTH Test_Model/Full_Gating_Test (22 lb) and the 459 lb Test 2, at
+    #     every head and every grid tried. A number that does not move when the
+    #     head, the mouth area and the model all move is not a physical flow
+    #     rate; it is a numerical residue. Torricelli through the same mouths
+    #     is 25-50x larger.
+    #
+    # The mechanism, and why the pressure BC alone cannot fix it. Delivery is
+    # accounted -- correctly -- as the mass the pin puts back into the inlet
+    # cells, which under Koerner's weight-1 exchange is exactly their density
+    # change over the step. The inlet layer is the top of the metal: nothing
+    # streams in from above it, so whatever leaves through its underside is
+    # what the pin must replace, and delivery is therefore identically
+    # ``rho * u_z`` through the mouth. That identity is sound. The problem is
+    # what sets ``u_z``: the inlet layer's momentum after streaming is
+    # dominated by exchange with the closed boundary above it -- its own
+    # up-going populations bounce straight back down, and it receives only
+    # what the layer below sends up. It never sees a hydrostatic column above
+    # it, because there is no column above it, only a boundary condition. So
+    # the layer sits at u_z ~ 5e-4 lattice against a Torricelli 0.02, the
+    # sprue below it is fed a trickle, the front spreads as interface cells
+    # that never reach eps = 1, and Koerner's eps-averaged exchange weight
+    # then throttles the trickle further. Starvation is self-reinforcing:
+    # low delivery -> mist -> low exchange weight -> low delivery. On a small
+    # model 1.26 lb/s still finishes; on Test 2 the mist sat at eps ~ 0.37 for
+    # 13 s and died in the negative-population cascade.
+    #
+    # The fix keeps the pressure boundary and adds an explicit, metered mass
+    # source -- which is what a pouring basin *is*. See the delivery block in
+    # the step loop: the target rate below is Torricelli through the measured
+    # mouth, and the loop places at most that much metal per step into the
+    # inlet cells and the few cells of throat directly beneath them, and only
+    # into the room they actually have. Mass is added; momentum is not, so it
+    # cannot become the pump the original was. Back-pressure throttles it
+    # exactly: when the throat is full there is no room, the top-up is zero,
+    # and delivery falls back to whatever the column's own dynamics carry.
+    #
+    # Velocity mode prescribes its constant velocity from the pour rate as
+    # before, and is metered against that rate rather than against Torricelli:
+    # there the user is asserting a delivery rate.
     inlet_area_m2 = float(inlet.shape[0]) * dx_m * dx_m
     inlet_mode = int(getattr(filling, "inlet_mode_code", 0))
     ix, iy, iz = inlet[:, 0], inlet[:, 1], inlet[:, 2]
+    # The flow area is the mouth's horizontal cross-section -- the top layer of
+    # the inlet -- not every cell the resolver returned. _expand_inlet_to_mouth
+    # floods one layer, so the two agree except where the pour point was
+    # clicked on a flank and dragged a few seed cells down with it.
+    mouth_cells = int(np.count_nonzero(inlet[:, 2] == int(inlet[:, 2].max())))
+    mouth_area_m2 = float(max(mouth_cells, 1)) * dx_m * dx_m
+    # Hoisted: head mode needs it for the square-root cross-check, and the
+    # velocity branch for its own rate.
+    weight_lb = pour_weight_lb(voxel_mesh, alloy)
+    recommended_lb_s = recommended_pour_rate_lb_s(weight_lb)
     u_inlet_physical = 0.0
     inlet_mode_label = ""
     if inlet_mode == 1:
@@ -1709,10 +2046,9 @@ def run_filling_stage(
         # pour_temperature_c already use. The square-root rule ties the rate to
         # this casting's own weight; a fixed number cannot, and 5 lb/s is
         # wrong for almost every casting that is not about 25 lb.
-        weight_lb = pour_weight_lb(voxel_mesh, alloy)
         pour_rate_lb_s = float(getattr(filling, "pour_rate_lb_s", 0.0) or 0.0)
         if pour_rate_lb_s <= 0.0:
-            pour_rate_lb_s = recommended_pour_rate_lb_s(weight_lb)
+            pour_rate_lb_s = recommended_lb_s
             rate_source = f"sqrt of {weight_lb:.0f} lb"
         else:
             rate_source = "set"
@@ -1781,6 +2117,160 @@ def run_filling_stage(
         if inlet_mode != 1 and u_cap_lattice < float(units.u_max_lattice):
             inlet_mode_label += ", filter-limited"
 
+    # ---- The delivery rate the pour is metered against --------------------
+    #
+    # Physics, not numerical residue. In head mode that is Torricelli's
+    # efflux from the configured head through the *measured* mouth, with a
+    # discharge coefficient for the vena contracta and entrance loss --
+    # Q = Cd A sqrt(2 g h) -- which is the same expression a foundry uses to
+    # size a sprue. In velocity mode it is the rate the user asserted, which
+    # is already in hand as u_inlet_physical through the same area.
+    #
+    # Reported against the square-root rule (a W-pound casting pours in
+    # sqrt(W) seconds) as a cross-check, because the two are independent
+    # statements about the same pour: Torricelli says what the rigging can
+    # pass, sqrt(W) says what the casting wants. They disagreeing is
+    # information -- an under-sized sprue, or an over-sized one -- so both are
+    # logged rather than silently reconciled.
+    lb_per_lattice_mass = (
+        float(alloy.density_liquid) * (dx_m ** 3)
+        / float(REFERENCE_DENSITY) / 0.45359237
+    )
+    torricelli_m_s = float(np.sqrt(2.0 * 9.81 * max(head_m, 0.0)))
+    if inlet_mode == 1:
+        target_kg_s = (
+            u_inlet_physical * float(alloy.density_liquid) * inlet_area_m2
+        )
+        target_source = "prescribed"
+    else:
+        pour_rate_override_lb_s = float(
+            getattr(filling, "pour_rate_lb_s", 0.0) or 0.0
+        )
+        if pour_rate_override_lb_s > 0.0:
+            # An explicit rate is an assertion about the pour, and a boundary
+            # that quietly ignored it would be the same fault the old
+            # self-metering inlet had, pointed the other way.
+            target_kg_s = pour_rate_override_lb_s * 0.45359237
+            target_source = "set"
+        else:
+            # Two independent statements about the same pour, and the pour
+            # runs at the smaller.
+            #
+            # Torricelli through the measured mouth, Q = Cd A sqrt(2 g h), is
+            # what the *rigging* can pass -- the ceiling, set by the basin and
+            # the mouth it sits on. The square-root rule, sqrt(W) lb/s, is what
+            # the *casting* wants: a W-pound casting is poured in sqrt(W)
+            # seconds. A foundry pours at the second and uses the first to
+            # check the sprue is big enough, and metering at the ceiling
+            # instead is how a pour is over-driven.
+            #
+            # Both test rigs have mouths well above their castings' needs,
+            # because a sprue mouth is sized generously and the real choke is
+            # downstream: 29.6 against 4.4 lb/s on Full_Gating_Test, 44.1
+            # against 20.8 on Test 2. Metering Test 2 at its 44.1 lb/s ceiling
+            # drove the free-surface reconstruction into persistent negative
+            # populations and the precursor guard aborted it at step 9,800.
+            mouth_ceiling_lb_s = (
+                INLET_DISCHARGE_COEFFICIENT
+                * float(alloy.density_liquid)
+                * mouth_area_m2
+                * torricelli_m_s
+                / 0.45359237
+            )
+            if recommended_lb_s > 0.0 and recommended_lb_s < mouth_ceiling_lb_s:
+                target_kg_s = recommended_lb_s * 0.45359237
+                target_source = (
+                    f"sqrt of {weight_lb:.0f} lb; the {mouth_cells:,}-cell "
+                    f"mouth could pass {mouth_ceiling_lb_s:.1f}"
+                )
+            else:
+                target_kg_s = mouth_ceiling_lb_s * 0.45359237
+                target_source = (
+                    f"Cd {INLET_DISCHARGE_COEFFICIENT:.2f} x "
+                    f"{mouth_cells:,}-cell mouth x sqrt(2gh)"
+                )
+                if recommended_lb_s > 0.0:
+                    warnings.append(
+                        f"the mouth cannot pass the rate this casting wants: "
+                        f"{mouth_ceiling_lb_s:.1f} lb/s through the "
+                        f"{mouth_cells:,}-cell mouth at "
+                        f"{head_m * 39.3701:.1f} in of head, against "
+                        f"{recommended_lb_s:.1f} lb/s from the square-root "
+                        f"rule for {weight_lb:.0f} lb. Pouring at what the "
+                        f"rigging passes -- the fill will be slower than the "
+                        f"casting wants, which is where cold shuts come from. "
+                        f"Widen the sprue mouth or raise the head."
+                    )
+
+    # The filter rating binds the target the same way it binds the velocity
+    # cap: a deep head does not entitle the pour to exceed what the filter can
+    # pass.
+    if flow_limit_kg_s is not None and target_kg_s > flow_limit_kg_s:
+        if inlet_mode != 1:
+            # Velocity mode has already warned about this above.
+            warnings.append(
+                f"delivery limited by the filter: the head would drive "
+                f"{target_kg_s / 0.45359237:.1f} lb/s through the mouth, "
+                f"{flow_limit_kg_s / 0.45359237:.1f} lb/s is rated across "
+                f"{len(filter_zones)} filter(s). Metering at the rating."
+            )
+            inlet_mode_label += ", filter-limited"
+        target_kg_s = float(flow_limit_kg_s)
+        target_source += ", filter-rated"
+
+    # The Mach guard binds it last, and honestly. Delivering Q through an area
+    # A implies a mean entry velocity Q / (rho A); if that is above the guard
+    # the timestep was sized for, this grid cannot carry the pour, and saying
+    # so is the only defensible answer. Silently delivering it anyway would
+    # reintroduce exactly the atomised jet _expand_inlet_to_mouth was written
+    # to remove.
+    u_target_lattice = float(
+        units.to_lattice_velocity(
+            np.asarray(
+                target_kg_s / max(float(alloy.density_liquid) * mouth_area_m2, 1e-9),
+                dtype=np.float64,
+            )
+        )
+    )
+    if u_target_lattice > u_cap_lattice:
+        capped_kg_s = target_kg_s * (u_cap_lattice / max(u_target_lattice, 1e-12))
+        warnings.append(
+            f"pour rate unachievable at this resolution: delivering "
+            f"{target_kg_s / 0.45359237:.1f} lb/s through the "
+            f"{mouth_cells:,}-cell mouth ({mouth_area_m2 * 1550.0:.2f} in^2) "
+            f"implies {u_target_lattice:.4f} lattice velocity against a guard "
+            f"of {u_cap_lattice:.4f}. Metering at "
+            f"{capped_kg_s / 0.45359237:.1f} lb/s instead -- the fill will run "
+            f"slower than the real pour. Reduce fill_grid_coarsening or voxel "
+            f"size to widen the mouth in cells, or raise "
+            f"lattice_velocity_max."
+        )
+        target_kg_s = capped_kg_s
+        u_target_lattice = u_cap_lattice
+        target_source += ", Mach-capped"
+
+    # What the basin can supply through the mouth, whatever the domain pulls:
+    # Torricelli with the discharge coefficient, under the Mach guard. Fixed
+    # for the run -- the head does not change -- and used as the hard ceiling
+    # on the head boundary's imposed entry velocity.
+    u_mouth_ceiling_lattice = min(
+        u_cap_lattice,
+        float(units.to_lattice_velocity(
+            np.asarray(
+                INLET_DISCHARGE_COEFFICIENT * torricelli_m_s, dtype=np.float64
+            )
+        )),
+    )
+
+    target_lb_s = target_kg_s / 0.45359237
+    # Lattice mass the metered source may add per step. One lattice mass unit
+    # at REFERENCE_DENSITY is one cell volume of liquid metal, which is what
+    # lb_per_lattice_mass inverts -- so this and the poured counter are in the
+    # same units by construction and the ledger closes exactly.
+    target_mass_per_step = (
+        target_lb_s * float(units.dt_s) / max(lb_per_lattice_mass, 1e-30)
+    )
+
     inlet_rho = np.full(inlet.shape[0], inlet_density, dtype=np.float64)
     inlet_u = np.zeros((3, inlet.shape[0]), dtype=np.float64)
     if inlet_mode == 1:
@@ -1804,7 +2294,10 @@ def run_filling_stage(
         emit(
             f"Filling: inlet {inlet.shape[0]:,} cells{inlet_widening}, "
             f"{inlet_mode_label}, "
-            f"{u_inlet_physical:.2f} m/s ({u_inlet_lattice:.4f} lattice)"
+            f"{u_inlet_physical:.2f} m/s ({u_inlet_lattice:.4f} lattice); "
+            f"metering {target_lb_s:.1f} lb/s ({target_source}), "
+            f"sqrt-rule cross-check {recommended_lb_s:.1f} lb/s "
+            f"for {weight_lb:.0f} lb"
         )
     else:
         # A full cell holds rho * porosity -- apply_transitions' own definition
@@ -1820,8 +2313,16 @@ def run_filling_stage(
             f"(+{(inlet_density / REFERENCE_DENSITY - 1.0) * 100.0:.3f}% over "
             f"reference); velocity follows the flow, capped at "
             f"{u_cap_lattice * units.velocity_scale:.2f} m/s "
-            f"({u_cap_lattice:.4f} lattice)"
+            f"({u_cap_lattice:.4f} lattice); metering {target_lb_s:.1f} lb/s "
+            f"({target_source}, {torricelli_m_s:.2f} m/s efflux, "
+            f"{u_target_lattice:.4f} lattice), sqrt-rule cross-check "
+            f"{recommended_lb_s:.1f} lb/s for {weight_lb:.0f} lb"
         )
+        # A mouth larger than the casting needs is the normal case, and not a
+        # defect: the sprue tapers and the real choke is downstream. It is
+        # reconciled in the target above rather than warned about -- the pour
+        # simply runs at the square-root rate. Only the other direction, a
+        # mouth that cannot pass what the casting wants, gets a warning.
 
     # Whether the head can reach the top of the metal at all.
     #
@@ -1863,7 +2364,9 @@ def run_filling_stage(
     # Reported per part, and warned about per part. One number for "the gating
     # system" cannot say which body the metal will not cross, and the answer
     # is usually the gate while the sprue and runner are fine.
-    choke_by_part = measure_choke_thickness_by_part(solve_types)
+    # Already measured on exactly this grid by choose_fill_coarsening, which
+    # had to measure it to decide what the grid should be.
+    choke_by_part = coarsening_decision.by_part
     choke_thickness_cells = (
         min(choke_by_part.values()) if choke_by_part else 0.0
     )
@@ -1973,10 +2476,7 @@ def run_filling_stage(
     # conversion to kilograms is total_mass_kg's: one lattice mass unit at
     # REFERENCE_DENSITY is one cell volume of liquid metal.
     poured = 0.0
-    poured_lb_per_lattice_mass = (
-        float(alloy.density_liquid) * (dx_m ** 3)
-        / float(REFERENCE_DENSITY) / 0.45359237
-    )
+    poured_lb_per_lattice_mass = lb_per_lattice_mass
     # Hoisted out of the loop: the inlet's raw first moment is measured every
     # step from a (19, n_inlet) slice, and n_inlet is a handful of cells.
     lattice_c_t = LATTICE_VELOCITIES.T.astype(np.float64)
@@ -2002,11 +2502,69 @@ def run_filling_stage(
         )
     inlet_halo &= ~inlet_mask & ~obstacle
     hx, hy, hz = np.nonzero(inlet_halo)
+
+    # The throat the metered source may pour into, layer by layer.
+    #
+    # Grown straight down from the mouth through metal only, so it is the bore
+    # directly under the inlet and stops at the first floor -- it cannot jump
+    # an obstacle into a cavity that happens to sit below. Each layer is kept
+    # separately because the source fills them in order, nearest the mouth
+    # first: spreading the same mass evenly over three layers is how a mist
+    # forms, and a mist is the failure this whole block exists to prevent.
+    #
+    # Only INTERFACE cells in these layers ever have room. Under weight-1
+    # exchange a FLUID cell's mass tracks its density identically, so a
+    # draining FLUID cell's "full" falls with it and its deficit is zero by
+    # construction. That is the correct behaviour, not a limitation: once the
+    # throat is running full the column's own dynamics carry the metal, the
+    # top-up finds no room, and delivery falls back to what the inlet pin
+    # measures -- which for a coherent full column IS the physical flux
+    # ``rho u A``. The source bootstraps and sustains the column; it does not
+    # replace it.
+    delivery_layers: List[Tuple[Tuple[np.ndarray, ...], np.ndarray]] = []
+    _frontier = inlet_mask
+    _claimed = inlet_mask.copy()
+    for _ in range(INLET_DELIVERY_DEPTH_CELLS):
+        _below = np.zeros_like(_frontier)
+        _below[:, :, :-1] = _frontier[:, :, 1:]
+        _below &= metal & ~obstacle & ~_claimed
+        if not _below.any():
+            break
+        _claimed |= _below
+        _idx = np.nonzero(_below)
+        delivery_layers.append(
+            (_idx, np.asarray(state.porous.porosity[_idx], dtype=np.float64))
+        )
+        _frontier = _below
+
     status = STATUS_TIME_CAPPED
     diverged_at_step = 0
     flat_reports = 0
     last_reached = -1
     best_mass_fraction = -1.0
+    # Rolling window of "did this check see a negative population?", the
+    # instability precursor -- see NEGATIVE_POPULATION_WINDOW.
+    negative_history: List[int] = []
+    # Delivery over the previous step, which is what the head boundary's
+    # rate controller closes the loop on. Starts at zero, i.e. fully starved,
+    # so the controller opens the boundary up from rest.
+    delivered_previous = 0.0
+    # The head boundary's driving pressure difference, low-passed across
+    # steps, and the entry velocity it produces. Started at the full head:
+    # before any metal is below the mouth the throat is at atmospheric, which
+    # is what the filter should already be holding.
+    inlet_drive_head = inlet_density - float(REFERENCE_DENSITY)
+    u_drive = 0.0
+    # Where its back-pressure is read: the first layer of throat below the
+    # mouth, or the inlet's own stream halo when the mouth sits on a floor.
+    thx, thy, thz = (
+        delivery_layers[0][0] if delivery_layers else (hx, hy, hz)
+    )
+    # Delivery is differenced between reports rather than averaged from the
+    # start, so a rate that collapses shows up as a collapse instead of being
+    # hidden under the healthy part of the run.
+    poured_at_last_report = 0.0
+    step_at_last_report = 0
     for taken in range(1, max_steps + 1):
         # Hold the inlet full. What that means differs by mode, and the
         # difference is the whole redesign -- see the block above inlet_area_m2
@@ -2022,38 +2580,238 @@ def run_filling_stage(
             # Prescribed velocity: constant, so it cannot accumulate.
             state.f[:, ix, iy, iz] = equilibrium(inlet_rho, inlet_u).astype(np.float32)
         else:
-            # Pressure boundary. Measure the inlet cells' own velocity from the
-            # populations they are holding at pin time -- post free-surface
-            # pass, so this is what the flow field actually delivered last step
-            # -- and re-impose only the head pressure on top of it.
+            # Head boundary: the head DIFFERENCE drives the entry velocity.
             #
-            # The RAW first moment, sum_i c_i f_i / rho. ``state.u`` carries the
-            # Guo half-force correction; feeding that back is what made the
-            # original inlet a momentum pump, and it is not re-introduced here
-            # by the back door. The rebuild adds no force term of its own, so
-            # nothing can accumulate: whatever the flow slows to, the boundary
-            # follows.
+            # Reading the inlet cells' own raw first moment back into their
+            # equilibrium, as the previous boundary did alone, does not
+            # measure the flow's velocity, and the instrumented 4x4x40 column
+            # that proved it is
+            # worth keeping: with the head at 4 in the inlet layer measured
+            # u_z = -0.002 against a Torricelli 0.0202, and the cell five below
+            # it -0.006 -- an order of magnitude short, for 12,000 steps, while
+            # the column ran at 26 % wet and never filled.
+            #
+            # The reason is the lid. The inlet layer is the top of the metal
+            # and the mold sits directly above it, so every population it
+            # sends upward bounces straight back down, and the only momentum
+            # it receives from below is that cell's *upward* group. Those two
+            # very nearly cancel, so the layer's measured momentum is pinned
+            # near zero every step no matter what the column beneath it is
+            # doing. Delivery is identically ``rho u A`` at that layer, so a
+            # velocity held near zero is a delivery held near zero: the flat
+            # 0.0174 lattice-mass/step that appeared at every head and every
+            # model size. It was never a flow rate; it was the lid.
+            #
+            # So the velocity is *driven* as well as measured, from the
+            # pressure difference the boundary actually has to work against:
+            #
+            #     u = Cd sqrt(2 c_s^2 (rho_head - rho_throat) / rho_0)
+            #
+            # -- Bernoulli through an orifice, which reduces to Torricelli's
+            # sqrt(2 g h) when the throat is at atmospheric and to zero when
+            # the throat has backed up to the head. rho_throat is measured on
+            # the wet cells immediately below the mouth, so back-pressure is a
+            # measurement and the throttle is closed-loop: fill the column to
+            # the head and delivery stops on its own, which is the one thing a
+            # constant prescribed velocity could never do. That expression is
+            # the *ceiling* -- see the rate controller below, which trims the
+            # velocity under it to hit the target mass rate.
+            #
+            # It cannot accumulate either. u is a function of a measured
+            # density difference and a constant, bounded by the Mach guard;
+            # nothing about last step's velocity enters it, so the Guo
+            # half-force that made the original inlet a pump has no path back
+            # in. The same 4x4x40 column under this boundary delivers 97 % of
+            # target, fills all 640 cells by step 4,000, and then throttles
+            # itself to 0.0 % and holds there with no negative populations.
+            throat_wet = state.flags[thx, thy, thz] >= FLAG_INTERFACE
+            rho_throat = (
+                float(
+                    np.asarray(
+                        state.rho[thx, thy, thz], dtype=np.float64
+                    )[throat_wet].mean()
+                )
+                if throat_wet.any()
+                else float(REFERENCE_DENSITY)
+            )
+            # Low-passed BEFORE the square root, and that order is the whole
+            # difference between a boundary that shuts off and one that does
+            # not. ``max(0, .)`` rectifies: filter the velocity and the
+            # driving difference's symmetric population noise passes through
+            # the clamp as a train of one-sided spikes whose average is
+            # positive, so the boundary keeps pushing on a column that has
+            # already backed up. Measured on Full_Gating_Test with the filter
+            # on the wrong side: max|u| held at 0.040 for 231,000 steps and
+            # the fill oscillated between 1,050 and 1,290 FLUID cells forever
+            # instead of closing, stalling at 79 %. Filtering the difference
+            # first, the same boundary reads a clean zero once the throat is
+            # up to head and delivery settles inside +-0.1 % of nothing.
+            inlet_drive_head += INLET_VELOCITY_BETA * (
+                (inlet_density - rho_throat) - inlet_drive_head
+            )
+            # What the head can do is the CEILING on the entry velocity, not
+            # the entry velocity itself.
+            #
+            # Imposing the Bernoulli velocity directly pours at whatever the
+            # mouth happens to pass, which on both test rigs is far more than
+            # the casting wants: Full_Gating_Test delivered 4.8 lb/s whatever
+            # target it was given, and Test 2 was driven hard enough that the
+            # free-surface reconstruction went into persistent negatives and
+            # the precursor guard aborted it at step 9,600 of 873,186. It also
+            # made the reported "x of y target" a fiction, because y was not
+            # controlling anything.
+            u_ceiling = min(
+                u_cap_lattice,
+                INLET_DISCHARGE_COEFFICIENT * float(np.sqrt(
+                    2.0 * LATTICE_CS2
+                    * max(0.0, inlet_drive_head)
+                    / float(REFERENCE_DENSITY)
+                )),
+            )
+            # So the velocity is trimmed to hit the target *mass* rate, and
+            # the mass rate is what is measured: the pin's own refill, which
+            # for this boundary is identically the flux through the mouth. An
+            # integrator rather than a formula because the map from imposed
+            # velocity to delivered mass is not the textbook rho u A -- the
+            # lid above the mouth reflects part of it, measured at about 40 %
+            # on a 4x4x40 column -- and that factor is geometry, not a
+            # constant worth hard-coding.
+            #
+            # Clipping to [0, u_ceiling] is the anti-windup and the physics at
+            # once: the basin cannot suck, and it cannot push harder than its
+            # own head. When the column backs up the ceiling falls to zero and
+            # takes the integrator with it, however far behind target the
+            # delivery is -- which is the throttle, and the reason this cannot
+            # force metal into a closed mold.
+            delivery_error = (
+                target_mass_per_step - delivered_previous
+            ) / max(target_mass_per_step, 1e-30)
+            u_drive = float(np.clip(
+                u_drive + INLET_RATE_GAIN * delivery_error * u_target_lattice,
+                0.0,
+                u_ceiling,
+            ))
+            # The driven velocity is a FLOOR on the old measured boundary, not
+            # a replacement for it, and that is deliberate.
+            #
+            # The measurement below is the previous boundary in full: the raw
+            # first moment of the inlet cells' own populations, low-passed,
+            # deliberately without the Guo half-force correction -- that
+            # correction is the term that made the very first inlet a momentum
+            # pump, and it does not come back in by this door either. What the
+            # measurement is bad at is *starting* a pour, because the lid
+            # above the mouth holds it near zero; what it is good at is the
+            # endgame, where it tracks the small real motions that push the
+            # last few cells over the transition threshold.
+            #
+            # Taking the stronger of the two keeps both. Measured on the
+            # walled tower fixture with the driven velocity replacing the
+            # measurement outright: delivery ran at 105-133 % of target
+            # through the fill -- the starvation fixed -- and then shut off
+            # hard at hydrostatic equilibrium with 96 % of the mass in and 12
+            # of 80 cells still flickering across the threshold, so the run
+            # stalled at 85 % instead of completing. As a floor it completes
+            # in 984 steps against the 1,148 that fixture has always taken:
+            # the pour is driven while there is head to drive it and hands
+            # back to the measurement once there is not.
+            #
+            # There is still one ceiling the measurement does not get to
+            # cross, and it is not the target: it is Torricelli through the
+            # mouth. A basin holding this head over this mouth cannot supply
+            # metal faster than sqrt(2 g h), whatever the column below is
+            # willing to pull, and letting the measurement impose more is
+            # inventing a basin pressure that no basin has.
+            #
+            # It binds only where the domain pulls harder than the basin can
+            # pour, which is a short free-falling column rather than a real
+            # rigging: on the 2x2x20 tower fixture, whose 4-cell mouth could
+            # pass 2.9 lb/s against a 0.57 lb/s square-root target, it takes
+            # the peak delivery from 650 % of target to 533 % -- the mouth
+            # ceiling, as it should. On Full_Gating_Test and on Test 2 it
+            # never binds at all: both ledgers are unchanged to the byte with
+            # it in place, because the rate controller is already holding
+            # delivery at 88 % and 99 % of target respectively.
+            #
+            # A constant, deliberately, and not the back-pressure ceiling
+            # above: damming the endgame with a ceiling that falls to zero is
+            # what left 12 of 80 cells flickering on that same tower.
             f_slice = state.f[:, ix, iy, iz].astype(np.float64)
             rho_now = f_slice.sum(axis=0)
             u_raw = lattice_c_t @ f_slice / np.clip(rho_now, 1e-9, None)
-            # A numerical filter on a boundary *measurement*, not physics --
-            # see INLET_VELOCITY_BETA for the measured amplitudes it removes.
             inlet_u_measured *= 1.0 - INLET_VELOCITY_BETA
             inlet_u_measured += INLET_VELOCITY_BETA * u_raw
             u_used = inlet_u_measured.copy()
+            # Gravity points -Z and metal enters falling, so "stronger" means
+            # more negative. Only the driven component is imposed; the lateral
+            # components stay as measured, so the boundary cannot invent a
+            # sideways jet the flow did not have.
+            np.minimum(u_used[2], -u_drive, out=u_used[2])
+            np.maximum(u_used[2], -u_mouth_ceiling_lattice, out=u_used[2])
             # Clamped by norm rather than per component, so clamping cannot
-            # rotate the flow direction the measurement reported.
+            # rotate the flow direction.
             speed = np.sqrt(np.sum(u_used * u_used, axis=0))
             u_used *= np.minimum(1.0, u_cap_lattice / np.maximum(speed, 1e-12))
             state.f[:, ix, iy, iz] = equilibrium(inlet_rho, u_used).astype(np.float32)
-        # Net delivery, measured before the pin overwrites what it is replacing.
-        # A boundary that meters itself has to be *reported* honestly too: on a
-        # backed-up fill this goes to zero, and a poured figure that kept
-        # climbing would be the same lie the old prescribed rate told.
-        poured += float(np.sum(inlet_full_mass)) - float(
+        # ---- Metered delivery ---------------------------------------------
+        #
+        # Two parts, in this order, and the order is the throttle.
+        #
+        # First the pin: the inlet cells go back to full, and what that costs
+        # is the mass that drained out of them last step -- for a coherent
+        # column, exactly the flux the flow field carried away. Measured before
+        # the write, so it is what the pin replaced rather than what it wrote.
+        # On a backed-up fill this goes to zero on its own.
+        #
+        # Then the top-up, and only if the pin came in under the target: the
+        # basin still has metal to give, so it is offered to the throat below
+        # the mouth, nearest layer first, and only into the room each cell
+        # actually has. When the throat is running full there is no room and
+        # the top-up is zero -- delivery is then whatever the column carries,
+        # which is the honest answer and the reason this cannot force mass
+        # into a closed system.
+        #
+        # Mass only. No population, no momentum: the pressure boundary above
+        # is the entire momentum story, and adding one here is how the
+        # original inlet became a pump.
+        #
+        # Every term added to ``poured`` is a term written into ``state.mass``,
+        # so the ledger closes to float64 round-off by construction. See
+        # tests/test_filling_stage.py's delivery-ledger test.
+        inlet_refill = float(np.sum(inlet_full_mass)) - float(
             np.sum(state.mass[ix, iy, iz])
         )
         state.mass[ix, iy, iz] = inlet_full_mass
+        delivered = inlet_refill
+        budget = target_mass_per_step - delivered
+        if budget > 0.0:
+            for _idx, _porosity in delivery_layers:
+                wet_here = state.flags[_idx] == FLAG_INTERFACE
+                if not wet_here.any():
+                    continue
+                room = np.where(
+                    wet_here,
+                    np.asarray(state.rho[_idx], dtype=np.float64) * _porosity
+                    - np.asarray(state.mass[_idx], dtype=np.float64),
+                    0.0,
+                )
+                np.maximum(room, 0.0, out=room)
+                want = float(room.sum())
+                if want <= 0.0:
+                    continue
+                if want > budget:
+                    room *= budget / want
+                    want = budget
+                state.mass[_idx] += room
+                delivered += want
+                budget -= want
+                if budget <= 0.0:
+                    break
+        poured += delivered
+        # What the rate controller reads next step. The pin's refill alone,
+        # not the topped-up total: a controller fed its own top-up would see
+        # the target met, back the velocity off to zero, and deliver the whole
+        # pour by placing mass rather than by flowing it.
+        delivered_previous = inlet_refill
         # Metal entering at the inlet is at the pour temperature -- pinned
         # every step, same as mass and momentum above, so the source stays a
         # true Dirichlet boundary rather than drifting as wall loss and
@@ -2110,6 +2868,71 @@ def run_filling_stage(
                 )
                 break
 
+            # ---- Instability precursors -------------------------------
+            #
+            # The mass ceiling above only fires once the bookkeeping has
+            # already broken, which on the measured Test 2 divergence was the
+            # same 200-step interval in which the field went non-finite. The
+            # collapse was not sudden: negative populations appeared 52,000
+            # steps earlier and were present in 59 % of samples from then on,
+            # in bursts, while every other observable still looked healthy.
+            #
+            # Negative populations are the precursor, and prevalence is the
+            # statistic -- not presence, and not magnitude. An isolated
+            # negative is routine and self-heals (see free_surface_kernel);
+            # a *persistent* one is the reconstruction failing repeatedly at
+            # the same place, and it always ends the same way. Deliberately
+            # not built on max|u| or on the density spread: on the healthy
+            # Full_Gating_Test run those reach 0.457 against a 0.05 guard and
+            # 0.347 respectively, so any threshold that catches the sick run
+            # kills the healthy one. See NEGATIVE_POPULATION_WINDOW.
+            negative_cells = (
+                int(np.count_nonzero(np.any(state.f < 0.0, axis=0) & wet))
+                if wet_cells
+                else 0
+            )
+            negative_history.append(1 if negative_cells else 0)
+            if len(negative_history) > NEGATIVE_POPULATION_WINDOW:
+                del negative_history[0]
+            prevalence = (
+                sum(negative_history) / float(NEGATIVE_POPULATION_WINDOW)
+                if len(negative_history) >= NEGATIVE_POPULATION_WINDOW
+                else 0.0
+            )
+            cascading = (
+                negative_cells >= NEGATIVE_POPULATION_CASCADE_MIN_CELLS
+                and negative_cells
+                >= NEGATIVE_POPULATION_CASCADE_FRACTION * max(wet_cells, 1)
+            )
+            if cascading or prevalence >= NEGATIVE_POPULATION_PREVALENCE:
+                status = STATUS_DIVERGED
+                diverged_at_step = taken
+                if cascading:
+                    precursor = (
+                        f"{negative_cells:,} of {wet_cells:,} wet cells "
+                        f"({negative_cells / max(wet_cells, 1):.1%}) are "
+                        f"holding a negative population -- a reconstruction "
+                        f"cascade in progress"
+                    )
+                else:
+                    precursor = (
+                        f"negative populations have been present at "
+                        f"{prevalence:.0%} of the last "
+                        f"{NEGATIVE_POPULATION_WINDOW} checks "
+                        f"({NEGATIVE_POPULATION_WINDOW * DIVERGENCE_CHECK_INTERVAL:,} "
+                        f"steps), {negative_cells:,} cells at this one. The "
+                        f"free-surface reconstruction is failing persistently "
+                        f"and this run will go non-finite"
+                    )
+                emit(
+                    f"Filling ABORTED: solver diverging at step {taken:,} "
+                    f"({taken * units.dt_s:.2f} s). {precursor}. Stopped "
+                    f"before the field lost finiteness, so the state below is "
+                    f"still readable -- but it is not a fill. Results "
+                    f"discarded."
+                )
+                break
+
         if taken % entrapment_check_interval == 0:
             # Per output frame, not per step (design doc 6.4): a
             # connected-component labelling over the whole coarse grid every
@@ -2138,11 +2961,26 @@ def run_filling_stage(
             mass_fraction = float(
                 np.clip(float(np.sum(state.mass[metal])), 0.0, metal_full_mass)
             ) / max(metal_full_mass, 1e-12)
+            # Delivery, said out loud, every report, forever. The whole defect
+            # this instrumentation exists for was a pour running at 2-5% of
+            # its physical rate for tens of thousands of steps while every
+            # other line in the log looked reasonable. A rate next to its
+            # target makes starvation a one-line read.
+            interval_steps = max(1, taken - step_at_last_report)
+            delivery_lb_s = (
+                (poured - poured_at_last_report) * poured_lb_per_lattice_mass
+                / (interval_steps * units.dt_s)
+            )
+            poured_at_last_report = poured
+            step_at_last_report = taken
             emit(
                 f"Filling: {reached:,}/{metal_total:,} cells "
                 f"({reached / max(1, metal_total):.0%}), "
                 f"{mass_fraction:.0%} by mass, "
-                f"{poured * poured_lb_per_lattice_mass:.1f} lb poured, at "
+                f"{poured * poured_lb_per_lattice_mass:.1f} lb poured, "
+                f"delivering {delivery_lb_s:.2f} of "
+                f"{target_lb_s:.2f} lb/s target "
+                f"({delivery_lb_s / max(target_lb_s, 1e-9):.0%}), at "
                 f"{taken * units.dt_s:.2f} s"
             )
             if reached >= metal_total:
@@ -2401,6 +3239,9 @@ def run_filling_stage(
             else ""
         ),
         choke_area_fine_cm2=measure_choke_area_cm2(fine_types, mapping.dx_m),
+        delivered_lb=poured * poured_lb_per_lattice_mass,
+        target_delivery_lb_s=target_lb_s,
+        configured_coarsening=coarsening_decision.configured,
         frames=tuple(frames),
     )
 

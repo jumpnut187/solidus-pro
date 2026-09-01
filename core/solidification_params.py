@@ -258,6 +258,15 @@ class FillingParams:
     pour_temperature_c: float = 0.0         # 0 = use alloy.pouring_temp
     initial_head_in: float = 4.0
     fill_grid_coarsening: int = 2
+    # 0/1 bool-as-int; see class docstring. When on (the default), the filling
+    # stage measures the gating channels on the grid
+    # ``fill_grid_coarsening`` asks for and, if any of them comes out at or
+    # below the two cells a channel needs before it has an interior, drops the
+    # coarsening a step at a time until they clear it or it reaches 1. Turn it
+    # off to pin the coarsening exactly as set -- the under-resolution warning
+    # still fires, so an under-resolved fill is never silent either way.
+    # See core.filling_stage.choose_fill_coarsening.
+    choke_auto_resolution: int = 1
     max_fill_time_s: float = 60.0
     smagorinsky_cs: float = 0.16
     lattice_velocity_max: float = 0.05
@@ -272,6 +281,7 @@ class FillingParams:
 
     def __post_init__(self) -> None:
         self.fill_grid_coarsening = _clamp_int(self.fill_grid_coarsening, 1, 8, 2)
+        self.choke_auto_resolution = _clamp_int(self.choke_auto_resolution, 0, 1, 1)
         self.lattice_velocity_max = _clamp_float(self.lattice_velocity_max, 0.005, 0.2, 0.05)
         self.max_fill_time_s = _clamp_float(self.max_fill_time_s, 1.0, 600.0, 60.0)
         self.cold_shut_arrival_gap_s = _clamp_float(self.cold_shut_arrival_gap_s, 0.01, 10.0, 0.5)
@@ -441,6 +451,9 @@ class SolidificationParameters:
         self.filling.fill_grid_coarsening = _clamp_int(
             self.filling.fill_grid_coarsening, 1, 8, 2,
         )
+        self.filling.choke_auto_resolution = _clamp_int(
+            self.filling.choke_auto_resolution, 0, 1, 1,
+        )
         self.filling.lattice_velocity_max = _clamp_float(
             self.filling.lattice_velocity_max, 0.005, 0.2, 0.05,
         )
@@ -551,6 +564,7 @@ class SolidificationParameters:
                 'pour_temperature_c': self.filling.pour_temperature_c,
                 'initial_head_in': self.filling.initial_head_in,
                 'fill_grid_coarsening': self.filling.fill_grid_coarsening,
+                'choke_auto_resolution': self.filling.choke_auto_resolution,
                 'max_fill_time_s': self.filling.max_fill_time_s,
                 'smagorinsky_cs': self.filling.smagorinsky_cs,
                 'lattice_velocity_max': self.filling.lattice_velocity_max,
