@@ -37,7 +37,21 @@ from physics.filling import (
     step,
     total_mass,
 )
-from physics.filling import _dilate, _interface_neighbourhood
+from physics.filling import (
+    REFERENCE_DENSITY,
+    TRANSITION_HYSTERESIS,
+    apply_transitions,
+    ensure_interface_skin,
+    fluid_fraction,
+)
+from physics.filling import (
+    _dilate,
+    _initialise_promoted_cells,
+    _initialise_promoted_temperature,
+    _interface_neighbourhood,
+    _mask_indices,
+    _redistribute,
+)
 
 WCB_NU = 0.006 / 7200.0
 DX_M = 0.0152
@@ -741,6 +755,519 @@ class InterfaceNeighbourhoodParityTests(unittest.TestCase):
         self.assertGreater(heal_submerged_interface(a, 0.5, 1, use_numba=True), 0)
         b, _, _ = _mixed_twin(plant=True)
         self.assertGreater(reset_detached_interface_cells(b, use_numba=True), 0)
+
+
+# ---------------------------------------------------------------------------
+# The cell-transition bookkeeping
+# ---------------------------------------------------------------------------
+#
+# apply_transitions and its helpers are the free-surface scheme's mass
+# bookkeeping, so these are the strictest parity tests in the file: every field
+# is asserted **exactly**, and total mass is asserted equal to the last bit.
+# The kernels were written to preserve accumulation order direction by
+# direction precisely so that this is achievable -- an allclose here would let
+# a reordered sum through, and a reordered sum in a redistribution loop is how
+# a conservation bug looks before it becomes a leak.
+#
+# The one documented exception is in redistribute_gather_kernel's docstring and
+# concerns NaN placement after divergence; no test asserts on that, because a
+# run that has diverged has already been aborted.
+
+#: A state has to be *provoked* into converting cells. Every synthetic box in
+#: this solver parks its interface at eps ~ 0.5 and stays there -- measured 0
+#: firing steps in 400 at 64^3 and 120^3, settling, falling and inlet-driven --
+#: so the transition paths are unreachable from a plain fixture and would go
+#: untested by accident rather than by choice.
+PROVOKE_SEED = 811
+
+
+def _provoked(n: int = 16, *, with_filter: bool = False, submerge: bool = False,
+              steps: int = 6, seed: int = PROVOKE_SEED):
+    """
+    A developed state with a deterministic scatter of cells pushed outside the
+    hysteresis band, so ``apply_transitions`` converts in both directions.
+
+    Two thirds of the picked cells are pushed over full and one third under
+    empty, which exercises the advancing front, the retreating front, and the
+    ``_redistribute`` call that has to balance both at once.
+    """
+    state, units = _fixture(n=n, with_filter=with_filter, submerge=submerge, seed=seed)
+    for _ in range(steps):
+        step(state, units, use_numba=True)
+        advect_temperature(state, 0.03)
+
+    rng = np.random.default_rng(seed)
+    wet = (state.flags == FLAG_FLUID) | (state.flags == FLAG_INTERFACE)
+    state.temperature = np.full(state.shape, NO_TEMPERATURE, dtype=np.float32)
+    state.temperature[wet] = (
+        1400.0 + 80.0 * rng.standard_normal(int(np.count_nonzero(wet)))
+    ).astype(np.float32)
+
+    idx = np.argwhere(state.flags == FLAG_INTERFACE)
+    pick = idx[rng.choice(len(idx), size=max(6, len(idx) // 5), replace=False)]
+    full = state.rho.astype(np.float64) * state.porous.porosity_f64
+    for j, cell in enumerate(pick):
+        at = (int(cell[0]), int(cell[1]), int(cell[2]))
+        state.mass[at] = full[at] * 1.08 + 0.01 if j % 3 else -0.02
+    return state, units
+
+
+def _provoked_twin(**kwargs):
+    a, units = _provoked(**kwargs)
+    b, _ = _provoked(**kwargs)
+    _assert_states_identical(a, b, "fixture")
+    return a, b, units
+
+
+#: Everything apply_transitions is allowed to touch. Asserting on a subset
+#: would let a kernel corrupt whatever was left out.
+STATE_FIELDS = ("flags", "mass", "f", "rho", "u", "temperature", "fill_time_s")
+
+
+def _assert_states_identical(a, b, label: str) -> None:
+    for name in STATE_FIELDS:
+        np.testing.assert_array_equal(
+            getattr(a, name), getattr(b, name), err_msg=f"{label}: {name}"
+        )
+    np.testing.assert_array_equal(
+        a.porous.primed, b.porous.primed, err_msg=f"{label}: primed"
+    )
+
+
+class ProvokedFixtureTests(unittest.TestCase):
+    """Guard the fixture: none of the tests below mean anything without this."""
+
+    def test_transitions_actually_fire_in_both_directions(self) -> None:
+        state, _ = _provoked()
+        filled, emptied = apply_transitions(state, 0.1, use_numba=False)
+        self.assertGreater(filled, 0)
+        self.assertGreater(emptied, 0)
+
+    def test_the_fronts_are_not_empty(self) -> None:
+        """
+        Both the advancing and the retreating mask must have cells in them, or
+        transition_front_kernel is being compared against nothing.
+        """
+        state, _ = _provoked()
+        eps = fluid_fraction(state)
+        interface = state.flags == FLAG_INTERFACE
+        to_fluid = interface & (eps > 1.0 + TRANSITION_HYSTERESIS)
+        to_gas = interface & (eps < -TRANSITION_HYSTERESIS)
+        state.flags[to_fluid] = FLAG_FLUID
+        state.flags[to_gas] = FLAG_GAS
+        promote = _dilate(to_fluid) & (state.flags == FLAG_GAS)
+        demote = _dilate(to_gas) & (state.flags == FLAG_FLUID)
+        self.assertGreater(int(np.count_nonzero(promote)), 0)
+        self.assertGreater(int(np.count_nonzero(demote)), 0)
+
+    def test_a_plain_fixture_converts_nothing(self) -> None:
+        """
+        The measurement behind PROVOKE_SEED's docstring, kept as a test so the
+        provocation is not quietly carrying a fixture that would have worked
+        anyway.
+        """
+        state, units = _fixture()
+        for _ in range(20):
+            step(state, units, use_numba=True)
+        self.assertEqual(apply_transitions(state, 0.1, use_numba=False), (0, 0))
+
+
+@unittest.skipUnless(NUMBA_AVAILABLE, "numba is not installed")
+class MaskCompactionParityTests(unittest.TestCase):
+    """``compact_mask_kernel`` is a parallel ``np.nonzero``; prove it."""
+
+    def _check(self, mask) -> None:
+        want = np.nonzero(mask)
+        got = _mask_indices(mask)
+        for axis, (g, w) in enumerate(zip(got, want)):
+            np.testing.assert_array_equal(g, w, err_msg=f"axis {axis}")
+
+    def test_matches_numpy_on_random_masks(self) -> None:
+        rng = np.random.default_rng(31)
+        for density in (0.0, 1e-4, 0.02, 0.5, 1.0):
+            with self.subTest(density=density):
+                mask = rng.random((13, 11, 9)) < density
+                self._check(mask)
+
+    def test_matches_numpy_on_degenerate_shapes(self) -> None:
+        """
+        The prefix sum runs over the x axis, so a single x slab is the case
+        where an off-by-one in the offsets would hide.
+        """
+        rng = np.random.default_rng(32)
+        for shape in ((1, 6, 5), (2, 1, 1), (7, 1, 3), (1, 1, 1), (5, 4, 1)):
+            with self.subTest(shape=shape):
+                self._check(rng.random(shape) < 0.4)
+
+    def test_the_order_is_the_one_mask_assignment_uses(self) -> None:
+        """
+        The whole point of matching C order: the caller writes through the
+        index list where the reference path wrote through the mask, so the two
+        have to visit cells in the same sequence.
+        """
+        rng = np.random.default_rng(33)
+        mask = rng.random((9, 8, 7)) < 0.3
+        n = int(np.count_nonzero(mask))
+        by_mask = np.zeros((9, 8, 7), dtype=np.float64)
+        by_mask[mask] = np.arange(n, dtype=np.float64)
+        ix, iy, iz = _mask_indices(mask)
+        by_index = np.zeros((9, 8, 7), dtype=np.float64)
+        by_index[ix, iy, iz] = np.arange(n, dtype=np.float64)
+        np.testing.assert_array_equal(by_mask, by_index)
+
+
+@unittest.skipUnless(NUMBA_AVAILABLE, "numba is not installed")
+class TransitionFrontParityTests(unittest.TestCase):
+    """
+    ``transition_front_kernel`` scatters from the converting cells where the
+    reference dilates towards them. Boolean masks, so exact or nothing.
+    """
+
+    @staticmethod
+    def _reference(state, to_fluid, to_gas):
+        """
+        The two expressions apply_transitions' NumPy fallback uses. Written out
+        rather than imported: this is the specification, and a shared helper
+        could be edited to agree with a broken kernel.
+        """
+        promote = _dilate(to_fluid) & (state.flags == FLAG_GAS)
+        demote = _dilate(to_gas) & (state.flags == FLAG_FLUID)
+        return promote, demote
+
+    def _kernel(self, state, to_fluid, to_gas):
+        from physics.fluid_flow import lattice_tables, transition_front_kernel
+
+        _C, Ci, _W, _OPP = lattice_tables()
+        promote = np.empty(state.shape, dtype=bool)
+        demote = np.empty(state.shape, dtype=bool)
+        transition_front_kernel(state.flags, to_fluid, to_gas, Ci, promote, demote)
+        return promote, demote
+
+    @staticmethod
+    def _split(state):
+        eps = fluid_fraction(state)
+        interface = state.flags == FLAG_INTERFACE
+        to_fluid = interface & (eps > 1.0 + TRANSITION_HYSTERESIS)
+        to_gas = interface & (eps < -TRANSITION_HYSTERESIS)
+        # The masks are read after the flag writes on both paths.
+        state.flags[to_fluid] = FLAG_FLUID
+        state.flags[to_gas] = FLAG_GAS
+        return to_fluid, to_gas
+
+    def test_masks_agree_on_a_provoked_state(self) -> None:
+        state, _ = _provoked()
+        to_fluid, to_gas = self._split(state)
+        kp, kd = self._kernel(state, to_fluid, to_gas)
+        rp, rd = self._reference(state, to_fluid, to_gas)
+        np.testing.assert_array_equal(kp, rp)
+        np.testing.assert_array_equal(kd, rd)
+        self.assertGreater(int(np.count_nonzero(rp)), 0)
+        self.assertGreater(int(np.count_nonzero(rd)), 0)
+
+    def test_masks_agree_on_randomised_flags(self) -> None:
+        """
+        Dense converting sets, which a real front never produces: every gas
+        cell then has several to_fluid neighbours and the scatter's duplicate
+        writes all collide.
+        """
+        rng = np.random.default_rng(41)
+        shape = (12, 10, 11)
+        state = create_state(np.zeros(shape, dtype=bool), dx_m=DX_M, dt_s=1e-4)
+        state.flags = rng.choice(
+            np.array(
+                [FLAG_OBSTACLE, FLAG_GAS, FLAG_INTERFACE, FLAG_FLUID], dtype=np.uint8
+            ),
+            size=shape,
+            p=(0.1, 0.35, 0.2, 0.35),
+        ).astype(np.uint8)
+        to_fluid = (rng.random(shape) < 0.15) & (state.flags == FLAG_FLUID)
+        to_gas = (rng.random(shape) < 0.15) & (state.flags == FLAG_GAS)
+
+        kp, kd = self._kernel(state, to_fluid, to_gas)
+        rp, rd = self._reference(state, to_fluid, to_gas)
+        np.testing.assert_array_equal(kp, rp)
+        np.testing.assert_array_equal(kd, rd)
+
+    def test_masks_agree_when_the_x_axis_is_too_short_to_have_three_planes(self) -> None:
+        """
+        The scatter parallelises over x and reads source planes x-1, x, x+1. At
+        nx < 3 the periodic wrap makes those collide, so the same source cell is
+        visited two or three times -- harmless only because the writes are
+        idempotent, which is exactly the kind of claim that needs a test.
+        """
+        rng = np.random.default_rng(42)
+        for nx in (1, 2, 3):
+            with self.subTest(nx=nx):
+                shape = (nx, 7, 6)
+                state = create_state(
+                    np.zeros(shape, dtype=bool), dx_m=DX_M, dt_s=1e-4
+                )
+                state.flags = rng.choice(
+                    np.array(
+                        [FLAG_OBSTACLE, FLAG_GAS, FLAG_INTERFACE, FLAG_FLUID],
+                        dtype=np.uint8,
+                    ),
+                    size=shape,
+                    p=(0.1, 0.35, 0.2, 0.35),
+                ).astype(np.uint8)
+                to_fluid = (rng.random(shape) < 0.2) & (state.flags == FLAG_FLUID)
+                to_gas = (rng.random(shape) < 0.2) & (state.flags == FLAG_GAS)
+                kp, kd = self._kernel(state, to_fluid, to_gas)
+                rp, rd = self._reference(state, to_fluid, to_gas)
+                np.testing.assert_array_equal(kp, rp)
+                np.testing.assert_array_equal(kd, rd)
+
+
+@unittest.skipUnless(NUMBA_AVAILABLE, "numba is not installed")
+class RedistributeParityTests(unittest.TestCase):
+    """
+    ``_redistribute`` moves leftover mass between cells, so it is the one
+    helper where a reordered sum would show up as a conservation error rather
+    than as noise.
+    """
+
+    @staticmethod
+    def _excess(state, seed: int):
+        """A signed excess field on a scatter of cells, donors and takers both."""
+        rng = np.random.default_rng(seed)
+        excess = np.zeros(state.shape, dtype=np.float64)
+        idx = np.argwhere(
+            (state.flags == FLAG_INTERFACE) | (state.flags == FLAG_FLUID)
+        )
+        pick = idx[rng.choice(len(idx), size=max(8, len(idx) // 8), replace=False)]
+        values = rng.standard_normal(len(pick)) * 0.05
+        for cell, v in zip(pick, values):
+            excess[int(cell[0]), int(cell[1]), int(cell[2])] = float(v)
+        return excess
+
+    def test_agrees_exactly(self) -> None:
+        a, b, _ = _provoked_twin()
+        excess = self._excess(a, 51)
+        _redistribute(a, excess.copy(), use_numba=True)
+        _redistribute(b, excess.copy(), use_numba=False)
+        np.testing.assert_array_equal(a.mass, b.mass)
+
+    def test_conserves_the_excess_to_the_ulp_on_both_paths(self) -> None:
+        """
+        Mass in equals mass out. Not "to 0.1%" -- the redistribution is a
+        rebalance, so the only honest tolerance is the float64 sum's own.
+        """
+        for label, use_numba in (("numba", True), ("numpy", False)):
+            with self.subTest(path=label):
+                state, _ = _provoked()
+                excess = self._excess(state, 52)
+                before = float(state.mass.sum())
+                handed_out = float(excess.sum())
+                _redistribute(state, excess, use_numba=use_numba)
+                after = float(state.mass.sum())
+                self.assertAlmostEqual(
+                    after - before, handed_out, delta=1e-9 * max(abs(before), 1.0)
+                )
+
+    def test_agrees_when_a_donor_has_no_interface_neighbour(self) -> None:
+        """
+        The stranded-mass branch: the excess stays on the donor rather than
+        being dropped, which is what keeps conservation true for an isolated
+        cell. Both paths must strand the same amount in the same place.
+        """
+        n = 7
+        for use_numba in (True, False):
+            state = create_state(
+                np.zeros((n, n, n), dtype=bool), dx_m=DX_M, dt_s=1e-4
+            )
+            state.flags[...] = FLAG_GAS
+            state.flags[3, 3, 3] = FLAG_FLUID
+            state.mass[3, 3, 3] = 0.25
+            excess = np.zeros((n, n, n), dtype=np.float64)
+            excess[3, 3, 3] = 0.125
+            _redistribute(state, excess, use_numba=use_numba)
+            with self.subTest(use_numba=use_numba):
+                self.assertEqual(float(state.mass[3, 3, 3]), 0.375)
+                self.assertEqual(float(state.mass.sum()), 0.375)
+
+
+@unittest.skipUnless(NUMBA_AVAILABLE, "numba is not installed")
+class PromotedSeedingParityTests(unittest.TestCase):
+    """
+    The donor-averaged seeding of freshly promoted cells, kernel against
+    reference. This is the pair that used to build a full-domain equilibrium.
+    """
+
+    @staticmethod
+    def _promote_mask(state):
+        gas = state.flags == FLAG_GAS
+        wet = (state.flags == FLAG_FLUID) | (state.flags == FLAG_INTERFACE)
+        return gas & _dilate(wet)
+
+    def test_populations_agree_exactly(self) -> None:
+        a, b, _ = _provoked_twin()
+        promote = self._promote_mask(a)
+        self.assertGreater(int(np.count_nonzero(promote)), 0)
+        _initialise_promoted_cells(a, promote, use_numba=True)
+        _initialise_promoted_cells(b, promote, use_numba=False)
+        np.testing.assert_array_equal(a.f, b.f)
+        np.testing.assert_array_equal(a.rho, b.rho)
+
+    def test_populations_agree_through_a_wet_filter(self) -> None:
+        """
+        The compressed equilibrium takes ``porosity`` per cell. Outside a filter
+        that is exactly 1.0 and the porosity term is inert, so a fixture without
+        one cannot tell a correct gather of it from no gather at all.
+        """
+        a, b, _ = _provoked_twin(with_filter=True, submerge=True)
+        promote = self._promote_mask(a)
+        self.assertGreater(int(np.count_nonzero(promote)), 0)
+        _initialise_promoted_cells(a, promote, use_numba=True)
+        _initialise_promoted_cells(b, promote, use_numba=False)
+        np.testing.assert_array_equal(a.f, b.f)
+        np.testing.assert_array_equal(a.rho, b.rho)
+
+    def test_temperatures_agree_exactly(self) -> None:
+        a, b, _ = _provoked_twin()
+        promote = self._promote_mask(a)
+        _initialise_promoted_temperature(a, promote, use_numba=True)
+        _initialise_promoted_temperature(b, promote, use_numba=False)
+        np.testing.assert_array_equal(a.temperature, b.temperature)
+
+    def test_the_donorless_fallback_agrees(self) -> None:
+        """
+        A promoted cell whose only wet neighbours were promoted alongside it has
+        no donor, and falls back to reference density at rest. Sheet promotion
+        makes that routine rather than exotic -- see
+        ``_initialise_promoted_cells`` -- so both paths need the same fallback.
+        """
+        n = 7
+        a = create_state(np.zeros((n, n, n), dtype=bool), dx_m=DX_M, dt_s=1e-4)
+        b = create_state(np.zeros((n, n, n), dtype=bool), dx_m=DX_M, dt_s=1e-4)
+        promote = np.zeros((n, n, n), dtype=bool)
+        promote[2:5, 2:5, 2:5] = True
+        for state in (a, b):
+            state.flags[...] = FLAG_GAS
+            state.flags[promote] = FLAG_INTERFACE
+            state.rho[...] = 0.0
+            state.f[...] = 0.0
+        _initialise_promoted_cells(a, promote, use_numba=True)
+        _initialise_promoted_cells(b, promote, use_numba=False)
+        np.testing.assert_array_equal(a.f, b.f)
+        np.testing.assert_array_equal(a.rho, b.rho)
+        self.assertEqual(
+            float(a.rho[3, 3, 3]), float(np.float32(REFERENCE_DENSITY))
+        )
+        self.assertEqual(float(np.abs(a.u[:, 3, 3, 3]).max()), 0.0)
+
+    def test_the_temperature_fallback_agrees(self) -> None:
+        """
+        The no-local-donor temperature falls back to the whole-domain mean, and
+        both paths compute that mean with ``np.mean`` on purpose -- a prange
+        reduction would sum in a different order and this is where it would
+        show. So it must be exactly equal, not merely close.
+        """
+        n = 9
+        states = []
+        for _ in range(2):
+            state = create_state(
+                np.zeros((n, n, n), dtype=bool), dx_m=DX_M, dt_s=1e-4
+            )
+            state.flags[...] = FLAG_FLUID
+            state.temperature[...] = np.arange(n ** 3, dtype=np.float32).reshape(
+                (n, n, n)
+            )
+            states.append(state)
+        promote = np.zeros((n, n, n), dtype=bool)
+        # An island far from any donor, so every cell in it takes the fallback.
+        promote[3:6, 3:6, 3:6] = True
+        for state in states:
+            state.flags[promote] = FLAG_INTERFACE
+            state.temperature[promote] = NO_TEMPERATURE
+        _initialise_promoted_temperature(states[0], promote, use_numba=True)
+        _initialise_promoted_temperature(states[1], promote, use_numba=False)
+        np.testing.assert_array_equal(states[0].temperature, states[1].temperature)
+        self.assertTrue(bool(np.all(np.isfinite(states[0].temperature[promote]))))
+
+
+@unittest.skipUnless(NUMBA_AVAILABLE, "numba is not installed")
+class TransitionKernelParityTests(unittest.TestCase):
+    """``apply_transitions`` end to end, every field, exactly."""
+
+    def test_agrees_exactly_on_a_provoked_state(self) -> None:
+        a, b, _ = _provoked_twin()
+        self.assertEqual(
+            apply_transitions(a, 0.25, use_numba=True),
+            apply_transitions(b, 0.25, use_numba=False),
+        )
+        _assert_states_identical(a, b, "apply_transitions")
+        self.assertEqual(total_mass(a), total_mass(b))
+
+    def test_agrees_exactly_through_a_wet_filter(self) -> None:
+        """
+        The porosity branch: ``full = rho * porosity``, so the eps scan, the
+        mass snap and the promoted-cell equilibrium all read porosity, and a
+        fixture with none of them below 1.0 proves nothing about any of it.
+        """
+        a, b, _ = _provoked_twin(with_filter=True, submerge=True)
+        self.assertEqual(
+            apply_transitions(a, 0.25, use_numba=True),
+            apply_transitions(b, 0.25, use_numba=False),
+        )
+        _assert_states_identical(a, b, "apply_transitions with a filter")
+        self.assertEqual(total_mass(a), total_mass(b))
+
+    def test_a_quiescent_state_converts_nothing_on_either_path(self) -> None:
+        """
+        The scan's early return. The kernel path runs the sweep and then bails
+        on the counts, so it must leave the state untouched -- including
+        ``state.mass``, which the kernel is otherwise allowed to write.
+        """
+        a, b, units = _twin()
+        for _ in range(4):
+            step(a, units, use_numba=True)
+            step(b, units, use_numba=True)
+        before = a.mass.copy()
+        self.assertEqual(apply_transitions(a, 0.1, use_numba=True), (0, 0))
+        self.assertEqual(apply_transitions(b, 0.1, use_numba=False), (0, 0))
+        np.testing.assert_array_equal(a.mass, before)
+        _assert_states_identical(a, b, "quiescent")
+
+    def test_agrees_over_many_provoked_steps(self) -> None:
+        """
+        One call cannot distinguish a front kernel that is right at the first
+        transition from one that is right only there. Repeated provocation walks
+        the fill through advance and retreat many times over.
+        """
+        a, b, units = _provoked_twin()
+        full_a = a.rho.astype(np.float64) * a.porous.porosity_f64
+        rng = np.random.default_rng(PROVOKE_SEED + 5)
+        for _ in range(12):
+            step(a, units, use_numba=True)
+            step(b, units, use_numba=True)
+            # Same provocation on both, from the same draw.
+            idx = np.argwhere(a.flags == FLAG_INTERFACE)
+            if len(idx):
+                pick = idx[rng.choice(len(idx), size=max(2, len(idx) // 8),
+                                      replace=False)]
+                for j, cell in enumerate(pick):
+                    at = (int(cell[0]), int(cell[1]), int(cell[2]))
+                    value = full_a[at] * 1.07 + 0.01 if j % 3 else -0.02
+                    a.mass[at] = value
+                    b.mass[at] = value
+            ra = apply_transitions(a, 0.3, use_numba=True)
+            rb = apply_transitions(b, 0.3, use_numba=False)
+            self.assertEqual(ra, rb)
+            _assert_states_identical(a, b, "repeated provocation")
+
+    def test_ensure_interface_skin_agrees_exactly(self) -> None:
+        """
+        The other caller of the promoted-cell seeding. It writes FLAG_FLUID by
+        hand, which is outside apply_transitions' bookkeeping, so it has its own
+        path through the same helpers.
+        """
+        a, b, _ = _provoked_twin()
+        halo = _dilate(a.flags == FLAG_FLUID)
+        self.assertEqual(
+            ensure_interface_skin(a, halo, use_numba=True),
+            ensure_interface_skin(b, halo, use_numba=False),
+        )
+        _assert_states_identical(a, b, "ensure_interface_skin")
 
 
 if __name__ == "__main__":

@@ -66,9 +66,17 @@ if NUMBA_AVAILABLE:  # pragma: no cover - import-time branch
     from physics.fluid_flow import (
         advect_temperature_kernel,
         collide_kernel,
+        compact_mask_kernel,
         free_surface_kernel,
         interface_neighbourhood_kernel,
+        promoted_donor_average_kernel,
+        promoted_donor_temperature_mask_kernel,
+        promoted_temperature_average_kernel,
+        redistribute_gather_kernel,
+        redistribute_share_kernel,
         stream_kernel,
+        transition_front_kernel,
+        transition_scan_kernel,
         wall_heat_loss_kernel,
     )
 
@@ -697,7 +705,9 @@ def advance_mass(
     return state.mass + delta
 
 
-def apply_transitions(state: FillingState, time_s: float) -> Tuple[int, int]:
+def apply_transitions(
+    state: FillingState, time_s: float, *, use_numba: bool = True
+) -> Tuple[int, int]:
     """
     Convert cells whose fill level has crossed the hysteresis band.
 
@@ -709,32 +719,81 @@ def apply_transitions(state: FillingState, time_s: float) -> Tuple[int, int]:
     Newly filled cells convert their gas neighbours into interface cells, which
     is how the front advances.
 
+    Cost, and why this function has kernels at all
+    ---------------------------------------------
+    The scan at the top runs on every step of a run and finds nothing on most
+    of them: 3.2 ms of a 47 ms step at 120^3, spent proving that no cell moved
+    -- now 0.26 ms.
+    The rest of the function runs only when something converts, and then it
+    costs **240 ms** -- five times the whole rest of the step, now 8.8 ms. See the
+    "Cell-transition bookkeeping" comment in ``physics/fluid_flow.py`` for the
+    per-phase measurements. Both halves are now kernelled, with the NumPy
+    bodies kept as the ``NUMBA_AVAILABLE == False`` fallback.
+
+    The two paths compute ``promote`` and ``demote`` at the same point, before
+    either is applied. The NumPy path used to compute ``demote`` further down,
+    after ``flags[promote] = FLAG_INTERFACE``; that write only moves cells out
+    of GAS and ``demote`` selects on FLUID, so the mask is identical either side
+    of it and hoisting it costs nothing but keeps the two branches readable
+    side by side.
+
     Args:
         state: Solver state, mutated in place.
         time_s: Current physical time, recorded as the arrival time.
+        use_numba: Take the kernels when they are available. Mirrors
+            :func:`step`'s parameter of the same name.
 
     Returns:
         ``(filled, emptied)`` counts.
     """
-    eps = fluid_fraction(state)
-    interface = state.flags == FLAG_INTERFACE
+    to_fluid: np.ndarray
+    to_gas: np.ndarray
+    excess: np.ndarray
+    if use_numba and NUMBA_AVAILABLE:
+        # Every cell of all three is written by the kernel, so np.empty is
+        # safe -- and at 120^3 np.empty does not touch the pages, so the
+        # kernel's parallel write is also the first touch.
+        to_fluid = np.empty(state.shape, dtype=bool)
+        to_gas = np.empty(state.shape, dtype=bool)
+        excess = np.empty(state.shape, dtype=np.float64)
+        # The kernel snaps the converting cells' mass in the same sweep, which
+        # is why there is no separate full_mass array on this side.
+        n_filled, n_emptied = transition_scan_kernel(
+            state.mass,
+            state.rho,
+            state.porous.porosity_f64,
+            state.flags,
+            1.0 + TRANSITION_HYSTERESIS,
+            -TRANSITION_HYSTERESIS,
+            to_fluid,
+            to_gas,
+            excess,
+        )
+        filled = int(n_filled)
+        emptied = int(n_emptied)
+        if filled == 0 and emptied == 0:
+            return 0, 0
+    else:
+        eps = fluid_fraction(state)
+        interface = state.flags == FLAG_INTERFACE
 
-    to_fluid = interface & (eps > 1.0 + TRANSITION_HYSTERESIS)
-    to_gas = interface & (eps < -TRANSITION_HYSTERESIS)
+        to_fluid = interface & (eps > 1.0 + TRANSITION_HYSTERESIS)
+        to_gas = interface & (eps < -TRANSITION_HYSTERESIS)
 
-    filled = int(np.count_nonzero(to_fluid))
-    emptied = int(np.count_nonzero(to_gas))
-    if filled == 0 and emptied == 0:
-        return 0, 0
+        filled = int(np.count_nonzero(to_fluid))
+        emptied = int(np.count_nonzero(to_gas))
+        if filled == 0 and emptied == 0:
+            return 0, 0
 
-    full_mass = state.rho.astype(np.float64) * state.porous.porosity_f64
+        full_mass = state.rho.astype(np.float64) * state.porous.porosity_f64
 
-    excess = np.zeros(state.shape, dtype=np.float64)
-    excess[to_fluid] = state.mass[to_fluid] - full_mass[to_fluid]
-    excess[to_gas] = state.mass[to_gas]
+        excess = np.zeros(state.shape, dtype=np.float64)
+        excess[to_fluid] = state.mass[to_fluid] - full_mass[to_fluid]
+        excess[to_gas] = state.mass[to_gas]
 
-    state.mass[to_fluid] = full_mass[to_fluid]
-    state.mass[to_gas] = 0.0
+        state.mass[to_fluid] = full_mass[to_fluid]
+        state.mass[to_gas] = 0.0
+
     state.flags[to_fluid] = FLAG_FLUID
     state.flags[to_gas] = FLAG_GAS
     # An emptied cell holds no metal any more, so it holds no temperature any
@@ -762,13 +821,28 @@ def apply_transitions(state: FillingState, time_s: float) -> Tuple[int, int]:
     state.fill_time_s[newly_filled] = np.float32(time_s)
     state.porous.primed[to_fluid] = True
 
+    # Both fronts, read off the same flags: a filled cell's gas neighbours
+    # advance to the interface, an emptied cell's fluid neighbours retreat to
+    # it. See the docstring for why computing the retreating one here rather
+    # than after the advance is equivalent.
+    promote: Optional[np.ndarray] = None
+    demote: Optional[np.ndarray] = None
+    if use_numba and NUMBA_AVAILABLE:
+        _C, Ci, _W, _OPP = lattice_tables()
+        promote = np.empty(state.shape, dtype=bool)
+        demote = np.empty(state.shape, dtype=bool)
+        transition_front_kernel(state.flags, to_fluid, to_gas, Ci, promote, demote)
+    else:
+        if filled:
+            promote = _dilate(to_fluid) & (state.flags == FLAG_GAS)
+        if emptied:
+            demote = _dilate(to_gas) & (state.flags == FLAG_FLUID)
+
     # A filled cell's gas neighbours join the interface -- this is how the
     # front advances.
-    if filled:
-        promote = _dilate(to_fluid) & (state.flags == FLAG_GAS)
+    if promote is not None:
         state.flags[promote] = FLAG_INTERFACE
-        _initialise_promoted_cells(state, promote)
-        _initialise_promoted_temperature(state, promote)
+        _seed_promoted_cells(state, promote, use_numba=use_numba)
 
     # An emptied cell's fluid neighbours must *retreat* to the interface.
     #
@@ -780,12 +854,10 @@ def apply_transitions(state: FillingState, time_s: float) -> Tuple[int, int]:
     # new one forms, and the run reaches NaN within a few hundred steps.
     # Retreat is not a rare case: it happens wherever the fill accelerates away
     # from a wall, which is most of a real pour.
-    if emptied:
-        demote = _dilate(to_gas) & (state.flags == FLAG_FLUID)
-        if np.any(demote):
-            state.flags[demote] = FLAG_INTERFACE
+    if demote is not None and np.any(demote):
+        state.flags[demote] = FLAG_INTERFACE
 
-    _redistribute(state, excess)
+    _redistribute(state, excess, use_numba=use_numba)
     return filled, emptied
 
 
@@ -938,11 +1010,13 @@ def heal_submerged_interface(
     # No gas neighbour means no gas *cell* to promote either, so unlike
     # apply_transitions there is no front to advance here -- the layer this
     # cell belonged to has already closed.
-    _redistribute(state, deficit)
+    _redistribute(state, deficit, use_numba=use_numba)
     return count
 
 
-def ensure_interface_skin(state: FillingState, halo: np.ndarray) -> int:
+def ensure_interface_skin(
+    state: FillingState, halo: np.ndarray, *, use_numba: bool = True
+) -> int:
     """
     Promote gas cells in ``halo`` to interface, seeded from their wet neighbours.
 
@@ -966,6 +1040,8 @@ def ensure_interface_skin(state: FillingState, halo: np.ndarray) -> int:
         state: Solver state, mutated in place.
         halo: Boolean mask of cells to check. Cells that are not gas are left
             alone, so this is idempotent and safe to call every step.
+        use_numba: Passed to the promoted-cell seeding. Mirrors :func:`step`'s
+            parameter of the same name.
 
     Returns:
         Number of cells promoted.
@@ -974,8 +1050,7 @@ def ensure_interface_skin(state: FillingState, halo: np.ndarray) -> int:
     count = int(np.count_nonzero(promote))
     if count:
         state.flags[promote] = FLAG_INTERFACE
-        _initialise_promoted_cells(state, promote)
-        _initialise_promoted_temperature(state, promote)
+        _seed_promoted_cells(state, promote, use_numba=use_numba)
     return count
 
 
@@ -1052,7 +1127,67 @@ def reset_detached_interface_cells(
     return count
 
 
-def _initialise_promoted_cells(state: FillingState, promote: np.ndarray) -> None:
+def _mask_indices(
+    mask: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Where a boolean mask is True, as three index arrays in C order.
+
+    ``np.nonzero`` for the same thing, but through
+    :func:`~physics.fluid_flow.compact_mask_kernel`, which is the same scan run
+    in parallel: 2.95 ms against 0.41 ms on a (120, 120, 120) mask holding the
+    ~450 cells a real promotion step produces. Read that
+    kernel's docstring for why the ordering is guaranteed to match NumPy's,
+    which is the property that lets the two be swapped for each other.
+
+    The output arrays are sized from ``np.count_nonzero`` -- a vectorised
+    popcount, and cheap -- rather than at the mask's full size, so the caller
+    does not carry a 40 MB index buffer to address a few hundred cells. The
+    kernel recounts as its first phase; the returned slice is defensive against
+    the two ever disagreeing.
+    """
+    n = int(np.count_nonzero(mask))
+    counts = np.empty(mask.shape[0] + 1, dtype=np.int64)
+    ix = np.empty(n, dtype=np.int64)
+    iy = np.empty(n, dtype=np.int64)
+    iz = np.empty(n, dtype=np.int64)
+    total = int(compact_mask_kernel(mask, counts, ix, iy, iz))
+    return ix[:total], iy[:total], iz[:total]
+
+
+def _seed_promoted_cells(
+    state: FillingState, promote: np.ndarray, *, use_numba: bool = True
+) -> None:
+    """
+    Populations *and* temperature for the same freshly promoted cells.
+
+    The two halves are separate functions because they are separately
+    meaningful -- and separately load-bearing, each with its own measured
+    failure mode if skipped. They are called together from both promotion sites,
+    though, and on the kernel path both need the promoted cells' indices, which
+    costs a full-grid scan to find. This locates them once and hands the same
+    list to both.
+    """
+    if not np.any(promote):
+        return
+    indices: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]] = None
+    if use_numba and NUMBA_AVAILABLE:
+        indices = _mask_indices(promote)
+    _initialise_promoted_cells(
+        state, promote, use_numba=use_numba, indices=indices
+    )
+    _initialise_promoted_temperature(
+        state, promote, use_numba=use_numba, indices=indices
+    )
+
+
+def _initialise_promoted_cells(
+    state: FillingState,
+    promote: np.ndarray,
+    *,
+    use_numba: bool = True,
+    indices: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]] = None,
+) -> None:
     """
     Give a freshly promoted GAS -> INTERFACE cell something to start from.
 
@@ -1075,8 +1210,50 @@ def _initialise_promoted_cells(state: FillingState, promote: np.ndarray) -> None
     every cell behind the leading edge of such a sheet has only
     same-step neighbours. They now fall back to reference density at rest,
     which is what an unconstrained cell of fresh metal should start from.
+
+    The NumPy body below is the reference and the ``NUMBA_AVAILABLE == False``
+    fallback. It was also, by a wide margin, the most expensive thing in the
+    solver on any step where the front advanced: 156.6 ms of a 240 ms
+    ``apply_transitions`` at 120^3. Two reasons, and the kernel path removes
+    both rather than parallelising them. It ran 90 full-grid ``np.roll`` sums --
+    18 directions x five fields -- to produce an average that only the few
+    hundred promoted cells ever read; and it then built a full-domain
+    ``(19, nx, ny, nz)`` float64 equilibrium, 262 MB and 87 of those 156 ms, to
+    take 447 columns out of it. The kernel path loops over the promoted cells'
+    indices and runs :func:`~physics.fluid_flow.equilibrium` on the same
+    compressed arrays, which is what :func:`reset_detached_interface_cells` has
+    always done for its handful of cells.
     """
     if not np.any(promote):
+        return
+
+    if use_numba and NUMBA_AVAILABLE:
+        px, py, pz = indices if indices is not None else _mask_indices(promote)
+        _C, Ci, _W, _OPP = lattice_tables()
+        rho_seed = np.empty(px.size, dtype=np.float64)
+        u_seed = np.empty((3, px.size), dtype=np.float64)
+        promoted_donor_average_kernel(
+            px, py, pz,
+            state.flags,
+            promote,
+            state.rho,
+            state.u,
+            Ci,
+            float(REFERENCE_DENSITY),
+            rho_seed,
+            u_seed,
+        )
+        # equilibrium is elementwise over the trailing shape, so running it on
+        # the compressed (n,) arrays gives the same values the full-domain call
+        # produced -- it just does not compute the 1.7 million columns that were
+        # about to be discarded. Boolean-mask assignment visits the True cells
+        # in C order, which is the order np.nonzero returns, so the two
+        # spellings of the scatter agree cell for cell.
+        seeded = equilibrium(
+            rho_seed, u_seed, porosity=state.porous.porosity_f64[px, py, pz]
+        )
+        state.f[:, px, py, pz] = seeded.astype(np.float32)
+        state.rho[px, py, pz] = rho_seed.astype(np.float32)
         return
 
     donor = (
@@ -1113,7 +1290,13 @@ def _initialise_promoted_cells(state: FillingState, promote: np.ndarray) -> None
     state.rho[promote] = rho_avg[promote].astype(np.float32)
 
 
-def _initialise_promoted_temperature(state: FillingState, promote: np.ndarray) -> None:
+def _initialise_promoted_temperature(
+    state: FillingState,
+    promote: np.ndarray,
+    *,
+    use_numba: bool = True,
+    indices: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]] = None,
+) -> None:
     """
     Give a freshly promoted GAS -> INTERFACE cell a starting temperature.
 
@@ -1126,14 +1309,27 @@ def _initialise_promoted_temperature(state: FillingState, promote: np.ndarray) -
     Skipping this leaves a promoted cell at :data:`NO_TEMPERATURE` (NaN) even
     though its flag says FLUID-adjacent metal, which then poisons the next
     advection step's stencil the moment a neighbour reads across into it.
+
+    The NumPy body below is the reference and the ``NUMBA_AVAILABLE == False``
+    fallback; 28.4 ms of a 240 ms ``apply_transitions`` at 120^3, mostly 36
+    full-grid rolls feeding an average that a few hundred cells read. The kernel
+    path keeps the whole-domain fallback mean in NumPy on purpose -- see the
+    comment on ``fallback_temp``.
     """
     if not np.any(promote):
         return
 
-    donor = (
-        (state.flags == FLAG_FLUID) | (state.flags == FLAG_INTERFACE)
-    ) & ~promote
-    donor_has_temp = donor & np.isfinite(state.temperature)
+    donor_has_temp: np.ndarray
+    if use_numba and NUMBA_AVAILABLE:
+        donor_has_temp = np.empty(state.shape, dtype=bool)
+        promoted_donor_temperature_mask_kernel(
+            state.flags, promote, state.temperature, donor_has_temp
+        )
+    else:
+        donor = (
+            (state.flags == FLAG_FLUID) | (state.flags == FLAG_INTERFACE)
+        ) & ~promote
+        donor_has_temp = donor & np.isfinite(state.temperature)
     if not np.any(donor_has_temp):
         return
 
@@ -1143,7 +1339,24 @@ def _initialise_promoted_temperature(state: FillingState, promote: np.ndarray) -
     # NO_TEMPERATURE is what this function's own docstring warns about: the
     # NaN survives until a neighbour reads across into it, and then spreads
     # through the advection stencil a cell per step.
+    #
+    # Deliberately np.mean on BOTH paths, not a prange reduction. A parallel
+    # reduction sums in whatever order the threads finish in; np.mean sums
+    # pairwise. Over a million-cell domain those disagree in the last bits, and
+    # this is the one value in the function where that would be visible, so the
+    # kernel path takes the reduction it cannot beat for free.
     fallback_temp = float(np.mean(state.temperature[donor_has_temp]))
+
+    if use_numba and NUMBA_AVAILABLE:
+        px, py, pz = indices if indices is not None else _mask_indices(promote)
+        _C, Ci, _W, _OPP = lattice_tables()
+        avg_c = np.empty(px.size, dtype=np.float64)
+        promoted_temperature_average_kernel(
+            px, py, pz, donor_has_temp, state.temperature, Ci,
+            float(fallback_temp), avg_c,
+        )
+        state.temperature[px, py, pz] = avg_c.astype(np.float32)
+        return
 
     weight = donor_has_temp.astype(np.float64)
     temp = np.where(donor_has_temp, state.temperature.astype(np.float64), 0.0) * weight
@@ -1164,7 +1377,9 @@ def _initialise_promoted_temperature(state: FillingState, promote: np.ndarray) -
     state.temperature[promote] = avg[promote].astype(np.float32)
 
 
-def _redistribute(state: FillingState, excess: np.ndarray) -> None:
+def _redistribute(
+    state: FillingState, excess: np.ndarray, *, use_numba: bool = True
+) -> None:
     """
     Push leftover mass into neighbouring interface cells.
 
@@ -1172,8 +1387,38 @@ def _redistribute(state: FillingState, excess: np.ndarray) -> None:
     When none does -- an isolated cell -- the mass stays put rather than being
     dropped, which keeps the conservation invariant true at the cost of a cell
     that is briefly over- or under-full.
+
+    The NumPy body below is the reference and the ``NUMBA_AVAILABLE == False``
+    fallback: 54 full-grid ``np.roll`` calls, 38.0 ms at 120^3, on every step
+    where any cell transitions. The kernel path is the same algorithm turned
+    receiver-side -- one pass for each donor's share, one for each interface
+    cell's gather -- so it needs no atomics and does not depend on thread
+    order. See :func:`~physics.fluid_flow.redistribute_gather_kernel` for the
+    direction mapping and for the single divergence, which is confined to
+    already-diverged lattices.
+
+    Mass conservation is the invariant this function exists to protect, so the
+    kernel path was held to the arithmetic rather than merely to a tolerance:
+    the gather adds the 18 shares into the receiver's own mass in the same
+    direction order the roll-sum does, and adds ``stranded`` last, which is
+    where the NumPy path's final ``state.mass += stranded`` sits.
     """
     if not np.any(excess):
+        return
+
+    if use_numba and NUMBA_AVAILABLE:
+        _C, Ci, _W, _OPP = lattice_tables()
+        share_buf = np.empty(state.shape, dtype=np.float64)
+        stranded_buf = np.empty(state.shape, dtype=np.float64)
+        redistribute_share_kernel(state.flags, excess, Ci, share_buf, stranded_buf)
+        # Two launches, not one: the gather reads its neighbours' `share`, so
+        # every donor's share has to be final before any receiver looks. Fusing
+        # them would make a receiver see some neighbours before and some after
+        # their update -- the same hazard free_surface_kernel's mass_in/mass_out
+        # split exists to avoid.
+        redistribute_gather_kernel(
+            state.flags, share_buf, stranded_buf, Ci, state.mass
+        )
         return
 
     interface = (state.flags == FLAG_INTERFACE).astype(np.float64)

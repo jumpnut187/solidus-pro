@@ -1540,6 +1540,488 @@ if NUMBA_AVAILABLE:
                     gasless_out[x, y, z] = gas == 0
                     detached_out[x, y, z] = wet == 0
 
+    # -----------------------------------------------------------------------
+    # Cell-transition bookkeeping
+    # -----------------------------------------------------------------------
+    #
+    # Everything below serves physics.filling.apply_transitions, which is where
+    # the per-step cost went once the collision and thermal passes had been
+    # dealt with. It hides in plain sight: on a *quiescent* lattice
+    # apply_transitions costs 3.8 ms of a 43 ms step at 120^3, because it scans
+    # for cells that crossed the hysteresis band, finds none, and returns. On a
+    # step where the front actually advances it costs **240 ms** -- five times
+    # the rest of the step put together. Measured at 120^3 with 92 cells
+    # converting to FLUID, 47 to GAS and 447 gas cells promoted to INTERFACE:
+    #
+    #     eps scan, comparisons, counts, full_mass        3.8 ms
+    #     _dilate(to_fluid) & gas, _dilate(to_gas) & fluid
+    #                                                    3.4 ms
+    #     _redistribute                                 38.0 ms
+    #     _initialise_promoted_cells                   156.6 ms
+    #     _initialise_promoted_temperature              28.4 ms
+    #
+    # The pattern is the same one the free-surface scans had: full-grid np.roll
+    # sums (90 of them in _initialise_promoted_cells alone) plus, worst of all,
+    # a full-domain (19, nx, ny, nz) float64 equilibrium -- 262 MB, 87 of those
+    # 156 ms -- built to seed 447 cells. So the kernels below split two ways:
+    #
+    # * Full-grid passes where the answer is needed everywhere: the eps scan and
+    #   the promote/demote front, one prange sweep each.
+    # * **Compressed** passes where it is not. The promoted-cell kernels take an
+    #   index list rather than a mask and loop over the few hundred cells that
+    #   were actually promoted, so their cost scales with the front, not the
+    #   domain. The NumPy tails then run `equilibrium` on those few hundred
+    #   cells too -- the same trick reset_detached_interface_cells has always
+    #   used, and the reason the full-domain equilibrium disappears entirely
+    #   rather than merely being parallelised.
+    #
+    # Accumulation order is preserved direction-by-direction against the NumPy
+    # references so the results are bit-identical, not merely close. Where that
+    # was not achievable the divergence is called out in the kernel's own
+    # docstring. tests/test_filling_parity.py::TransitionKernelParityTests holds
+    # every pair together.
+
+    @njit(parallel=True, cache=True)
+    def transition_scan_kernel(
+        mass, rho, porosity, flags, fluid_threshold, gas_threshold,
+        to_fluid_out, to_gas_out, excess_out,
+    ):
+        """
+        Find the interface cells whose fill level left the hysteresis band, and
+        snap their mass in the same sweep.
+
+        Replaces ``fluid_fraction`` plus the two comparison passes plus the
+        ``full_mass`` product plus the two ``excess`` scatters -- six full-grid
+        NumPy passes, 3.8 ms at 120^3, paid on **every** step of a run whether
+        or not anything converts. Parity contract with
+        :func:`physics.filling.apply_transitions`.
+
+        Every operation is cell-local: ``eps`` reads only this cell's mass,
+        density and porosity, and the mass snap writes back only this cell. So
+        fusing the scan and the snap is safe, and it removes the separate
+        ``full_mass`` array the NumPy path needs to carry between them.
+
+        ``full = rho * porosity``, not ``rho``: a filter cell is full when its
+        *pores* are full. This is the one expression ``fluid_fraction`` and
+        ``apply_transitions`` have to agree on -- see ``fluid_fraction``'s
+        docstring for the quarter-kilogram discrepancy that disagreeing costs.
+
+        Writes every cell of all three output arrays, so they may be
+        uninitialised on entry.
+
+        Returns:
+            ``(filled, emptied)`` -- prange reductions, so the counts come back
+            without a follow-up ``count_nonzero`` pass over the masks.
+        """
+        nx, ny, nz = flags.shape
+        filled = 0
+        emptied = 0
+        for x in prange(nx):
+            for y in range(ny):
+                for z in range(nz):
+                    excess_out[x, y, z] = 0.0
+                    to_fluid_out[x, y, z] = False
+                    to_gas_out[x, y, z] = False
+                    if flags[x, y, z] != _FLAG_INTERFACE:
+                        continue
+
+                    full = np.float64(rho[x, y, z]) * porosity[x, y, z]
+                    m = mass[x, y, z]
+                    eps = m / full if full > 0.0 else 0.0
+                    if eps > fluid_threshold:
+                        to_fluid_out[x, y, z] = True
+                        excess_out[x, y, z] = m - full
+                        mass[x, y, z] = full
+                        filled += 1
+                    elif eps < gas_threshold:
+                        to_gas_out[x, y, z] = True
+                        excess_out[x, y, z] = m
+                        mass[x, y, z] = 0.0
+                        emptied += 1
+        return filled, emptied
+
+    @njit(parallel=True, cache=True)
+    def transition_front_kernel(flags, to_fluid, to_gas, Ci, promote_out, demote_out):
+        """
+        The advancing and retreating fronts, in one sweep.
+
+        Replaces ``_dilate(to_fluid) & (flags == FLAG_GAS)`` and
+        ``_dilate(to_gas) & (flags == FLAG_FLUID)`` -- 36 full-grid rolls, 3.4 ms
+        at 120^3, on every step where anything converts.
+
+        ``_dilate(m)[x]`` is ``m[x] | any_i m[x - c_i]``, so the NumPy masks
+        carry an ``m[x]`` term this kernel has no equivalent of. It does not need
+        one: it is called after the flag writes, where a ``to_fluid`` cell is
+        already FLUID and a ``to_gas`` cell is already GAS, and no cell is in
+        both sets. So ``to_fluid[x] & (flags[x] == GAS)`` and
+        ``to_gas[x] & (flags[x] == FLUID)`` are both empty by construction and
+        each mask collapses to "does this cell have such a neighbour". The
+        18-direction set is closed under negation, so a scatter from ``s`` to
+        ``s + c_i`` here answers the ``x - c_i`` question the rolls ask.
+
+        A ``to_gas`` cell CAN be promoted straight back to INTERFACE if a
+        neighbour filled, and a ``to_fluid`` cell can be demoted back if a
+        neighbour emptied. That is the NumPy behaviour, not an accident of it,
+        and it is preserved here.
+
+        One call for both masks even though the NumPy path computes ``demote``
+        *after* writing ``flags[promote] = FLAG_INTERFACE``. That write only
+        moves cells out of GAS and into INTERFACE; it cannot add or remove a
+        FLUID cell, and ``demote`` selects on FLUID. So the mask is the same
+        either side of it.
+
+        Scatter, not gather, and that choice is the whole performance story
+        -- the obvious formulation is a regression
+        ------------------------------------------------------------------
+        The first version of this kernel asked, for every GAS or FLUID cell,
+        "do I have a converting neighbour": 18 strided neighbour loads per cell
+        over the whole domain. Measured 5.48 ms at 120^3 -- **slower than the
+        3.4 ms pair of ``np.roll`` dilates it was meant to replace**. np.roll
+        reads sequentially; an 18-point gather over a byte array is almost pure
+        cache miss. It is the same 18-neighbour shape as
+        :func:`interface_neighbourhood_kernel`, which costs 0.29 ms, and the
+        only difference is that that one skips 99% of cells on their own flag
+        while GAS and FLUID between them are the whole domain.
+
+        So this runs the other way round: the converting sets are tiny (order
+        100 cells out of 1.7 million), so it scatters *from* them. The
+        parallelism is over destination x-slabs, and a thread scans the three
+        source planes ``x-1, x, x+1`` -- the only ones that can reach slab ``x``,
+        since every lattice velocity has ``|c_x| <= 1`` -- and writes only cells
+        whose x index is its own. Each output byte therefore has exactly one
+        writer, so there is no race to reason about, benign or otherwise.
+
+        Cost is 3 sequential byte reads per cell, independent of how many cells
+        converted, so a violent step cannot degrade it. Measured 0.32 ms.
+
+        Scanning the same plane two or three times when ``nx < 3`` (the wrap
+        makes ``x-1`` and ``x+1`` collide) is harmless: the writes are
+        idempotent and the ``!= x`` filter still holds.
+        """
+        nx, ny, nz = flags.shape
+        for x in prange(nx):
+            for y in range(ny):
+                for z in range(nz):
+                    promote_out[x, y, z] = False
+                    demote_out[x, y, z] = False
+
+            for dx in range(-1, 2):
+                sx = (x + dx) % nx
+                for sy in range(ny):
+                    for sz in range(nz):
+                        fills = to_fluid[sx, sy, sz]
+                        empties = to_gas[sx, sy, sz]
+                        if not fills and not empties:
+                            continue
+                        for i in range(1, 19):
+                            tx = (sx + Ci[i, 0]) % nx
+                            if tx != x:
+                                continue
+                            ty = (sy + Ci[i, 1]) % ny
+                            tz = (sz + Ci[i, 2]) % nz
+                            flag = flags[tx, ty, tz]
+                            if fills and flag == _FLAG_GAS:
+                                promote_out[tx, ty, tz] = True
+                            if empties and flag == _FLAG_FLUID:
+                                demote_out[tx, ty, tz] = True
+
+    @njit(parallel=True, cache=True)
+    def redistribute_share_kernel(flags, excess, Ci, share_out, stranded_out):
+        """
+        Pass 1 of the mass redistribution: what each donor cell has to give, and
+        how many interface neighbours it has to give it to.
+
+        ``share = excess / n_interface_neighbours``, or, where a donor has no
+        interface neighbour at all, ``stranded = excess`` -- the mass stays put
+        rather than being dropped, which is what keeps the conservation
+        invariant true. Replaces 18 full-grid rolls.
+
+        The neighbour count is a sum of exact 0.0/1.0 values, so it is
+        order-independent and matches the NumPy roll-sum bit-for-bit.
+
+        Cells with no excess to give skip the neighbour count entirely. They are
+        the overwhelming majority -- order 100 cells transition out of 1.7
+        million -- and both of their outputs are exactly zero either way:
+        ``0.0 / count`` is ``0.0`` for any positive count, and ``stranded``
+        takes the same zero when the count is zero. Without that early exit this
+        kernel measured 5.67 ms at 120^3, doing 18 strided neighbour loads per
+        cell to divide zero by something; with it, 0.33 ms. The one thing lost
+        is the sign of a negative zero, which nothing observes.
+
+        Writes every cell of both outputs.
+        """
+        nx, ny, nz = flags.shape
+        for x in prange(nx):
+            for y in range(ny):
+                for z in range(nz):
+                    e = excess[x, y, z]
+                    if e == 0.0:
+                        share_out[x, y, z] = 0.0
+                        stranded_out[x, y, z] = 0.0
+                        continue
+                    count = 0.0
+                    for i in range(1, 19):
+                        sx = (x + Ci[i, 0]) % nx
+                        sy = (y + Ci[i, 1]) % ny
+                        sz = (z + Ci[i, 2]) % nz
+                        if flags[sx, sy, sz] == _FLAG_INTERFACE:
+                            count += 1.0
+                    if count > 0.0:
+                        share_out[x, y, z] = e / count
+                        stranded_out[x, y, z] = 0.0
+                    else:
+                        share_out[x, y, z] = 0.0
+                        stranded_out[x, y, z] = e
+
+    @njit(parallel=True, cache=True)
+    def redistribute_gather_kernel(flags, share, stranded, Ci, mass):
+        """
+        Pass 2: every interface cell collects the share aimed at it.
+
+        Receiver-side gather rather than donor-side scatter, so each thread owns
+        one destination cell -- no atomics, and the result does not depend on
+        thread scheduling. Replaces 36 full-grid rolls (18 shifted products, 18
+        accumulations into ``state.mass``).
+
+        The direction mapping is the mirror of the NumPy scatter: that sends
+        cell ``d``'s share to ``d + c_i``, so the donor that lands here in
+        direction ``i`` is at ``x - c_i``. The gather runs ``i = 1..18`` in the
+        same order and adds ``stranded`` last, exactly where the NumPy path's
+        final ``state.mass += stranded`` sits, so a receiver's arithmetic is
+        bit-identical to the roll-sum's.
+
+        **One deliberate divergence.** The NumPy path adds a contribution to
+        *every* cell, the non-receivers getting ``share[x - c_i] * 0.0``. This
+        kernel skips non-interface cells entirely. For finite shares that is the
+        additive identity and the two agree exactly. It differs only if a share
+        is non-finite, where ``inf * 0.0`` is NaN and the NumPy path would
+        poison a cell that receives nothing: after divergence, and only there,
+        the NaN pattern differs. The donor's own mass carries the non-finite
+        value on both paths, so ``total_mass`` -- which is what
+        ``core/filling_stage.py``'s divergence guard actually tests -- reports
+        the blow-up either way. Buying exact agreement here would mean 18
+        float64 neighbour loads for all 1.7M cells instead of the 14k interface
+        ones, to reproduce a NaN placement in a run that has already been
+        aborted.
+
+        ``mass`` is read and written per cell with no neighbour writes, so it is
+        safe to update in place; ``share`` and ``stranded`` must be distinct
+        arrays from it.
+        """
+        nx, ny, nz = flags.shape
+        for x in prange(nx):
+            for y in range(ny):
+                for z in range(nz):
+                    m = mass[x, y, z]
+                    if flags[x, y, z] == _FLAG_INTERFACE:
+                        for i in range(1, 19):
+                            sx = (x - Ci[i, 0]) % nx
+                            sy = (y - Ci[i, 1]) % ny
+                            sz = (z - Ci[i, 2]) % nz
+                            m += share[sx, sy, sz]
+                    mass[x, y, z] = m + stranded[x, y, z]
+
+    @njit(parallel=True, cache=True)
+    def compact_mask_kernel(mask, counts, ix_out, iy_out, iz_out):
+        """
+        The indices of a boolean mask's True cells, in C order -- a parallel
+        ``np.nonzero``.
+
+        ``np.nonzero`` on a (120, 120, 120) bool array measures 2.95 ms, which
+        is two orders of magnitude off memory bandwidth for a 1.7 MB scan; it
+        counts and then fills, and it does neither in a form that vectorises
+        over a 3-D array. The promoted-cell seeding needs the same index list
+        twice per step, so that was 5.6 ms of the transition bookkeeping spent
+        locating a few hundred cells.
+
+        Three phases, which is what makes it race-free rather than merely fast:
+
+        1. Parallel over x: count the True cells in each x-slab.
+        2. Serial prefix sum over the slabs -- ``nx`` iterations, so tens of
+           microseconds, and it fixes each slab's output offset.
+        3. Parallel over x again: each thread fills its own contiguous output
+           segment, so no two threads ever write the same element.
+
+        Because slab segments are laid out in x order and each slab is filled in
+        y-then-z order, the result is exactly C order -- the same order
+        ``np.nonzero`` returns and the same order a boolean-mask assignment
+        visits, which is what lets the caller use the two interchangeably.
+
+        Args:
+            mask: Boolean ``(nx, ny, nz)``.
+            counts: Scratch int64 ``(nx + 1,)``. On return ``counts[nx]`` is the
+                total, i.e. the number of valid entries in the output arrays.
+            ix_out, iy_out, iz_out: Int64 output arrays, each at least as long
+                as the number of True cells. The caller sizes them from a
+                previous count or from the mask's own popcount.
+        """
+        nx, ny, nz = mask.shape
+        for x in prange(nx):
+            n = 0
+            for y in range(ny):
+                for z in range(nz):
+                    if mask[x, y, z]:
+                        n += 1
+            counts[x + 1] = n
+
+        counts[0] = 0
+        total = 0
+        for x in range(nx):
+            total += counts[x + 1]
+            counts[x + 1] = total
+
+        for x in prange(nx):
+            at = counts[x]
+            for y in range(ny):
+                for z in range(nz):
+                    if mask[x, y, z]:
+                        ix_out[at] = x
+                        iy_out[at] = y
+                        iz_out[at] = z
+                        at += 1
+        return total
+
+    @njit(parallel=True, cache=True)
+    def promoted_donor_average_kernel(
+        px, py, pz, flags, promote, rho, u, Ci,
+        reference_density, rho_avg_out, u_avg_out,
+    ):
+        """
+        Donor-averaged density and velocity for freshly promoted cells.
+
+        **Compressed**: ``px/py/pz`` are the promoted cells' indices, so this
+        loops over the few hundred cells that were promoted rather than the
+        whole domain. The NumPy reference it replaces runs 90 full-grid rolls --
+        18 directions x (weight, rho, three velocity components) -- to compute
+        an average that only those few hundred cells ever read. 156.6 ms at
+        120^3, of which 87 ms was a full-domain equilibrium the caller then
+        threw away 99.97% of.
+
+        Donors are wet cells (FLUID or INTERFACE) that were **not** promoted
+        this step. Excluding same-step neighbours is what leaves a cell in the
+        middle of an advancing sheet with no donor at all; those fall back to
+        reference density at rest, and
+        :func:`physics.filling._initialise_promoted_cells` documents why that
+        fallback is load-bearing rather than cosmetic.
+
+        The donor test is applied as a 0.0/1.0 *weight* rather than a branch,
+        matching the NumPy path's ``rho = state.rho.astype(np.float64) *
+        weight``. That is not stylistic: on a diverged lattice ``0.0 * inf`` is
+        NaN, and the reference propagates that into the average. Reproducing it
+        costs nothing here -- the multiply is over a few hundred cells -- so
+        this kernel is exact even in that case.
+
+        Neighbours are read at ``x + c_i``, which is where the NumPy path's
+        ``np.roll(shift=-c_i)`` reads them, and the four accumulators run in
+        direction order, so the sums are bit-identical.
+
+        Writes ``rho_avg_out[k]`` and ``u_avg_out[:, k]`` for every k; the
+        caller turns those into populations with the ordinary
+        :func:`equilibrium` on the same compressed arrays.
+        """
+        nx, ny, nz = flags.shape
+        n = px.shape[0]
+        for k in prange(n):
+            x = px[k]
+            y = py[k]
+            z = pz[k]
+            count = 0.0
+            rho_sum = 0.0
+            ux_sum = 0.0
+            uy_sum = 0.0
+            uz_sum = 0.0
+            for i in range(1, 19):
+                sx = (x + Ci[i, 0]) % nx
+                sy = (y + Ci[i, 1]) % ny
+                sz = (z + Ci[i, 2]) % nz
+                nflag = flags[sx, sy, sz]
+                w = 0.0
+                if (
+                    nflag == _FLAG_FLUID or nflag == _FLAG_INTERFACE
+                ) and not promote[sx, sy, sz]:
+                    w = 1.0
+                count += w
+                rho_sum += w * np.float64(rho[sx, sy, sz])
+                ux_sum += w * np.float64(u[0, sx, sy, sz])
+                uy_sum += w * np.float64(u[1, sx, sy, sz])
+                uz_sum += w * np.float64(u[2, sx, sy, sz])
+
+            if count > 0.0:
+                rho_avg_out[k] = rho_sum / count
+                u_avg_out[0, k] = ux_sum / count
+                u_avg_out[1, k] = uy_sum / count
+                u_avg_out[2, k] = uz_sum / count
+            else:
+                rho_avg_out[k] = reference_density
+                u_avg_out[0, k] = 0.0
+                u_avg_out[1, k] = 0.0
+                u_avg_out[2, k] = 0.0
+
+    @njit(parallel=True, cache=True)
+    def promoted_donor_temperature_mask_kernel(
+        flags, promote, temperature, donor_out
+    ):
+        """
+        "Wet, not promoted this step, and carrying a real temperature."
+
+        One sweep in place of five NumPy passes (two flag comparisons, an OR, an
+        AND with ``~promote``, and ``np.isfinite``). The mask is left as a full
+        grid rather than compressed because
+        :func:`physics.filling._initialise_promoted_temperature` needs it twice:
+        once for its whole-domain fallback mean, and once as the donor test in
+        the gather below.
+        """
+        nx, ny, nz = flags.shape
+        for x in prange(nx):
+            for y in range(ny):
+                for z in range(nz):
+                    ok = False
+                    nflag = flags[x, y, z]
+                    if (
+                        nflag == _FLAG_FLUID or nflag == _FLAG_INTERFACE
+                    ) and not promote[x, y, z]:
+                        ok = np.isfinite(temperature[x, y, z])
+                    donor_out[x, y, z] = ok
+
+    @njit(parallel=True, cache=True)
+    def promoted_temperature_average_kernel(
+        px, py, pz, donor_has_temp, temperature, Ci, fallback, temp_out
+    ):
+        """
+        Donor-averaged temperature for freshly promoted cells.
+
+        Compressed, like :func:`promoted_donor_average_kernel`, and replacing
+        the same shape of work: 36 full-grid rolls to average over a few hundred
+        cells. 28.4 ms at 120^3.
+
+        Donors are pre-screened by ``donor_has_temp``, so every value summed
+        here is finite and skipping a non-donor is the exact additive identity
+        -- unlike the mass gather, this one needs no caveat. Cells with no donor
+        take the caller's whole-domain ``fallback``, which the caller computes
+        with ``np.mean`` for exactly that reason: a prange reduction sums in a
+        different order than NumPy's pairwise summation, and the fallback is the
+        one number here where that would show.
+        """
+        nx, ny, nz = donor_has_temp.shape
+        n = px.shape[0]
+        for k in prange(n):
+            x = px[k]
+            y = py[k]
+            z = pz[k]
+            count = 0.0
+            temp_sum = 0.0
+            for i in range(1, 19):
+                sx = (x + Ci[i, 0]) % nx
+                sy = (y + Ci[i, 1]) % ny
+                sz = (z + Ci[i, 2]) % nz
+                if donor_has_temp[sx, sy, sz]:
+                    count += 1.0
+                    temp_sum += np.float64(temperature[sx, sy, sz])
+            if count > 0.0:
+                temp_out[k] = temp_sum / count
+            else:
+                temp_out[k] = fallback
+
 
 def lattice_tables():
     """The lattice tables in the dtypes the kernels expect."""
