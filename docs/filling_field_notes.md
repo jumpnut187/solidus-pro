@@ -86,6 +86,18 @@ still rising when the clock runs out; everything upstream is 99.5–100 % full.
 Arrival is physically ordered — mean `fill_time_s` sprue 0.35 s, runner 0.97 s,
 gate 1.19 s, casting 5.23 s, riser 17.57 s.
 
+*Measured on the same model at coarsening 1 through the full pipeline*
+(2026-09-01, dwell active, `Test/`-side log `gate4_dwell.log`): the fill
+reached **96 % of cells / 94 % by mass at 13.5 s and then receded** — 96 → 91
+→ 90 → 87 → 86 % over five reports with the poured total falling 17.9 →
+16.9 lb, i.e. metal genuinely flowing back out through the basin — and the
+stall guard ended it at 86 % with the honest warning. **Un-diagnosed; do not
+theorize without instrumenting.** The plausible-sounding story (a late slosh
+wave reflecting off the full cavity, absorbed by the pressure inlet) is
+exactly the kind of mechanism this project has refuted by measurement five
+times. The defaults (coarsening 2) complete cleanly; only the fine grid shows
+this.
+
 **The transient Mach excursion documented last round is gone.** `max|u|` is
 0.042 at the cap with the 99th percentile at 0.021, and **0 of 8,996 wet cells
 are over the guard** — against a 0.457 peak and 87 of 866 samples over it
