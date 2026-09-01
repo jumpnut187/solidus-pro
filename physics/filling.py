@@ -252,18 +252,39 @@ class FillingState:
     cells in float32 loses precisely the digits the conservation assertion is
     checking.
 
-    What float32 storage buys is narrower here than it looks, and the honest
-    version is worth recording. The *arithmetic* is float64 on both paths, and
-    the kernels' working buffers (``_scratch_post``, ``_scratch_out``,
-    ``_scratch_f_out``) are float64, so the traffic inside a step is not halved
-    -- only the resident field and the populations the collision kernel reads
-    are. Until this optimisation pass the saving was worse than nothing on the
-    numba path: ``state.f.astype(np.float64)`` rebuilt a 19 x N float64 copy
-    every step, so float32 storage bought a conversion pass and a large
-    allocation on top of the float64 traffic it was supposed to avoid. The
-    kernels now cast per-element as they read, so the claim above is at least
-    true of the read side. Making the *kernels* compute in float32 is a separate
-    question and is deliberately not done: it would change the numerics.
+    That claim used to be half true, and the history is worth keeping because
+    it is the shape of the mistake. Storing ``f`` float32 while every working
+    buffer inside the step stayed float64 bought nothing: the numba path rebuilt
+    ``state.f.astype(np.float64)`` every step, so the narrow field cost a
+    conversion pass and a 19 x N allocation *on top of* the float64 traffic it
+    was supposed to avoid. The first pass fixed the read side (the kernels cast
+    per element as they read). This one fixes the write side: the population
+    buffers the kernels move between them -- ``_scratch_post`` and
+    ``_scratch_out`` -- are float32 too, and the float64 ``_scratch_f_out``
+    that ``free_surface_kernel`` used to reconstruct into is gone entirely. At
+    120^3 that is 817.4 -> 316.4 MiB of resident scratch, and the populations
+    moving between the kernels really are half the bytes now rather than
+    nominally. Whole step: 43.2 -> 36.7 ms median, six interleaved A/B rounds,
+    won all six. The win is smaller than the buffers suggest because the
+    collision kernel turned out to be compute-bound -- see
+    :func:`_collide_stream_numba` for the per-kernel measurements.
+
+    **Storage is float32; arithmetic is float64.** Every kernel reads a
+    population through an explicit ``np.float64`` cast and rounds once, at the
+    store -- the same rounding ``state.f`` has always received at each step
+    boundary, now also applied to the mid-step buffers. Making the kernels
+    *compute* in float32 remains deliberately not done: it would change the
+    numerics rather than the traffic. Mass is float64 end to end, from
+    ``mass_in`` through the exchange accumulator to ``state.mass``, and the
+    Koerner exchange's pairwise cancellation stays bit-exact under the narrower
+    populations -- see :func:`physics.fluid_flow.free_surface_kernel` for the
+    argument and tests/test_filling_parity.py for the measurement.
+
+    The price is that the numba and NumPy step paths are no longer bit-identical:
+    they now round populations at different points, so the parity tests carry
+    measured tolerances instead of ``assert_array_equal``. The NumPy path stays
+    float64 throughout on purpose -- it is the numerics reference, not a
+    performance path.
 
     Attributes:
         shape: Grid shape ``(nx, ny, nz)``.
@@ -305,9 +326,12 @@ class FillingState:
     # _collide_stream_numba and _free_surface_scratch). Declared here, rather
     # than injected via plain attribute assignment, so they are typed instead
     # of tripping mypy's attr-defined check on every scratch access.
+    # float32, like state.f itself -- see the dtype paragraph in the class
+    # docstring. The float64 _scratch_f_out that used to sit beside them is
+    # gone; free_surface_kernel reconstructs straight into the float32 buffer
+    # that becomes state.f.
     _scratch_post: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
     _scratch_out: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
-    _scratch_f_out: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
     _scratch_mass_out: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
     # Float64 moment buffers the collision kernel writes. Held rather than
     # np.empty'd per step: at 120^3 that was 55 MB of allocate-and-free churn
@@ -1778,13 +1802,14 @@ def step(
             smagorinsky_cs,
         )
         if track_free_surface:
-            f_out, mass_out = _free_surface_scratch(state)
+            mass_out = _free_surface_scratch(state)
             C, Ci, W, OPP = lattice_tables()
             # A fresh float32 array rather than a held buffer, so state.f keeps
             # the "new object every step" identity the NumPy path also has -- a
             # caller that captured the previous state.f still sees the previous
-            # step. The kernel fills it in parallel, which is the point: the
-            # f_out.astype(np.float32) it replaces was a serial 19 x N pass.
+            # step. The kernel writes every direction of every cell of it, and
+            # reconstructs into it directly; it is the only population output
+            # the free-surface pass has now.
             f32_out = np.empty((Q,) + state.shape, dtype=np.float32)
             free_surface_kernel(
                 post,
@@ -1804,7 +1829,6 @@ def step(
                 float(GAS_DENSITY),
                 state.mass,
                 mass_out,
-                f_out,
                 f32_out,
             )
             state.f = f32_out
@@ -1817,6 +1841,12 @@ def step(
             heal_submerged_interface(state, state.step_count * state.dt_s)
             reset_detached_interface_cells(state)
         else:
+            # ``streamed`` is already float32, so this is a copy rather than a
+            # conversion -- and the copy is the point. ``streamed`` is the
+            # held ``_scratch_out`` buffer; binding it to state.f would make
+            # every step overwrite the populations the caller was handed last
+            # step, and would let collide_kernel read the array stream_kernel
+            # is writing.
             state.f = streamed.astype(np.float32)
             state.step_count += 1
         return state
@@ -1894,8 +1924,38 @@ def _collide_stream_numba(
     Run the local pass and the streaming pass through the Numba kernels.
 
     Reuses scratch buffers held on the state. Allocating two
-    (19, nx, ny, nz) float64 arrays every step would put most of the win back:
-    at a 12 in casting that is ~250 MB of churn per step.
+    (19, nx, ny, nz) arrays every step would put most of the win back: at a
+    12 in casting that is ~250 MB of churn per step.
+
+    Both population buffers are **float32**, matching ``state.f``. The
+    arithmetic inside both kernels is still float64: ``collide_kernel`` reads
+    through per-element casts and rounds once at the store, and
+    ``stream_kernel`` only copies. See :class:`FillingState`'s dtype paragraph.
+
+    What that bought, and what it did not, measured at 120^3 on 18 threads
+    (medians of 12, per kernel, against a machine roofline of 185 GiB/s for a
+    parallel 19 x N copy):
+
+    ==================  ========  =======  ==============================
+    kernel              float64   float32  effective bandwidth, after
+    ==================  ========  =======  ==============================
+    ``collide_kernel``   20.3 ms  20.4 ms  18 GiB/s -- 10% of roofline
+    ``stream_kernel``     5.6 ms   3.8 ms  65 GiB/s -- 35%
+    free surface         11.9 ms   7.0 ms  67 GiB/s -- 36%
+    ==================  ========  =======  ==============================
+
+    Streaming and the free-surface pass were bandwidth-bound and halving their
+    traffic did what halving traffic does. **The collision was not**, and it is
+    the largest of the three. It evaluates ``_equilibrium_i`` about 57 times per
+    cell -- 19 for the Smagorinsky stress and two per direction for the TRT
+    split -- plus a square root, all in scalar float64, and it was running at a
+    tenth of the memory system's rate. Cutting its output traffic by 125 MiB a
+    step changed its time by 0.6%, which is inside the noise. Switching the
+    Smagorinsky branch off (19 fewer equilibria, one fewer sqrt, and *no*
+    change in traffic at all) takes it from 20.7 to 14.9 ms, which is the
+    direct evidence: 28% of that kernel is arithmetic that never touches
+    memory. Anyone looking for the next constant factor should start there and
+    not with another dtype.
 
     Nothing here converts dtypes any more, and that was worth ~26 ms of a
     measured 106 ms step at 120^3 (38 ``astype`` calls per step across the
@@ -1922,8 +1982,8 @@ def _collide_stream_numba(
     post = state._scratch_post
     out = state._scratch_out
     if post is None or out is None or post.shape[1:] != shape:
-        post = np.empty((Q,) + shape, dtype=np.float64)
-        out = np.empty((Q,) + shape, dtype=np.float64)
+        post = np.empty((Q,) + shape, dtype=np.float32)
+        out = np.empty((Q,) + shape, dtype=np.float32)
         state._scratch_post = post
         state._scratch_out = out
 
@@ -1966,15 +2026,20 @@ def _collide_stream_numba(
     return post, out, u
 
 
-def _free_surface_scratch(state: FillingState) -> Tuple[np.ndarray, np.ndarray]:
+def _free_surface_scratch(state: FillingState) -> np.ndarray:
     """
-    Cache the ``free_surface_kernel`` output buffers on the state.
+    Cache the ``free_surface_kernel`` mass output buffer on the state.
 
-    ``f_out`` is the float64 population buffer the kernel reads its own
-    reconstructed values back out of during the mass exchange. It never becomes
-    ``state.f``: the kernel writes the float32 copy that does into a separate
-    argument, so this buffer stays private to the kernel and cannot alias an
-    input on the next step.
+    This used to hand back a population buffer too: a float64 ``f_out`` the
+    kernel reconstructed into and then read back during the mass exchange,
+    separate from the float32 copy that became ``state.f``. Now that the
+    populations moving through the step are float32 there is nothing for the
+    float64 copy to preserve, so it is gone -- 19 x N x 8 B, 250 MB at 120^3 --
+    and the kernel reconstructs directly into the float32 buffer ``step()``
+    allocates fresh each step. That buffer is *not* cached here, deliberately:
+    it becomes ``state.f``, and a held buffer would make ``state.f`` the same
+    object every step, so a caller holding the previous step's populations
+    would find them silently overwritten.
 
     ``mass_out`` is float64 like ``state.mass`` itself, so aliasing is a real
     risk: if ``state.mass`` were ever pointed straight at this cached buffer,
@@ -1985,14 +2050,11 @@ def _free_surface_scratch(state: FillingState) -> Tuple[np.ndarray, np.ndarray]:
     this buffer stays a distinct object forever.
     """
     shape = state.shape
-    f_out = state._scratch_f_out
     mass_out = state._scratch_mass_out
-    if f_out is None or mass_out is None or f_out.shape[1:] != shape:
-        f_out = np.empty((Q,) + shape, dtype=np.float64)
+    if mass_out is None or mass_out.shape != shape:
         mass_out = np.empty(shape, dtype=np.float64)
-        state._scratch_f_out = f_out
         state._scratch_mass_out = mass_out
-    return f_out, mass_out
+    return mass_out
 
 
 # ---------------------------------------------------------------------------

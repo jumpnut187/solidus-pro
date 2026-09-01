@@ -973,6 +973,37 @@ if NUMBA_AVAILABLE:
         two float32 values in float32 and the kernel would stop matching the
         NumPy reference bit-for-bit. float32 -> float64 is exact, so with them
         the result is identical to the old pre-converted input.
+
+        **``post_out`` is float32, and the arithmetic above it is not.** Every
+        register in this loop is float64; the narrowing happens once, at the
+        store, spelled ``np.float32(...)`` so it is visible rather than an
+        implicit setitem cast. The populations were already rounded to float32
+        once per step -- that is what ``state.f`` is -- and streaming moves
+        values without touching them, so for every direction whose value is not
+        later rewritten by the free-surface reconstruction, ``state.f`` comes
+        out of the step *bit-identical* to what it was when ``post_out`` was
+        float64: ``f32(post)`` copied is the same number as ``f32(copy of
+        post)``. What the narrowing does change is the two places that consume
+        ``post`` as a number rather than moving it -- the gas-side
+        reconstruction and the Koerner mass exchange in
+        :func:`free_surface_kernel` -- which now see the rounded value. That is
+        a deliberate, measured trade: see the parity tolerances in
+        tests/test_filling_parity.py for what it costs, and
+        :class:`physics.filling.FillingState` for what it buys.
+
+        It buys this kernel nothing, and that is worth recording so nobody
+        pays for the measurement twice. 120^3, 18 threads, median of 12:
+        20.3 ms with a float64 ``post_out``, 20.4 ms with a float32 one, for
+        125 MiB per step less writing. This loop is **compute-bound**, not
+        bandwidth-bound: it moves ~370 MiB in 20.4 ms, 18 GiB/s, about a tenth
+        of what a parallel copy of the same arrays sustains on this machine,
+        and it spends the difference on roughly 57 inlined ``_equilibrium_i``
+        evaluations per cell (19 for the Smagorinsky stress tensor, two per
+        direction for the TRT split) plus a square root, all scalar float64.
+        Running it with ``use_smagorinsky=False`` -- 19 fewer equilibria, one
+        fewer sqrt, byte-for-byte identical memory traffic -- drops it to
+        14.9 ms. The narrower store stays because it is what makes the two
+        kernels downstream faster; it is not why this one is slow.
         """
         nx, ny, nz = flags.shape
         for x in prange(nx):
@@ -1114,7 +1145,9 @@ if NUMBA_AVAILABLE:
                             + (3.0 * (cz - uz) + 9.0 * cu * cz) * fz
                         )
 
-                        post_out[i, x, y, z] = (
+                        # float64 register arithmetic, one rounding at the
+                        # store. See the docstring.
+                        post_out[i, x, y, z] = np.float32(
                             fi
                             - omega_plus * (f_sym - e_sym)
                             - omega_minus * (f_asym - e_asym)
@@ -1133,6 +1166,19 @@ if NUMBA_AVAILABLE:
         ``C`` must be the **integer** lattice table: it is used as an array
         index here, not as arithmetic, and the float64 view would make every
         offset a float.
+
+        ``post`` and ``out`` are float32 (see :func:`collide_kernel`). Nothing
+        in this kernel is arithmetic: every value is either a copy from a
+        neighbour, a bounce-back copy of the reversed direction from this same
+        cell, or a literal zero. Copies are exact in any precision, so the
+        narrower dtype changes what this pass *costs* -- two 19 x N buffers
+        halve to 125 MB each at 120^3 -- and nothing about what it computes.
+        Measured there on 18 threads: 5.58 -> 3.79 ms, a 1.5x speedup for a 2x
+        traffic cut. The shortfall is the gather: the read of ``post[i, sx, sy,
+        sz]`` walks 18 different neighbour offsets, so the kernel is partly
+        waiting on latency rather than on bandwidth, and it was already
+        sustaining 88 GiB/s against a 185 GiB/s parallel-copy roofline before
+        the change.
         """
         nx, ny, nz = flags.shape
         for x in prange(nx):
@@ -1174,7 +1220,7 @@ if NUMBA_AVAILABLE:
     @njit(parallel=True, cache=True)
     def free_surface_kernel(
         post, streamed, flags, rho, u, porosity, entry_offset, primed,
-        C, Ci, W, OPP, gas_density, mass_in, mass_out, f_out, f32_out,
+        C, Ci, W, OPP, gas_density, mass_in, mass_out, f_out,
     ):
         """
         Fused free-surface pass: gas-side reconstruction + Koerner mass exchange.
@@ -1189,19 +1235,46 @@ if NUMBA_AVAILABLE:
         are all taken from the same instant; updating in place would let a cell
         see some neighbours before and some after their update.
 
-        Two population outputs, deliberately:
+        One population output, where there used to be two
+        -------------------------------------------------
+        This kernel used to write a float64 ``f_out`` *and* a float32
+        ``f32_out``, with identical values: the float64 one existed only so the
+        mass exchange at the bottom could read the reconstruction back at full
+        precision, and the float32 one was what became ``state.f``. Now that
+        ``post`` and ``streamed`` are themselves float32 there is nothing left
+        for the float64 copy to preserve -- every value it would hold either
+        came from ``streamed`` (already rounded) or is a reconstruction the
+        exchange consumes in the same iteration that writes it -- so the buffer
+        is gone. It was 19 x N x 8 B: 250 MB resident and 250 MB of write
+        traffic per step at 120^3, for a rounding that no longer exists to be
+        deferred. ``f_out`` below is the float32 buffer that becomes
+        ``state.f``; every cell of every direction is assigned unconditionally
+        at the top, so it is fully defined on return.
 
-        * ``f_out`` is float64 and is what the mass exchange below reads its own
-          reconstructed populations back out of. It has to stay float64 --
-          ``physics.filling.advance_mass`` feeds the float64 ``reconstructed``
-          array into the exchange too, and rounding it to float32 first would
-          make the two paths solve slightly different problems.
-        * ``f32_out`` is the float32 copy that becomes ``state.f``. Writing it
-          here rather than as ``f_out.astype(np.float32)`` afterwards moves a
-          19 x N conversion (~390 MB of traffic per step at 120^3) out of the
-          serial NumPy tail and into this already-parallel loop. Every cell of
-          every direction is assigned unconditionally at the top, so the buffer
-          is fully defined on return.
+        Measured at 120^3 on 18 threads, dropping that buffer and narrowing the
+        two population inputs together: 11.90 -> 6.95 ms, the largest single
+        saving of the pass. This kernel was the most bandwidth-bound of the
+        three -- ~976 MiB moved per call before, ~476 MiB after -- which is why
+        it responded almost proportionally where the collision did not respond
+        at all.
+
+        The mass exchange is exact in the pairing, not merely close
+        ----------------------------------------------------------
+        Conservation survives the narrower dtype *structurally*, and it is
+        worth spelling out why rather than trusting the measurement alone.
+        For a wet pair ``x`` and ``nb = x + c_i``, cell x contributes
+        ``(f_out[ibar, x] - post[i, x]) * w`` and cell nb contributes
+        ``(f_out[i, nb] - post[ibar, nb]) * w``. Neither of those ``f_out``
+        entries is ever a reconstructed value -- the reconstruction only
+        rewrites the direction pointing back from a GAS neighbour, and that
+        direction is skipped by the exchange precisely because the neighbour is
+        gas -- so both are streamed copies: ``f_out[ibar, x] == post[ibar, nb]``
+        and ``f_out[i, nb] == post[i, x]``, *bit for bit*, because streaming
+        copies. The two contributions are therefore exact negations of each
+        other, and ``w`` is symmetric under the swap (float addition is
+        commutative, so ``0.5 * (eps_x + eps_nb)`` is the same number from both
+        ends). Total mass changes only by the float64 accumulation-order
+        round-off it already had.
 
         ``rho`` is read through an explicit ``np.float64`` cast so the caller
         can pass ``state.rho`` (float32) directly. That is not a shortcut, it is
@@ -1210,16 +1283,21 @@ if NUMBA_AVAILABLE:
         float32-rounded density, not the raw float64 the collision produced.
         ``u``, by contrast, is the raw float64 velocity, because that is exactly
         what the NumPy path hands ``reconstruct_gas_populations``.
+
+        ``post`` and ``streamed`` arrive float32 and are read through explicit
+        ``np.float64`` casts wherever they are used as numbers. The casts are
+        exact and the promotion would happen implicitly anyway; they are
+        written out because this file's convention is that a widening in an
+        arithmetic expression is load-bearing enough to be visible.
         """
         nx, ny, nz = flags.shape
         for x in prange(nx):
             for y in range(ny):
                 for z in range(nz):
                     flag = flags[x, y, z]
+                    # float32 -> float32: a copy, exact.
                     for i in range(19):
-                        val0 = streamed[i, x, y, z]
-                        f_out[i, x, y, z] = val0
-                        f32_out[i, x, y, z] = val0
+                        f_out[i, x, y, z] = streamed[i, x, y, z]
                     mass_out[x, y, z] = mass_in[x, y, z]
                     if flag != _FLAG_INTERFACE and flag != _FLAG_FLUID:
                         continue
@@ -1266,11 +1344,10 @@ if NUMBA_AVAILABLE:
                             # of the wet-cell count across the run, so the
                             # trade is a small, bounded mass gain in exchange
                             # for the solve surviving at all.
-                            val = ei + eb - post[i, x, y, z]
+                            val = ei + eb - np.float64(post[i, x, y, z])
                             if val < 0.0:
                                 val = 0.0
-                            f_out[ib, x, y, z] = val
-                            f32_out[ib, x, y, z] = val
+                            f_out[ib, x, y, z] = np.float32(val)
 
                     # --- Koerner mass exchange ---
                     #
@@ -1318,9 +1395,13 @@ if NUMBA_AVAILABLE:
                                 eps_nb = 1.0
                             weight = 0.5 * (eps_here_c + eps_nb)
                         ib = OPP[i]
+                        # Both populations are float32 storage; the difference
+                        # and the accumulation are float64, which is what keeps
+                        # the pairwise cancellation above exact.
                         delta += (
-                            (f_out[ib, x, y, z] - post[i, x, y, z]) * weight
-                        )
+                            np.float64(f_out[ib, x, y, z])
+                            - np.float64(post[i, x, y, z])
+                        ) * weight
                     mass_out[x, y, z] = mass_in[x, y, z] + delta
 
     # -----------------------------------------------------------------------

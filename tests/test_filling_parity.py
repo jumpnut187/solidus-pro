@@ -6,13 +6,54 @@ analytical benchmarks were validated against; the kernels are the fast one.
 Only a parity test keeps the second honest, because a fused kernel can be
 subtly wrong in ways that still look like a plausible fill.
 
-Two agreement levels are asserted deliberately:
+Three agreement levels are asserted deliberately:
 
-- One step from an identical state must agree to float64 round-off. Any real
+- One step from an identical state must agree to round-off. Any real
   divergence in the algebra shows up immediately here.
 - Many steps are allowed to drift, because the two paths sum in different
   orders and the scheme runs within 1e-5 of its stability limit. What must NOT
   drift is anything conserved or discrete: total mass, and the cell flags.
+- The bookkeeping kernels -- the thermal pair, the neighbourhood masks, the
+  whole of ``apply_transitions`` -- are asserted with ``assert_array_equal``
+  and no tolerance at all. They are supposed to be bit-identical, and a
+  tolerance wide enough to absorb round-off is also wide enough to absorb a
+  plausible-looking wrong stencil.
+
+The step paths are no longer bit-identical, and that is deliberate
+-----------------------------------------------------------------
+Until the float32-storage pass they were: every number the two paths produced
+matched to the last bit, and the "round-off" tolerances above were slack that
+never got spent. They now round populations at different points -- the numba
+path stores ``post`` and ``streamed`` as float32 and reconstructs into float32,
+the NumPy reference stays float64 throughout because it is the numerics
+reference rather than a performance path -- so the first two levels above
+became real tolerances, set from measurement.
+
+The measurements they are set from, taken on the four fixtures below
+(quiescent and provoked, each with and without a wet filter), numba against
+NumPy from an identical start:
+
+===================  ===============  ==================
+field                after 1 step     peak over 100
+===================  ===============  ==================
+``f``                6.9e-8 rel       1.4e-6 rel
+``rho``              0 (exact)        4.8e-7 rel
+``u``                0 (exact)        1.6e-7 abs
+``mass``             1.7e-8 abs       4.6e-6 abs
+``total_mass``       0 (exact)        3.7e-16 rel
+flags/fill_time/     exact            exact
+primed
+===================  ===============  ==================
+
+``rho`` and ``u`` come straight out of ``collide_kernel``'s float64 registers,
+so the *first* step cannot move them at all; they only diverge once a rounded
+``f`` feeds back into the next step's moments. ``total_mass`` staying at
+round-off while the per-cell ``mass`` field drifts by 4.6e-6 is not luck: the
+Koerner exchange is pairwise antisymmetric in whatever the populations are
+stored as, so the per-cell errors sum to zero -- measured at 2e-15 over 1,584
+disagreeing cells. See :class:`Float32StorageDivergenceTests`, which pins every
+number in that table, and
+``physics.fluid_flow.free_surface_kernel`` for the argument.
 """
 
 from __future__ import annotations
@@ -21,7 +62,13 @@ import unittest
 
 import numpy as np
 
-from physics.fluid_flow import NUMBA_AVAILABLE, LATTICE_VELOCITIES, Q, lattice_units
+from physics.fluid_flow import (
+    NUMBA_AVAILABLE,
+    LATTICE_VELOCITIES,
+    Q,
+    equilibrium,
+    lattice_units,
+)
 from physics.filling import (
     FLAG_FLUID,
     FLAG_GAS,
@@ -116,31 +163,57 @@ def _twin(**kwargs):
 
 @unittest.skipUnless(NUMBA_AVAILABLE, "numba is not installed")
 class SingleStepParityTests(unittest.TestCase):
-    """One step must agree to round-off. Anything worse is an algebra bug."""
+    """
+    One step must agree to round-off. Anything worse is an algebra bug.
+
+    "Round-off" now means *float32* round-off on the populations and on
+    anything derived from them within the step -- see the module docstring.
+    The tolerances below are unchanged from when the two paths were
+    bit-identical, and they are kept rather than tightened because they were
+    always sized for a float32 field; what changed is that they now have
+    something to absorb. The measured single-step divergence is recorded next
+    to each assertion so the headroom is a number and not a guess.
+    """
 
     def test_populations_agree(self) -> None:
         a, b, units = _twin()
         step(a, units, use_numba=True)
         step(b, units, use_numba=False)
+        # Measured: 6.9e-8 relative, 3.7e-9 absolute -- about half a float32
+        # ULP, which is exactly what one extra rounding of ``post`` costs.
+        # rtol has ~145x headroom over that, atol ~27x.
         np.testing.assert_allclose(a.f, b.f, rtol=1e-5, atol=1e-7)
 
     def test_density_agrees(self) -> None:
         a, b, units = _twin()
         step(a, units, use_numba=True)
         step(b, units, use_numba=False)
+        # Still *exactly* equal after one step, and asserted as such below;
+        # the moments are read out of collide_kernel's float64 registers
+        # before anything is rounded, so the first step cannot move them.
         np.testing.assert_allclose(a.rho, b.rho, rtol=1e-5, atol=1e-7)
+        np.testing.assert_array_equal(a.rho, b.rho)
 
     def test_velocity_agrees(self) -> None:
         a, b, units = _twin()
         step(a, units, use_numba=True)
         step(b, units, use_numba=False)
         np.testing.assert_allclose(a.u, b.u, rtol=1e-4, atol=1e-9)
+        # As with rho: the velocity comes out of the same float64 registers,
+        # so one step from an identical state still matches bit for bit.
+        np.testing.assert_array_equal(a.u, b.u)
 
     def test_mass_agrees(self) -> None:
         a, b, units = _twin()
         step(a, units, use_numba=True)
         step(b, units, use_numba=False)
-        np.testing.assert_allclose(a.mass, b.mass, rtol=1e-5, atol=1e-9)
+        # One step moves the per-cell mass apart by at most 1.7e-8 absolute /
+        # 1.5e-7 relative across the four fixtures -- the float32 rounding of
+        # the two populations the Koerner difference reads. Bounds set at
+        # ~12x and ~13x that. The old atol of 1e-9 was *below* the measured
+        # absolute divergence and survived only because rtol carried the
+        # cells with mass near 1; it is not a bound anyone could reason with.
+        np.testing.assert_allclose(a.mass, b.mass, rtol=2e-6, atol=2e-7)
 
     def test_flags_agree_exactly(self) -> None:
         """Cell state is discrete; it has no tolerance to spend."""
@@ -224,8 +297,17 @@ class PorousParityTests(unittest.TestCase):
         for _ in range(30):
             step(a, units, use_numba=True)
             step(b, units, use_numba=False)
-        np.testing.assert_allclose(a.mass, b.mass, rtol=1e-9, atol=1e-12)
+        # 30 steps accumulate 7.2e-7 absolute / 1.3e-6 relative on the per-cell
+        # mass inside the filter; bounds at ~14x and ~7.5x that. This used to
+        # be rtol=1e-9, atol=1e-12, which is what bit-identical paths cost --
+        # the float32 population buffers are what spent it, and the number
+        # above is what they spent.
+        np.testing.assert_allclose(a.mass, b.mass, rtol=1e-5, atol=1e-5)
         np.testing.assert_array_equal(a.flags, b.flags)
+        # The *total* is not a tolerance question, though. Measured difference
+        # after 30 steps: 0.0, on a total of 1512.0 -- the exchange's pairwise
+        # cancellation is exact in float32 storage too, so places=9 (5e-10 on
+        # that total) is three orders of headroom over anything observed.
         self.assertAlmostEqual(total_mass(a), total_mass(b), places=9)
 
 
@@ -299,6 +381,77 @@ class KernelInvariantTests(unittest.TestCase):
         for _ in range(5):
             step(state, units, use_numba=True)
             self.assertEqual(float(np.abs(state.f[:, obstacle]).max()), 0.0)
+
+    def test_the_population_buffers_are_float32_and_mass_is_not(self) -> None:
+        """
+        The dtype split the whole float32-storage pass rests on.
+
+        Nothing in the step *reads* a dtype and behaves differently, so a
+        silent slide back to float64 buffers would cost 500 MB and 8 ms a step
+        at 120^3 while every other test in the suite carried on passing. The
+        reverse slide -- mass or its scratch going float32 -- would be worse:
+        accumulating a conservation sum over millions of cells in float32
+        loses exactly the digits the 0.1% invariant is checking, and it would
+        show up as a plausible-looking leak rather than as an error.
+        """
+        state, units = _fixture()
+        step(state, units, use_numba=True)
+
+        self.assertEqual(state.f.dtype, np.float32)
+        self.assertEqual(state.rho.dtype, np.float32)
+        self.assertEqual(state.u.dtype, np.float32)
+        self.assertIsNotNone(state._scratch_post)
+        self.assertIsNotNone(state._scratch_out)
+        self.assertEqual(state._scratch_post.dtype, np.float32)
+        self.assertEqual(state._scratch_out.dtype, np.float32)
+
+        self.assertEqual(state.mass.dtype, np.float64)
+        self.assertIsNotNone(state._scratch_mass_out)
+        self.assertEqual(state._scratch_mass_out.dtype, np.float64)
+        # The float64 moment buffers the free-surface pass reads are the one
+        # place a float64 population-sized array would still be justified, and
+        # they are per-cell, not per-direction.
+        self.assertEqual(state._scratch_rho64.dtype, np.float64)
+        self.assertEqual(state._scratch_u64.dtype, np.float64)
+
+        # free_surface_kernel used to reconstruct into a float64 (19, nx, ny,
+        # nz) buffer and read it back for the mass exchange. With float32
+        # populations there is nothing for it to preserve, so it is gone -- and
+        # a reintroduced one would be 250 MB at 120^3 that no test would miss
+        # except this line.
+        self.assertFalse(hasattr(state, "_scratch_f_out"))
+
+    def test_the_numpy_reference_path_still_computes_in_float64(self) -> None:
+        """
+        The fallback is the numerics reference, not a second performance path.
+
+        It reads the same float32 ``state.f`` the kernels do and must widen it
+        immediately; if it ever starts carrying float32 intermediates, the
+        thing the parity tolerances are measured *against* has moved, and the
+        tolerances stop meaning anything.
+        """
+        from physics.filling import (
+            advance_mass,
+            macroscopic,
+            reconstruct_gas_populations,
+            _stream_with_bounce_back,
+        )
+
+        state, units = _fixture()
+        rho, u = macroscopic(state)
+        self.assertEqual(rho.dtype, np.float64)
+        self.assertEqual(u.dtype, np.float64)
+
+        post = np.asarray(state.f, dtype=np.float64)
+        streamed = _stream_with_bounce_back(post, state.flags == FLAG_OBSTACLE)
+        self.assertEqual(streamed.dtype, np.float64)
+
+        reconstructed = reconstruct_gas_populations(state, streamed, post, u)
+        self.assertEqual(reconstructed.dtype, np.float64)
+        self.assertEqual(advance_mass(state, post, reconstructed).dtype, np.float64)
+
+        step(state, units, use_numba=False)
+        self.assertEqual(state.mass.dtype, np.float64)
 
     def test_numpy_fallback_is_reachable(self) -> None:
         """The reference path must keep working even where numba is present."""
@@ -870,6 +1023,394 @@ class ProvokedFixtureTests(unittest.TestCase):
         for _ in range(20):
             step(state, units, use_numba=True)
         self.assertEqual(apply_transitions(state, 0.1, use_numba=False), (0, 0))
+
+
+# ---------------------------------------------------------------------------
+# What float32 population storage actually costs
+# ---------------------------------------------------------------------------
+
+
+#: Regimes the divergence envelope is measured over. Both halves matter: the
+#: quiescent fixture never converts a cell (see PROVOKE_SEED), so on its own it
+#: would measure only the collide/stream/exchange chain and say nothing about
+#: whether a rounded fill fraction can flip a hysteresis crossing. The filter
+#: variants reach the porosity branch of the mass exchange, which weights by
+#: eps rather than 1 and so multiplies the rounding rather than cancelling it.
+DIVERGENCE_REGIMES: tuple[tuple[str, dict, bool], ...] = (
+    ("quiescent", {}, False),
+    ("quiescent + wet filter", {"with_filter": True, "submerge": True}, False),
+    ("firing", {}, True),
+    ("firing + wet filter", {"with_filter": True, "submerge": True}, True),
+)
+
+#: Steps each regime is walked for. 100 is where the measurements in the module
+#: docstring were taken; the envelope grows roughly as sqrt(steps), so a longer
+#: walk would need its own numbers rather than these ones.
+DIVERGENCE_STEPS = 100
+
+
+def _divergence_walk(kwargs, provoked, steps):
+    """
+    Step a numba/NumPy twin side by side and collect the worst divergence.
+
+    Returns a dict of peaks over the whole walk, plus the step at which each
+    discrete field first stopped being exactly equal (absent = never).
+    """
+    if provoked:
+        a, units = _provoked(**kwargs)
+        b, _ = _provoked(**kwargs)
+    else:
+        a, b, units = _twin(**kwargs)
+    _assert_states_identical(a, b, "divergence fixture")
+
+    start = total_mass(a)
+    peak = {name: {"abs": 0.0, "rel": 0.0} for name in ("f", "rho", "u", "mass")}
+    first = {"abs": {}, "rel": {}}
+    broke: dict[str, int] = {}
+    total_gap = 0.0
+    conservation = 0.0
+
+    for s in range(1, steps + 1):
+        step(a, units, use_numba=True)
+        step(b, units, use_numba=False)
+        for name in peak:
+            x = np.asarray(getattr(a, name), dtype=np.float64)
+            y = np.asarray(getattr(b, name), dtype=np.float64)
+            d = np.abs(x - y)
+            scale = np.maximum(np.abs(x), np.abs(y))
+            live = scale > 0
+            amax = float(d.max())
+            rmax = float((d[live] / scale[live]).max()) if np.any(live) else 0.0
+            if s == 1:
+                first["abs"][name] = amax
+                first["rel"][name] = rmax
+            peak[name]["abs"] = max(peak[name]["abs"], amax)
+            peak[name]["rel"] = max(peak[name]["rel"], rmax)
+        total_gap = max(total_gap, abs(total_mass(a) - total_mass(b)) / start)
+        conservation = max(conservation, abs(total_mass(a) - start) / start)
+        for name, x, y in (
+            ("flags", a.flags, b.flags),
+            ("fill_time_s", a.fill_time_s, b.fill_time_s),
+            ("primed", a.porous.primed, b.porous.primed),
+        ):
+            if name not in broke and not np.array_equal(x, y):
+                broke[name] = s
+
+    return {
+        "peak": peak,
+        "first_step": first,
+        "total_gap": total_gap,
+        "conservation": conservation,
+        "broke": broke,
+    }
+
+
+@unittest.skipUnless(NUMBA_AVAILABLE, "numba is not installed")
+class Float32StorageDivergenceTests(unittest.TestCase):
+    """
+    The price of storing the population buffers float32, measured and pinned.
+
+    ``collide_kernel`` used to write a float64 ``post`` that streamed into a
+    float64 buffer and was reconstructed into a float64 ``f_out``; all three are
+    float32 now, and the arithmetic that reads them stays float64. Before that
+    change every assertion in this file could have been ``assert_array_equal``:
+    the numba and NumPy step paths agreed to the last bit on ``f``, ``rho``,
+    ``u``, ``mass``, ``flags``, ``fill_time_s`` and ``primed``, in all four
+    regimes, for as long as anyone cared to run them. That is no longer true,
+    and the point of this class is that the *amount* by which it is no longer
+    true is a measured number with a test around it rather than a shrug.
+
+    Every bound below is the measured peak over 100 steps of all four regimes,
+    rounded up and given the headroom stated beside it. They are ceilings, not
+    targets: if a future change makes them fail, the change moved the numerics,
+    and the answer is to find out why -- not to raise the ceiling.
+    """
+
+    envelopes: dict
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        # One walk per regime, shared by every test below. Each walk is 100
+        # paired steps on a 14^3 or 16^3 grid; doing it per test method would
+        # multiply that by the number of assertions for no extra coverage.
+        cls.envelopes = {
+            label: _divergence_walk(kwargs, provoked, DIVERGENCE_STEPS)
+            for label, kwargs, provoked in DIVERGENCE_REGIMES
+        }
+
+    def test_the_first_step_leaves_the_moments_untouched(self) -> None:
+        """
+        ``rho`` and ``u`` cannot move on step one, and that is a structural
+        claim rather than a tolerance.
+
+        Both come out of ``collide_kernel``'s float64 registers and are stored
+        float32 exactly as the NumPy path stores them, before anything in the
+        step has been rounded to float32 twice. If this ever fails, the
+        narrowing has crept into the moment arithmetic rather than staying at
+        the population store, which is precisely the line this pass drew.
+        """
+        for label in self.envelopes:
+            with self.subTest(regime=label):
+                first = self.envelopes[label]["first_step"]
+                self.assertEqual(first["abs"]["rho"], 0.0)
+                self.assertEqual(first["abs"]["u"], 0.0)
+
+    def test_the_first_step_costs_about_half_a_float32_ulp_on_f(self) -> None:
+        """
+        Measured across the four regimes: 6.95e-8 relative, 3.73e-9 absolute.
+
+        float32 has a relative spacing of 1.19e-7, so a single rounding of
+        ``post`` costs half of one, and that is what this is (the measured
+        figure sits a little over 5.96e-8 because the relative error is scored
+        against ``max(|a|, |b|)`` and the spacing widens just under a power of
+        two). It is the evidence that the narrowing happens once per step
+        rather than compounding within it.
+
+        Bounds at 2e-7 relative (~3x) and 4e-8 absolute (~11x). Deliberately
+        the tightest assertions in this file, but honest about their reach: a
+        *second* rounding inside the step would land near 1.4e-7 relative,
+        which is still inside 2e-7, so this catches an order-of-magnitude
+        widening rather than a doubling. The thing that would catch a doubling
+        is the sibling test above -- rho and u are asserted exactly equal after
+        one step, and any extra rounding early enough to double ``f`` would
+        have to pass through the moments first.
+        """
+        for label in self.envelopes:
+            with self.subTest(regime=label):
+                first = self.envelopes[label]["first_step"]
+                self.assertLess(first["rel"]["f"], 2e-7)
+                self.assertLess(first["abs"]["f"], 4e-8)
+
+    def test_a_hundred_steps_stay_inside_the_measured_envelope(self) -> None:
+        """
+        Peaks over 100 steps, worst of the four regimes:
+        ``f`` 1.42e-6 rel / 2.98e-7 abs, ``rho`` 4.77e-7 rel, ``u`` 1.58e-7
+        abs, ``mass`` 4.56e-6 abs. Every bound below is 10x the measurement.
+
+        ``u`` and ``mass`` are bounded absolutely, not relatively, and that is
+        not a dodge: both fields have entries legitimately at or near zero --
+        a stationary cell, an interface cell that has just given up nearly all
+        its metal -- where a relative measure divides by noise. The worst
+        relative disagreement on ``mass`` reaches 1.6 on such a cell while its
+        absolute disagreement is 5e-6, and it is the absolute figure that says
+        whether the fill is the same fill.
+        """
+        bounds = {
+            ("f", "rel"): 1.5e-5,
+            ("f", "abs"): 3e-6,
+            ("rho", "rel"): 5e-6,
+            ("u", "abs"): 1.6e-6,
+            ("mass", "abs"): 5e-5,
+        }
+        for label, env in self.envelopes.items():
+            for (name, kind), bound in bounds.items():
+                with self.subTest(regime=label, field=name, measure=kind):
+                    self.assertLess(env["peak"][name][kind], bound)
+
+    def test_the_discrete_fields_never_diverge_at_all(self) -> None:
+        """
+        Flags, arrival times and the filter's primed latch stay *exactly* equal
+        for the whole 100 steps, in every regime.
+
+        This is the assertion the float32 pass was most likely to break and the
+        one worth the most: cell transitions fire on an eps threshold crossing,
+        so a rounded fill fraction could in principle land on the far side of
+        ``1 + TRANSITION_HYSTERESIS`` on one path and the near side on the
+        other, and the two fills would then differ by a whole cell rather than
+        by 1e-6 of one. It does not happen here, and the hysteresis band is why:
+        at 1e-3 it is four orders of magnitude wider than the 1e-7 the rounding
+        moves eps by, so a crossing is only at risk for a cell whose eps sits
+        within 1e-7 of the band edge and stays there.
+
+        The band is not a guarantee, only a very long lever, so this test
+        records a horizon rather than a theorem. If a future fixture does flip
+        a crossing, the honest fix is to report the first divergent step here
+        and assert exact equality up to it -- not to relax the assertion.
+        """
+        for label, env in self.envelopes.items():
+            with self.subTest(regime=label):
+                self.assertEqual(
+                    env["broke"], {},
+                    f"{label}: a discrete field diverged; first divergent step "
+                    f"per field is {env['broke']}",
+                )
+
+    def test_total_mass_stays_exact_across_both_paths(self) -> None:
+        """
+        The per-cell mass field drifts by up to 4.6e-6; its *sum* does not
+        drift at all.
+
+        Measured: 3.7e-16 relative between the paths, and the same for the
+        numba path against its own starting total, over 100 steps of every
+        regime. That is float64 round-off on a sum of ~1,500, not a
+        conservation error, and it is the structural consequence of the Koerner
+        exchange being pairwise antisymmetric in whatever the populations are
+        stored as -- the per-cell errors are equal and opposite across each
+        pair, so they cancel in the sum. Directly measured on the wet-filter
+        fixture: 1,584 cells disagree by up to 7.2e-7 each, and the sum of
+        those disagreements is 2.2e-15.
+
+        Bound at 1e-12 relative -- ~2,700x the measurement, and still six
+        orders inside the module's 0.1% invariant. A real leak would blow
+        through it immediately.
+        """
+        for label, env in self.envelopes.items():
+            with self.subTest(regime=label):
+                self.assertLess(env["total_gap"], 1e-12)
+                self.assertLess(env["conservation"], 1e-12)
+
+
+@unittest.skipUnless(NUMBA_AVAILABLE, "numba is not installed")
+class InletLedgerConservationTests(unittest.TestCase):
+    """
+    Mass delivered in equals mass in the domain, on the numba path, over a long
+    provoked pour.
+
+    The closed-box conservation tests elsewhere in the suite start with all the
+    metal already present and only have to avoid losing it. This one runs the
+    boundary that a real fill runs on: ``core/filling_stage.py`` holds the inlet
+    cells full every step and books the difference between what it writes and
+    what it overwrote as delivered mass. That ledger is the actual definition of
+    the 0.1% invariant in the module docstring, and nothing in ``physics/``
+    tested it, because ``physics/`` may not import ``core/``. So the pin is
+    reproduced here, minus the mesh.
+
+    Every write into ``state.mass`` from outside the solver is booked the same
+    way, including the provocation -- which is what makes it a ledger rather
+    than a hope.
+    """
+
+    N = 12
+    NZ = 20
+    STEPS = 600
+
+    def _pour(self, use_numba: bool):
+        obstacle = np.zeros((self.N, self.N, self.NZ), dtype=bool)
+        obstacle[0] = obstacle[-1] = True
+        obstacle[:, 0] = obstacle[:, -1] = True
+        obstacle[:, :, 0] = True
+        units = lattice_units(DX_M, WCB_NU, u_max_physical_m_s=2.8)
+        state = create_state(obstacle, dx_m=DX_M, dt_s=units.dt_s)
+
+        inlet = np.zeros(state.shape, dtype=bool)
+        mid = self.N // 2
+        inlet[mid - 1 : mid + 1, mid - 1 : mid + 1, self.NZ - 2] = True
+        ix, iy, iz = np.nonzero(inlet)
+        # The cells the inlet can stream into, kept wet the way the stage keeps
+        # them wet -- otherwise the cell above the inlet drains to gas and the
+        # inlet stops receiving anything arriving downward.
+        halo = _dilate(inlet) & ~inlet & ~obstacle
+        n_in = int(inlet.sum())
+
+        # A pressure boundary, 2% over reference, like the stage's head mode.
+        inlet_rho = np.full(n_in, REFERENCE_DENSITY * 1.02, dtype=np.float64)
+        inlet_u = np.zeros((3, n_in), dtype=np.float64)
+        inlet_full = np.full(n_in, float(REFERENCE_DENSITY), dtype=np.float64)
+
+        rng = np.random.default_rng(PROVOKE_SEED)
+        delivered = 0.0
+        worst = 0.0
+        converted = [0, 0]  # INTERFACE -> FLUID, INTERFACE -> GAS
+
+        for s in range(1, self.STEPS + 1):
+            state.flags[ix, iy, iz] = FLAG_FLUID
+            ensure_interface_skin(state, halo, use_numba=use_numba)
+            state.f[:, ix, iy, iz] = equilibrium(inlet_rho, inlet_u).astype(
+                np.float32
+            )
+            delivered += float(inlet_full.sum()) - float(
+                state.mass[ix, iy, iz].sum()
+            )
+            state.mass[ix, iy, iz] = inlet_full
+            state.temperature[ix, iy, iz] = np.float32(1400.0)
+
+            # Provocation, booked into the ledger exactly like the pin above:
+            # shove a scatter of interface cells outside the hysteresis band in
+            # both directions, so promote, demote, _redistribute and the
+            # promoted-cell seeding all fire repeatedly over the run instead of
+            # only where the front happens to reach.
+            if s % 5 == 0:
+                idx = np.argwhere(state.flags == FLAG_INTERFACE)
+                if len(idx):
+                    pick = idx[
+                        rng.choice(
+                            len(idx),
+                            size=min(len(idx), max(2, len(idx) // 8)),
+                            replace=False,
+                        )
+                    ]
+                    full = state.rho.astype(np.float64) * state.porous.porosity_f64
+                    for j, cell in enumerate(pick):
+                        at = (int(cell[0]), int(cell[1]), int(cell[2]))
+                        value = full[at] * 1.07 + 0.01 if j % 3 else -0.02
+                        delivered += value - float(state.mass[at])
+                        state.mass[at] = value
+
+            before = state.flags.copy()
+            step(state, units, track_free_surface=True, use_numba=use_numba)
+            # Conversions actually made this step, counted off the flags rather
+            # than taken on trust from apply_transitions' return value -- this
+            # is the fixture guard, and a pour that quietly converted nothing
+            # would make the ledger assertion vacuous.
+            was_interface = before == FLAG_INTERFACE
+            converted[0] += int(
+                np.count_nonzero(was_interface & (state.flags == FLAG_FLUID))
+            )
+            converted[1] += int(
+                np.count_nonzero(was_interface & (state.flags == FLAG_GAS))
+            )
+            if delivered > 0.0:
+                worst = max(
+                    worst, abs(total_mass(state) - delivered) / delivered
+                )
+
+        return state, delivered, worst, tuple(converted)
+
+    def test_the_numba_path_holds_the_ledger(self) -> None:
+        """
+        Measured over 600 steps: worst-in-run discrepancy 1.92e-15 relative,
+        final 3.56e-16, against 1,916.36 lattice mass units delivered through
+        4 inlet cells -- float64 round-off, twelve orders of magnitude inside
+        the 0.1% the module promises. 1,882 cells end FLUID, and the run makes
+        11,281 INTERFACE -> FLUID conversions and 1,367 the other way along the
+        route -- identical counts on both paths -- so the transition
+        bookkeeping and ``_redistribute`` are carrying real traffic rather than
+        idling.
+
+        Asserted at 1e-3, the invariant itself, rather than at the measurement:
+        this test exists to catch a *leak*, and a bound tight enough to catch
+        round-off would be a bound that fails for reasons no foundry cares
+        about. The measurement is recorded here so a future drift to, say,
+        1e-6 is visibly a regression even while the assertion still passes.
+        """
+        state, delivered, worst, converted = self._pour(use_numba=True)
+        self.assertGreater(delivered, 0.0)
+        self.assertGreater(
+            int(np.count_nonzero(state.flags == FLAG_FLUID)), 100,
+            "the pour never filled anything",
+        )
+        self.assertGreater(converted[0], 1000, "the front never advanced")
+        self.assertGreater(converted[1], 100, "the front never retreated")
+        self.assertLess(
+            worst, 1e-3,
+            f"inlet ledger broke: worst {worst:.3e} over {self.STEPS} steps",
+        )
+        self.assertLess(
+            abs(total_mass(state) - delivered) / delivered, 1e-3
+        )
+
+    def test_the_numpy_path_holds_the_same_ledger(self) -> None:
+        """
+        The reference path, so the test above is known to be measuring the
+        solver rather than the harness. Measured: worst 1.51e-15, final
+        1.07e-15, on the same 600 steps.
+        """
+        state, delivered, worst, _ = self._pour(use_numba=False)
+        self.assertGreater(delivered, 0.0)
+        self.assertLess(worst, 1e-3)
+        self.assertLess(
+            abs(total_mass(state) - delivered) / delivered, 1e-3
+        )
 
 
 @unittest.skipUnless(NUMBA_AVAILABLE, "numba is not installed")
