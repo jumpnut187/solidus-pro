@@ -619,6 +619,43 @@ def apply_transitions(state: FillingState, time_s: float) -> Tuple[int, int]:
     return filled, emptied
 
 
+def ensure_interface_skin(state: FillingState, halo: np.ndarray) -> int:
+    """
+    Promote gas cells in ``halo`` to interface, seeded from their wet neighbours.
+
+    The scheme's central invariant is that no FLUID cell is ever directly
+    adjacent to a GAS cell -- see :func:`apply_transitions`, which maintains it
+    for every cell *it* converts, in both the advancing and the retreating
+    direction. A caller that writes ``FLAG_FLUID`` by hand is outside that
+    bookkeeping and has to maintain the invariant for its own cells. The
+    filling stage pins its inlet cells FLUID every step, so it is exactly such
+    a caller.
+
+    The cost of skipping it, measured on a 2x2x12 column with a pressure inlet:
+    the cell above the inlet drained to gas, streaming zeroed it, and the inlet
+    stopped receiving every population arriving with ``c_z = -1`` -- one sixth
+    of the total weight. Its measured z-momentum jumped from -0.009 (falling)
+    to +0.147 (rising) in a single step, and the whole column reversed and ran
+    upward at the Mach cap. A boundary that measures its own velocity cannot
+    afford to measure it through a hole.
+
+    Args:
+        state: Solver state, mutated in place.
+        halo: Boolean mask of cells to check. Cells that are not gas are left
+            alone, so this is idempotent and safe to call every step.
+
+    Returns:
+        Number of cells promoted.
+    """
+    promote = np.asarray(halo, dtype=bool) & (state.flags == FLAG_GAS)
+    count = int(np.count_nonzero(promote))
+    if count:
+        state.flags[promote] = FLAG_INTERFACE
+        _initialise_promoted_cells(state, promote)
+        _initialise_promoted_temperature(state, promote)
+    return count
+
+
 def reset_detached_interface_cells(state: FillingState) -> int:
     """
     Return fully detached interface cells to rest.

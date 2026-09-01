@@ -161,10 +161,35 @@ PROGRESS_UPDATE_INTERVAL = 200
 #: Steps between mass-conservation checks. Cheap next to a lattice step.
 DIVERGENCE_CHECK_INTERVAL = 200
 
-#: Consecutive progress reports with no newly filled metal before the run is
-#: called stalled. The front genuinely pauses while a cavity backs up, so a
-#: single flat report proves nothing.
+#: Consecutive progress reports with no advance -- in either measure -- before
+#: the run is called stalled. The front genuinely pauses while a cavity backs
+#: up, so a single flat report proves nothing.
 STALL_REPORTS = 5
+
+#: Blend weight for the inlet's measured velocity, ``u = (1-b) u_prev + b u_raw``.
+#:
+#: A numerical filter on a boundary measurement, not a physical term. The
+#: pressure inlet reads its velocity out of the populations every step, so
+#: population noise in the inlet layer feeds straight back into what the
+#: boundary writes. Measured on a 2x2x40 column, unfiltered: peak |u| in the
+#: two cells below the inlet reached 0.183 against a 0.05 Mach guard, swinging
+#: 0.05 <-> 0.18 report to report and still rising at the end of the run. At
+#: b = 0.2 the same run peaks at 0.077 and fills in 2,060 steps; at b = 0.05 it
+#: peaks at 0.053 but takes 3,296. It damps the boundary's response, it does
+#: not bias it: the filter has unit gain, so a steady flow settles on exactly
+#: the velocity it was measuring.
+INLET_VELOCITY_BETA = 0.2
+
+#: Extra fraction of the metal's full mass that must arrive between reports for
+#: the fill to count as advancing.
+#:
+#: The filled-cell high-water mark alone is not enough. A cell only flips to
+#: FLUID at the top of the eps hysteresis band, so a front creeping through
+#: interface cells takes on mass every report while flipping no flags and reads
+#: as stopped. Measured on Test_Model/Filling_Test: 428 casting cells held at
+#: eps ~ 0.5, advancing, with the cell count flat. A stall now requires both
+#: measures to be flat.
+STALL_MASS_FRACTION_EPSILON = 0.001
 
 #: Steps that must elapse before a stall can be declared at all. Reports are
 #: spaced at ``max_steps / 20``, so on a short step budget five of them can
@@ -1212,12 +1237,13 @@ def run_filling_stage(
         advect_temperature,
         apply_wall_heat_loss,
         create_state,
+        ensure_interface_skin,
         find_cold_shuts,
         find_entrapped_gas,
         fluid_fraction,
         step,
     )
-    from physics.fluid_flow import equilibrium, lattice_units
+    from physics.fluid_flow import LATTICE_VELOCITIES, equilibrium, lattice_units
     from core.part_manager import is_gating_metal
 
     def emit(message: str) -> None:
@@ -1367,29 +1393,57 @@ def run_filling_stage(
         1.0 + units.gravity_lattice * head_lattice / (1.0 / 3.0)
     )
 
-    # The inlet velocity, prescribed once and held constant.
+    # What the inlet imposes -- and what it must not.
     #
-    # This is the whole reason the stage used to detonate. The old source
-    # rebuilt the inlet populations from ``state.u``, which is the *Guo
-    # force-corrected* velocity -- it already carries half of that step's
+    # The original source rebuilt the inlet populations from ``state.u``, the
+    # *Guo force-corrected* velocity, which carries half of that step's
     # gravitational impulse by construction (see guo_velocity's docstring).
     # Feeding it back into equilibrium() re-imposed that half-impulse every
     # step with nothing to remove it, so the inlet gained 0.5*g_lattice of
-    # velocity per step forever, crossed the Mach guard, and took the whole
-    # solve with it. The fill was being driven by that artifact: simply
-    # subtracting the half-force stops the runaway but also stops the pour
-    # (measured: 25% -> 1%), because a 0.16% density head alone cannot meter
-    # metal through a sprue at these timesteps.
+    # velocity per step forever and took the whole solve with it.
     #
-    # So the inlet prescribes a real velocity instead. Head mode uses
-    # Torricelli, sqrt(2 g h), which is the standard sprue-entry velocity and
-    # exactly the quantity ``initial_head_in`` was always describing. Velocity
-    # mode divides the requested pour rate by the inlet area. Both are capped
-    # at the Mach guard the timestep was sized for, because a boundary
-    # condition that violates the solver's own stability limit is not a
-    # boundary condition. Being constant, it cannot accumulate.
+    # Its replacement -- a constant *prescribed* velocity, Torricelli's
+    # sqrt(2 g h) in head mode -- could not accumulate, and could not work
+    # either. A fixed-velocity equilibrium pin cannot feel back-pressure: it
+    # overwrites whatever the domain streams back into it. Instrumented on
+    # Test_Model/Filling_Test at 0.20 in voxels, coarsening 2, that produced
+    # three measurements, and they are the reason this design is gone:
+    #
+    #   * Delivery collapsed. Net mass added by the inlet fell from 0.110
+    #     lattice-mass/step -- the full prescribed rate -- to 0.006 by step
+    #     28,000, about 6 %, and then went negative: the pin was deleting
+    #     metal that had streamed back into it.
+    #   * The column starved. With delivery choked, the whole sprue sat in
+    #     suction: mean rho 0.99995 at the sprue bottom against a hydrostatic
+    #     requirement of ~1.0028. No head developed, so nothing pushed the
+    #     metal onward, and 428 casting cells crept at eps ~ 0.5, about 50x
+    #     slower than the geometry allows.
+    #   * The inlet seeded a staggered oscillation. Per-cell mass in the top
+    #     sprue layers reached +-218 against a physical range of [0, ~1], u_z
+    #     alternating sign per z-layer, total wet mass swinging 170 <-> 2,815
+    #     between 200-step samples, until the divergence guard fired at step
+    #     126,400.
+    #
+    # So head mode imposes PRESSURE and lets the velocity be whatever the flow
+    # field itself produces. The pressure is the metallostatic head of a
+    # pouring basin held topped up, which is exactly what ``initial_head_in``
+    # has always described. Run freely, gravity accelerates the column and the
+    # inlet feeds it; back the downstream up and the measured velocity falls,
+    # so delivery falls with it -- what a real basin does, and what a
+    # prescribed velocity cannot do. Momentum cannot accumulate, because the
+    # velocity is re-measured from the populations every step and the rebuild
+    # adds no force term. The measurement is the RAW first moment, deliberately
+    # without the Guo half-force correction: that correction is precisely the
+    # term that made the original a pump.
+    #
+    # Velocity mode still prescribes a constant velocity from the pour rate.
+    # There the user is asserting a delivery rate, and a boundary that meters
+    # itself would quietly ignore them.
     inlet_area_m2 = float(inlet.shape[0]) * dx_m * dx_m
     inlet_mode = int(getattr(filling, "inlet_mode_code", 0))
+    ix, iy, iz = inlet[:, 0], inlet[:, 1], inlet[:, 2]
+    u_inlet_physical = 0.0
+    inlet_mode_label = ""
     if inlet_mode == 1:
         # 0 means "derive", the same convention pour_time_s and
         # pour_temperature_c already use. The square-root rule ties the rate to
@@ -1420,24 +1474,26 @@ def run_filling_stage(
                 f"{pour_rate_lb_s:.1f} s pour)"
             )
     if inlet_mode != 1:
-        u_inlet_physical = float(np.sqrt(2.0 * 9.81 * max(head_m, 1e-6)))
         inlet_mode_label = f"head ({head_m * 39.3701:.1f} in)"
 
     # The filter ceiling, applied to BOTH inlet modes. A filter restricts the
     # flow path itself, so it binds whatever is driving the metal -- a deep
     # head does not entitle the pour to exceed the filter's rating, it just
-    # means the sprue backs up. Capping here rather than only in velocity mode
-    # is the difference between modelling the restriction and ignoring it.
+    # means the sprue backs up. In velocity mode it lowers the prescribed
+    # velocity. In head mode nothing is prescribed to lower, so it lowers the
+    # *cap* the measured velocity is clamped against instead: the restriction
+    # is still modelled, it just binds a measurement rather than a setting.
     flow_limit_kg_s, flow_limit_note = filter_flow_limit_kg_s(
         filter_zones, alloy, int(getattr(filling, "pour_mode_code", 0))
     )
     if flow_limit_note:
         warnings.append(flow_limit_note)
+    u_filter_max: Optional[float] = None
     if flow_limit_kg_s is not None:
         u_filter_max = flow_limit_kg_s / max(
             float(alloy.density_liquid) * inlet_area_m2, 1e-9
         )
-        if u_inlet_physical > u_filter_max:
+        if inlet_mode == 1 and u_inlet_physical > u_filter_max:
             requested_lb_s = (
                 u_inlet_physical * float(alloy.density_liquid) * inlet_area_m2
                 / 0.45359237
@@ -1452,25 +1508,87 @@ def run_filling_stage(
             u_inlet_physical = u_filter_max
             inlet_mode_label += ", filter-limited"
 
-    u_inlet_lattice = float(units.to_lattice_velocity(u_inlet_physical))
-    if u_inlet_lattice > units.u_max_lattice:
-        warnings.append(
-            f"inlet velocity {u_inlet_physical:.2f} m/s exceeds the Mach guard "
-            f"the timestep was sized for; clamped to "
-            f"{units.u_max_lattice * units.velocity_scale:.2f} m/s. Raise "
-            f"lattice_velocity_max or lower the pour rate."
+    # The Mach guard the timestep was sized for, lowered by the filter rating
+    # where one applies. Nothing the inlet writes may exceed it: a boundary
+    # condition that violates the solver's own stability limit is not a
+    # boundary condition.
+    u_cap_lattice = float(units.u_max_lattice)
+    if u_filter_max is not None:
+        u_cap_lattice = min(
+            u_cap_lattice,
+            float(units.to_lattice_velocity(np.asarray(u_filter_max, dtype=np.float64))),
         )
-        u_inlet_lattice = float(units.u_max_lattice)
+        if inlet_mode != 1 and u_cap_lattice < float(units.u_max_lattice):
+            inlet_mode_label += ", filter-limited"
 
-    # Gravity points -Z (physics.filling.step's default), and metal enters
-    # falling, so the inlet drives along it.
-    inlet_u = np.zeros((3, inlet.shape[0]), dtype=np.float64)
-    inlet_u[2, :] = -u_inlet_lattice
     inlet_rho = np.full(inlet.shape[0], inlet_density, dtype=np.float64)
-    emit(
-        f"Filling: inlet {inlet.shape[0]:,} cells, {inlet_mode_label}, "
-        f"{u_inlet_physical:.2f} m/s ({u_inlet_lattice:.4f} lattice)"
-    )
+    inlet_u = np.zeros((3, inlet.shape[0]), dtype=np.float64)
+    if inlet_mode == 1:
+        u_inlet_lattice = float(units.to_lattice_velocity(u_inlet_physical))
+        if u_inlet_lattice > units.u_max_lattice:
+            warnings.append(
+                f"inlet velocity {u_inlet_physical:.2f} m/s exceeds the Mach guard "
+                f"the timestep was sized for; clamped to "
+                f"{units.u_max_lattice * units.velocity_scale:.2f} m/s. Raise "
+                f"lattice_velocity_max or lower the pour rate."
+            )
+            u_inlet_lattice = float(units.u_max_lattice)
+        # Gravity points -Z (physics.filling.step's default), and metal enters
+        # falling, so the inlet drives along it.
+        inlet_u[2, :] = -u_inlet_lattice
+        # Velocity mode's mass pin is unchanged: a whole cell's worth, every
+        # step, matching the constant delivery it is asserting.
+        inlet_full_mass = np.full(
+            inlet.shape[0], float(REFERENCE_DENSITY), dtype=np.float64
+        )
+        emit(
+            f"Filling: inlet {inlet.shape[0]:,} cells, {inlet_mode_label}, "
+            f"{u_inlet_physical:.2f} m/s ({u_inlet_lattice:.4f} lattice)"
+        )
+    else:
+        # A full cell holds rho * porosity -- apply_transitions' own definition
+        # of full. Pinning REFERENCE_DENSITY instead would read as under-filled
+        # the moment the free-surface pass looked at an inlet inside a filter.
+        inlet_full_mass = inlet_rho * np.asarray(
+            state.porous.porosity[ix, iy, iz], dtype=np.float64
+        )
+        emit(
+            f"Filling: inlet {inlet.shape[0]:,} cells, {inlet_mode_label} "
+            f"pressure boundary, rho {inlet_density:.5f} "
+            f"(+{(inlet_density / REFERENCE_DENSITY - 1.0) * 100.0:.3f}% over "
+            f"reference); velocity follows the flow, capped at "
+            f"{u_cap_lattice * units.velocity_scale:.2f} m/s "
+            f"({u_cap_lattice:.4f} lattice)"
+        )
+
+    # Whether the head can reach the top of the metal at all.
+    #
+    # Metal does not climb above the free surface of the basin feeding it, so
+    # a pour point plus head sitting below the highest metal cell cannot
+    # finish the casting however long the solve runs. Without this the run
+    # spends its whole budget proving that and then reports a time cap, which
+    # reads as "needed longer" when it means "cannot get there from here".
+    # Head mode only: velocity mode is a pump, and a pump has no free surface.
+    if inlet_mode != 1:
+        solve_dx_in = mapping.dx_in * coarsening
+        z_centres_in = float(mapping.origin_in[2]) + (
+            np.arange(solve_types.shape[2], dtype=np.float64) * coarsening
+            + (coarsening - 1) / 2.0
+        ) * mapping.dx_in
+        metal_top_z_in = float(
+            z_centres_in[np.nonzero(np.any(metal, axis=(0, 1)))[0].max()]
+        )
+        inlet_z_in = float(z_centres_in[iz].max())
+        head_reach_in = inlet_z_in + head_m * 39.3701
+        if head_reach_in < metal_top_z_in + solve_dx_in:
+            warnings.append(
+                f"the metallostatic head cannot reach the top of the metal, so "
+                f"the fill physically cannot complete: the pour point sits at "
+                f"z = {inlet_z_in:.2f} in and {head_m * 39.3701:.1f} in of head "
+                f"reaches {head_reach_in:.2f} in, while metal extends to "
+                f"z = {metal_top_z_in:.2f} in. Raise the pour point or "
+                f"increase initial_head_in."
+            )
 
     # An under-resolved choke is not a small inaccuracy -- it is the
     # difference between a fill and a sealed channel -- and it is measured
@@ -1535,28 +1653,103 @@ def run_filling_stage(
         )
 
     taken = 0
-    ix, iy, iz = inlet[:, 0], inlet[:, 1], inlet[:, 2]
     metal_total = int(metal.sum())
+    # Mass the metal region holds when full. Full is rho * porosity -- the same
+    # definition apply_transitions converts on -- so inside a filter this sits
+    # below the cell count, which is correct: a filter cell full of metal holds
+    # only its pore volume.
+    metal_full_mass = float(
+        np.sum(
+            float(REFERENCE_DENSITY)
+            * np.asarray(state.porous.porosity, dtype=np.float64)[metal]
+        )
+    )
+    # Net mass the inlet has injected, in lattice mass units, accumulated at
+    # each pin: what the pin writes, minus what was there to overwrite. The
+    # conversion to kilograms is total_mass_kg's: one lattice mass unit at
+    # REFERENCE_DENSITY is one cell volume of liquid metal.
+    poured = 0.0
+    poured_lb_per_lattice_mass = (
+        float(alloy.density_liquid) * (dx_m ** 3)
+        / float(REFERENCE_DENSITY) / 0.45359237
+    )
+    # Hoisted out of the loop: the inlet's raw first moment is measured every
+    # step from a (19, n_inlet) slice, and n_inlet is a handful of cells.
+    lattice_c_t = LATTICE_VELOCITIES.T.astype(np.float64)
+    inlet_u_measured = np.zeros((3, inlet.shape[0]), dtype=np.float64)
+
+    # The cells the inlet streams into, so the pin can keep them wet.
+    #
+    # Pinning FLAG_FLUID by hand puts the inlet outside apply_transitions'
+    # bookkeeping, and with it outside the scheme's central invariant: no FLUID
+    # cell is ever directly adjacent to a GAS cell. Measured on a 2x2x12 column
+    # -- the cell above the inlet drained to gas, streaming zeroed it, and the
+    # inlet stopped receiving every population arriving with c_z = -1, one
+    # sixth of the weight. The measured z-momentum jumped from -0.009 (falling)
+    # to +0.147 (rising) in one step and the whole column reversed at the Mach
+    # cap. Rolled with the same periodic wrap the streaming kernel uses, so the
+    # halo is exactly the set of cells the inlet can stream into.
+    inlet_mask = np.zeros(solve_types.shape, dtype=bool)
+    inlet_mask[ix, iy, iz] = True
+    inlet_halo = np.zeros(solve_types.shape, dtype=bool)
+    for _c in LATTICE_VELOCITIES[1:]:
+        inlet_halo |= np.roll(
+            inlet_mask, shift=(int(_c[0]), int(_c[1]), int(_c[2])), axis=(0, 1, 2)
+        )
+    inlet_halo &= ~inlet_mask & ~obstacle
+    hx, hy, hz = np.nonzero(inlet_halo)
     status = STATUS_TIME_CAPPED
     diverged_at_step = 0
     flat_reports = 0
     last_reached = -1
+    best_mass_fraction = -1.0
     for taken in range(1, max_steps + 1):
-        # Hold the inlet full, at the head pressure and the entry velocity
-        # prescribed above. The choke still meters the fill -- what the inlet
-        # sets is the sprue-entry condition, and everything downstream of it
-        # is decided by the geometry, which is what Foseco's guidance asks
-        # for. What it must not do is *accelerate*: see the derivation at
-        # inlet_u for why reading the velocity back out of the solver made
-        # this a pump rather than a boundary.
+        # Hold the inlet full. What that means differs by mode, and the
+        # difference is the whole redesign -- see the block above inlet_area_m2
+        # for the three measurements that forced it.
         state.flags[ix, iy, iz] = FLAG_FLUID
-        state.mass[ix, iy, iz] = REFERENCE_DENSITY
-        # Re-impose the reservoir: head pressure and the prescribed entry
-        # velocity, both constant. Rebuilding from the *prescribed* velocity
-        # rather than from ``state.u`` is what keeps this a boundary condition
-        # instead of a momentum pump -- see the derivation above the
-        # inlet_u definition.
-        state.f[:, ix, iy, iz] = equilibrium(inlet_rho, inlet_u).astype(np.float32)
+        # Restore the interface skin the pin needs and cannot get from
+        # apply_transitions -- see the inlet_halo derivation above. Checked on
+        # the handful of halo cells first; the full-domain mask is only built
+        # on the steps where something has actually gone dry.
+        if np.any(state.flags[hx, hy, hz] == FLAG_GAS):
+            ensure_interface_skin(state, inlet_halo)
+        if inlet_mode == 1:
+            # Prescribed velocity: constant, so it cannot accumulate.
+            state.f[:, ix, iy, iz] = equilibrium(inlet_rho, inlet_u).astype(np.float32)
+        else:
+            # Pressure boundary. Measure the inlet cells' own velocity from the
+            # populations they are holding at pin time -- post free-surface
+            # pass, so this is what the flow field actually delivered last step
+            # -- and re-impose only the head pressure on top of it.
+            #
+            # The RAW first moment, sum_i c_i f_i / rho. ``state.u`` carries the
+            # Guo half-force correction; feeding that back is what made the
+            # original inlet a momentum pump, and it is not re-introduced here
+            # by the back door. The rebuild adds no force term of its own, so
+            # nothing can accumulate: whatever the flow slows to, the boundary
+            # follows.
+            f_slice = state.f[:, ix, iy, iz].astype(np.float64)
+            rho_now = f_slice.sum(axis=0)
+            u_raw = lattice_c_t @ f_slice / np.clip(rho_now, 1e-9, None)
+            # A numerical filter on a boundary *measurement*, not physics --
+            # see INLET_VELOCITY_BETA for the measured amplitudes it removes.
+            inlet_u_measured *= 1.0 - INLET_VELOCITY_BETA
+            inlet_u_measured += INLET_VELOCITY_BETA * u_raw
+            u_used = inlet_u_measured.copy()
+            # Clamped by norm rather than per component, so clamping cannot
+            # rotate the flow direction the measurement reported.
+            speed = np.sqrt(np.sum(u_used * u_used, axis=0))
+            u_used *= np.minimum(1.0, u_cap_lattice / np.maximum(speed, 1e-12))
+            state.f[:, ix, iy, iz] = equilibrium(inlet_rho, u_used).astype(np.float32)
+        # Net delivery, measured before the pin overwrites what it is replacing.
+        # A boundary that meters itself has to be *reported* honestly too: on a
+        # backed-up fill this goes to zero, and a poured figure that kept
+        # climbing would be the same lie the old prescribed rate told.
+        poured += float(np.sum(inlet_full_mass)) - float(
+            np.sum(state.mass[ix, iy, iz])
+        )
+        state.mass[ix, iy, iz] = inlet_full_mass
         # Metal entering at the inlet is at the pour temperature -- pinned
         # every step, same as mass and momentum above, so the source stays a
         # true Dirichlet boundary rather than drifting as wall loss and
@@ -1632,9 +1825,20 @@ def run_filling_stage(
             if cancel_callback is not None:
                 cancel_callback()
             reached = int(np.count_nonzero((state.flags == FLAG_FLUID) & metal))
+            # Two measures of the same fill, because neither alone is honest.
+            # The cell count is what "filled" means, but it moves in steps of a
+            # whole cell: an interface cell fills continuously from eps 0 to
+            # eps 1 and only flips to FLUID at the top of that band. Mass moves
+            # the whole time. Reporting both makes a slow fill legible as slow
+            # rather than as stopped.
+            mass_fraction = float(
+                np.clip(float(np.sum(state.mass[metal])), 0.0, metal_full_mass)
+            ) / max(metal_full_mass, 1e-12)
             emit(
                 f"Filling: {reached:,}/{metal_total:,} cells "
-                f"({reached / max(1, metal_total):.0%}) at "
+                f"({reached / max(1, metal_total):.0%}), "
+                f"{mass_fraction:.0%} by mass, "
+                f"{poured * poured_lb_per_lattice_mass:.1f} lb poured, at "
                 f"{taken * units.dt_s:.2f} s"
             )
             if reached >= metal_total:
@@ -1651,8 +1855,21 @@ def run_filling_stage(
             # across the same cells, so the count ticks up and down by a few
             # percent forever. Comparing consecutive reports resets on every
             # one of those wobbles and never fires.
+            #
+            # BOTH measures must be flat. The cell count alone declared a stall
+            # on a front that was genuinely advancing: measured on
+            # Test_Model/Filling_Test, 428 casting cells sat at eps ~ 0.5,
+            # taking on mass every report while flipping no flags. Requiring
+            # the mass high-water mark to be flat as well is the difference
+            # between "cannot get there" and "is getting there slowly".
+            advanced = False
             if reached > last_reached:
                 last_reached = reached
+                advanced = True
+            if mass_fraction > best_mass_fraction + STALL_MASS_FRACTION_EPSILON:
+                best_mass_fraction = mass_fraction
+                advanced = True
+            if advanced:
                 flat_reports = 0
             else:
                 flat_reports += 1
@@ -1662,7 +1879,8 @@ def run_filling_stage(
                     f"Filling stopped: the front has not advanced for "
                     f"{flat_reports} consecutive reports, holding at "
                     f"{reached:,}/{metal_total:,} cells "
-                    f"({reached / max(1, metal_total):.0%})."
+                    f"({reached / max(1, metal_total):.0%}, "
+                    f"{mass_fraction:.0%} by mass)."
                 )
                 break
 

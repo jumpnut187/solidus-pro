@@ -15,6 +15,17 @@ recorded in the docs as proof the stage worked.
 
 So the tests here assert two things the old suite never did: that the solver
 conserves mass while it runs, and that the inlet does not accelerate.
+
+The prescribed-velocity inlet that replaced it failed a second time, for the
+opposite reason: a fixed-velocity equilibrium pin cannot feel back-pressure, so
+it kept overwriting whatever the domain streamed back into it. Measured on
+Test_Model/Filling_Test, delivery fell to 6% of the prescribed rate and then
+went negative, the sprue sat in suction at rho 0.99995 against a hydrostatic
+requirement of ~1.0028, and the inlet layer oscillated to +-218 per-cell mass
+before the divergence guard fired. Head mode is a pressure boundary now, and
+:class:`PressureInletTests` asserts the three properties that failure taught:
+delivery falls away when the column backs up, a standing column is hydrostatic
+rather than in suction, and the pinned inlet keeps its interface skin.
 """
 
 from __future__ import annotations
@@ -35,7 +46,12 @@ from core.filling_stage import (
     FillingResult,
     measure_choke_thickness_cells,
 )
-from core.part_manager import PART_TYPE_CAST, PART_TYPE_GATE, PART_TYPE_RUNNER
+from core.part_manager import (
+    PART_TYPE_CAST,
+    PART_TYPE_CORE,
+    PART_TYPE_GATE,
+    PART_TYPE_RUNNER,
+)
 from tests.test_filling_stage import (  # reuse the established fixtures
     EMPTY_CELL,
     _Alloy,
@@ -57,10 +73,82 @@ def _tower(nx=2, ny=2, nz=6, part_type=PART_TYPE_CAST):
     return mesh
 
 
+def _walled_tower(nz=12, width=3):
+    """
+    The same column, but inside a mold block so the domain has walls.
+
+    ``_tower`` produces a *fully occupied* dense grid: every cell is metal, so
+    ``_obstacle_mask`` finds nothing solid and the lattice has no boundary at
+    all. Both streaming paths wrap periodically -- ``stream_kernel``'s own
+    docstring says "real domains are closed by obstacle cells, so the wrap
+    never fires" -- which makes that fixture a torus. Metal leaving the bottom
+    re-enters at the top, and gravity, having nothing to press against,
+    accelerates the whole fluid without limit: free fall, forever, with no
+    hydrostatic gradient and no steady state.
+
+    That was invisible while the inlet prescribed its own constant velocity.
+    A pressure inlet lets the flow decide, so anything about settling,
+    back-pressure or hydrostatics has to be asked of a bounded domain. Cells
+    outside the column are cores, which ``_obstacle_mask`` makes solid, so the
+    metal sits in a closed channel with a floor.
+    """
+    n = width + 2
+    centers = lattice_centers((n, n, nz + 2), dx=DX, origin=(0.0, 0.0, 0.0))
+    index = np.rint(np.asarray(centers) / DX).astype(int)
+    types = np.full(len(centers), PART_TYPE_CORE, dtype=np.int8)
+    inside = (
+        (index[:, 0] >= 1) & (index[:, 0] <= width)
+        & (index[:, 1] >= 1) & (index[:, 1] <= width)
+        & (index[:, 2] >= 1) & (index[:, 2] <= nz)
+    )
+    types[inside] = PART_TYPE_CAST
+    mesh = _FakeMesh(centers, types, DX)
+    metal_centers = np.asarray(centers)[inside]
+    mesh._top_z = float(metal_centers[:, 2].max())
+    mesh._pour_xy = (
+        float(metal_centers[:, 0].mean()),
+        float(metal_centers[:, 1].mean()),
+    )
+    return mesh
+
+
 def _pour_at_top(mesh):
     from core.pour_location import PourLocation
 
-    return PourLocation(point_in=(0.0, 0.0, getattr(mesh, "_top_z", 5 * DX)))
+    x, y = getattr(mesh, "_pour_xy", (0.0, 0.0))
+    return PourLocation(point_in=(x, y, getattr(mesh, "_top_z", 5 * DX)))
+
+
+def _inlet_cells(mesh, coarsening=1):
+    """The lattice cells ``run_filling_stage`` will pin, for a top pour."""
+    from core.filling_stage import (
+        build_grid_mapping,
+        coarsen_part_types,
+        dense_part_types,
+        _resolve_inlet_cells,
+    )
+
+    centers = np.asarray(mesh.voxel_centers, dtype=np.float64)
+    dx_in = float(np.asarray(mesh.voxel_sizes).ravel()[0])
+    mapping = build_grid_mapping(centers, dx_in)
+    types = coarsen_part_types(
+        dense_part_types(mapping, mesh.voxel_part_types), coarsening
+    )
+    return _resolve_inlet_cells(_pour_at_top(mesh), mapping, types, coarsening)
+
+
+def _head_mode(**overrides):
+    """FillingParams overrides for a plain head-driven pour."""
+    settings = dict(
+        fill_grid_coarsening=1,
+        lattice_velocity_max=0.05,
+        initial_head_in=4.0,
+        inlet_mode_code=0,
+        pour_rate_lb_s=0.0,
+        pour_temperature_c=0.0,
+    )
+    settings.update(overrides)
+    return settings
 
 
 class _FakeFilterZone:
@@ -108,7 +196,16 @@ class InletMomentumTests(unittest.TestCase):
     """
 
     def _velocity_history(self, steps=1200):
-        """Max |u| in the domain, sampled while a real fill runs."""
+        """
+        Max |u| in the domain, sampled while a real fill runs.
+
+        Measured on a *walled* tower. The unwalled ``_tower`` is a torus (see
+        that fixture's docstring): gravity there has nothing to press against,
+        so the fluid free-falls for the whole run and any growth ratio measures
+        free fall rather than the inlet. On the walled column the flow reaches a
+        steady state -- quartile peaks 0.042, 0.041, 0.024, 0.004 over a
+        50,000-step fill -- which is the behaviour these assertions are about.
+        """
         import physics.filling as pf
 
         history: list[float] = []
@@ -122,7 +219,7 @@ class InletMomentumTests(unittest.TestCase):
         try:
             # A tall column so the run lasts long enough for linear growth to
             # be unmistakable rather than arguable.
-            _run(mesh=_tower(nz=40), max_fill_time_s=0.5)
+            _run(mesh=_walled_tower(nz=40, width=4), max_fill_time_s=0.5)
         finally:
             pf.step = original
         return np.asarray(history[:steps], dtype=np.float64)
@@ -133,7 +230,8 @@ class InletMomentumTests(unittest.TestCase):
         early = float(np.max(history[: history.size // 4]))
         late = float(np.max(history[-history.size // 4 :]))
         # The old inlet grew strictly linearly, so the last quarter ran about
-        # four times the first. Physical transients settle instead.
+        # four times the first. Physical transients settle instead: measured
+        # 0.0022 -> 0.0056 here, a factor of 2.6 and flattening.
         self.assertLess(
             late,
             4.0 * early + 1e-6,
@@ -594,21 +692,37 @@ class InletModeTests(unittest.TestCase):
                 return float(message.split("m/s")[0].split()[-1])
         self.fail(f"no inlet velocity reported in {messages}")
 
-    def test_head_mode_uses_torricelli(self) -> None:
+    def _reported_inlet_density(self, messages):
+        for message in messages:
+            if "inlet" in message and "rho" in message:
+                return float(message.split("rho")[1].split()[0])
+        self.fail(f"no inlet density reported in {messages}")
+
+    def test_head_mode_imposes_a_pressure_not_a_velocity(self) -> None:
+        """
+        The contract change. Head mode used to prescribe Torricelli's
+        sqrt(2 g h) as a constant entry velocity; it now imposes the
+        metallostatic head as a *pressure* and measures the velocity from the
+        flow. A prescribed velocity is what the message must no longer claim.
+        """
         messages: list = []
         _run(messages=messages, inlet_mode_code=0, initial_head_in=4.0)
-        expected = float(np.sqrt(2.0 * 9.81 * 4.0 * 0.0254))
-        self.assertAlmostEqual(
-            self._reported_inlet_velocity(messages), expected, places=2
-        )
+        line = next(m for m in messages if "inlet" in m and "head" in m)
+        self.assertIn("pressure boundary", line)
+        self.assertIn("velocity follows the flow", line)
+        self.assertGreater(self._reported_inlet_density(messages), 1.0)
 
-    def test_a_deeper_head_pours_faster(self) -> None:
+    def test_a_deeper_head_raises_the_inlet_pressure(self) -> None:
+        """
+        rho = rho_0 (1 + g h / c_s^2): the head enters as pressure, so a deeper
+        basin means a denser inlet, not a faster one.
+        """
         shallow, deep = [], []
         _run(messages=shallow, inlet_mode_code=0, initial_head_in=2.0)
         _run(messages=deep, inlet_mode_code=0, initial_head_in=8.0)
         self.assertGreater(
-            self._reported_inlet_velocity(deep),
-            self._reported_inlet_velocity(shallow),
+            self._reported_inlet_density(deep),
+            self._reported_inlet_density(shallow),
         )
 
     def test_velocity_mode_follows_the_pour_rate(self) -> None:
@@ -619,6 +733,393 @@ class InletModeTests(unittest.TestCase):
             self._reported_inlet_velocity(fast),
             self._reported_inlet_velocity(slow),
         )
+
+
+class PressureInletTests(unittest.TestCase):
+    """
+    What the head-mode inlet must do now that it imposes pressure, not velocity.
+
+    Each of these is a measured failure of the prescribed-velocity design,
+    turned into an assertion. See the module docstring for the numbers.
+    """
+
+    def _poured_lb(self, messages):
+        """Cumulative poured weight from the last progress report."""
+        reports = [m for m in messages if "lb poured" in m]
+        self.assertTrue(reports, f"no poured weight reported in {messages}")
+        return float(reports[-1].split("lb poured")[0].split(",")[-1])
+
+    def test_a_head_driven_pour_fills_and_delivers_metal(self) -> None:
+        """
+        The whole point: gravity plus a head pressure has to move metal.
+        Delivery is reported as weight, so a pour that reports 0 lb has not
+        happened however many cells its flag count claims.
+        """
+        messages: list = []
+        result = _run(
+            mesh=_tower(nz=20), messages=messages, **_head_mode(max_fill_time_s=0.5)
+        )
+        self.assertIsNotNone(result)
+        self.assertNotEqual(result.status, STATUS_DIVERGED)
+        self.assertEqual(result.status, STATUS_COMPLETE)
+        self.assertGreater(self._poured_lb(messages), 0.0)
+
+    def test_delivery_falls_away_when_the_column_backs_up(self) -> None:
+        """
+        Back-pressure, which is the property a fixed-velocity pin cannot have.
+
+        Total domain mass changes only through the inlet pin -- the solver
+        conserves the rest, which :class:`MassConservationTests` checks -- so
+        its per-step increment *is* the net injection. In a closed tower with
+        the metal nowhere left to go, that increment must collapse. Measured:
+        0.0151 lattice-mass/step over the first quarter of the run against
+        0.000025 over the last, a factor of 600. The old pin instead kept
+        writing its prescribed velocity and deleted the metal streaming back
+        into it, which is how delivery went negative on the real assembly.
+        """
+        import physics.filling as pf
+
+        mesh = _walled_tower(nz=12)
+        totals: list[float] = []
+        original = pf.step
+
+        def traced(state, units, **kwargs):
+            original(state, units, **kwargs)
+            totals.append(pf.total_mass(state))
+
+        pf.step = traced
+        try:
+            result = _run(mesh=mesh, **_head_mode(max_fill_time_s=1.5))
+        finally:
+            pf.step = original
+
+        self.assertIsNotNone(result)
+        self.assertNotEqual(result.status, STATUS_DIVERGED)
+        delivery = np.diff(np.asarray(totals, dtype=np.float64))
+        self.assertGreater(delivery.size, 400, "run too short to judge")
+        quarter = delivery.size // 4
+        early = float(delivery[:quarter].mean())
+        late = float(delivery[-quarter:].mean())
+        self.assertGreater(early, 0.0, "the inlet never delivered anything")
+        self.assertLess(
+            late,
+            0.2 * early,
+            f"the inlet kept delivering into a full tower: "
+            f"{early:.5g} -> {late:.5g} lattice-mass/step",
+        )
+
+    def test_a_standing_column_is_hydrostatic_not_in_suction(self) -> None:
+        """
+        The suction-column regression.
+
+        With delivery choked, the whole sprue sat *below* reference density --
+        mean rho 0.99995 at the sprue bottom against the ~1.0028 the head
+        requires -- so nothing pushed the metal onward and the front crept.
+        A column fed by a real head stands on its own weight instead: density
+        rises downward at 3 g_lattice per cell.
+
+        Measured on this fixture: 1.00330 over the bottom quarter against
+        1.00210 over the top, a difference of 1.2e-3 where the hydrostatic
+        prediction over that span is 7.8e-4. Asserted as a sign, not a value,
+        because the free surface is still moving when the clock runs out.
+        """
+        import physics.filling as pf
+
+        mesh = _walled_tower(nz=12)
+        held: dict = {}
+        original = pf.step
+
+        def traced(state, units, **kwargs):
+            original(state, units, **kwargs)
+            held["state"] = state
+            held["units"] = units
+
+        pf.step = traced
+        try:
+            result = _run(mesh=mesh, **_head_mode(max_fill_time_s=1.0))
+        finally:
+            pf.step = original
+        self.assertIsNotNone(result)
+        self.assertNotEqual(result.status, STATUS_DIVERGED)
+
+        # Let the column settle with no inlet holding it: a pressure gradient
+        # that only exists while something is pinning the top is not
+        # hydrostatic, it is the boundary condition showing through.
+        state, units = held["state"], held["units"]
+        for _ in range(300):
+            pf.step(state, units, track_free_surface=True)
+
+        wet = (state.flags == pf.FLAG_FLUID) | (state.flags == pf.FLAG_INTERFACE)
+        layers = np.nonzero(np.any(wet, axis=(0, 1)))[0]
+        low, high = int(layers.min()), int(layers.max())
+        span = high - low + 1
+        self.assertGreater(span, 4, "column too short to have a top and a bottom")
+        bottom = wet.copy()
+        bottom[:, :, low + span // 4:] = False
+        top = wet.copy()
+        top[:, :, : high - span // 4 + 1] = False
+        # Density, not mass: mass is the free surface's fill level, density is
+        # the pressure. Gas cells hold neither, hence the wet mask.
+        bottom_rho = float(state.rho[bottom].mean())
+        top_rho = float(state.rho[top].mean())
+        self.assertGreater(
+            bottom_rho,
+            top_rho,
+            f"the column is not standing on its own weight: bottom "
+            f"{bottom_rho:.6f}, top {top_rho:.6f}",
+        )
+
+    def test_the_pinned_inlet_keeps_its_interface_skin(self) -> None:
+        """
+        No FLUID cell may touch a GAS cell -- apply_transitions' own invariant,
+        which the inlet pin sits outside because it writes FLAG_FLUID by hand.
+
+        When it was violated, the inlet stopped receiving every population
+        arriving with c_z = -1 (a sixth of the weight) and its measured
+        z-momentum jumped from -0.009 to +0.147 in one step: the column
+        reversed and ran upward at the Mach cap. A boundary that measures its
+        own velocity cannot measure it through a hole.
+        """
+        import physics.filling as pf
+        from physics.filling import _dilate
+
+        mesh = _walled_tower(nz=12)
+        inlet = _inlet_cells(mesh)
+        self.assertGreater(inlet.shape[0], 0)
+        breaches: list[int] = []
+        original = pf.step
+        counter = [0]
+
+        def traced(state, units, **kwargs):
+            original(state, units, **kwargs)
+            counter[0] += 1
+            pinned = np.zeros(state.shape, dtype=bool)
+            pinned[inlet[:, 0], inlet[:, 1], inlet[:, 2]] = True
+            if np.any(_dilate(pinned) & ~pinned & (state.flags == pf.FLAG_GAS)):
+                breaches.append(counter[0])
+
+        pf.step = traced
+        try:
+            _run(mesh=mesh, **_head_mode(max_fill_time_s=0.3))
+        finally:
+            pf.step = original
+        # The check runs after step() and before the next pin, so a breach here
+        # is one the pin is about to read through.
+        self.assertEqual(
+            breaches[-3:], [], f"the inlet touched gas at steps {breaches[-3:]}"
+        )
+
+    def test_an_unreachable_head_is_called_out_before_the_clock_runs(self) -> None:
+        """
+        Metal does not climb above the free surface of the basin feeding it.
+        A pour point plus head below the highest metal cell cannot finish the
+        casting, and saying so costs one comparison; not saying so costs the
+        whole step budget and then reports a time cap, which reads as "needed
+        longer" when it means "cannot get there from here".
+        """
+        result = _run(
+            mesh=_tower(nz=20), **_head_mode(initial_head_in=0.1, max_fill_time_s=0.02)
+        )
+        self.assertIsNotNone(result)
+        self.assertTrue(
+            any("cannot reach the top of the metal" in w for w in result.warnings),
+            f"an unreachable head was not called out: {result.warnings}",
+        )
+
+    def test_a_reachable_head_is_not_warned_about(self) -> None:
+        result = _run(
+            mesh=_tower(nz=20), **_head_mode(initial_head_in=4.0, max_fill_time_s=0.02)
+        )
+        self.assertIsNotNone(result)
+        self.assertFalse(
+            any("cannot reach the top of the metal" in w for w in result.warnings),
+            f"warned about a head that reaches: {result.warnings}",
+        )
+
+    def test_velocity_mode_still_prescribes_a_constant_velocity(self) -> None:
+        """
+        The redesign is head mode's alone. In velocity mode the user is
+        asserting a delivery rate, and a boundary that meters itself would
+        quietly ignore them.
+        """
+        messages: list = []
+        _run(
+            mesh=_tower(nz=12), messages=messages,
+            **_head_mode(inlet_mode_code=1, pour_rate_lb_s=7.5, max_fill_time_s=0.02)
+        )
+        line = next(m for m in messages if "inlet" in m and "m/s" in m)
+        self.assertIn("velocity (7.5 lb/s", line)
+        self.assertNotIn("pressure boundary", line)
+
+
+class MassProgressReportingTests(unittest.TestCase):
+    """
+    A cell count alone cannot tell a slow fill from a stopped one.
+
+    Interface cells fill continuously from eps 0 to eps 1 and only flip to
+    FLUID at the top of that band, so a front creeping through them takes on
+    mass every report while flipping no flags. Measured on
+    Test_Model/Filling_Test: 428 casting cells held at eps ~ 0.5, advancing,
+    with the cell count flat -- which the old stall guard read as stopped.
+    """
+
+    def _reports(self, messages):
+        return [m for m in messages if "by mass" in m]
+
+    def _poured_lb(self, messages):
+        reports = self._reports(messages)
+        self.assertTrue(reports, f"no poured weight reported in {messages}")
+        return float(reports[-1].split("lb poured")[0].split(",")[-1])
+
+    def test_progress_reports_cells_mass_and_weight(self) -> None:
+        messages: list = []
+        _run(mesh=_tower(nz=20), messages=messages, **_head_mode(max_fill_time_s=0.2))
+        reports = self._reports(messages)
+        self.assertTrue(reports, f"no mass-based progress reported: {messages}")
+        for line in reports:
+            with self.subTest(line=line):
+                self.assertIn("cells", line)
+                self.assertIn("% by mass", line)
+                self.assertIn("lb poured", line)
+
+    def test_the_mass_fraction_is_a_fraction(self) -> None:
+        """Above 100% it is not a fill level, it is a symptom."""
+        messages: list = []
+        _run(mesh=_tower(nz=20), messages=messages, **_head_mode(max_fill_time_s=0.3))
+        for line in self._reports(messages):
+            percent = int(line.split("% by mass")[0].split(",")[-1])
+            with self.subTest(line=line):
+                self.assertGreaterEqual(percent, 0)
+                self.assertLessEqual(percent, 100)
+
+    def test_poured_weight_only_grows_while_metal_is_arriving(self) -> None:
+        """
+        Cumulative delivery, so it must never run backwards over a fill that
+        is still taking metal on.
+        """
+        messages: list = []
+        _run(mesh=_tower(nz=20), messages=messages, **_head_mode(max_fill_time_s=0.4))
+        poured = [
+            float(m.split("lb poured")[0].split(",")[-1])
+            for m in self._reports(messages)
+        ]
+        self.assertEqual(poured, sorted(poured), f"poured weight went backwards: {poured}")
+
+    def test_the_poured_weight_matches_the_castings_own_weight(self) -> None:
+        """
+        The unit conversion, checked against arithmetic rather than against
+        itself. One lattice mass unit at REFERENCE_DENSITY is one cell volume
+        of liquid metal -- ``total_mass_kg``'s convention -- so a completed
+        pour must have delivered about the casting's weight.
+
+        Measured: a 2x2x40 tower of quarter-inch cells is 2.5 in^3, which
+        ``pour_weight_lb`` puts at 0.65 lb of steel, and the run reports
+        0.6 lb delivered. The balance is the seed ``create_state`` starts with,
+        which came in before the inlet did anything.
+        """
+        from core.filling_stage import pour_weight_lb
+
+        mesh = _tower(nz=40)
+        messages: list = []
+        result = _run(mesh=mesh, messages=messages, **_head_mode(max_fill_time_s=1.0))
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, STATUS_COMPLETE)
+        weight_lb = pour_weight_lb(mesh, _Alloy())
+        poured_lb = self._poured_lb(messages)
+        self.assertGreater(
+            poured_lb, 0.5 * weight_lb,
+            f"reported {poured_lb:.2f} lb poured into a {weight_lb:.2f} lb casting",
+        )
+        self.assertLess(
+            poured_lb, 1.2 * weight_lb,
+            f"reported {poured_lb:.2f} lb poured into a {weight_lb:.2f} lb casting",
+        )
+
+    def test_a_stall_needs_both_measures_flat(self) -> None:
+        """
+        The epsilon exists so that a front advancing only in mass is not
+        declared stopped. Pinning it here keeps the two measures from
+        collapsing back into one.
+        """
+        from core.filling_stage import STALL_MASS_FRACTION_EPSILON
+
+        self.assertGreater(STALL_MASS_FRACTION_EPSILON, 0.0)
+        self.assertLess(STALL_MASS_FRACTION_EPSILON, 0.01)
+
+    def test_a_stall_is_reported_with_both_measures(self) -> None:
+        """A stall message that gives only a cell count hides the disagreement."""
+        messages: list = []
+        _run(mesh=_walled_tower(nz=12), messages=messages,
+             **_head_mode(max_fill_time_s=1.5))
+        stall = [m for m in messages if "has not advanced" in m]
+        if not stall:
+            self.skipTest("this fixture did not stall on this run")
+        self.assertIn("by mass", stall[0])
+
+
+class InterfaceSkinTests(unittest.TestCase):
+    """
+    ``ensure_interface_skin`` is the hand-maintained half of an invariant
+    ``apply_transitions`` maintains for itself.
+    """
+
+    def _state(self, shape=(5, 5, 5)):
+        from physics.filling import create_state
+
+        fluid = np.zeros(shape, dtype=bool)
+        fluid[2, 2, 2] = True
+        return create_state(
+            np.zeros(shape, dtype=bool),
+            dx_m=0.005,
+            dt_s=1e-4,
+            initial_fluid=fluid,
+            initial_temperature_c=1500.0,
+        )
+
+    def test_a_gas_cell_in_the_halo_is_promoted(self) -> None:
+        from physics.filling import FLAG_GAS, FLAG_INTERFACE, ensure_interface_skin
+
+        state = self._state()
+        state.flags[state.flags == FLAG_INTERFACE] = FLAG_GAS
+        halo = np.zeros(state.shape, dtype=bool)
+        halo[2, 2, 3] = True
+        self.assertEqual(ensure_interface_skin(state, halo), 1)
+        self.assertEqual(int(state.flags[2, 2, 3]), int(FLAG_INTERFACE))
+
+    def test_a_promoted_cell_is_given_populations(self) -> None:
+        """rho = 0 is what the very next macroscopic pass divides by."""
+        from physics.filling import FLAG_GAS, FLAG_INTERFACE, ensure_interface_skin
+
+        state = self._state()
+        state.flags[state.flags == FLAG_INTERFACE] = FLAG_GAS
+        halo = np.zeros(state.shape, dtype=bool)
+        halo[2, 2, 3] = True
+        ensure_interface_skin(state, halo)
+        self.assertGreater(float(state.rho[2, 2, 3]), 0.0)
+        self.assertTrue(bool(np.all(np.isfinite(state.f[:, 2, 2, 3]))))
+        self.assertTrue(bool(np.isfinite(state.temperature[2, 2, 3])))
+
+    def test_it_leaves_wet_cells_alone(self) -> None:
+        """Idempotent, because it runs every step of every fill."""
+        from physics.filling import FLAG_GAS, ensure_interface_skin
+
+        state = self._state()
+        before = state.flags.copy()
+        halo = state.flags != FLAG_GAS      # everything already wet or solid
+        self.assertEqual(ensure_interface_skin(state, halo), 0)
+        self.assertTrue(bool(np.array_equal(state.flags, before)))
+
+    def test_it_takes_no_mass(self) -> None:
+        """A promotion is a topology repair, not a delivery."""
+        from physics.filling import FLAG_GAS, FLAG_INTERFACE, ensure_interface_skin
+
+        state = self._state()
+        state.flags[state.flags == FLAG_INTERFACE] = FLAG_GAS
+        total = float(state.mass.sum())
+        halo = np.zeros(state.shape, dtype=bool)
+        halo[2, 2, 3] = True
+        ensure_interface_skin(state, halo)
+        self.assertAlmostEqual(float(state.mass.sum()), total, places=12)
 
 
 class PourRateRuleTests(unittest.TestCase):
