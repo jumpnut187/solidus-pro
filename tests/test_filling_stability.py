@@ -759,7 +759,7 @@ class SubmergedInterfaceHealingTests(unittest.TestCase):
         neighbour_before = float(state.mass[5, 5, 6])
         total_before = pf.total_mass(state)
 
-        healed = pf.heal_submerged_interface(state, 0.0)
+        healed = pf.heal_submerged_interface(state, 0.0, dwell_steps=1)
 
         self.assertEqual(healed, 1, "the submerged cell was not converted")
         self.assertEqual(int(state.flags[5, 5, 5]), int(pf.FLAG_FLUID))
@@ -780,19 +780,52 @@ class SubmergedInterfaceHealingTests(unittest.TestCase):
             msg="healing moved mass in or out of the domain",
         )
 
-    def test_it_converts_within_a_few_steps_of_a_real_run(self) -> None:
-        """The same cell, reached through :func:`~physics.filling.step`."""
+    def test_it_converts_within_a_dwell_of_a_real_run(self) -> None:
+        """
+        The same cell, reached through :func:`~physics.filling.step`.
+
+        The dwell (:data:`~physics.filling.HEAL_DWELL_STEPS`) holds the rule
+        back until the cell has been gasless for that many consecutive steps,
+        so through the real loop conversion lands just after the dwell -- a
+        permanently stranded cell only ever pays it once.
+        """
         import physics.filling as pf
 
         state, units = _submerged_pair()
-        for _ in range(3):
+        for _ in range(pf.HEAL_DWELL_STEPS + 5):
             pf.step(state, units)
             if int(state.flags[5, 5, 5]) == int(pf.FLAG_FLUID):
                 break
         self.assertEqual(
             int(state.flags[5, 5, 5]), int(pf.FLAG_FLUID),
-            "a submerged interface cell survived three steps",
+            "a submerged interface cell survived a full dwell",
         )
+
+    def test_a_transient_submersion_never_heals(self) -> None:
+        """
+        The dwell's whole point: a cell whose submersion is interrupted loses
+        its streak and starts over, so a sloshing front is never healed.
+        Measured before the dwell existed: 828,368 heal events over 327,200
+        steps on Test_Model/Filling_Test (~190 per cell) and 34% less metal
+        delivered -- the rule was fighting the retreat path for the front.
+        """
+        import physics.filling as pf
+
+        state, _ = _submerged_pair()
+        for _ in range(4):
+            self.assertEqual(pf.heal_submerged_interface(state, 0.0, dwell_steps=5), 0)
+        # Re-open the surface beside it for one step: the streak must reset.
+        was = np.uint8(state.flags[5, 5, 4])
+        state.flags[5, 5, 4] = pf.FLAG_GAS
+        self.assertEqual(pf.heal_submerged_interface(state, 0.0, dwell_steps=5), 0)
+        state.flags[5, 5, 4] = was
+        # Four more consecutive gasless steps still do not reach the dwell.
+        for _ in range(4):
+            self.assertEqual(pf.heal_submerged_interface(state, 0.0, dwell_steps=5), 0)
+        self.assertEqual(int(state.flags[5, 5, 5]), int(pf.FLAG_INTERFACE))
+        # The fifth consecutive one does.
+        self.assertEqual(pf.heal_submerged_interface(state, 0.0, dwell_steps=5), 1)
+        self.assertEqual(int(state.flags[5, 5, 5]), int(pf.FLAG_FLUID))
 
     def test_it_leaves_a_cell_with_a_gas_neighbour_alone(self) -> None:
         """The rule keys on topology, not on fill level."""
@@ -805,7 +838,7 @@ class SubmergedInterfaceHealingTests(unittest.TestCase):
         state.flags[5, 5, 4] = pf.FLAG_GAS
         state.mass[5, 5, 4] = 0.0
         state.f[:, 5, 5, 4] = 0.0
-        self.assertEqual(pf.heal_submerged_interface(state, 0.0), 0)
+        self.assertEqual(pf.heal_submerged_interface(state, 0.0, dwell_steps=1), 0)
         self.assertEqual(int(state.flags[5, 5, 5]), int(pf.FLAG_INTERFACE))
         self.assertEqual(float(state.mass[5, 5, 6]), float(before))
 
@@ -829,7 +862,7 @@ class SubmergedInterfaceHealingTests(unittest.TestCase):
         state.mass[5, 5, 5] = 0.40
         before = pf.total_mass(state)
 
-        self.assertEqual(pf.heal_submerged_interface(state, 0.0), 1)
+        self.assertEqual(pf.heal_submerged_interface(state, 0.0, dwell_steps=1), 1)
         self.assertEqual(int(state.flags[5, 5, 5]), int(pf.FLAG_FLUID))
         self.assertEqual(
             float(state.mass[5, 5, 5]), 0.40,
@@ -847,8 +880,10 @@ class SubmergedInterfaceHealingTests(unittest.TestCase):
         ``apply_transitions``' retreat path -- so the count must fall away, not
         settle onto a per-step floor.
 
-        Measured on a closed box seeded with a 27-cell submerged pocket: 27
-        conversions on the first step and zero on all 1,999 after it.
+        Measured on a closed box seeded with a 27-cell submerged pocket: zero
+        conversions through the dwell, all 27 in one burst the step it
+        expires, and zero on every step after -- once per cell, ever, is the
+        contract.
         """
         import physics.filling as pf
 
@@ -863,22 +898,27 @@ class SubmergedInterfaceHealingTests(unittest.TestCase):
         counts: list[int] = []
         original = pf.heal_submerged_interface
 
-        def traced(s, t):
-            healed = original(s, t)
+        def traced(s, t, **kw):
+            healed = original(s, t, **kw)
             counts.append(healed)
             return healed
 
         pf.heal_submerged_interface = traced
         try:
-            for _ in range(300):
+            for _ in range(pf.HEAL_DWELL_STEPS + 100):
                 pf.step(state, units)
         finally:
             pf.heal_submerged_interface = original
 
-        self.assertEqual(counts[0], int(np.count_nonzero(pocket)))
+        dwell = pf.HEAL_DWELL_STEPS
         self.assertEqual(
-            sum(counts[1:]), 0,
-            f"healing kept firing after the pocket closed: {counts[1:20]}",
+            sum(counts[: dwell - 1]), 0,
+            "healing fired before the dwell expired",
+        )
+        self.assertEqual(counts[dwell - 1], int(np.count_nonzero(pocket)))
+        self.assertEqual(
+            sum(counts[dwell:]), 0,
+            f"healing kept firing after the pocket closed: {counts[dwell:dwell+20]}",
         )
 
 

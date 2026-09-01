@@ -10,9 +10,11 @@ design document; `docs/filling_implementation.md` is the plan and
 **A configuration now produces a genuine `complete` fill, and it survives the
 whole pipeline.** `Test_Model/Full_Gating_Test` at 0.20 in voxels with
 `fill_grid_coarsening` 2 — the shipped default, giving a 0.40 in fill grid —
-fills every one of its 9,251 metal voxels in 15.0 s of simulated pour,
-72,206 steps, 129 s wall, **0 misruns and no warnings at all**. `max|u|` is
-0.019 against the 0.05 Mach guard and **no wet cell exceeds it at any point**.
+fills every one of its 9,251 metal voxels in 9.0 s of simulated pour,
+43,324 steps, **0 misruns and no warnings at all**. `max|u|` is 0.025
+against the 0.05 Mach guard and **no wet cell exceeds it at any point**.
+(15.0 s before the heal dwell below; the ping-pong was taxing even the run
+that finished.)
 That is the first completed run this stage has produced; every "complete"
 cited before the build report was a blow-up.
 
@@ -55,15 +57,25 @@ cell's metal. The mass accounting stays honest (18.0 lb delivered against
 93.5 % of the metal volume wet: the two agree to within 1 %), but "100 % of
 cells FLUID" means "the cavity is closed", not "the cavity is full".
 
-**On a model with a thick, sloshing front the rule ping-pongs, and that is not
-fixed.** A healed cell whose neighbour later drains is demoted back to
+**On a model with a thick, sloshing front the rule ping-ponged; a dwell now
+holds it back.** A healed cell whose neighbour later drains is demoted back to
 interface by the retreat path, refills, and is healed again — and each cycle
-pulls its deficit out of the *advancing* front. Measured on `Filling_Test`:
-828,368 heal events over 327,200 steps on a 4,346-cell domain, roughly 190
-conversions per cell. On a run that finishes, the count decays to nothing —
-`Full_Gating_Test` at coarsening 2 does its last heal at step 57,545 of
-72,206 and none in the final fifth of the run. It is runs that *don't* finish
-where it churns.
+pulls its deficit out of the *advancing* front. Measured on `Filling_Test`
+before the dwell: 828,368 heal events over 327,200 steps on a 4,346-cell
+domain, roughly 190 conversions per cell, and 34 % less metal delivered
+through the inlet than the same run without the rule.
+
+The dwell (`HEAL_DWELL_STEPS` = 200) converts a cell only after 200
+*consecutive* gasless steps. Persistence is the property that actually
+separates a stranded cell from a busy one: a permanently closed-over cell is
+gasless forever and merely waits 200 steps once; a sloshing cell loses its
+streak the moment the surface re-opens beside it. Measured effect, same
+`Filling_Test` run: heal events 828,368 → 45,250, delivery 36.6 → 41.1 lb,
+cells filled at the 60 s cap 41 % → 57 % — level with the pre-heal run's 58 %,
+except those cells are now real, convertible metal rather than frozen flags.
+And `Full_Gating_Test` at the default coarsening completes *faster* with the
+dwell than without it — 9.0 s of pour against 15.0 s — with its last heal at
+step 42,282 of 43,324 and zero in the final stretch.
 
 *Measured on `Test_Model/Full_Gating_Test` at 0.20 in, coarsening 1* (the fine
 grid, 45 s cap). Still `time_capped` — 433,247 steps, 58 min wall — but at

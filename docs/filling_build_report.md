@@ -11,12 +11,23 @@ record of the work itself.
 
 Delivered across 12 commits, `f17147d..fb274ac`, on `refactor/pouring-seams`.
 
-**Read this first: the mold-filling stage is not validated. No configuration
-tested on the reference assembly produces a verified complete fill.** This
-document previously certified a 100 % fill as proof the stage works. That
-result was a numerical blow-up that happened to look like a perfect pour —
-see "What was actually verified" and "Current state" below before trusting
-any fill-percentage or timing number anywhere in this file.
+**Status (2026-09-01): the stage now produces a genuine, verified complete
+fill.** `Test_Model/Full_Gating_Test` (a purpose-built validation rig: bottom
+gated, every channel at least 5 cells across on its fill grid) fills all
+9,251 metal voxels in 9.0 s of simulated pour at the shipped defaults, with
+zero misruns, zero warnings, mass conserved, and every wet cell under the Mach
+guard — and survives the whole pipeline into solidification and defect
+analysis. What made that possible, and what remains open (under-resolved
+models such as `Filling_Test`'s 3-cell gate still time-cap honestly rather
+than finish), is in `filling_field_notes.md` under "Current state".
+
+A caution this file keeps on purpose: an earlier revision certified a 100 %
+fill that was a numerical blow-up dressed as a perfect pour — the completion
+check read flags alone. Every number below predates the 2026-08-31/09-01
+rework (pressure inlet, mouth-wide inlet resolution, Körner Table 1 mass
+exchange, submerged-interface healing with a dwell); read "What was actually
+verified" before trusting any fill-percentage or timing figure elsewhere in
+this file.
 
 ## What exists now
 

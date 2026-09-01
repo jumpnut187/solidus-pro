@@ -87,6 +87,21 @@ FLAG_FLUID = np.uint8(3)
 #: result rather than a bug.
 TRANSITION_HYSTERESIS = 1e-3
 
+#: Consecutive gasless steps before a submerged interface cell is healed.
+#:
+#: :func:`heal_submerged_interface` exists for cells the front has closed over
+#: PERMANENTLY -- those stay gasless forever, so waiting costs them 200 steps
+#: (tens of milliseconds of pour) out of a run of hundreds of thousands. A cell
+#: on an active, sloshing front is gasless only transiently, and healing it on
+#: sight ping-pongs with apply_transitions' retreat path: heal -> a neighbour
+#: drains -> demote -> refill -> heal, each cycle pulling the deficit out of
+#: the advancing front. Measured on Test_Model/Filling_Test before the dwell:
+#: 828,368 heal events over 327,200 steps on a 4,346-cell grid (~190 per
+#: cell), and 34% less metal delivered through the inlet than the same run
+#: without the rule. The dwell keys the rule to persistence, which is the
+#: property that actually distinguishes a stranded cell from a busy one.
+HEAL_DWELL_STEPS = 200
+
 #: Reference gas density (atmospheric) in lattice units.
 GAS_DENSITY = 1.0
 
@@ -201,6 +216,10 @@ class FillingState:
     _scratch_out: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
     _scratch_f_out: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
     _scratch_mass_out: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
+    # Per-cell count of consecutive steps spent as a gasless interface cell,
+    # for heal_submerged_interface's dwell. Lazily allocated, int16, capped at
+    # the dwell so it cannot overflow on long runs.
+    _submerged_streak: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
 
     @property
     def cell_volume_m3(self) -> float:
@@ -672,7 +691,9 @@ def apply_transitions(state: FillingState, time_s: float) -> Tuple[int, int]:
     return filled, emptied
 
 
-def heal_submerged_interface(state: FillingState, time_s: float) -> int:
+def heal_submerged_interface(
+    state: FillingState, time_s: float, dwell_steps: int = HEAL_DWELL_STEPS
+) -> int:
     """
     Convert a *submerged* interface cell -- one with no gas neighbour -- to FLUID.
 
@@ -725,9 +746,17 @@ def heal_submerged_interface(state: FillingState, time_s: float) -> int:
     The reverse rule -- an interface cell with no *fluid* neighbour becoming
     GAS -- is deliberately not implemented here. Only the freeze was measured.
 
+    A cell converts only after ``dwell_steps`` CONSECUTIVE gasless steps -- see
+    :data:`HEAL_DWELL_STEPS` for the measured ping-pong that forced the dwell.
+    A permanently stranded cell is gasless forever and merely waits; a cell on
+    an active front loses its streak the moment the surface re-opens beside it,
+    so the rule stays out of live flow entirely.
+
     Args:
         state: Solver state, mutated in place.
         time_s: Current physical time, recorded as the arrival time.
+        dwell_steps: Consecutive gasless steps required before conversion.
+            Tests of the conversion mechanics pass 1 to fire immediately.
 
     Returns:
         Number of cells healed, for instrumentation. Over a real fill this
@@ -736,15 +765,29 @@ def heal_submerged_interface(state: FillingState, time_s: float) -> int:
         interface, through ``apply_transitions``' existing retreat path.
     """
     interface = state.flags == FLAG_INTERFACE
+    streak = state._submerged_streak
+    if streak is None or streak.shape != state.shape:
+        streak = np.zeros(state.shape, dtype=np.int16)
+        state._submerged_streak = streak
     if not np.any(interface):
+        streak[...] = 0
         return 0
 
     # The same neighbourhood apply_transitions advances the front with, so
     # "has a gas neighbour" means the same thing in both directions.
     submerged = interface & ~_dilate(state.flags == FLAG_GAS)
-    count = int(np.count_nonzero(submerged))
+    # The streak is the dwell's whole state: persistence, not instantaneous
+    # topology, is what separates a stranded cell from a sloshing one. Capped
+    # at the dwell so an int16 cannot overflow on a 400,000-step run.
+    streak[...] = np.where(
+        submerged, np.minimum(streak.astype(np.int32) + 1, dwell_steps), 0
+    ).astype(np.int16)
+    ripe = submerged & (streak >= dwell_steps)
+    count = int(np.count_nonzero(ripe))
     if count == 0:
         return 0
+    submerged = ripe
+    streak[ripe] = 0
 
     full_mass = state.rho.astype(np.float64) * state.porous.porosity.astype(np.float64)
     deficit = np.zeros(state.shape, dtype=np.float64)
