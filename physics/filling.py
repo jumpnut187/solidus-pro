@@ -265,9 +265,11 @@ class FillingState:
     120^3 that is 817.4 -> 316.4 MiB of resident scratch, and the populations
     moving between the kernels really are half the bytes now rather than
     nominally. Whole step: 43.2 -> 36.7 ms median, six interleaved A/B rounds,
-    won all six. The win is smaller than the buffers suggest because the
-    collision kernel turned out to be compute-bound -- see
-    :func:`_collide_stream_numba` for the per-kernel measurements.
+    won all six. The win was smaller than the buffers suggest because the
+    collision kernel turned out to be compute-bound rather than
+    bandwidth-bound; removing the duplicate arithmetic that diagnosis exposed
+    took the step on to 32.0 ms. See :func:`_collide_stream_numba` for the
+    per-kernel measurements of both passes.
 
     **Storage is float32; arithmetic is float64.** Every kernel reads a
     population through an explicit ``np.float64`` cast and rounds once, at the
@@ -1945,17 +1947,23 @@ def _collide_stream_numba(
     ==================  ========  =======  ==============================
 
     Streaming and the free-surface pass were bandwidth-bound and halving their
-    traffic did what halving traffic does. **The collision was not**, and it is
-    the largest of the three. It evaluates ``_equilibrium_i`` about 57 times per
-    cell -- 19 for the Smagorinsky stress and two per direction for the TRT
-    split -- plus a square root, all in scalar float64, and it was running at a
-    tenth of the memory system's rate. Cutting its output traffic by 125 MiB a
-    step changed its time by 0.6%, which is inside the noise. Switching the
-    Smagorinsky branch off (19 fewer equilibria, one fewer sqrt, and *no*
-    change in traffic at all) takes it from 20.7 to 14.9 ms, which is the
-    direct evidence: 28% of that kernel is arithmetic that never touches
-    memory. Anyone looking for the next constant factor should start there and
-    not with another dtype.
+    traffic did what halving traffic does. **The collision was not**: cutting
+    its output traffic by 125 MiB a step changed its time by 0.6%, inside the
+    noise, because at 18 GiB/s it was nowhere near waiting on memory. It was
+    waiting on duplicate arithmetic -- 57 equilibrium evaluations per cell where
+    19 would do, its own populations read four times, ``c_i . u`` formed three
+    times. Removing the duplication (bit-identically; the values and every
+    accumulation order are untouched) took it to **17.3 ms**, and the whole
+    step from 36.4 to 32.0 ms. The measurements and the reason LLVM could not
+    do it unaided are in :func:`physics.fluid_flow.collide_kernel`'s docstring.
+
+    That is the end of the easy constant factors. What remains in the collision
+    is the Smagorinsky stress tensor (3.3 ms of the 17.3, measured by switching
+    it off) and 19 scalar float64 equilibria that no longer duplicate anything.
+    Going further means either vectorising across directions -- which needs the
+    lattice tables transposed to ``Cx[19]``/``Cy[19]``/``Cz[19]`` so the
+    per-direction reads stop being stride-3 gathers -- or moving the pass to the
+    GPU. Neither is a dtype question, and neither is free.
 
     Nothing here converts dtypes any more, and that was worth ~26 ms of a
     measured 106 ms step at 120^3 (38 ``astype`` calls per step across the

@@ -995,18 +995,78 @@ if NUMBA_AVAILABLE:
         pays for the measurement twice. 120^3, 18 threads, median of 12:
         20.3 ms with a float64 ``post_out``, 20.4 ms with a float32 one, for
         125 MiB per step less writing. This loop is **compute-bound**, not
-        bandwidth-bound: it moves ~370 MiB in 20.4 ms, 18 GiB/s, about a tenth
-        of what a parallel copy of the same arrays sustains on this machine,
-        and it spends the difference on roughly 57 inlined ``_equilibrium_i``
-        evaluations per cell (19 for the Smagorinsky stress tensor, two per
-        direction for the TRT split) plus a square root, all scalar float64.
-        Running it with ``use_smagorinsky=False`` -- 19 fewer equilibria, one
-        fewer sqrt, byte-for-byte identical memory traffic -- drops it to
-        14.9 ms. The narrower store stays because it is what makes the two
-        kernels downstream faster; it is not why this one is slow.
+        bandwidth-bound: it moved ~370 MiB in 20.4 ms, 18 GiB/s, about a tenth
+        of what a parallel copy of the same arrays sustains on this machine.
+        The narrower store stays because it is what makes the two kernels
+        downstream faster; it was never why this one is slow.
+
+        Where the compute went, and what came back
+        -----------------------------------------
+        It was spending it on duplicate work. The cell evaluated
+        ``_equilibrium_i`` **57 times**: 19 in the Smagorinsky stress loop,
+        then two more per direction in the TRT loop, because ``e_sym`` and
+        ``e_asym`` need both ends of each opposite pair. All 57 took the same
+        ``(rho, ux, uy, uz, usqr, inv_eps)`` -- nothing between the two loops
+        touches any of them, since the only thing the Smagorinsky branch
+        produces is ``omega_plus`` and the equilibrium does not depend on it --
+        so 38 of the 57 were recomputations of numbers the cell had already had
+        in a register. It also read its own 19 populations from ``f`` four
+        times over (moments, stress, and both halves of the TRT pair), each a
+        separate nx*ny*nz stride, and formed ``c_i . u`` three times.
+
+        All three are now computed once per cell into the ``eq``, ``fl`` and
+        ``cul`` slab-local buffers and read back. This is **value-preserving,
+        not an approximation**: the same function on the same arguments, no
+        expression rewritten, and -- critically -- no accumulation order
+        anywhere in the kernel changed. The output is bit-identical, verified
+        bytewise on every field over seven regimes (quiescent and provoked,
+        each with and without a wet filter, plus Smagorinsky-off, a non-default
+        Cs, and the single-phase path).
+
+        Measured at 120^3, 18 threads, six interleaved rounds, medians:
+
+        =============================  ==========  ==========
+        variant                        Smag on     Smag off
+        =============================  ==========  ==========
+        Phase B (as above)              22.1 ms     15.7 ms
+        + equilibria once (``eq``)      17.9 ms     14.2 ms
+        + populations once (``fl``)     17.8 ms     14.3 ms
+        + ``c_i . u`` once (``cul``)    17.3 ms     14.0 ms
+        =============================  ==========  ==========
+
+        The equilibrium dedup is nearly all of it -- 4.2 of the 4.8 ms -- which
+        also answers the question the numbers pose: LLVM had *not* already
+        common-subexpression-eliminated across the two loops. It could not: the
+        stress loop's results feed a branch (``tau_eff`` clamping) that sits
+        between them, and 19 inlined evaluations is past the point where the
+        optimiser will speculatively keep them all live across it. Written out
+        by hand, it does.
+
+        Note what the Smagorinsky column says now. Before this pass, switching
+        the subgrid model off saved 6.4 ms (22.1 -> 15.7); it now saves 3.3
+        (17.3 -> 14.0), because half of what "Smagorinsky on" used to cost was
+        not the stress tensor at all -- it was the 38 duplicate equilibria that
+        having a second loop happened to imply.
         """
         nx, ny, nz = flags.shape
         for x in prange(nx):
+            # Per-cell scratch: the 19 equilibria, the 19 populations widened
+            # to float64, and the 19 velocity projections c_i . u. Declared
+            # against the prange loop rather than inside the z loop so numba's
+            # allocation hoisting lifts them to one buffer per thread instead
+            # of one per cell -- 152 bytes each, three of them, comfortably
+            # resident in L1 for the whole slab.
+            #
+            # All three are thread-private and carry nothing across cells: each
+            # is fully written near the top of a cell's iteration before
+            # anything reads it, so two threads working different x-slabs never
+            # share one and the loop stays a legal parfor. Sizing them 19 (the
+            # literal, not ``Q``) is what makes the allocation loop-invariant
+            # and therefore hoistable, and matches every other ``range(19)`` in
+            # this file.
+            eq = np.empty(19, dtype=np.float64)
+            fl = np.empty(19, dtype=np.float64)
+            cul = np.empty(19, dtype=np.float64)
             for y in range(ny):
                 for z in range(nz):
                     flag = flags[x, y, z]
@@ -1029,7 +1089,13 @@ if NUMBA_AVAILABLE:
                     my = 0.0
                     mz = 0.0
                     for i in range(19):
+                        # Widened once and kept: this cell's populations are
+                        # read four times over (moments, stress, and both
+                        # halves of the TRT pair), each read a separate stride
+                        # of nx*ny*nz elements into ``f``. Same values, same
+                        # casts, one pass.
                         fi = np.float64(f[i, x, y, z])
+                        fl[i] = fi
                         rho += fi
                         mx += C[i, 0] * fi
                         my += C[i, 1] * fi
@@ -1082,15 +1148,48 @@ if NUMBA_AVAILABLE:
                     inv_eps = 1.0 / eps if eps > 0.0 else 1.0
                     usqr = ux * ux + uy * uy + uz * uz
 
+                    # --- the 19 equilibria, evaluated once for the cell ---
+                    #
+                    # Both consumers below want the same 19 numbers from the
+                    # same (rho, u, usqr, inv_eps): the stress tensor needs
+                    # f_i - e_i, and the TRT split needs e_i and e_ibar. Until
+                    # this pass each computed its own, so the cell paid for 57
+                    # -- 19 in the stress loop, then 2 per direction in the TRT
+                    # loop, because e_sym and e_asym want both ends of the
+                    # pair. Nothing between them changes an argument
+                    # (``omega_plus`` is the only thing the Smagorinsky branch
+                    # produces, and the equilibrium does not depend on it), so
+                    # the recomputation was pure duplication.
+                    #
+                    # This is a value-preserving change, not an approximation:
+                    # the same function on the same arguments, and neither the
+                    # order of operations inside ``_equilibrium_i`` nor any
+                    # accumulation order below is touched. The kernel's output
+                    # is bit-identical -- verified field by field, bytewise,
+                    # over seven regimes.
+                    #
+                    # ``cul[i]`` is c_i . u, which ``_equilibrium_i`` also
+                    # forms internally from the same three products in the same
+                    # order, and which the TRT loop below used to form a third
+                    # time. Written out here so the TRT loop can read it: the
+                    # duplicate inside the inlined equilibrium on the next line
+                    # is the same expression on the same locals, so LLVM folds
+                    # the two into one, and the value the TRT loop gets is the
+                    # one it used to compute for itself. Measured worth 1.4 ms
+                    # of the kernel on its own -- see the docstring.
+                    for i in range(19):
+                        cul[i] = C[i, 0] * ux + C[i, 1] * uy + C[i, 2] * uz
+                        eq[i] = _equilibrium_i(
+                            i, rho, ux, uy, uz, usqr, inv_eps, C, W
+                        )
+
                     # --- Smagorinsky, from the local non-equilibrium stress ---
                     omega_plus = 1.0 / tau
                     if use_smagorinsky and c1 == 0.0:
                         q00 = 0.0; q01 = 0.0; q02 = 0.0
                         q11 = 0.0; q12 = 0.0; q22 = 0.0
                         for i in range(19):
-                            neq = np.float64(f[i, x, y, z]) - _equilibrium_i(
-                                i, rho, ux, uy, uz, usqr, inv_eps, C, W
-                            )
+                            neq = fl[i] - eq[i]
                             cx = C[i, 0]; cy = C[i, 1]; cz = C[i, 2]
                             q00 += cx * cx * neq
                             q01 += cx * cy * neq
@@ -1124,13 +1223,17 @@ if NUMBA_AVAILABLE:
                     # --- TRT collision with Guo source ---
                     for i in range(19):
                         ib = OPP[i]
-                        # Cast before the symmetric/antisymmetric split: see
-                        # the docstring -- fi + fb in float32 would not match
+                        # ``fl`` and ``eq`` hold this cell's populations and
+                        # equilibria, both already float64. The cast that used
+                        # to happen here is the one at the top of the moments
+                        # loop -- still before the symmetric/antisymmetric
+                        # split, which is what the docstring's parity argument
+                        # requires: fi + fb added in float32 would not match
                         # the NumPy path.
-                        fi = np.float64(f[i, x, y, z])
-                        fb = np.float64(f[ib, x, y, z])
-                        ei = _equilibrium_i(i, rho, ux, uy, uz, usqr, inv_eps, C, W)
-                        eb = _equilibrium_i(ib, rho, ux, uy, uz, usqr, inv_eps, C, W)
+                        fi = fl[i]
+                        fb = fl[ib]
+                        ei = eq[i]
+                        eb = eq[ib]
 
                         f_sym = 0.5 * (fi + fb)
                         f_asym = 0.5 * (fi - fb)
@@ -1138,7 +1241,7 @@ if NUMBA_AVAILABLE:
                         e_asym = 0.5 * (ei - eb)
 
                         cx = C[i, 0]; cy = C[i, 1]; cz = C[i, 2]
-                        cu = cx * ux + cy * uy + cz * uz
+                        cu = cul[i]
                         src = W[i] * guo_prefactor * (
                             (3.0 * (cx - ux) + 9.0 * cu * cx) * fx
                             + (3.0 * (cy - uy) + 9.0 * cu * cy) * fy

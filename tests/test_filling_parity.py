@@ -382,6 +382,62 @@ class KernelInvariantTests(unittest.TestCase):
             step(state, units, use_numba=True)
             self.assertEqual(float(np.abs(state.f[:, obstacle]).max()), 0.0)
 
+    def test_the_numba_path_is_deterministic(self) -> None:
+        """
+        Two runs of the same steps from the same state agree bit for bit.
+
+        This is the guard for shared mutable scratch inside a ``prange`` body.
+        ``collide_kernel`` keeps three 19-element buffers -- the cell's
+        equilibria, its widened populations, and its ``c_i . u`` projections --
+        so that each is computed once instead of two or three times. They are
+        declared against the ``prange`` loop, which makes them thread-private
+        and lets numba hoist the allocation to one per thread. Move those
+        declarations one level out, to the function body, and they become one
+        buffer shared by every thread: 18 threads writing the same 152 bytes
+        while reading each other's values.
+
+        The rest of this file is not blind to that -- measured, hoisting the
+        three declarations fails 28 of the other tests -- so this is not here
+        to catch something otherwise missed. It is here to *name* it. Those 28
+        failures are tolerance breaches and flag mismatches, which read as "the
+        numerics moved" and send you looking at the algebra; this one reads as
+        "a kernel is racing", which is a different bug and a different search.
+        A cheap test that turns a 28-line wall of numeric drift into one
+        sentence about thread safety earns its 3 seconds.
+
+        Verified to have teeth: hoisting the three declarations out of the
+        ``prange`` body fails all three subtests below; the shipped kernel
+        passes them on repeat.
+
+        Byte comparison rather than ``assert_array_equal`` because
+        ``temperature`` carries NaN sentinels, and NaN != NaN would report a
+        difference that is not one.
+        """
+        fields = ("f", "rho", "u", "mass", "flags", "temperature", "fill_time_s")
+
+        def run(fixture):
+            state, units = fixture()
+            for _ in range(12):
+                step(state, units, use_numba=True)
+                advect_temperature(state, 0.03)
+            return {n: np.asarray(getattr(state, n)).tobytes() for n in fields}
+
+        for label, fixture in (
+            ("quiescent", _fixture),
+            ("firing", _provoked),
+            ("wet filter", lambda: _fixture(with_filter=True, submerge=True)),
+        ):
+            with self.subTest(fixture=label):
+                first = run(fixture)
+                for attempt in range(2):
+                    again = run(fixture)
+                    for name in fields:
+                        self.assertEqual(
+                            first[name], again[name],
+                            f"{label}: {name} differed between identical runs "
+                            f"on attempt {attempt + 1} -- a kernel is racing",
+                        )
+
     def test_the_population_buffers_are_float32_and_mass_is_not(self) -> None:
         """
         The dtype split the whole float32-storage pass rests on.
