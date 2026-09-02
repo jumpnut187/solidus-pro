@@ -133,6 +133,24 @@ STATUS_DIVERGED = "diverged"
 #: This is a *thickness*, not a cross-sectional area. The first version of this
 #: check compared an area against 4 and so passed a wide, thin gate -- exactly
 #: the geometry that seals -- while looking like it had checked something.
+#:
+#: **Calibrated at Lambda = 3/16, which the solver no longer runs at.** The
+#: +-0.5-cell wall position this threshold's whole argument rests on holds only
+#: at the exact magic parameter, and
+#: :data:`~physics.fluid_flow.TAU_MINUS_MAX` gave that up to damp an
+#: undamped momentum mode. Solved exactly for steady Stokes-TRT Poiseuille,
+#: ``(H_eff/2)^2 = (H/2)^2 + (4/3)(Lambda - 3/16)``, so the clamp costs a flat
+#: 0.25 cell^2 of flow-carrying width at any channel width -- **-25 % of the
+#: flow through a 2-cell channel** and -11 % through a 3-cell one, against
+#: exactly 0 before. The effective viscosity is unchanged; the entire cost is at
+#: the wall.
+#:
+#: The threshold is deliberately left at 2.0 rather than raised. What changed is
+#: how much flow a marginal channel carries, not where the channel stops having
+#: an interior, and that is what this number is about: at one cell across,
+#: halfway bounce-back seals the channel outright whatever Lambda is. The 25 %
+#: is why the warning text says a channel at this thickness cannot be trusted
+#: rather than merely apologising for it.
 MIN_CHOKE_THICKNESS_CELLS = 2.0
 
 #: Thickness at which a channel is resolved well enough to stop apologising for.
@@ -151,6 +169,21 @@ MIN_CHOKE_THICKNESS_CELLS = 2.0
 #: being fed back into itself, and the fill completed the first time it ran with
 #: a mold pad in place. Measurements taken through a torus are not measurements
 #: -- see :data:`MOLD_PAD_CELLS` and ``docs/filling_field_notes.md``.
+#:
+#: **And it is now optimistic by 11 %.** These thresholds, and the complete
+#: fills that justify them, were all measured at ``Lambda = 3/16``.
+#: :data:`~physics.fluid_flow.TAU_MINUS_MAX` costs a flat 0.25 cell^2 of
+#: flow-carrying width -- ``(H_eff/2)^2 = (H/2)^2 + (4/3)(Lambda - 3/16)``,
+#: solved exactly -- which on a 3-cell channel is **-11.1 % of the flow for the
+#: same head**. So a gate that measures 3.0 cells now passes about a ninth less
+#: metal than the runs behind this number did.
+#:
+#: The value stays at 3.0 anyway, for two reasons. It is a *resolution*
+#: threshold, and the resolution has not changed -- a 3-cell channel still has
+#: exactly one interior node. And the warning it fires already tells the user to
+#: treat the flow through such a channel as marginal rather than as a result,
+#: which is the correct response to an 11 % boundary bias as much as to a
+#: coarse-grid one. Raising it would refuse geometries the solver does complete.
 #:
 #: Above the hard minimum, below this, the fill is marginal rather than wrong --
 #: worth saying, in a softer voice.

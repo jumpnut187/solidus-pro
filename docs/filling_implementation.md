@@ -152,6 +152,17 @@ Two mitigations, both needed:
    MRT is also viable and marginally more stable, at ~2× BGK cost and much more
    code.
 
+   **Λ = 3/16 is not held all the way down.** ω⁻ carries no viscosity; it sets
+   the wall position and the damping rate of the odd "ghost" modes, and holding
+   Λ fixed as τ → ½ sends ω⁻ → 0. At a casting τ of 0.500010 that is
+   τ⁻ = 18,060 steps, i.e. no damping at all, and an undamped period-2
+   checkerboard on one lattice diagonal took `Test 2` non-finite at step 20,192.
+   `core`'s answer is `physics.fluid_flow.TAU_MINUS_MAX = 5`: cap τ⁻, which
+   binds only below τ = 0.541667 and so leaves the wall-position benchmarks
+   (run at τ = 0.8) on exact Λ = 3/16. Below the threshold Λ becomes
+   (τ − ½)(τ⁻ₘₐₓ − ½) and the effective wall moves off the node midpoint —
+   a real error, and smaller than the one it removes.
+
 2. **Smagorinsky subgrid viscosity (physically required anyway).** Reynolds
    numbers here are 6,000–720,000 (10 mm to 200 mm sections at 0.5–3 m/s), so
    the flow is strongly turbulent and nowhere near resolved. A subgrid model is
@@ -190,7 +201,8 @@ f_i^eq±   = ( f_i^eq  ± f_ī^eq  ) / 2
 f_i*  = f_i − ω⁺ ( f_i^+ − f_i^eq+ ) − ω⁻ ( f_i^- − f_i^eq- ) + F_i
 
 ω⁺ = 1/τ,   τ = 3 ν_lattice + 1/2
-ω⁻ chosen from  Λ = (1/ω⁺ − ½)(1/ω⁻ − ½) = 3/16
+ω⁻ chosen from  Λ = (1/ω⁺ − ½)(1/ω⁻ − ½) = 3/16,  then 1/ω⁻ capped at
+     TAU_MINUS_MAX = 5   (binds below τ = 0.541667; see §5.1)
 
 f_i(x + c_i, t + 1) = f_i*(x, t)          (streaming)
 ```
@@ -547,6 +559,8 @@ foundry cases only obscure.
 2. **Poiseuille flow.** Pressure-driven channel, compare to the parabolic
    profile. Validates viscosity calibration and the bounce-back wall position;
    with TRT Λ = 3/16 the fitted wall should land within a few percent of dx/2.
+   Run it at τ = 0.8, above the `TAU_MINUS_MAX` threshold, or it measures the
+   clamped Λ instead of 3/16.
 3. **Dam break.** Classic free-surface benchmark with published experimental
    surge-front data (Martin & Moyce). Validates mass tracking and interface
    advection.

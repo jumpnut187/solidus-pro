@@ -788,12 +788,25 @@ class PorousPairWeightTests(unittest.TestCase):
 
     NU = 0.006 / 7200.0
     DX_M = 0.0152
-    #: Enough to separate flat from growing at this fixture's rate without
-    #: putting any one test past a few seconds. Measured: the shipped rule
-    #: holds a 5.0000e-02 seed at 5.003e-02, the deleted one takes it to
-    #: 5.210e-02 (+4.2 %). At 4,000 steps the gap is +14 %; the growth is
-    #: exponential with a rate independent of the seed, so any step count
-    #: discriminates and this one is the cheapest that does it clearly.
+    #: Enough to separate the two weight rules without putting any one test
+    #: past a few seconds.
+    #:
+    #: **Recalibrated when TAU_MINUS_MAX landed.** The deleted override's gain
+    #: comes from the exchange *amplitude*, and clamping ``tau_minus`` from
+    #: 18,060 to 5 relaxes the odd moments hard enough to cut that amplitude on
+    #: a quiescent fixture -- so on this box the override no longer runs away at
+    #: all. It settles at a fixed bias instead: measured over 8,000 steps the
+    #: shipped rule holds a 5.0000e-02 seed at 5.0027e-02 (+0.055 %) and the
+    #: override at 5.0253e-02 (+0.51 %), both dead flat from step 2,000 onward.
+    #: The tests below therefore measure that 9x bias separation rather than a
+    #: runaway, and their bounds moved with it: pre-clamp the same fixture gave
+    #: +4.2 % at 2,000 steps and +14 % at 4,000.
+    #:
+    #: The runaway itself is still real -- it needs a live front and the
+    #: exchange amplitudes of a real pour, where the diagnosis measured
+    #: eps 7.76 at the filter outlet. It is no longer reproducible on a
+    #: two-second fixture, which is a fact about the fixture, not about the
+    #: defect.
     STEPS = 2000
 
     def _units(self):
@@ -887,8 +900,11 @@ class PorousPairWeightTests(unittest.TestCase):
         """The witness, on the numerics reference path."""
         seeded, final, drift = self._drift(use_numba=False)
         self.assertAlmostEqual(seeded, 0.05, places=6)
+        # 1.002, not 1.01: see STEPS. The override now settles at +0.51 % on
+        # this fixture, so a 1 % bound would pass under the very rule this test
+        # exists to reject. Measured shipped value is +0.055 %.
         self.assertLess(
-            final, 1.01 * seeded,
+            final, 1.002 * seeded,
             f"the fill-fraction error grew {seeded:.4e} -> {final:.4e} over "
             f"{self.STEPS} steps: the exchange weight is feeding a cell's own "
             f"eps back into its exchange amplitude",
@@ -910,7 +926,7 @@ class PorousPairWeightTests(unittest.TestCase):
         seeded, final, drift = self._drift(use_numba=True)
         self.assertAlmostEqual(seeded, 0.05, places=6)
         self.assertLess(
-            final, 1.01 * seeded,
+            final, 1.002 * seeded,
             f"the fill-fraction error grew {seeded:.4e} -> {final:.4e} over "
             f"{self.STEPS} steps on the kernel path",
         )
@@ -921,27 +937,47 @@ class PorousPairWeightTests(unittest.TestCase):
         The discriminator: the same fixture under the rule that was removed.
 
         Without this the two tests above could pass on a fixture that had lost
-        the ability to fail. Under the porous override the error grows
-        monotonically at a rate independent of the seed -- measured 3.83e-5 per
-        step from a 5 % seed and 2.99e-5 from a 17.6 % one -- and under Table 1
-        it is held at whatever it was seeded with, to four figures. Mass is
-        conserved to round-off in both, which is the point: this was never a
-        leak.
+        the ability to fail.
+
+        **What it measures changed with ``TAU_MINUS_MAX``** -- see ``STEPS``.
+        It used to assert a runaway: the override grew the error monotonically
+        at 3.83e-5 per step from a 5 % seed and 2.99e-5 from a 17.6 % one, a
+        rate independent of the seed, which is the signature of linear positive
+        feedback. Clamping ``tau_minus`` cut the exchange amplitude the gain
+        feeds on, so on this quiescent box the override now settles at a fixed
+        bias instead of diverging. The separation it leaves is still decisive
+        and is what is asserted: the override's excess over the seed is **9x**
+        the shipped rule's (+0.51 % against +0.055 %), and the bound below asks
+        for 4x.
+
+        Mass is conserved to round-off under both rules, which is the point
+        this test has always made: the defect was never a leak.
         """
         _, fixed, _ = self._drift(use_numba=False)
         seeded, broken, drift = self._drift(
             use_numba=False, advance_mass=_porous_weight_advance_mass
         )
+        # The 4x bound below is a ratio of two small differences, so its
+        # denominator has to be established first: if a future change made the
+        # shipped rule *decay* the seed, ``fixed - seeded`` would go negative
+        # and the comparison would pass no matter what the override did.
         self.assertGreater(
-            broken, 1.03 * seeded,
-            f"the fixture no longer discriminates: the porous override held "
-            f"{seeded:.4e} -> {broken:.4e}, so a passing test above proves "
-            f"nothing",
+            fixed - seeded, 0.0,
+            f"Table 1 no longer grows the seed at all on this fixture "
+            f"({seeded:.6f} -> {fixed:.6f}), so the separation bound below "
+            f"cannot be read as a ratio; re-derive it",
         )
-        self.assertLess(
-            fixed - seeded, 0.1 * (broken - seeded),
-            f"Table 1 grew the error {fixed - seeded:.3e} against the "
-            f"override's {broken - seeded:.3e}",
+        self.assertGreater(
+            broken - seeded, 4.0 * (fixed - seeded),
+            f"the fixture no longer discriminates: the porous override held "
+            f"{seeded:.6f} -> {broken:.6f} against Table 1's {fixed:.6f}, so a "
+            f"passing test above proves nothing",
+        )
+        self.assertGreater(
+            broken, 1.003 * seeded,
+            f"the override's bias has vanished on this fixture "
+            f"({seeded:.6f} -> {broken:.6f}); it needs re-deriving before the "
+            f"bounds above mean anything",
         )
         self.assertLess(abs(drift), 1e-12, "the override leaked mass after all")
 
@@ -955,9 +991,17 @@ class PorousPairWeightTests(unittest.TestCase):
         where the eps gradient across the outlet face points the bias into the
         cell.
 
-        Measured over 2,000 steps from the same 5 % seed, ``max|eps - 1|`` over
-        the band's FLUID cells: the shipped rule holds it at 5.010e-02, the
-        deleted one takes it to 5.917e-02 (+18 %).
+        **This is now an invariant test, not a discriminator, and the change is
+        measured.** Before ``TAU_MINUS_MAX`` the two rules separated cleanly
+        here: 5.010e-02 shipped against 5.917e-02 (+18 %) for the override.
+        Clamping ``tau_minus`` cut the exchange amplitude the override's gain
+        feeds on, and on this configuration the two rules now agree to six
+        figures -- both reach 5.0035e-02. So it no longer proves anything about
+        the weight rule; it asserts what it says on the tin, that a FLUID cell
+        in or beside a filter with a live front stays near full, and the
+        discrimination lives in
+        :meth:`test_the_deleted_weighting_is_what_grew_it` and in the diagnosis
+        report's real-assembly measurements.
 
         FLUID cells only, deliberately. An INTERFACE cell in the same band
         reaches ``|eps - 1|`` of 0.53 under both rules, because
@@ -1008,8 +1052,10 @@ class PorousPairWeightTests(unittest.TestCase):
                         worst, self._worst_fill_fraction_error(state, fluid_band)
                     )
         self.assertGreater(worst, 0.0, "no FLUID cell stayed in the band")
+        # 1.01, not 1.05: the measured value is +0.07 % and a 5 % bound on a
+        # test that no longer discriminates is a bound that asserts nothing.
         self.assertLess(
-            worst, 1.05 * seeded,
+            worst, 1.01 * seeded,
             f"a FLUID cell in or beside the filter reached eps "
             f"{1 + worst:.4g} against a seeded {1 + seeded:.4g}; a full cell "
             f"holds exactly its pore volume, so back-pressure belongs in rho, "
@@ -1422,6 +1468,305 @@ class PeriodicWrapTests(unittest.TestCase):
                     f"{int(np.count_nonzero(~plane))} non-obstacle cells: the "
                     f"lattice is a torus",
                 )
+
+
+class GhostModeDampingTests(unittest.TestCase):
+    """
+    The regression test for the step-20,192 momentum blow-up.
+
+    In TRT ``omega_plus`` sets the shear viscosity and ``omega_minus`` does not
+    -- it enters only through ``Lambda = (1/omega_plus - 1/2)(1/omega_minus -
+    1/2)``, which fixes the bounce-back wall position *and* how fast the odd,
+    momentum-carrying "ghost" modes are damped. Holding ``Lambda`` at the
+    wall-optimal 3/16 as ``tau_plus -> 1/2`` sends ``omega_minus -> 0``, and a
+    casting lattice sits within 1e-5 of 1/2. Measured on ``Test 2``:
+    ``tau_minus = 18,060`` steps, so over the ~200 steps a mode needs to double
+    the odd part of ``f`` has no restoring term at all.
+
+    What grew in that hole was a period-2 checkerboard on one lattice diagonal,
+    in the *non-porous* runner cells one cell outside a filter's inlet face: the
+    argmax of ``|u|`` alternating between two diagonal neighbours for 31
+    consecutive steps without a break, ``u`` converging on ``(-a, +a, 0)``,
+    growing from ``|u| = 0.016`` at step 19,000 to 0.94 at 20,180 and taking the
+    field non-finite at 20,192. Neither of the two dissipation mechanisms the
+    solver has could touch it: Smagorinsky senses the *symmetric* stress and is
+    blind to an odd-parity mode, and the Guo-Zhao porous drag -- a strict
+    contraction at every velocity -- is identically absent in the cells it grew
+    in. See :data:`~physics.fluid_flow.TAU_MINUS_MAX`.
+
+    These tests seed that mode directly rather than waiting for a jet to excite
+    it, which is what makes them cheap and deterministic. Smagorinsky is off, so
+    ``omega_minus`` is the only channel that can damp the seed and the test
+    measures exactly the quantity the clamp restores.
+    """
+
+    DX_M = 0.0043          # Test 2's own fill grid
+    NU = 0.006 / 7200.0
+    SHAPE = (8, 8, 10)
+    AMPLITUDE = 0.01       # a fifth of the 0.05 design velocity
+    STEPS = 600
+
+    def _closed_box(self, tau_minus_max):
+        """A sealed box of FLUID on Test 2's lattice, at the requested clamp."""
+        import physics.filling as pf
+        from physics.fluid_flow import lattice_units
+
+        obstacle = np.zeros(self.SHAPE, dtype=bool)
+        obstacle[0] = obstacle[-1] = True
+        obstacle[:, 0] = obstacle[:, -1] = True
+        obstacle[:, :, 0] = obstacle[:, :, -1] = True
+        units = lattice_units(
+            self.DX_M, self.NU, u_max_physical_m_s=2.8,
+            tau_minus_max=tau_minus_max,
+        )
+        state = pf.create_state(
+            obstacle, dx_m=self.DX_M, dt_s=units.dt_s, initial_fluid=~obstacle
+        )
+        self.assertEqual(
+            int(np.count_nonzero(state.flags == pf.FLAG_INTERFACE)), 0,
+            "the box must be sealed, so only the momentum path is under test",
+        )
+        return state, units, ~obstacle
+
+    def _seed_checkerboard(self, state, wet):
+        """
+        Put the mode in by hand: ``u = (+a, -a, 0)`` flipping with ``(x + y)``
+        parity, which is the ``(+1, -1, 0)`` diagonal the real mode chose.
+
+        Returns the sign pattern, so the mode's amplitude can be projected back
+        out of ``state.u`` afterwards instead of read off a global maximum -- a
+        global maximum cannot separate this mode from the mean flow, which is
+        exactly why it went unseen for 5,000 steps on the real assembly.
+        """
+        from physics.fluid_flow import equilibrium
+
+        grid = np.meshgrid(*[np.arange(n) for n in self.SHAPE], indexing="ij")
+        sign = np.where((grid[0] + grid[1]) % 2 == 0, 1.0, -1.0)
+        u = np.zeros((3,) + self.SHAPE, dtype=np.float64)
+        u[0] = self.AMPLITUDE * sign * wet
+        u[1] = -self.AMPLITUDE * sign * wet
+        seeded = equilibrium(np.ones(self.SHAPE, dtype=np.float64), u)
+        state.f = np.where(
+            wet, seeded, np.asarray(state.f, dtype=np.float64)
+        ).astype(np.float32)
+        return sign
+
+    @staticmethod
+    def _amplitude(state, wet, sign):
+        """The staggered mode's amplitude, projected out of ``state.u``."""
+        u = np.asarray(state.u, dtype=np.float64)
+        with np.errstate(over="ignore", invalid="ignore"):
+            return float(np.mean((sign * (u[0] - u[1]))[wet]) * 0.5)
+
+    def _trajectory(self, *, use_numba, tau_minus_max):
+        """
+        ``(seed amplitude, [(step, amplitude), ...])`` for one clamp.
+
+        The clamp travels on ``units`` and nowhere else. It used to need a
+        monkeypatch of ``physics.filling.TAU_MINUS_MAX`` alongside the
+        ``lattice_units`` argument, because the kernel and the Smagorinsky path
+        read the module global while only the non-Smagorinsky NumPy branch read
+        ``units`` -- so asking for a non-default ceiling moved one of the three
+        relaxation sites and silently put the two step paths on different
+        schemes. ``LatticeUnits.tau_minus_max`` is now the single authority and
+        the workaround is gone.
+        """
+        import physics.filling as pf
+
+        state, units, wet = self._closed_box(tau_minus_max)
+        self.assertEqual(units.tau_minus_max, tau_minus_max)
+        sign = self._seed_checkerboard(state, wet)
+        kwargs = dict(
+            use_numba=use_numba, track_free_surface=False, smagorinsky=False
+        )
+        with np.errstate(over="ignore", invalid="ignore"):
+            pf.step(state, units, **kwargs)
+            seed = self._amplitude(state, wet, sign)
+            samples = []
+            for k in range(1, self.STEPS + 1):
+                pf.step(state, units, **kwargs)
+                if k % 150 == 0:
+                    samples.append((k, self._amplitude(state, wet, sign)))
+        return seed, samples
+
+    def _both_paths(self):
+        from physics.fluid_flow import NUMBA_AVAILABLE
+
+        return (False, True) if NUMBA_AVAILABLE else (False,)
+
+    def test_the_shipped_clamp_damps_the_mode(self) -> None:
+        """
+        Seeded at 0.01 lattice, the mode decays and stays decayed.
+
+        Measured: 0.43 of the seed by step 150 and 0.37 by step 600, monotone,
+        finite throughout, identically on both paths. ``tau_minus = 5`` gives
+        the odd moments a five-step relaxation time, which is what a period-2
+        mode needs to see.
+        """
+        from physics.fluid_flow import TAU_MINUS_MAX
+
+        self.assertEqual(TAU_MINUS_MAX, 5.0, "the clamp value moved")
+        for use_numba in self._both_paths():
+            with self.subTest(numba=use_numba):
+                seed, samples = self._trajectory(
+                    use_numba=use_numba, tau_minus_max=TAU_MINUS_MAX
+                )
+                self.assertAlmostEqual(seed, self.AMPLITUDE, delta=2e-3)
+                ratios = [a / seed for _, a in samples]
+                self.assertTrue(
+                    all(np.isfinite(r) for r in ratios),
+                    f"the mode went non-finite: {samples}",
+                )
+                self.assertLess(
+                    max(ratios), 0.6,
+                    f"the mode was not damped: amplitude ratios {ratios}",
+                )
+                self.assertLess(
+                    ratios[-1], ratios[0] + 1e-9,
+                    f"the mode stopped decaying: {ratios}",
+                )
+
+    def test_without_the_clamp_the_mode_survives_and_detonates(self) -> None:
+        """
+        The discriminator, so a passing test above cannot be a passing fixture.
+
+        At ``Lambda = 3/16`` exactly -- ``tau_minus = 18,060`` on this lattice
+        -- the same seed does not decay at all: it holds above its seed
+        amplitude through step 450 and the field is **non-finite by step 600**,
+        on both paths. That is the mechanism, in 600 steps of an 8x8x10 box,
+        with no jet and no filter needed to excite it.
+        """
+        for use_numba in self._both_paths():
+            with self.subTest(numba=use_numba):
+                seed, samples = self._trajectory(
+                    use_numba=use_numba, tau_minus_max=float("inf")
+                )
+                ratios = [a / seed for _, a in samples]
+                grew = max((r for r in ratios if np.isfinite(r)), default=0.0)
+                detonated = any(not np.isfinite(r) for r in ratios)
+                self.assertTrue(
+                    grew > 1.0 or detonated,
+                    f"the unclamped scheme damped the mode too, so this "
+                    f"fixture no longer discriminates: ratios {ratios}",
+                )
+
+    def test_the_units_carry_the_clamp_into_both_step_paths(self) -> None:
+        """
+        ``lattice_units(..., tau_minus_max=inf)`` really does reach the solver
+        -- in both paths, and with Smagorinsky in its production default.
+
+        This is the regression test for a seam, not for the physics. The clamp
+        is applied at three places: ``omega_minus_from_magic`` (which fills
+        ``units.omega_minus``, read only when Smagorinsky is off),
+        ``smagorinsky_relaxation`` (the production NumPy path) and inlined in
+        ``collide_kernel`` (both Numba paths). The latter two used to read the
+        module global ``TAU_MINUS_MAX``, so ``lattice_units``' argument reached
+        one site out of three: the documented ``float("inf")`` escape hatch did
+        nothing in the default configuration, and asking for it with
+        ``smagorinsky=False`` put the NumPy path on ``omega_minus = 5.5e-5``
+        while the kernel stayed at 0.2 -- a 3,600x split between paths that
+        ``tests/test_filling_parity.py`` cannot see, because its own fixture
+        uses the default ceiling and so both paths clamp and agree.
+
+        Measured by stepping the same seeded state under each ceiling and
+        differencing the populations: at ``inf`` the two ceilings must disagree
+        (or the ceiling is not reaching the solver at all), and at each ceiling
+        the two *paths* must agree.
+        """
+        import copy
+
+        import physics.filling as pf
+        from physics.fluid_flow import (
+            NUMBA_AVAILABLE, TAU_MINUS_MAX, lattice_units,
+            omega_minus_from_magic,
+        )
+
+        def units_at(ceiling):
+            return lattice_units(
+                self.DX_M, self.NU, u_max_physical_m_s=2.8,
+                tau_minus_max=ceiling,
+            )
+
+        clamped, unclamped = units_at(TAU_MINUS_MAX), units_at(float("inf"))
+        # The two ceilings really are different schemes on this lattice.
+        self.assertAlmostEqual(1.0 / clamped.omega_minus, TAU_MINUS_MAX, places=12)
+        self.assertGreater(1.0 / unclamped.omega_minus, 18_000.0)
+        self.assertEqual(
+            unclamped.omega_minus,
+            omega_minus_from_magic(
+                unclamped.omega_plus, tau_minus_max=float("inf")
+            ),
+        )
+
+        def stepped(units, *, use_numba, smagorinsky):
+            state, _, wet = self._closed_box(units.tau_minus_max)
+            self._seed_checkerboard(state, wet)
+            for _ in range(4):
+                pf.step(
+                    state, units, use_numba=use_numba,
+                    track_free_surface=False, smagorinsky=smagorinsky,
+                )
+            return np.asarray(state.f, dtype=np.float64)
+
+        paths = (False, True) if NUMBA_AVAILABLE else (False,)
+        for smagorinsky in (True, False):
+            for use_numba in paths:
+                with self.subTest(smagorinsky=smagorinsky, numba=use_numba):
+                    a = stepped(clamped, use_numba=use_numba,
+                                smagorinsky=smagorinsky)
+                    b = stepped(unclamped, use_numba=use_numba,
+                                smagorinsky=smagorinsky)
+                    self.assertFalse(
+                        np.allclose(a, b, rtol=1e-9, atol=1e-12),
+                        "the ceiling on units made no difference to the "
+                        "populations, so this path is reading the clamp from "
+                        "somewhere other than the units it was handed",
+                    )
+
+        if not NUMBA_AVAILABLE:
+            self.skipTest("numba is not installed; path agreement not checkable")
+        for ceiling, label in ((TAU_MINUS_MAX, "clamped"),
+                               (float("inf"), "unclamped")):
+            for smagorinsky in (True, False):
+                with self.subTest(ceiling=label, smagorinsky=smagorinsky):
+                    units = units_at(ceiling)
+                    np.testing.assert_allclose(
+                        stepped(units, use_numba=False,
+                                smagorinsky=smagorinsky),
+                        stepped(units, use_numba=True,
+                                smagorinsky=smagorinsky),
+                        rtol=1e-5, atol=1e-7,
+                        err_msg=(
+                            f"the two step paths disagree at "
+                            f"tau_minus_max={label}: one of them is not "
+                            f"reading units.tau_minus_max"
+                        ),
+                    )
+
+    def test_both_paths_agree_on_the_clamped_trajectory(self) -> None:
+        """
+        The clamp is inlined in the kernel and applied by
+        ``omega_minus_from_magic`` in the NumPy path, so a one-sided edit is
+        possible and would be invisible to the amplitude bounds above.
+
+        ``tests/test_filling_parity.py`` covers this generally -- its fixture
+        runs at ``tau = 0.500003``, deep inside the clamp -- but it does not
+        seed this mode, so the agreement is pinned here too.
+        """
+        from physics.fluid_flow import NUMBA_AVAILABLE, TAU_MINUS_MAX
+
+        if not NUMBA_AVAILABLE:
+            self.skipTest("numba is not installed")
+        seed_np, numpy_samples = self._trajectory(
+            use_numba=False, tau_minus_max=TAU_MINUS_MAX
+        )
+        seed_nb, numba_samples = self._trajectory(
+            use_numba=True, tau_minus_max=TAU_MINUS_MAX
+        )
+        self.assertAlmostEqual(seed_np, seed_nb, places=6)
+        for (step, a), (_, b) in zip(numpy_samples, numba_samples):
+            with self.subTest(step=step):
+                self.assertAlmostEqual(a, b, places=6)
 
 
 class StatusReportingTests(unittest.TestCase):
@@ -3195,9 +3540,14 @@ class PorousDragForceTests(unittest.TestCase):
     60x more of them than the filter's 1.4 % of the mesh would predict, all in
     interface cells, persistent across thousands of steps, aborting the fill on
     the precursor guard at step 12,000. No floor on the reconstruction can fix
-    it -- with ``omega_minus ~ 5.6e-5`` the TRT barely relaxes the antisymmetric
-    part, so the gap between a braked equilibrium and an unbraked momentum is
-    frozen in and grows until ``|f_asym|`` passes ``f_sym``.
+    it -- at the time this was measured ``omega_minus`` was ~5.6e-5 on this
+    lattice, so the TRT barely relaxed the antisymmetric part, the gap between a
+    braked equilibrium and an unbraked momentum was frozen in, and it grew until
+    ``|f_asym|`` passed ``f_sym``. ``TAU_MINUS_MAX`` has since bounded
+    ``omega_minus`` at 0.2 for exactly that reason -- see
+    :class:`GhostModeDampingTests` -- so the freezing is gone; the momentum
+    source this fixture tests is not, and it is what the assertions below are
+    about.
 
     The fixture is deliberately *not* a free surface: no interface cells, no
     reconstruction, no mass exchange. It is the collision on its own, so a

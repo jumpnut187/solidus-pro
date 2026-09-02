@@ -10,8 +10,12 @@ Two of these have already earned their keep:
   mass into the fluid on step 1, which drove a fluid "at rest" to Ma ~ 0.1.
 - Hydrostatics caught the Guo forcing prefactor using ``1 - 1/(2 tau)`` (the
   BGK form) instead of ``1 - omega_minus/2``. Under TRT at casting viscosities
-  that applies gravity at ~2e-4 of its true strength -- with no instability and
-  no error, just a fill that never develops a pressure gradient.
+  that applied gravity at a small fraction of its true strength -- with no
+  instability and no error, just a fill that never develops a pressure
+  gradient. On the lattice below the fraction is **a tenth** since
+  ``TAU_MINUS_MAX`` bounded ``omega_minus`` at 0.2; before that ceiling it was
+  **4.84e-5**. The clamp makes the bug four orders of magnitude less severe and
+  no less silent.
 
 Neither showed up in the unit tests, and neither would have shown up in a
 foundry case except as "the fill looks wrong".
@@ -197,8 +201,9 @@ class HydrostaticTests(unittest.TestCase):
         """
         From a uniform start the column must actually develop its pressure
         gradient. This is the assertion the BGK-prefactor bug failed: gravity
-        was applied at 2e-4 strength, so drho stayed at ~1e-6 instead of
-        reaching the analytic 1.5e-3.
+        was applied at ~5e-5 of strength (4.84e-5 at the tau this runs at,
+        before ``TAU_MINUS_MAX``; a tenth after it), so drho stayed at ~1e-6
+        instead of reaching the analytic 1.5e-3.
         """
         obstacle = closed_box(10)
         units = lattice_units(DX_M, WCB_NU, u_max_physical_m_s=1.0)

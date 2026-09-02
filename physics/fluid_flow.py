@@ -100,6 +100,120 @@ INV_CS2 = 3.0
 #: channel width.
 TRT_MAGIC_PARAMETER = 3.0 / 16.0
 
+#: Ceiling on the antisymmetric relaxation time ``tau_minus = 1 / omega_minus``.
+#:
+#: In TRT, ``omega_plus`` sets the shear viscosity and ``omega_minus`` does not:
+#: it enters only through ``Lambda = (1/omega_plus - 1/2)(1/omega_minus - 1/2)``,
+#: which fixes where halfway bounce-back puts the wall *and* how fast the odd,
+#: momentum-carrying "ghost" modes are damped. Holding
+#: :data:`TRT_MAGIC_PARAMETER` at 3/16 as ``tau_plus -> 1/2`` therefore drives
+#: ``omega_minus -> 0``, and a casting lattice sits at ``tau_plus`` within 1e-5
+#: of 1/2 (see :func:`lattice_units`: shrinking dt pushes tau *closer* to the
+#: limit, so this is not tunable away).
+#:
+#: Measured on ``Test 2`` at ``tau_plus = 0.500010``: ``tau_minus = 18,060``
+#: steps. The odd part of ``f`` is then a pure accumulator of the forcing with
+#: no restoring term over any timescale the solve reaches. A period-2
+#: checkerboard mode on one lattice diagonal grew for ~5,000 steps in the
+#: non-porous runner cells one cell outside a filter's inlet face -- the argmax
+#: of ``|u|`` alternating between two diagonal neighbours for 31 consecutive
+#: steps without a break, ``u`` converging on ``(-a, +a, 0)`` -- from
+#: ``|u| = 0.016`` at step 19,000 to 0.94 at 20,180, and the field went
+#: non-finite at step 20,192.
+#:
+#: **Smagorinsky cannot see it.** Its sensor is the *symmetric* non-equilibrium
+#: stress ``|sum_i c_i c_j (f_i - eq_i)|``, and an odd-parity staggered mode puts
+#: its energy in the antisymmetric moments, so ``tau_eff`` barely moves. Measured
+#: against :func:`smagorinsky_relaxation` at this tau: on a quiescent field it
+#: leaves ``tau_minus`` at 18,060, and at a realistic strain (``tau_eff``
+#: 0.5001) it only brings it down to 1,400-4,700 -- still hundreds of times too
+#: slow. The eddy viscosity does not reach ``tau_minus`` = 5 on its own until
+#: ``tau_eff`` = 0.541667 -- the clamp's own threshold, unsurprisingly, since
+#: that is what the threshold *is*; at ``tau_eff`` = 0.53 it is still 6.75. By
+#: the time a cell is straining that hard the damage is done. It is
+#: also switched off inside filter cells by design. Nor is the Guo-Zhao porous
+#: drag implicated: it is a strict contraction at every velocity
+#: (``sup |m'/m| = 0.99998``) and the runaway cells carry none of it -- they are
+#: non-porous, with ``c1 = 0`` and a measured damping ratio of exactly 0.
+#:
+#: **Why 5.** The clamp binds only where
+#: ``tau_plus < magic/(TAU_MINUS_MAX - 1/2) + 1/2 = 0.541667``, so any solve at
+#: a larger tau keeps the exact ``Lambda = 3/16`` wall location -- including
+#: ``tests/test_filling_benchmarks.py``'s Poiseuille wall-position benchmark at
+#: ``tau = 0.8``. Below it, ``Lambda`` becomes
+#: ``(tau_plus - 1/2)(TAU_MINUS_MAX - 1/2)`` -- 4.67e-5 at Test 2's tau.
+#:
+#: **What that costs, solved exactly.** Steady Stokes-TRT Poiseuille with
+#: halfway bounce-back has effective half-width
+#:
+#:     ``(H_eff/2)^2 = (H/2)^2 + (4/3) (Lambda - 3/16)``
+#:
+#: so the clamp removes a **flat 0.25 cell^2 of flow-carrying width**,
+#: independently of channel width, against exactly 0 before (a casting tau had
+#: ``Lambda = 3/16`` by construction). As a relative flow-rate deficit
+#: ``-0.25/(H/2)^2``, on Test 2's own measured channels:
+#:
+#:     ===============  ========  ================
+#:     channel          H cells   flow deficit
+#:     ===============  ========  ================
+#:     gate                    3          -11.1 %
+#:     runner                  7           -2.0 %
+#:     sprue                  11           -0.8 %
+#:     filter                 15           -0.4 %
+#:     MIN_CHOKE                2          -25.0 %
+#:     ===============  ========  ================
+#:
+#: The effective *viscosity* is untouched -- fitted ``nu_eff`` matches
+#: ``(tau - 1/2)/3`` to 1.3e-10 under either Lambda -- so the whole cost lands
+#: on the boundary. The direction agrees with the measured whole-assembly
+#: outcome below: 2.06 % fewer wet cells, i.e. less flow, not more.
+#:
+#: **The cost is intrinsic, not a property of 5.** Any practical ceiling gives
+#: essentially ``Lambda ~ 0`` at ``tau_plus ~ 1/2``, hence the same
+#: ``-0.25 cell^2``: the term is ``(4/3)(Lambda - 3/16)`` and 3/16 dominates it
+#: whatever the ceiling. Raising ``TAU_MINUS_MAX`` buys back no accuracy worth
+#: having and gives the ghost mode room, so it is not a tuning knob -- it is a
+#: choice between a biased wall and a divergent solve. See
+#: :data:`~core.filling_stage.MIN_CHOKE_THICKNESS_CELLS`, whose thresholds were
+#: calibrated at ``Lambda = 3/16``.
+#:
+#: **This is not byte-identical to the unclamped scheme for any real pour**, and
+#: it cannot be: every casting lattice runs below 0.541667, and the runaway is in
+#: non-porous cells, so the change cannot be confined to filters. Measured on
+#: Test 2: the run reaches its fill-time cap instead of diverging (23,284 steps
+#: against a divergence at 20,200) with no non-finite cell, ``max|u|`` never
+#: above 0.052 against 0.938, zero ledger rows above 0.1 against 130, and the
+#: runaway cell flat at 0.0055. All 123 earlier "damped velocity excursions"
+#: vanish as well -- they were the same ghost mode, not turbulence -- so the
+#: unfixed velocity field's maximum was contaminated by roughly a factor of two
+#: for the whole run. Wet mass agrees to 0.015 %; wet cells differ by 2.06 %,
+#: which is the honest price of moving the wall. ``Full_Gating_Test`` and
+#: ``Filling_Test`` are therefore no longer bitwise regression sentinels for
+#: this change and must be re-baselined on physical outcomes.
+#:
+#: Pass ``tau_minus_max=float("inf")`` to :func:`lattice_units` wherever an
+#: exact ``Lambda = 3/16`` is what is being measured. That value rides on
+#: :attr:`LatticeUnits.tau_minus_max` and **all three** relaxation sites read it
+#: from there, never from this global: ``omega_minus_from_magic`` fills
+#: ``units.omega_minus``, ``smagorinsky_relaxation`` is handed
+#: ``units.tau_minus_max``, and the kernel receives it as an argument. This
+#: constant is the default only. While two of the three read the global instead,
+#: the escape hatch reached one site in three -- so it did nothing at all in the
+#: production configuration, and asking for it with ``smagorinsky=False`` put a
+#: 3,600x difference in the odd relaxation rate between the two step paths.
+#:
+#: **Side effect on the filter-exchange regression fixtures.** The eps-weighted
+#: porous exchange deleted in the previous round drew its gain from the exchange
+#: *amplitude*, which this ceiling cuts, so on a quiescent fixture that defect no
+#: longer runs away -- it settles at a fixed bias (+0.51 % against the shipped
+#: rule's +0.055 % on the closed-box witness, flat to step 8,000, where before
+#: the clamp it reached +4.2 % at 2,000 steps and +14 % at 4,000). The defect is
+#: unchanged on a real pour, where the front supplies the amplitude and the
+#: diagnosis measured eps 7.76 at the filter outlet.
+#: ``tests/test_filling_stability.py::PorousPairWeightTests`` carries the
+#: recalibrated bounds and the reasoning.
+TAU_MINUS_MAX = 5.0
+
 #: Gravitational acceleration, m/s^2. Mirrors ``physics.units.GRAVITY_M_S2``;
 #: duplicated rather than imported only because this module is deliberately
 #: dependency-free at import time for the Numba kernels.
@@ -122,10 +236,23 @@ class LatticeUnits:
         nu_lattice: Kinematic viscosity in lattice units.
         tau: Relaxation time, ``3 * nu_lattice + 1/2``.
         omega_plus: Symmetric relaxation rate, ``1 / tau``.
-        omega_minus: Antisymmetric rate, from the magic parameter.
+        omega_minus: Antisymmetric rate, from the magic parameter, capped by
+            ``tau_minus_max``.
         gravity_lattice: Gravitational acceleration in lattice units.
         u_max_lattice: Mach guard the timestep was chosen to satisfy.
         u_max_physical: Physical velocity that maps to ``u_max_lattice``.
+        tau_minus_max: The ceiling that produced ``omega_minus``. Carried on the
+            state rather than read from :data:`TAU_MINUS_MAX` at each use, so
+            that a solve has **one** authority for it the way it already does
+            for ``tau`` and the magic parameter. It has to be here: the eddy
+            viscosity recomputes ``omega_minus`` per cell every step and the
+            Numba kernel recomputes it from ``tau``, so neither of them reads
+            ``omega_minus`` above -- they read this. When it lived in the module
+            global instead, ``lattice_units``' own ``tau_minus_max`` argument
+            reached exactly one of the three relaxation sites, the documented
+            ``float("inf")`` escape hatch did nothing in the default
+            configuration, and asking for it with ``smagorinsky=False`` put a
+            3,600x difference between the two step paths.
     """
 
     dx_m: float
@@ -137,6 +264,7 @@ class LatticeUnits:
     gravity_lattice: float
     u_max_lattice: float
     u_max_physical: float
+    tau_minus_max: float = TAU_MINUS_MAX
 
     @property
     def velocity_scale(self) -> float:
@@ -159,6 +287,7 @@ def lattice_units(
     u_max_physical_m_s: float,
     u_max_lattice: float = 0.05,
     magic_parameter: float = TRT_MAGIC_PARAMETER,
+    tau_minus_max: float = TAU_MINUS_MAX,
     gravity_m_s2: float = GRAVITY_M_S2,
 ) -> LatticeUnits:
     """
@@ -183,16 +312,23 @@ def lattice_units(
         u_max_lattice: Lattice velocity that maps to it. Keep well under the
             lattice sound speed (0.577); 0.05 is a conventional safe choice.
         magic_parameter: TRT Lambda. Defaults to 3/16.
+        tau_minus_max: Ceiling on the antisymmetric relaxation time. Binds
+            below ``tau = 0.541667``, which is every casting lattice -- see
+            :data:`TAU_MINUS_MAX`. ``float("inf")`` recovers exact Lambda. It is
+            recorded on the returned :class:`LatticeUnits` and every relaxation
+            site reads it from there, so this argument is the one place a solve's
+            ceiling is chosen.
         gravity_m_s2: Gravitational acceleration.
 
     Returns:
         A populated :class:`LatticeUnits`.
 
     Raises:
-        ValueError: If any input is non-positive, or if the resulting tau is
-            not above 1/2. A tau at or below 1/2 is not a small inaccuracy --
-            the scheme has negative viscosity and diverges -- so it is refused
-            here rather than left to blow up thousands of steps later.
+        ValueError: If any input is non-positive, if ``tau_minus_max`` is not
+            above 1/2, or if the resulting tau is not above 1/2. A tau at or
+            below 1/2 is not a small inaccuracy -- the scheme has negative
+            viscosity and diverges -- so it is refused here rather than left to
+            blow up thousands of steps later.
     """
     if dx_m <= 0:
         raise ValueError(f"dx_m must be positive, got {dx_m}")
@@ -209,6 +345,7 @@ def lattice_units(
         )
     if magic_parameter <= 0:
         raise ValueError(f"magic_parameter must be positive, got {magic_parameter}")
+    _validate_tau_minus_max(tau_minus_max)
 
     dt_s = u_max_lattice * dx_m / u_max_physical_m_s
     nu_lattice = kinematic_viscosity_m2_s * dt_s / (dx_m * dx_m)
@@ -220,7 +357,9 @@ def lattice_units(
         )
 
     omega_plus = 1.0 / tau
-    omega_minus = omega_minus_from_magic(omega_plus, magic_parameter)
+    omega_minus = omega_minus_from_magic(
+        omega_plus, magic_parameter, tau_minus_max
+    )
     gravity_lattice = gravity_m_s2 * dt_s * dt_s / dx_m
 
     return LatticeUnits(
@@ -233,23 +372,65 @@ def lattice_units(
         gravity_lattice=float(gravity_lattice),
         u_max_lattice=float(u_max_lattice),
         u_max_physical=float(u_max_physical_m_s),
+        tau_minus_max=float(tau_minus_max),
     )
 
 
+def _validate_tau_minus_max(tau_minus_max: float) -> None:
+    """
+    Refuse a ceiling that would put ``omega_minus`` outside the stable range.
+
+    ``omega_minus = 1 / tau_minus``, so the ceiling is a *floor* on the rate,
+    and TRT needs ``omega_minus`` in ``(0, 2)``. Checked here rather than left
+    to the arithmetic because every value below 1/2 fails silently and
+    differently: 0.4 gives ``omega_minus = 2.5``, past the stability limit, and
+    over-relaxes the odd moments until the run diverges with no diagnostic; 0.5
+    gives exactly 2.0, whose ``guo_prefactor = 1 - omega_minus/2`` is zero, so
+    the entire Guo body force vanishes and gravity stops acting with no error at
+    all; 0 raises ZeroDivisionError from inside the arithmetic rather than the
+    ValueError every neighbouring bad input gets; negative gives a negative
+    rate. ``float("inf")`` is allowed and means "no ceiling" -- the exact
+    magic-parameter relation.
+    """
+    if not tau_minus_max > 0.5:
+        raise ValueError(
+            f"tau_minus_max must be above 1/2 (or inf for no ceiling), got "
+            f"{tau_minus_max}: at or below 1/2 it implies omega_minus >= 2, "
+            f"outside the TRT stable range, and at 1/2 exactly it zeroes the "
+            f"Guo force prefactor"
+        )
+
+
 def omega_minus_from_magic(
-    omega_plus: float, magic_parameter: float = TRT_MAGIC_PARAMETER
+    omega_plus: float,
+    magic_parameter: float = TRT_MAGIC_PARAMETER,
+    tau_minus_max: float = TAU_MINUS_MAX,
 ) -> float:
     """
     Antisymmetric relaxation rate from the symmetric one.
 
-    Inverts ``Lambda = (1/omega+ - 1/2)(1/omega- - 1/2)``.
+    Inverts ``Lambda = (1/omega+ - 1/2)(1/omega- - 1/2)``, then caps the
+    resulting ``tau_minus`` at ``tau_minus_max``. The cap is what keeps the odd
+    ghost modes damped as ``tau_plus -> 1/2``; see :data:`TAU_MINUS_MAX` for the
+    mode it removes and for the ``Lambda`` accuracy it trades away. It binds
+    only below ``tau_plus = 0.541667``; pass ``float("inf")`` to recover the
+    exact magic-parameter relation.
+
+    Raises:
+        ValueError: If ``omega_plus`` is outside ``(0, 2)``, if it implies
+            ``tau <= 1/2``, or if ``tau_minus_max`` is not above 1/2 -- see
+            :func:`_validate_tau_minus_max` for what each bad ceiling does.
     """
     if omega_plus <= 0.0 or omega_plus >= 2.0:
         raise ValueError(f"omega_plus must be in (0, 2), got {omega_plus}")
+    _validate_tau_minus_max(tau_minus_max)
     half_inverse_plus = 1.0 / omega_plus - 0.5
     if half_inverse_plus <= 0.0:
         raise ValueError(f"omega_plus={omega_plus} implies tau <= 1/2")
-    return 1.0 / (magic_parameter / half_inverse_plus + 0.5)
+    tau_minus = magic_parameter / half_inverse_plus + 0.5
+    if tau_minus > tau_minus_max:
+        tau_minus = tau_minus_max
+    return 1.0 / tau_minus
 
 
 # ---------------------------------------------------------------------------
@@ -356,10 +537,16 @@ def guo_force_terms(
 
     In BGK ``omega_minus == omega_plus == 1/tau``, which recovers the familiar
     ``1 - 1/(2 tau)``. In TRT the two rates are independent: at the viscosities
-    here ``omega_plus`` approaches 2 while ``omega_minus`` falls to ~2.6e-4, so
-    using ``tau`` injects roughly 2e-4 of the intended force. The symptom is
-    not a crash -- gravity simply does almost nothing, a hydrostatic column
-    never develops its pressure gradient, and the fill runs impossibly slowly.
+    here ``omega_plus`` approaches 2 while ``omega_minus`` is held at 0.2 by
+    :data:`TAU_MINUS_MAX`, so using ``tau`` injects **a tenth** of the intended
+    force (measured on Test 2's lattice, ``tau = 0.500010``: 1.0002e-1 of
+    ``F``). Before that ceiling existed ``omega_minus`` was 5.54e-5 here and the
+    same mistake injected **4.84e-5** of the force. The symptom is not a crash
+    either way -- gravity simply does almost nothing, a hydrostatic column never
+    develops its pressure gradient, and the fill runs impossibly slowly. The
+    clamp makes the bug an order of magnitude less severe and no less silent,
+    which is why the assertion in ``tests/test_filling_lattice.py`` pins the
+    identity rather than a magnitude.
 
     Args:
         u: Velocity, shape ``(3, ...)``.
@@ -735,11 +922,27 @@ def porous_drag_force(
     predict, and where the fill aborted on the precursor guard at step 12,000.
 
     The negatives are not a reconstruction artefact and no floor fixes them.
-    With ``omega_minus ~ 5.6e-5`` the TRT barely relaxes the antisymmetric part,
-    so once the equilibrium is built from a braked ``u`` while the populations
-    carry an unbraked momentum, the gap ``f_asym - e_asym`` is frozen in and
-    grows. When ``|f_asym|`` passes ``f_sym`` the upstream population of the
-    pair goes negative and stays negative.
+    Once the equilibrium is built from a braked ``u`` while the populations carry
+    an unbraked momentum, the gap ``f_asym - e_asym`` persists and grows, and
+    when ``|f_asym|`` passes ``f_sym`` the upstream population of the pair goes
+    negative and stays negative.
+
+    **The mechanism that made that gap permanent is gone; the reason for this
+    term is not.** It used to be spelled "with ``omega_minus ~ 5.6e-5`` the TRT
+    barely relaxes the antisymmetric part, so the gap is frozen in", and
+    :data:`TAU_MINUS_MAX` removed exactly that premise -- ``omega_minus`` is now
+    0.2 on the same lattice, a 3,600x faster relaxation, so an odd-moment
+    imbalance no longer sits there indefinitely. Anyone auditing whether this
+    term is still needed should not conclude from that it can go. It is needed
+    for the plain physical reason above: **a porous cell has to have a terminal
+    velocity**, and it only gets one if the drag enters the *momentum* budget
+    through the Guo source. Without it the cell accelerates under gravity
+    without bound, whatever the odd moments do. Independently measured on a
+    jet-into-a-porous-face fixture at the real filter coefficients: removing
+    this term kills the fixture at *every* inlet velocity including the 0.05
+    design velocity (dead at step 1,402), and doubling it cuts peak ``|u|`` from
+    11.27 to 3.51. More drag is monotonically better and never worse -- this
+    force is the only momentum sink a filter cell has.
 
     Where the formula comes from
     ----------------------------
@@ -942,6 +1145,7 @@ def smagorinsky_relaxation(
     smagorinsky_cs: float = SMAGORINSKY_CS,
     suppress: np.ndarray | None = None,
     magic_parameter: float = TRT_MAGIC_PARAMETER,
+    tau_minus_max: float = TAU_MINUS_MAX,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Per-cell TRT relaxation rates including the Smagorinsky eddy viscosity.
@@ -968,6 +1172,10 @@ def smagorinsky_relaxation(
             closure for those pore-scale losses, so adding eddy viscosity on
             top double-counts them.
         magic_parameter: TRT Lambda.
+        tau_minus_max: Ceiling on the antisymmetric relaxation time. The eddy
+            viscosity raises ``tau_eff`` and so lowers ``tau_minus``, but it
+            senses only the *symmetric* stress and is blind to the odd ghost
+            mode this ceiling exists to damp -- see :data:`TAU_MINUS_MAX`.
 
     Returns:
         ``(omega_plus, omega_minus)`` arrays with the spatial shape of ``rho``.
@@ -991,7 +1199,8 @@ def smagorinsky_relaxation(
 
     omega_plus = 1.0 / tau_eff
     half = 1.0 / omega_plus - 0.5
-    omega_minus = 1.0 / (magic_parameter / np.maximum(half, 1e-12) + 0.5)
+    tau_minus = magic_parameter / np.maximum(half, 1e-12) + 0.5
+    omega_minus = 1.0 / np.minimum(tau_minus, tau_minus_max)
     return omega_plus, omega_minus
 
 
@@ -1045,7 +1254,7 @@ if NUMBA_AVAILABLE:
         f, flags, porosity, drag_c0, drag_c1,
         C, W, OPP,
         tau, gravity_lattice, gx, gy, gz,
-        smagorinsky_cs, use_smagorinsky, magic,
+        smagorinsky_cs, use_smagorinsky, magic, tau_minus_max,
         rho_out, u_out, post_out, rho32_out, u32_out,
     ):
         """
@@ -1335,10 +1544,23 @@ if NUMBA_AVAILABLE:
                             tau_eff = tau
                         omega_plus = 1.0 / tau_eff
 
+                    # ``tau_minus`` is capped, not just inverted. Lambda =
+                    # 3/16 at a casting tau leaves the odd, momentum-carrying
+                    # moments with an 18,000-step relaxation time, and the
+                    # Smagorinsky branch above cannot help: its sensor is the
+                    # symmetric stress and the mode that exploits this is
+                    # odd-parity. Parity contract with
+                    # physics.fluid_flow.omega_minus_from_magic and
+                    # smagorinsky_relaxation, which apply the same cap; see
+                    # TAU_MINUS_MAX for the measured mode and the accuracy
+                    # traded for it.
                     half = 1.0 / omega_plus - 0.5
                     if half < 1e-12:
                         half = 1e-12
-                    omega_minus = 1.0 / (magic / half + 0.5)
+                    tau_minus = magic / half + 0.5
+                    if tau_minus > tau_minus_max:
+                        tau_minus = tau_minus_max
+                    omega_minus = 1.0 / tau_minus
                     guo_prefactor = 1.0 - 0.5 * omega_minus
 
                     # --- TRT collision with Guo source ---

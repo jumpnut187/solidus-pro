@@ -1911,10 +1911,14 @@ def step(
 
     # The Guo-Zhao drag, added to the body force so the collision's momentum
     # budget carries it. ``macroscopic`` has already braked ``u`` with it, but
-    # the equilibrium is not where a force acts: without this term the
-    # populations inside a filter accelerate under gravity for ever and the
-    # frozen antisymmetric non-equilibrium drives them negative. Exactly zero
-    # off a filter, so a no-filter run is bit-identical. See
+    # the equilibrium is not where a force acts: without this term a filter cell
+    # has no terminal velocity and its populations accelerate under gravity for
+    # ever, which is what drives them negative. That is the whole reason for the
+    # term -- not the frozen antisymmetric non-equilibrium the comment used to
+    # cite, whose premise TAU_MINUS_MAX removed. Measured on a jet fixture at
+    # the real filter coefficients: removing this kills the run at every inlet
+    # velocity including the design velocity, and doubling it cuts peak |u| by
+    # 3x. Exactly zero off a filter, so a no-filter run is bit-identical. See
     # physics.fluid_flow.porous_drag_force. Mirrored in collide_kernel.
     if not state.porous.is_inert:
         force = force + porous_drag_force(
@@ -1939,6 +1943,7 @@ def step(
             units.tau,
             smagorinsky_cs=smagorinsky_cs,
             suppress=state.porous.drag_c1 > 0.0,
+            tau_minus_max=units.tau_minus_max,
         )
     else:
         omega_plus = units.omega_plus
@@ -2088,6 +2093,7 @@ def _collide_stream_numba(
         float(smagorinsky_cs),
         bool(smagorinsky),
         float(TRT_MAGIC_PARAMETER),
+        float(units.tau_minus_max),
         rho, u, post, rho32, u32,
     )
     state.rho = rho32

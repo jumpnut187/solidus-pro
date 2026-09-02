@@ -7,11 +7,194 @@ design document; `docs/filling_implementation.md` is the plan and
 
 ## Current state — read this first
 
+**Round 5 removed the divergence round 4 uncovered.** The mold-pad and
+filter-exchange fixes below cleared both of Test 2's blow-ups and exposed a
+third, at step 20,200: an **undamped odd-parity momentum mode**. It is fixed by
+one clamp, and the fix is not free — read "What moved, and what it cost".
+
+### The defect: ω⁻ → 0 as τ → ½
+
+In TRT, `ω⁺` sets the shear viscosity and `ω⁻` does not. `ω⁻` enters only
+through Λ = (1/ω⁺ − ½)(1/ω⁻ − ½), which fixes where halfway bounce-back puts the
+wall **and** how fast the odd, momentum-carrying "ghost" modes are damped.
+Λ = 3/16 is the wall-optimal choice — and holding it as τ⁺ → ½ sends ω⁻ → 0.
+Every casting lattice sits within 1e-5 of ½, and `lattice_units`' own docstring
+says shrinking `dt` pushes τ *closer* to the limit, so this is not tunable away
+by resolution.
+
+Measured on Test 2 at τ⁺ = 0.500010: **τ⁻ = 18,060 steps.** Over the ~200 steps
+a mode needs to double, the odd part of `f` is a pure accumulator of the forcing
+with no restoring term. What grew in that hole was a **period-2 checkerboard on
+one lattice diagonal**, in the **non-porous runner cells one cell outside filter
+#1's inlet face** — the argmax of |u| alternating between two diagonal
+neighbours for **31 consecutive steps without a break**, `u` converging on
+(−a, +a, 0), growing super-exponentially from |u| = 0.016 at step 19,000 to 0.94
+at 20,180 and taking the field non-finite at **20,192**. Extrapolating the
+earliest growth rate backwards puts the onset near step **15,000**: it had been
+growing for 5,000 steps.
+
+**Neither dissipation mechanism the solver has could touch it.** Smagorinsky
+senses the *symmetric* non-equilibrium stress, and an odd-parity staggered mode
+puts its energy in the antisymmetric moments, so `tau_eff` barely moves — and it
+is switched off inside filter cells by design anyway. Measured against
+`smagorinsky_relaxation` directly at this τ: on a quiescent field it leaves
+τ⁻ at 18,060, and at a realistic strain (`tau_eff` 0.5001) it only brings τ⁻
+down to 1,400–4,700 — still hundreds of times too slow. It takes a *violent*
+strain, `tau_eff` above 0.53, before the eddy viscosity reaches τ⁻ ≈ 5 on its
+own, which is to say only after the damage is done. The Guo-Zhao porous drag
+is a strict contraction at every velocity (sup |m′/m| = 0.99998, maximum damping
+at |u| = 0.72 where momentum is annihilated in one step) and is **identically
+absent** in the cells the mode grew in: they are porosity 1 with c₁ = 0 and a
+measured damping ratio of exactly 0 at all 61 samples. Removing the drag from
+the jet fixture kills it at *every* velocity including the 0.05 design velocity;
+doubling it cuts peak |u| from 11.27 to 3.51. **The drag is the stabiliser** —
+`f1daf97` was right and should stay.
+
+Also ruled out by measurement: Mach/compressibility (the mode grows from
+Ma 0.027, *below* the design velocity, with ρ inside 1.0000–1.0121 throughout),
+any interaction with round 4 (the runaway cells are FLUID at ε ≈ 1 with no
+mass-side observable at all), and float32 population overflow (max |f| over the
+whole growth window is 6.07, 37 orders below the ceiling — the overflow warning
+is downstream).
+
+### The fix: cap τ⁻ at 5
+
+`physics.fluid_flow.TAU_MINUS_MAX = 5`, applied in `omega_minus_from_magic`, in
+`smagorinsky_relaxation` and inlined in `collide_kernel` — all three, or the two
+step paths would solve different schemes and `tests/test_filling_parity.py`
+would fail, which is the safety property. It binds only where
+τ⁺ < Λ/(τ⁻ₘₐₓ − ½) + ½ = **0.541667**, so anything at a larger τ keeps the exact
+Λ = 3/16 wall location, including the Poiseuille wall-position benchmark at
+τ = 0.8. Pass `tau_minus_max=float("inf")` to `lattice_units` where exact Λ is
+the thing being measured; the ceiling rides on `LatticeUnits.tau_minus_max` and
+all three relaxation sites read it from there, so that escape hatch reaches the
+kernel and the eddy-viscosity path as well as `units.omega_minus`. It has to be
+one authority per state: while two of the three read a module global instead,
+asking for `inf` changed one site in three and put a 3,600× split between the
+two step paths.
+
+### What moved, and what it cost
+
+On Test 2, τ⁻ = 18,060 → 5:
+
+| | before | after |
+|---|---|---|
+| outcome | `diverged`, **step 20,200** | `time_capped`, **step 23,284** |
+| first non-finite | step 20,192 | **none** |
+| max\|u\| over the run | **0.938** | **0.052** |
+| max\|u\| p99 / median | 0.352 / 0.058 | 0.046 / 0.034 |
+| ledger rows with max\|u\| > 0.1 | **130** | **0** |
+| negative populations, last row | 152 | **0** |
+| \|u\| at the runaway cell | 0.016 → 0.94 | **0.0055, flat** |
+
+Three things in that table matter beyond the divergence:
+
+1. **The mode never forms**, rather than being damped after the fact: |u| at the
+   runaway cell sits at 0.0050–0.0064 for 4,200 consecutive samples with a
+   fitted growth rate of +4.9e-5/step, which is zero to the precision of the
+   fit.
+2. **All 123 of the earlier "damped velocity excursions" are gone too.** The
+   "marginally stable for 16,000 steps" character recorded in round 4 was not
+   physical turbulence — it was this same ghost mode, excited repeatedly and
+   only marginally decaying each time.
+3. **It is an accuracy fix as much as a stability fix.** Compared at equal
+   steps, max|u| roughly halves throughout (0.069 → 0.039 at step 6,000;
+   0.068 → 0.033 at 20,000). The unfixed velocity field's maximum was ghost-mode
+   contamination by about a factor of two for the whole run, and the median now
+   sits at 0.034, under the 0.05 the timestep was sized for.
+
+**The cost, stated plainly: this is not byte-identical for any real pour.** Every
+casting lattice runs below τ = 0.541667, and the mode is in non-porous cells so
+the change cannot be confined to filters. Wet mass is unaffected — it agrees to
+**0.015 %** at step 20,000 — but wet cells differ by **−2.06 %**, and that is
+the effective wall moving off the node midpoint. Solved exactly for steady
+Stokes-TRT Poiseuille, `(H_eff/2)² = (H/2)² + (4/3)(Λ − 3/16)`: the clamp costs
+a flat **0.25 cell²** of flow-carrying width at any width, which is **−11.1 % of
+the flow through a 3-cell channel** and −25 % through a 2-cell one, against
+exactly 0 before. Viscosity is untouched. It is intrinsic to damping the mode
+rather than a property of the value 5 — see "Λ is not 3/16 on any real pour"
+under Known limits for the full table and what it means for the choke
+thresholds.
+`Full_Gating_Test` and `Filling_Test` are therefore **no longer bitwise
+regression sentinels** for this change and must be re-baselined on physical
+outcomes (fill fraction, fill time, delivered mass, misrun count). On the
+evidence above the new front is the better answer, since the old one was being
+advanced by a velocity field with a spurious factor-of-two maximum.
+
+**Test 2 still does not finish.** It stops on the fill-time cap, not a
+divergence. Mechanism 3 being fixed makes it a physically meaningful run that
+has to be given enough time; it does not by itself complete the pour.
+
+**One side effect worth knowing about: the clamp partially masks round 4's
+filter defect on quiescent fixtures.** The deleted eps-weighted porous exchange
+got its gain from the exchange *amplitude*, and relaxing the odd moments at
+τ⁻ = 5 instead of 18,060 cuts that amplitude. On the closed-box witness the old
+rule used to grow a 5 % seeded error by +4.2 % over 2,000 steps and +14 % over
+4,000; it now settles at a fixed +0.51 % and stays there to step 8,000. On the
+free-surface variant the two rules agree to six figures. The round-4 fix is not
+thereby unnecessary — the real assembly's runaway had a live front and reached
+ε = 7.76 at the filter outlet — but the two-second fixtures can no longer show a
+runaway, so `PorousPairWeightTests` was recalibrated to assert the 9x *bias*
+separation that remains, and its free-surface case is now labelled an invariant
+test rather than a discriminator. A future reader tempted to conclude the porous
+override was harmless should read the diagnosis report, not the fixture.
+
+### The next precursor to build: a per-cell velocity rise counter
+
+Designed and calibrated, **deliberately not shipped this round** — see the
+caveat at the end.
+
+A precursor on the **global** max|u| cannot work here, and that is measured. A
+sliding log-linear fit of max|u| over the run, swept over window length and
+slope threshold: the one setting that catches the real event (10 samples, slope
+0.0015) also fires **22 false positives** before step 19,700, and every tighter
+setting either fires only inside the pour transient or never fires at all. The
+reason is that the growing mode is not the global maximum until step 19,960 —
+the sprue's free-fall jet dominates max|u| for the first 19,900 steps. **A global scalar cannot see a localised mode growing
+three times slower than the noise floor.** For reference, the FLUID fill-fraction
+band gave 32 steps of warning on this failure and global max|u| gives none.
+
+What distinguishes the real event is not magnitude but **persistence at a fixed
+location**, and that needs two extra grids and O(1) work per cell per check: a
+`float32` grid of |u| at the previous check (7 MB at Test 2's size) and an `int8`
+grid of consecutive-rise counts. Per check: `counter += 1` where |u| rose, else
+0; fire when at least N wet cells have `counter >= K` and `|u| > FLOOR`.
+Calibrated on 913 traced pocket cells:
+
+| K | FLOOR | N | fires at | lead to NaN |
+|---|---|---|---|---|
+| 6 | 0.01 | 3 | 19,800 | 392 steps |
+| **8** | **0.01** | **3** | **19,840** | **352 steps (27 ms)** |
+| 8 | 0.02 | 3 | 19,940 | 252 steps |
+| 10 | 0.01 | 3 | 19,880 | 312 steps |
+
+An equivalent per-cell log-slope detector (ln|u| slope > 0.0015/step over 10
+samples, r² > 0.95) fires at step 19,660 — 532 steps of lead — in 33 of the 913
+cells, all inside the one growing mode.
+
+**Why it is not shipped: N = 3 is calibrated on 913 cells in one pocket, not on
+339,824.** A rising front legitimately accelerates, so N will need to be well
+above 3 on a full domain, or the counter restricted to cells that have been
+FLUID for a few hundred steps. Re-tune it against a *healthy* fill
+(`Full_Gating_Test`, `Filling_Test`) and raise N until it is silent before
+shipping it. A cheaper qualitative alternative worth measuring first: the mode's
+signature is a period-2 alternation, and a physical flow at dt = 77 µs cannot
+change by 3× in one step, so a detector on
+max |u(n) − u(n−1)| / max(|u(n)|, floor) would key on the mode's *character*
+rather than its amplitude, for one extra grid and two consecutive steps.
+
+Full diagnosis, fixture and validation: `Test/session_diag_2026-09-02/`.
+
+### Round 4: the mold pad and the filter exchange
+
 **Round 4 fixed two measured defects, and the numbers in this section are the
-first this stage has produced on a lattice that is not a torus.** The block
-between "Everything below this line predates the mold pad" and "Running a fill"
-was measured before that and is kept for history, not for reference; the
-sections from "Running a fill" onward are current.
+first this stage produced on a lattice that is not a torus.** They were measured
+*before* the τ⁻ clamp above, so the fill times and front shapes in it will move
+again by roughly the deltas that section quotes; the mechanisms and the
+before/after directions stand. The block between "Everything below this line
+predates the mold pad" and "Running a fill" is older still and is kept for
+history, not for reference; the sections from "Running a fill" onward are
+current.
 
 ### The two defects
 
@@ -126,7 +309,11 @@ A pocket pinned against the casting floor now reads as entrapped, which is the
 right answer: it is the textbook gas-porosity site, and it used to read as
 vented.
 
-### `Test 2` (459 lb) — both mechanisms gone, and it still diverges
+### `Test 2` (459 lb) — both mechanisms gone, and it still diverged
+
+**Resolved in round 5.** The step-20,200 divergence this section characterises
+as an open item was the undamped ω⁻ ghost mode; see the τ⁻ clamp above. The
+characterisation below is kept because it is what led to it.
 
 4.3 mm auto-refined grid, solve grid **(137, 137, 98)** = (135, 135, 94) plus
 the pad and two headspace planes, **3,672** cells of atmosphere opened above the
@@ -435,6 +622,48 @@ metallostatic pressure.
   complete (10.2 mm in 6.00 s, 8.6 mm in 9.00 s), but those are two voxel sizes
   at the same coarsening, not the coarsening sweep the question needs. Until
   someone runs it, quote the fill grid with every result.
+- **Λ is not 3/16 on any real pour, and it costs a thin channel ~11 % of its
+  flow.** `TAU_MINUS_MAX = 5` caps the antisymmetric relaxation time, which is
+  what keeps the odd ghost modes damped at a casting τ, and it binds below
+  τ = 0.541667 — every casting lattice. Solving steady Stokes-TRT Poiseuille
+  with halfway bounce-back exactly gives the effective half-width as
+
+      (H_eff/2)² = (H/2)² + (4/3)(Λ − 3/16)
+
+  so the clamp removes a **flat 0.25 cell² of flow-carrying width** at any
+  channel width, against exactly 0 before (a casting τ had Λ = 3/16 by
+  construction). As a flow-rate deficit that is **−11.1 % through a 3-cell
+  channel** — Test 2's and `Filling_Test`'s gate — **−25 % through a 2-cell
+  one**, −2.0 % at 7 cells, −0.8 % at 11. Effective viscosity is untouched
+  (fitted `nu_eff` matches (τ−½)/3 to 1.3e-10 either way): the entire cost is at
+  the wall. Consistent with the whole-assembly measurement above — wet mass
+  unchanged to 0.015 %, wet cells −2.06 %, i.e. less flow, not more.
+
+  **The cost is intrinsic to damping the mode, not to the value 5.** Any
+  practical ceiling gives Λ ≈ 0 at τ ≈ ½, so the (4/3)(Λ − 3/16) term is
+  −0.25 cell² whatever the ceiling; 3/16 dominates it. There is no setting that
+  both damps the ghost mode and keeps the wall. `MIN_CHOKE_THICKNESS_CELLS` and
+  `MARGINAL_CHOKE_THICKNESS_CELLS` were calibrated at Λ = 3/16 and are left
+  alone deliberately — they are resolution thresholds and the resolution has not
+  changed — but their docstrings now carry these numbers, and the marginal
+  warning's "treat the flow through it as marginal, not as a result" is the
+  right reading of an 11 % boundary bias as well as of a coarse grid. Keep the
+  Poiseuille wall benchmark at τ = 0.8, where the clamp is inert, so it goes on
+  measuring 3/16.
+- **No detector exists for a localised undamped mode, and one cannot be built
+  from a global scalar.** The mass-side guard
+  (`FLUID_FILL_FRACTION_MIN`/`MAX`) gives thousands of steps of warning on a
+  mass-side amplifier and 32 steps on a momentum-side one. A precursor on the
+  global max|u| is **structurally blind** here, measured, not assumed: the only
+  fit setting that catches the real event also fires 22 false positives before
+  it, because the sprue's free-fall jet dominates max|u| until 240 steps before
+  the NaN. So mechanism 3 is fixed, but **any other localised undamped mode
+  still has no warning at all** — and the diagnosis names a live candidate, the
+  Smagorinsky-suppressed filter footprint, which is unconditionally unstable at
+  the 0.05 design velocity in the jet fixture with no filter present. The τ⁻
+  clamp closes that particular hazard; the detection gap it exposed is
+  unchanged. The design that works is in "The next precursor to build" above and
+  is uncalibrated on a full domain.
 - **The inlet** imposes a *pressure* in head mode: the metallostatic head
   rho = rho_0 (1 + g h / c_s^2), with the velocity measured back out of the
   inlet cells' own populations each step and clamped at the Mach guard. It is

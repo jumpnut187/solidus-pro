@@ -26,6 +26,7 @@ from physics.fluid_flow import (
     NOMINAL_FOAM_POROSITY,
     OPPOSITE,
     Q,
+    TAU_MINUS_MAX,
     TRT_MAGIC_PARAMETER,
     bounce_back,
     capillary_entry_density_offset,
@@ -213,9 +214,22 @@ class TrtCollisionTests(unittest.TestCase):
 
 
 class MagicParameterTests(unittest.TestCase):
-    def test_magic_parameter_round_trips(self) -> None:
-        for tau in (0.5001, 0.51, 0.8, 1.0, 1.9):
+    def test_magic_parameter_round_trips_where_the_clamp_does_not_bind(self) -> None:
+        """
+        ``Lambda`` is recovered exactly above ``tau = 0.541667``.
+
+        The tau list lost 0.5001 and 0.51 when ``TAU_MINUS_MAX`` arrived: below
+        0.541667 the clamp caps ``tau_minus`` at 5 and ``Lambda`` is
+        deliberately no longer 3/16. That is the whole point of the clamp and it
+        is asserted by :meth:`test_the_clamp_binds_at_a_casting_tau`; asserting
+        the round trip there would be asserting the mode back into existence.
+        The exact relation is what the boundary-accuracy benchmarks depend on,
+        and they all run above the threshold.
+        """
+        threshold = TRT_MAGIC_PARAMETER / (TAU_MINUS_MAX - 0.5) + 0.5
+        for tau in (0.5417, 0.55, 0.8, 1.0, 1.9):
             with self.subTest(tau=tau):
+                self.assertGreater(tau, threshold, "tau is inside the clamp")
                 omega_plus = 1.0 / tau
                 omega_minus = omega_minus_from_magic(omega_plus)
                 recovered = (1.0 / omega_plus - 0.5) * (1.0 / omega_minus - 0.5)
@@ -224,13 +238,90 @@ class MagicParameterTests(unittest.TestCase):
     def test_magic_parameter_is_three_sixteenths(self) -> None:
         self.assertAlmostEqual(TRT_MAGIC_PARAMETER, 0.1875, places=15)
 
+    def test_the_clamp_binds_at_a_casting_tau(self) -> None:
+        """
+        At ``tau_plus = 0.500010`` -- ``Test 2``'s whole domain --
+        ``tau_minus`` is 5, not 18,060.
+
+        Unclamped, the odd momentum-carrying moments relax over 18,060 steps,
+        which is no relaxation at all over the 200 steps a mode needs to double.
+        A period-2 checkerboard on one lattice diagonal grew undamped for
+        ~5,000 steps in the runner cells outside a filter inlet and took the
+        run non-finite at step 20,192. See
+        :data:`~physics.fluid_flow.TAU_MINUS_MAX`.
+        """
+        omega_plus = 1.0 / 0.500010
+        clamped = omega_minus_from_magic(omega_plus)
+        unclamped = omega_minus_from_magic(
+            omega_plus, tau_minus_max=float("inf")
+        )
+        self.assertAlmostEqual(1.0 / clamped, TAU_MINUS_MAX, places=12)
+        self.assertAlmostEqual(clamped, 1.0 / TAU_MINUS_MAX, places=15)
+        self.assertGreater(
+            1.0 / unclamped, 18_000.0,
+            "the unclamped relation no longer freezes the odd moments, so this "
+            "test no longer measures anything",
+        )
+
+    def test_the_clamp_does_not_bind_at_the_benchmark_tau(self) -> None:
+        """
+        At ``tau = 0.6`` the clamp is inert and ``Lambda`` is exactly 3/16.
+
+        This is the property that lets the wall-location benchmarks keep
+        testing the magic parameter: ``tests/test_filling_benchmarks.py`` runs
+        its Poiseuille profile at ``tau = 0.8``, and the threshold is 0.541667.
+        """
+        for tau in (0.6, 0.8):
+            with self.subTest(tau=tau):
+                omega_plus = 1.0 / tau
+                clamped = omega_minus_from_magic(omega_plus)
+                unclamped = omega_minus_from_magic(
+                    omega_plus, tau_minus_max=float("inf")
+                )
+                self.assertEqual(clamped, unclamped)
+                self.assertLess(1.0 / clamped, TAU_MINUS_MAX)
+                recovered = (tau - 0.5) * (1.0 / clamped - 0.5)
+                self.assertAlmostEqual(recovered, TRT_MAGIC_PARAMETER, places=12)
+
+    def test_the_clamp_threshold_is_where_it_is_documented(self) -> None:
+        """The boundary itself, so the docstring's 0.541667 cannot go stale."""
+        threshold = TRT_MAGIC_PARAMETER / (TAU_MINUS_MAX - 0.5) + 0.5
+        self.assertAlmostEqual(threshold, 0.5416666666666666, places=15)
+        just_below = omega_minus_from_magic(1.0 / (threshold - 1e-6))
+        just_above = omega_minus_from_magic(1.0 / (threshold + 1e-6))
+        self.assertAlmostEqual(1.0 / just_below, TAU_MINUS_MAX, places=12)
+        self.assertLess(1.0 / just_above, TAU_MINUS_MAX)
+
     def test_omega_minus_stays_in_the_stable_range(self) -> None:
-        """omega- must remain in (0, 2) even as tau approaches 1/2."""
+        """
+        omega- must remain in (0, 2) even as tau approaches 1/2.
+
+        The clamp makes the lower end trivial -- omega- cannot fall below
+        ``1 / TAU_MINUS_MAX`` -- so the floor is asserted explicitly rather
+        than left as "greater than zero", which is now unfalsifiable.
+        """
         for tau in (0.500001, 0.5001, 0.51, 1.0, 1.99):
             with self.subTest(tau=tau):
                 om = omega_minus_from_magic(1.0 / tau)
-                self.assertGreater(om, 0.0)
+                self.assertGreaterEqual(om, 1.0 / TAU_MINUS_MAX)
                 self.assertLess(om, 2.0)
+
+    def test_lattice_units_carries_the_clamp(self) -> None:
+        """
+        The clamp reaches the solver through ``LatticeUnits.omega_minus``, which
+        is what the non-Smagorinsky path relaxes with, so it is asserted at that
+        seam and not only on the helper.
+        """
+        wcb_nu = 0.006 / 7200.0
+        lu = lattice_units(0.0043, wcb_nu, u_max_physical_m_s=2.8)
+        raw = lattice_units(
+            0.0043, wcb_nu, u_max_physical_m_s=2.8, tau_minus_max=float("inf")
+        )
+        self.assertLess(lu.tau, 0.5416666666666666)
+        self.assertAlmostEqual(1.0 / lu.omega_minus, TAU_MINUS_MAX, places=12)
+        self.assertGreater(1.0 / raw.omega_minus, 18_000.0)
+        self.assertEqual(lu.tau, raw.tau)
+        self.assertEqual(lu.omega_plus, raw.omega_plus)
 
     def test_invalid_omega_plus_raises(self) -> None:
         for bad in (0.0, -1.0, 2.0, 2.5):
@@ -354,9 +445,13 @@ class ForcingTests(unittest.TestCase):
 
         Using the BGK prefactor ``1 - 1/(2 tau)`` here instead satisfies this
         only when omega_minus == 1/tau. Under TRT at casting viscosities
-        omega_minus is ~2.6e-4 while 1/tau is ~2.0, so gravity would be applied
-        at about 2e-4 of its true strength -- silently, with no instability to
-        give it away.
+        omega_minus is 0.2 -- the ``TAU_MINUS_MAX`` floor -- while 1/tau is
+        ~2.0, so gravity would be applied at a tenth of its true strength,
+        silently, with no instability to give it away. Before the clamp the same
+        mismatch was 4.84e-5 on the lattice these numbers are quoted for
+        (tau = 0.500010, omega_minus 5.54e-5), which is how large the
+        discrepancy this test guards can get. The identity is what is asserted,
+        not the magnitude -- it holds for any pair of rates, which is the point.
         """
         u = np.zeros((3, 1))
         force = np.array([[0.0], [0.0], [-1e-4]])
