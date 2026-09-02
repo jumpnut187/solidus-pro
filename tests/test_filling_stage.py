@@ -40,6 +40,7 @@ from core.part_manager import (
     PART_TYPE_CORE,
     PART_TYPE_FILTER,
     PART_TYPE_GATE,
+    PART_TYPE_RISER,
     PART_TYPE_RUNNER,
     PART_TYPE_SPRUE,
     PART_TYPE_TO_CODE,
@@ -1117,3 +1118,587 @@ class DeliveryLedgerTests(unittest.TestCase):
             any("metering" in m for m in messages),
             f"the setup line does not name the target rate: {messages}",
         )
+
+
+def _flush_riser_mesh(nx=10, ny=8, cast_top=5, nz=13, dx=DX_IN):
+    """
+    Test 2's topology in miniature: metal flush against two opposite z faces.
+
+    A CAST box whose floor is the grid's own ``z = 0`` plane -- there is no mold
+    below it, because ``build_grid_mapping`` sizes the grid to the voxel
+    centres' bounding box and nothing was meshed beyond the casting -- with a
+    RISER column and a SPRUE column both reaching the ``z = nz - 1`` plane.
+    Under periodic neighbour indexing the cast floor and those tops are
+    neighbours of each other, 12 empty planes apart, which is what seeded a
+    phantom pool in the real assembly's riser top at step 12,156. Cores fill the
+    x/y margin, so z is the only unwalled axis and the assertions can name it.
+
+    The sprue is there so the pour has somewhere to go that is not the riser:
+    the headspace deliberately skips the inlet mouth (see
+    :data:`~core.filling_stage.HEADSPACE_CELLS`), so a fixture poured into its
+    only top-face feature could not show the headspace at all.
+    """
+    centers = lattice_centers((nx, ny, nz), dx=dx, origin=(0.0, 0.0, 0.0))
+    index = np.rint(np.asarray(centers) / dx).astype(int)
+    types = np.full(len(centers), PART_TYPE_CORE, dtype=np.int8)
+    in_x = (index[:, 0] >= 1) & (index[:, 0] <= nx - 3)
+    in_y = (index[:, 1] >= 1) & (index[:, 1] <= ny - 2)
+    cast = in_x & in_y & (index[:, 2] <= cast_top)
+    column = (index[:, 1] >= 3) & (index[:, 1] <= 4) & (index[:, 2] >= cast_top)
+    riser = column & (index[:, 0] >= 2) & (index[:, 0] <= 3)
+    sprue = column & (index[:, 0] >= 6) & (index[:, 0] <= 7)
+    types[cast] = PART_TYPE_CAST
+    types[riser] = PART_TYPE_RISER
+    types[sprue] = PART_TYPE_SPRUE
+    mesh = _FakeMesh(centers, types, dx)
+    mesh._riser_top_xy = (2.5 * dx, 3.5 * dx)
+    mesh._sprue_top_xy = (6.5 * dx, 3.5 * dx)
+    mesh._top_z = (nz - 1) * dx
+    return mesh
+
+
+def _touching_tops_mesh(nx=10, ny=8, cast_top=5, nz=13, dx=DX_IN):
+    """
+    :func:`_flush_riser_mesh` with its riser and sprue columns side by side.
+
+    The separated version cannot see the headspace's lateral leak. The inlet's
+    ``ensure_interface_skin`` halo is an 18-direction dilation, so its
+    ``c_z = +1`` diagonals reach the first headspace plane over the columns
+    *beside* the mouth -- and the exclusion has to cover the mouth's whole
+    8-neighbourhood in ``(x, y)``, not just the mouth. With the riser two cells
+    from the sprue there is no column in that ring to leak onto; with them
+    touching, a mouth-only exclusion leaves the riser's near column open inside
+    the halo's reach.
+    """
+    centers = lattice_centers((nx, ny, nz), dx=dx, origin=(0.0, 0.0, 0.0))
+    index = np.rint(np.asarray(centers) / dx).astype(int)
+    types = np.full(len(centers), PART_TYPE_CORE, dtype=np.int8)
+    in_x = (index[:, 0] >= 1) & (index[:, 0] <= nx - 2)
+    in_y = (index[:, 1] >= 1) & (index[:, 1] <= ny - 2)
+    types[in_x & in_y & (index[:, 2] <= cast_top)] = PART_TYPE_CAST
+    column = (index[:, 1] >= 3) & (index[:, 1] <= 4) & (index[:, 2] >= cast_top)
+    types[column & (index[:, 0] >= 3) & (index[:, 0] <= 4)] = PART_TYPE_RISER
+    types[column & (index[:, 0] >= 5) & (index[:, 0] <= 6)] = PART_TYPE_SPRUE
+    mesh = _FakeMesh(centers, types, dx)
+    mesh._riser_top_xy = (3.5 * dx, 3.5 * dx)
+    mesh._sprue_top_xy = (5.5 * dx, 3.5 * dx)
+    mesh._top_z = (nz - 1) * dx
+    return mesh
+
+
+class MoldPadTests(unittest.TestCase):
+    """
+    The solve grid is padded with mold before it is solved, and nothing about
+    the mapping back to voxels moves.
+
+    ``core.filling_stage.MOLD_PAD_CELLS`` carries the measurement. The short
+    version: every neighbour access in both step paths is periodic, both
+    document that they rely on an obstacle shell, and the grid the stage used
+    to build had none -- 302 metal-to-metal wrap pairs across z on the real
+    assembly, 298 of them putting a cast-floor cell directly opposite a
+    riser-top cell 93 planes away.
+
+    Padding is the whole fix, so it must cost nothing that matters: no metal
+    cell, no riser-top vent, and no voxel's identity. Those are the four
+    assertions here.
+    """
+
+    def _unpadded_types(self, mesh):
+        """The bounding-box part-type grid, before the stage pads it."""
+        from core.filling_stage import coarsen_part_types, dense_part_types
+
+        centers = np.asarray(mesh.voxel_centers, dtype=np.float64)
+        dx_in = float(np.asarray(mesh.voxel_sizes).ravel()[0])
+        mapping = build_grid_mapping(centers, dx_in)
+        return coarsen_part_types(
+            dense_part_types(mapping, mesh.voxel_part_types), 1
+        )
+
+    def _padded_types(self, mesh):
+        """The same grid padded exactly as ``run_filling_stage`` pads it."""
+        from core.filling_stage import HEADSPACE_CELLS, MOLD_PAD_CELLS
+
+        pad = int(MOLD_PAD_CELLS)
+        return np.pad(
+            self._unpadded_types(mesh),
+            ((pad, pad), (pad, pad), (pad, pad + int(HEADSPACE_CELLS))),
+            mode="constant",
+            constant_values=EMPTY_CELL,
+        )
+
+    def _solved(self, mesh, pour):
+        """
+        Run the real stage and hand back the ``obstacle`` mask it built.
+
+        Captured from ``create_state``'s own argument rather than rebuilt here,
+        so the headspace and the invariant are the stage's and not a
+        re-derivation that could agree with a broken original.
+        """
+        import physics.filling as pf
+        from core.filling_stage import maybe_run_filling
+
+        held = {}
+        original = pf.create_state
+
+        def capture(obstacle, **kwargs):
+            state = original(obstacle, **kwargs)
+            held.setdefault("obstacle", np.asarray(obstacle).copy())
+            return state
+
+        pf.create_state = capture
+        try:
+            result = maybe_run_filling(
+                mesh, _Alloy(), _isolated_options(), _Inputs(pour)
+            )
+        finally:
+            pf.create_state = original
+        self.assertIn("obstacle", held, "the stage never built a solver state")
+        return result, held["obstacle"]
+
+    def _sprue_pour(self, mesh):
+        from core.pour_location import PourLocation
+
+        return PourLocation(
+            point_in=(mesh._sprue_top_xy[0], mesh._sprue_top_xy[1], mesh._top_z)
+        )
+
+    def _riser_pour(self, mesh):
+        from core.pour_location import PourLocation
+
+        return PourLocation(
+            point_in=(mesh._riser_top_xy[0], mesh._riser_top_xy[1], mesh._top_z)
+        )
+
+    def _inlet_of(self, mesh, pour):
+        """The padded inlet cells the stage will resolve this pour point to."""
+        from core.filling_stage import (
+            MOLD_PAD_CELLS,
+            _expand_inlet_to_mouth,
+            _resolve_inlet_cells,
+        )
+
+        centers = np.asarray(mesh.voxel_centers, dtype=np.float64)
+        dx_in = float(np.asarray(mesh.voxel_sizes).ravel()[0])
+        mapping = build_grid_mapping(centers, dx_in)
+        core_types = self._unpadded_types(mesh)
+        seeds = _resolve_inlet_cells(pour, mapping, core_types, 1)
+        return _expand_inlet_to_mouth(seeds, core_types) + int(MOLD_PAD_CELLS)
+
+    def test_the_unpadded_grid_really_is_open(self) -> None:
+        """
+        Guard the fixture. If the miniature already had walls on every face,
+        every assertion below would pass on a grid that never had the defect.
+        """
+        from core.filling_stage import _obstacle_mask
+
+        open_faces = _obstacle_mask(self._unpadded_types(_flush_riser_mesh()))
+        self.assertFalse(
+            bool(open_faces[:, :, 0].all()),
+            "the fixture's z = 0 face is already walled",
+        )
+        self.assertFalse(
+            bool(open_faces[:, :, -1].all()),
+            "the fixture's top face is already walled",
+        )
+        self.assertTrue(bool(open_faces[0].all()), "x should be walled by cores")
+        self.assertTrue(bool(open_faces[:, 0].all()), "y should be walled")
+
+    def test_every_face_of_the_solved_grid_is_obstacle(self) -> None:
+        """
+        The invariant the stage now checks and refuses to run on. Both step
+        paths wrap silently, so a single non-obstacle cell on an array face
+        makes opposite ends of the domain neighbours and there is no error to
+        read anywhere downstream.
+        """
+        mesh = _flush_riser_mesh()
+        _, obstacle = self._solved(mesh, self._sprue_pour(mesh))
+        for axis in (0, 1, 2):
+            for face in (0, -1):
+                plane = np.take(obstacle, face, axis=axis)
+                self.assertTrue(
+                    bool(plane.all()),
+                    f"axis {axis} face {face} leaves "
+                    f"{int(np.count_nonzero(~plane))} cells open",
+                )
+
+    def test_the_pad_costs_no_metal(self) -> None:
+        """
+        The pad is ``EMPTY_CELL``, which ``_metal_mask`` excludes, so the fill
+        denominator is untouched and a padded run can still report 100 %.
+
+        This is what separates padding from the one-line stopgap
+        (``obstacle |= <the whole array envelope>``), which sealed the wrap by
+        making 3,858 of the real assembly's 339,824 metal cells solid --
+        including the riser's entire 1,801-cell top plane -- so the fill could
+        never reach 100 % and the riser read 1,801 cells short.
+        """
+        from core.filling_stage import _metal_mask
+
+        mesh = _flush_riser_mesh()
+        padded_metal = _metal_mask(self._padded_types(mesh))
+        core_metal = _metal_mask(self._unpadded_types(mesh))
+        self.assertEqual(int(padded_metal.sum()), int(core_metal.sum()))
+        self.assertGreater(int(padded_metal.sum()), 0)
+
+    def test_the_pad_costs_no_riser_top_vent(self) -> None:
+        """
+        The riser keeps its atmosphere boundary, which is the other half of
+        what padding buys over the stopgap.
+
+        ``_static_vent_mask`` tests the *type* grid -- "the cell above a RISER
+        cell is EMPTY_CELL" -- and above a padded riser top the pad is still
+        EMPTY_CELL, so the count is unchanged with no code change at all.
+        Measured on the real assembly: 2,247 riser-top vents before and after.
+        The stopgap takes the same count to zero, and the riser's whole gas
+        column then reads as entrapped.
+        """
+        from core.filling_stage import _static_vent_mask
+        from core.part_manager import PART_TYPE_RISER
+
+        mesh = _flush_riser_mesh()
+        core_types = self._unpadded_types(mesh)
+        padded = self._padded_types(mesh)
+        no_inlet = np.zeros((0, 3), dtype=np.int64)
+        before = _static_vent_mask(core_types, no_inlet, True) & (
+            core_types == PART_TYPE_RISER
+        )
+        after = _static_vent_mask(padded, no_inlet, True) & (
+            padded == PART_TYPE_RISER
+        )
+        self.assertGreater(int(before.sum()), 0, "the fixture has no open riser")
+        self.assertEqual(int(after.sum()), int(before.sum()))
+
+    def test_the_riser_top_keeps_an_open_headspace(self) -> None:
+        """
+        Metal reaching the original ``+z`` face gets real atmosphere above it,
+        not a bounce-back lid one cell up.
+
+        :data:`~core.filling_stage.HEADSPACE_CELLS` planes of the pad are left
+        non-obstacle directly over it, and the plane above *those* stays solid
+        so the array face is still sealed. The cells are ``EMPTY_CELL``-typed,
+        so they are GAS to the solver and invisible to ``_metal_mask``.
+
+        The inlet mouth is deliberately excluded: its stream halo is kept wet
+        every step, and headspace there would grow an interface skin above the
+        pour boundary and pool metal outside the fill ledger.
+        """
+        from core.filling_stage import (
+            HEADSPACE_CELLS,
+            MOLD_PAD_CELLS,
+            _metal_mask,
+        )
+
+        mesh = _flush_riser_mesh()
+        _, obstacle = self._solved(mesh, self._sprue_pour(mesh))
+        pad = int(MOLD_PAD_CELLS)
+        core_nz = self._unpadded_types(mesh).shape[2]
+        riser_top_cells = 4  # the 2x2 riser column
+
+        for offset in range(int(HEADSPACE_CELLS)):
+            plane = obstacle[:, :, pad + core_nz + offset]
+            self.assertEqual(
+                int(np.count_nonzero(~plane)), riser_top_cells,
+                f"headspace plane {offset} is open over "
+                f"{int(np.count_nonzero(~plane))} cells, expected the riser's "
+                f"{riser_top_cells} and not the sprue mouth's",
+            )
+        self.assertTrue(
+            bool(obstacle[:, :, -1].all()),
+            "the outermost pad plane must stay solid or the face wraps again",
+        )
+        # Headspace is not metal, so it changes neither side of the fill
+        # fraction.
+        padded_metal = _metal_mask(self._padded_types(mesh))
+        self.assertEqual(
+            int(padded_metal[:, :, pad + core_nz:].sum()), 0
+        )
+
+    def test_no_headspace_cell_is_reachable_by_the_inlet_halo(self) -> None:
+        """
+        The headspace must not hand the inlet's stream halo a cell to wet.
+
+        ``inlet_halo`` is an 18-direction ``np.roll`` dilation of the mouth, and
+        five of those directions carry ``c_z = +1``: they land in the first
+        headspace plane over the columns diagonally beside the mouth. Clearing
+        the headspace only over the mouth's own columns leaves such a column
+        open, ``inlet_halo &= ~obstacle`` keeps it, and
+        ``ensure_interface_skin`` promotes it on every step -- INTERFACE cells
+        above the geometry, outside ``metal`` and cropped out of every result
+        field, so their mass lands in ``poured`` and is reported nowhere else.
+        Measured on Test 2's grid before the exclusion was widened: 0 such cells
+        for a sprue-top pour, but 35 for a riser-top pour and 6 for a cast-top
+        pour, both legal placements.
+
+        Asserted on the fixture whose two top-face features touch, from both
+        pour points, structurally (no headspace inside the mouth's
+        8-neighbourhood) and behaviourally (nothing above the original top face
+        is ever wet, including at ``t = 0``, where ``create_state``'s own
+        ``_dilate`` would seed it before step 1).
+        """
+        import physics.filling as pf
+        from scipy import ndimage
+
+        from core.filling_stage import (
+            HEADSPACE_CELLS,
+            MOLD_PAD_CELLS,
+            _metal_mask,
+        )
+
+        mesh = _touching_tops_mesh()
+        pad = int(MOLD_PAD_CELLS)
+        core_nz = self._unpadded_types(mesh).shape[2]
+        padded_metal = _metal_mask(self._padded_types(mesh))
+        top_metal = padded_metal[:, :, pad + core_nz - 1]
+
+        for name, pour in (
+            ("sprue", self._sprue_pour(mesh)),
+            ("riser", self._riser_pour(mesh)),
+        ):
+            with self.subTest(pour=name):
+                wet_above = []
+                original = pf.step
+
+                def traced(state, units, _wet=wet_above, **kwargs):
+                    original(state, units, **kwargs)
+                    above = state.flags[:, :, pad + core_nz:]
+                    if np.any(
+                        (above == pf.FLAG_FLUID) | (above == pf.FLAG_INTERFACE)
+                    ):
+                        _wet.append(int(state.step_count))
+                    return state
+
+                pf.step = traced
+                try:
+                    _, obstacle = self._solved(mesh, pour)
+                finally:
+                    pf.step = original
+
+                # Structural: the mouth's whole 8-neighbourhood in (x, y) is
+                # closed across every headspace plane.
+                mouth = np.zeros(obstacle.shape[:2], dtype=bool)
+                mouth_z = pad + core_nz - 1
+                inlet_here = self._inlet_of(mesh, pour)
+                on_top = inlet_here[:, 2] == mouth_z
+                mouth[inlet_here[on_top, 0], inlet_here[on_top, 1]] = True
+                reach = ndimage.binary_dilation(
+                    mouth, structure=np.ones((3, 3), dtype=bool)
+                )
+                for offset in range(int(HEADSPACE_CELLS)):
+                    plane = obstacle[:, :, pad + core_nz + offset]
+                    self.assertEqual(
+                        int(np.count_nonzero(~plane & reach)), 0,
+                        f"headspace plane {offset} is open inside the mouth's "
+                        f"8-neighbourhood, which is exactly where the halo's "
+                        f"c_z = +1 diagonals land",
+                    )
+                    # And it is still open where it should be, or the test
+                    # would pass by sealing everything.
+                    self.assertGreater(
+                        int(np.count_nonzero(~plane)), 0,
+                        "no headspace at all -- the fixture stopped testing "
+                        "the exclusion and started testing a lid",
+                    )
+                    self.assertTrue(
+                        bool(np.all(top_metal[~plane])),
+                        "headspace opened over a column that is not top-face "
+                        "metal",
+                    )
+
+                # Behavioural: nothing above the geometry ever holds metal.
+                self.assertEqual(
+                    wet_above[:3], [],
+                    f"cells above the original top face were wet at steps "
+                    f"{wet_above[:3]}: the halo reached into the headspace",
+                )
+
+    def _vent_mask(self, mesh, pour, flags):
+        """
+        The vent mask ``run_filling_stage`` assembles, for arbitrary flags.
+
+        ``obstacle`` is captured from the stage rather than re-derived, and the
+        headspace is then simply "the non-obstacle cells above the original top
+        face" -- read off that captured mask, not rebuilt from the rule -- so
+        this cannot agree with a broken construction.
+        """
+        from core.filling_stage import (
+            MOLD_PAD_CELLS,
+            _open_air_mask,
+            _static_vent_mask,
+        )
+
+        pad = int(MOLD_PAD_CELLS)
+        core_shape = self._unpadded_types(mesh).shape
+        padded = self._padded_types(mesh)
+        _, obstacle = self._solved(mesh, pour)
+        self.assertEqual(obstacle.shape, padded.shape)
+
+        open_air = np.zeros(padded.shape, dtype=bool)
+        open_air[
+            pad:pad + core_shape[0], pad:pad + core_shape[1],
+            pad:pad + core_shape[2],
+        ] = _open_air_mask(core_shape)
+        # The headspace, as the stage actually left it.
+        open_air[:, :, pad + core_shape[2]:] |= ~obstacle[
+            :, :, pad + core_shape[2]:
+        ]
+        open_air &= ~obstacle
+
+        inlet = self._inlet_of(mesh, pour)
+        static_vent = _static_vent_mask(padded, inlet, True)
+        from physics.filling import FLAG_GAS
+
+        return static_vent | (open_air & (flags == FLAG_GAS))
+
+    def test_a_pocket_against_the_casting_floor_reads_as_entrapped(self) -> None:
+        """
+        The floor of the meshed bounding box is sand, so gas pinned against it
+        is trapped -- and that is the classic gas-porosity site.
+
+        The vent term used to take every one of the six original faces as "open
+        to atmosphere by omission", which was the only defensible reading while
+        nothing was modelled beyond the box. The mold pad settled it: five of
+        those faces are now explicitly walled *and* physically are sand, so only
+        ``+z`` is air. See ``core.filling_stage._open_air_mask``.
+
+        Measured on this fixture: the six-face mask reports **0** entrapped
+        cells for a pocket sitting on the casting floor; the shipped mask
+        reports 1. The old answer was the exact inverse of the one the detector
+        exists to give.
+
+        The floor and the riser top only, because this fixture's ``x``/``y``
+        margins are cores by design -- that is what makes ``z`` its only
+        unwalled axis -- so no metal reaches a side face here. The four side
+        faces are covered in
+        ``tests/test_filling_defects.py::TestVentMaskConstruction`` on a grid
+        whose metal does reach them.
+        """
+        from physics.filling import FLAG_FLUID, FLAG_GAS
+        from physics.filling import find_entrapped_gas
+        from core.filling_stage import MOLD_PAD_CELLS, _metal_mask, _static_vent_mask
+
+        mesh = _flush_riser_mesh()
+        pour = self._sprue_pour(mesh)
+        pad = int(MOLD_PAD_CELLS)
+        core_shape = self._unpadded_types(mesh).shape
+        padded = self._padded_types(mesh)
+        metal = _metal_mask(padded)
+
+        # Everything metal is FLUID; three isolated GAS cells, chosen by where
+        # they sit on the ORIGINAL grid's faces.
+        flags = np.where(metal, FLAG_FLUID, np.uint8(0)).astype(np.uint8)
+        floor = (2 + pad, 2 + pad, pad)                       # original z = 0
+        riser_top = (2 + pad, 3 + pad, pad + core_shape[2] - 1)  # original top
+        for cell in (floor, riser_top):
+            self.assertTrue(
+                bool(metal[cell]), f"fixture drifted: {cell} is not metal"
+            )
+            flags[cell] = FLAG_GAS
+
+        vent_mask = self._vent_mask(mesh, pour, flags)
+        entrapped = find_entrapped_gas(flags, vent_mask)
+
+        self.assertTrue(
+            bool(entrapped[floor]),
+            "a gas pocket on the casting floor read as vented",
+        )
+        self.assertFalse(
+            bool(entrapped[riser_top]),
+            "the riser top must still vent to the headspace above it",
+        )
+
+        # What the six-face term gave, so this test names what it guards.
+        six_face = np.zeros(padded.shape, dtype=bool)
+        core = (
+            slice(pad, pad + core_shape[0]),
+            slice(pad, pad + core_shape[1]),
+            slice(pad, pad + core_shape[2]),
+        )
+        envelope = np.zeros(core_shape, dtype=bool)
+        envelope[[0, -1], :, :] = True
+        envelope[:, [0, -1], :] = True
+        envelope[:, :, [0, -1]] = True
+        six_face[core] = envelope
+        stale = _static_vent_mask(padded, self._inlet_of(mesh, pour), True) | (
+            six_face & (flags == FLAG_GAS)
+        )
+        stale_entrapped = find_entrapped_gas(flags, stale)
+        self.assertFalse(
+            bool(stale_entrapped[floor]),
+            "the fixture no longer discriminates: the six-face mask already "
+            "called this pocket entrapped, so a pass above proves nothing",
+        )
+
+    def test_a_riser_enclosed_except_its_top_still_vents(self) -> None:
+        """
+        The regression the change must not cause.
+
+        A riser walled by mold on every side with only its top open is the
+        normal case, and it has to keep reading as vented -- from two
+        independent routes, so trimming one cannot silence it: the type-based
+        ``_static_vent_mask`` (a RISER cell with EMPTY_CELL above it) and the
+        headspace the pad opens over the same column. Asserted with the gas
+        column filling the riser's whole height, which is what a riser looks
+        like before the metal arrives.
+        """
+        from physics.filling import FLAG_FLUID, FLAG_GAS, find_entrapped_gas
+        from core.filling_stage import MOLD_PAD_CELLS, _metal_mask
+        from core.part_manager import PART_TYPE_RISER
+
+        mesh = _flush_riser_mesh()
+        pour = self._sprue_pour(mesh)
+        pad = int(MOLD_PAD_CELLS)
+        padded = self._padded_types(mesh)
+        metal = _metal_mask(padded)
+        riser = (padded == PART_TYPE_RISER) & metal
+        self.assertGreater(int(riser.sum()), 0, "the fixture lost its riser")
+
+        flags = np.where(metal, FLAG_FLUID, np.uint8(0)).astype(np.uint8)
+        flags[riser] = FLAG_GAS
+
+        vent_mask = self._vent_mask(mesh, pour, flags)
+        entrapped = find_entrapped_gas(flags, vent_mask)
+        self.assertEqual(
+            int(np.count_nonzero(entrapped)), 0,
+            f"{int(np.count_nonzero(entrapped))} riser cells read as entrapped "
+            f"though the riser is open at the top",
+        )
+
+    def test_the_result_still_maps_back_to_the_right_voxels(self) -> None:
+        """
+        The off-by-one this fix could have introduced, asserted end to end.
+
+        Every solve field is cropped back to the original grid before it is
+        upsampled and gathered (``run_filling_stage``'s ``to_voxels``). Miss the
+        crop and ``gather_to_voxels`` either raises on the shape or -- at a
+        coarsening above 1 -- silently reads every voxel one cell off along all
+        three axes. ``fill_time_s`` is NaN exactly where a voxel is not metal,
+        so comparing that NaN set against the mesh's own part types catches a
+        shift of one cell in any direction.
+        """
+        from core.filling_stage import STATUS_DIVERGED
+        from core.part_manager import is_metal
+
+        mesh = _flush_riser_mesh()
+        result, _ = self._solved(mesh, self._sprue_pour(mesh))
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertNotEqual(result.status, STATUS_DIVERGED, result.warnings)
+
+        voxel_metal = is_metal(np.asarray(mesh.voxel_part_types, dtype=np.int32))
+        np.testing.assert_array_equal(
+            np.isnan(result.fill_time_s), ~voxel_metal,
+            "fill_time_s is NaN on the wrong voxels: the pad was not cropped "
+            "off before the gather, or was cropped in the wrong place",
+        )
+        self.assertEqual(
+            result.filled_voxel_count + result.misrun_voxel_count,
+            int(voxel_metal.sum()),
+        )
+        self.assertEqual(len(result.temperature_c), mesh.get_voxel_count())
+        self.assertTrue(bool(np.all(np.isfinite(result.temperature_c))))
+        # At coarsening 1 the correspondence is exact. Above 1 it is not, and
+        # never was: COARSENING_PRIORITY can vote a coarse cell CORE over a
+        # metal voxel, so 100 of a 2,068-voxel variant of this geometry read as
+        # non-metal at coarsening 2 -- measured identical before and after the
+        # pad, which is how the crop was checked at that coarsening.
+        self.assertEqual(result.coarsening, 1)

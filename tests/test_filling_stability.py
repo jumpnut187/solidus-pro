@@ -258,8 +258,18 @@ def _pour_at_top(mesh):
 
 
 def _inlet_cells(mesh, coarsening=1):
-    """The lattice cells ``run_filling_stage`` will pin, for a top pour."""
+    """
+    The lattice cells ``run_filling_stage`` will pin, for a top pour.
+
+    Shifted by :data:`~core.filling_stage.MOLD_PAD_CELLS`, because the stage
+    resolves the pour point against the bounding-box grid the mapping knows and
+    then pads that grid with a cell of mold on every face before it is solved.
+    Any caller comparing these indices against a live ``state`` array is
+    indexing the padded grid, so without the shift it reads a cell diagonally
+    adjacent to the real inlet on all three axes.
+    """
     from core.filling_stage import (
+        MOLD_PAD_CELLS,
         build_grid_mapping,
         coarsen_part_types,
         dense_part_types,
@@ -272,7 +282,8 @@ def _inlet_cells(mesh, coarsening=1):
     types = coarsen_part_types(
         dense_part_types(mapping, mesh.voxel_part_types), coarsening
     )
-    return _resolve_inlet_cells(_pour_at_top(mesh), mapping, types, coarsening)
+    resolved = _resolve_inlet_cells(_pour_at_top(mesh), mapping, types, coarsening)
+    return resolved + int(MOLD_PAD_CELLS)
 
 
 def _head_mode(**overrides):
@@ -662,6 +673,755 @@ class FluidMassTracksDensityTests(unittest.TestCase):
                     high = max(high, float(state.mass[fl].max()))
         self.assertGreater(low, -0.1, f"a FLUID cell emptied to {low:.4g}")
         self.assertLess(high, 1.6, f"a FLUID cell overfilled to {high:.4g}")
+
+
+def _table1_advance_mass(state, f_post_collision, f_streamed):
+    """
+    Koerner Table 1, written out independently of ``physics.filling``.
+
+    The reference for the bit-identity test below. Weight 1 whenever either
+    cell of the pair is FLUID, the clamped fill-fraction average otherwise, and
+    no porosity term anywhere -- which is what the shipped exchange must reduce
+    to on a lattice with no filter in it, since that is all it ever was there.
+    """
+    import physics.filling as pf
+    from physics.filling import FLAG_FLUID, FLAG_INTERFACE, LATTICE_VELOCITIES, Q
+    from physics.fluid_flow import OPPOSITE
+
+    outgoing = np.asarray(f_post_collision, dtype=np.float64)
+    incoming = np.asarray(f_streamed, dtype=np.float64)
+    eps = np.clip(pf.fluid_fraction(state), 0.0, 1.0)
+    fluid = state.flags == FLAG_FLUID
+    wet = (state.flags == FLAG_INTERFACE) | fluid
+    opp = OPPOSITE.astype(np.intp)
+    axes = (0, 1, 2)
+    delta = np.zeros(state.shape, dtype=np.float64)
+    for i in range(1, Q):
+        c = LATTICE_VELOCITIES[i]
+        shift = (-int(c[0]), -int(c[1]), -int(c[2]))
+        ibar = int(opp[i])
+        weight = np.where(
+            fluid | np.roll(fluid, shift=shift, axis=axes),
+            1.0,
+            0.5 * (eps + np.roll(eps, shift=shift, axis=axes)),
+        )
+        delta += np.where(
+            wet & np.roll(wet, shift=shift, axis=axes),
+            (incoming[ibar] - outgoing[i]) * weight,
+            0.0,
+        )
+    return state.mass + delta
+
+
+def _porous_weight_advance_mass(state, f_post_collision, f_streamed):
+    """
+    The exchange as it stood at f1daf97, porous override included.
+
+    Kept only so the tests below can measure the gap they close. Any pair with
+    a porous cell on either side was diverted to ``0.5 * (eps_A + eps_B)`` with
+    eps **unclamped**, overriding Table 1. Reproduced here rather than in the
+    solver, so a future edit cannot quietly restore it and still pass.
+    """
+    import physics.filling as pf
+    from physics.filling import FLAG_FLUID, FLAG_INTERFACE, LATTICE_VELOCITIES, Q
+    from physics.fluid_flow import OPPOSITE
+
+    outgoing = np.asarray(f_post_collision, dtype=np.float64)
+    incoming = np.asarray(f_streamed, dtype=np.float64)
+    eps_raw = pf.fluid_fraction(state)
+    eps = np.clip(eps_raw, 0.0, 1.0)
+    fluid = state.flags == FLAG_FLUID
+    wet = (state.flags == FLAG_INTERFACE) | fluid
+    porous = state.porous.porosity_f64 < 1.0
+    opp = OPPOSITE.astype(np.intp)
+    axes = (0, 1, 2)
+    delta = np.zeros(state.shape, dtype=np.float64)
+    for i in range(1, Q):
+        c = LATTICE_VELOCITIES[i]
+        shift = (-int(c[0]), -int(c[1]), -int(c[2]))
+        ibar = int(opp[i])
+        weight = np.where(
+            fluid | np.roll(fluid, shift=shift, axis=axes),
+            1.0,
+            0.5 * (eps + np.roll(eps, shift=shift, axis=axes)),
+        )
+        weight = np.where(
+            porous | np.roll(porous, shift=shift, axis=axes),
+            0.5 * (eps_raw + np.roll(eps_raw, shift=shift, axis=axes)),
+            weight,
+        )
+        delta += np.where(
+            wet & np.roll(wet, shift=shift, axis=axes),
+            (incoming[ibar] - outgoing[i]) * weight,
+            0.0,
+        )
+    return state.mass + delta
+
+
+class PorousPairWeightTests(unittest.TestCase):
+    """
+    The regression test for the filter-outlet mass overload.
+
+    :class:`FluidMassTracksDensityTests` above asserts Koerner Table 1 on a
+    clear lattice. Inside and around a filter the solver used to override
+    Table 1 with ``0.5 * (eps_A + eps_B)`` on *unclamped* eps, for any pair
+    with a porous cell on either side. The weight scales the exchange
+    amplitude and is a function of the cell's own eps, so an eps error
+    amplified its own exchanges -- the same positive feedback Table 1 was
+    adopted to remove, re-enabled everywhere a filter touches.
+
+    Nothing arrests it. ``transition_scan_kernel``, ``apply_transitions`` and
+    ``heal_submerged_interface`` all select on FLAG_INTERFACE, so a FLUID
+    cell's mass is written by the exchange and by nothing else. Measured on the
+    real ``Test 2`` assembly at the filter outlet: the effective weight, which
+    the scheme requires to be 1, reached +10.7 and -13.0; 786 of 2,009 FLUID
+    samples of the filter's bottom plane were over full against 1 of 754
+    INTERFACE samples of the same cells; eps_max in the porous zone climbed
+    1.046 -> 7.76 while eps_min fell to -9.5, and the run died on a
+    negative-mass cell 8,800 steps later.
+
+    Mass is conserved throughout -- the weight is symmetric under the pair
+    swap, measured at exactly zero residual over 36,550 pairs -- so these
+    tests assert the fill *fraction*, not the total. The phantom fill is stolen
+    from real cells, which is why the total looks healthy the whole way down.
+    """
+
+    NU = 0.006 / 7200.0
+    DX_M = 0.0152
+    #: Enough to separate flat from growing at this fixture's rate without
+    #: putting any one test past a few seconds. Measured: the shipped rule
+    #: holds a 5.0000e-02 seed at 5.003e-02, the deleted one takes it to
+    #: 5.210e-02 (+4.2 %). At 4,000 steps the gap is +14 %; the growth is
+    #: exponential with a rate independent of the seed, so any step count
+    #: discriminates and this one is the cheapest that does it clearly.
+    STEPS = 2000
+
+    def _units(self):
+        from physics.fluid_flow import lattice_units
+
+        return lattice_units(self.DX_M, self.NU, u_max_physical_m_s=2.8)
+
+    def _submerged_filter(self, seed_eps=1.05):
+        """
+        A closed, all-FLUID box with a three-cell porosity-0.85 band across it.
+
+        :class:`FluidMassTracksDensityTests`' fixture plus a filter. There is
+        no GAS and no INTERFACE cell anywhere, so ``apply_transitions``,
+        ``heal_submerged_interface`` and ``_redistribute`` are no-ops by
+        construction and the only thing that writes ``state.mass`` is the
+        exchange. The filter is also *fully submerged*, which is the state the
+        real assembly's filter is in for most of a pour and the one where the
+        re-pin repair that was considered instead does nothing at all --
+        ``_redistribute`` has no INTERFACE neighbour to donate to and strands
+        the correction back on the donor.
+
+        The band is seeded 5 % over full because the defect does not
+        self-start: seeded at exactly eps = 1 it stays there for 6,000 steps.
+        It is an amplifier, and 5 % stands in for the 1-2 % that
+        ``state.rho`` being the start-of-step density puts on every FLUID cell
+        for free.
+        """
+        import physics.filling as pf
+        from physics.filling import PorousZone
+
+        shape = (5, 5, 16)
+        obstacle = np.zeros(shape, dtype=bool)
+        obstacle[0] = obstacle[-1] = True
+        obstacle[:, 0] = obstacle[:, -1] = True
+        obstacle[:, :, 0] = obstacle[:, :, -1] = True
+        units = self._units()
+        zone = PorousZone.inert(shape)
+        band = np.zeros(shape, dtype=bool)
+        band[1:4, 1:4, 6:9] = True
+        zone.porosity[band] = np.float32(0.85)
+        state = pf.create_state(
+            obstacle,
+            dx_m=self.DX_M,
+            dt_s=units.dt_s,
+            initial_fluid=~obstacle,
+            porous=zone,
+        )
+        self.assertEqual(
+            int(np.count_nonzero(state.flags == pf.FLAG_INTERFACE)), 0,
+            "the filter must be submerged, with no free surface anywhere",
+        )
+        self.assertEqual(int(np.count_nonzero(state.flags == pf.FLAG_GAS)), 0)
+        full = state.rho.astype(np.float64) * state.porous.porosity_f64
+        # create_state now carries the porosity factor, so the band starts at
+        # eps = 1 rather than 1/0.85 = 1.176. Assert that before overwriting it:
+        # a fixture that starts 18 % over full cannot say what the seed did.
+        self.assertAlmostEqual(
+            float(np.abs(state.mass[band] / full[band] - 1.0).max()), 0.0,
+            places=6,
+            msg="create_state seeded the filter without its porosity factor",
+        )
+        state.mass[band] = (full * seed_eps)[band]
+        return state, units, band
+
+    def _worst_fill_fraction_error(self, state, band):
+        """``max|eps - 1|`` over the band, from the state's own fields."""
+        full = state.rho.astype(np.float64) * state.porous.porosity_f64
+        with np.errstate(invalid="ignore", divide="ignore"):
+            eps = np.where(full > 0, state.mass / full, 1.0)
+        return float(np.abs(eps[band] - 1.0).max())
+
+    def _drift(self, use_numba, advance_mass=None):
+        """``(seeded, final, dM/M0)`` for one weight rule on one step path."""
+        import physics.filling as pf
+
+        state, units, band = self._submerged_filter()
+        seeded = self._worst_fill_fraction_error(state, band)
+        start = float(state.mass.sum())
+        original = pf.advance_mass
+        if advance_mass is not None:
+            pf.advance_mass = advance_mass
+        try:
+            for _ in range(self.STEPS):
+                pf.step(state, units, use_numba=use_numba)
+        finally:
+            pf.advance_mass = original
+        final = self._worst_fill_fraction_error(state, band)
+        return seeded, final, (float(state.mass.sum()) - start) / abs(start)
+
+    def test_a_seeded_error_does_not_grow_numpy(self) -> None:
+        """The witness, on the numerics reference path."""
+        seeded, final, drift = self._drift(use_numba=False)
+        self.assertAlmostEqual(seeded, 0.05, places=6)
+        self.assertLess(
+            final, 1.01 * seeded,
+            f"the fill-fraction error grew {seeded:.4e} -> {final:.4e} over "
+            f"{self.STEPS} steps: the exchange weight is feeding a cell's own "
+            f"eps back into its exchange amplitude",
+        )
+        self.assertLess(abs(drift), 1e-12, f"mass drifted by {drift:.3e}")
+
+    def test_a_seeded_error_does_not_grow_numba(self) -> None:
+        """
+        The same on the kernel path.
+
+        Both paths carried the same override, in the same precedence, with the
+        same clamping choice, so a one-sided fix would leave every real solve
+        broken while this file's NumPy tests passed.
+        """
+        from physics.fluid_flow import NUMBA_AVAILABLE
+
+        if not NUMBA_AVAILABLE:
+            self.skipTest("numba is not installed")
+        seeded, final, drift = self._drift(use_numba=True)
+        self.assertAlmostEqual(seeded, 0.05, places=6)
+        self.assertLess(
+            final, 1.01 * seeded,
+            f"the fill-fraction error grew {seeded:.4e} -> {final:.4e} over "
+            f"{self.STEPS} steps on the kernel path",
+        )
+        self.assertLess(abs(drift), 1e-12, f"mass drifted by {drift:.3e}")
+
+    def test_the_deleted_weighting_is_what_grew_it(self) -> None:
+        """
+        The discriminator: the same fixture under the rule that was removed.
+
+        Without this the two tests above could pass on a fixture that had lost
+        the ability to fail. Under the porous override the error grows
+        monotonically at a rate independent of the seed -- measured 3.83e-5 per
+        step from a 5 % seed and 2.99e-5 from a 17.6 % one -- and under Table 1
+        it is held at whatever it was seeded with, to four figures. Mass is
+        conserved to round-off in both, which is the point: this was never a
+        leak.
+        """
+        _, fixed, _ = self._drift(use_numba=False)
+        seeded, broken, drift = self._drift(
+            use_numba=False, advance_mass=_porous_weight_advance_mass
+        )
+        self.assertGreater(
+            broken, 1.03 * seeded,
+            f"the fixture no longer discriminates: the porous override held "
+            f"{seeded:.4e} -> {broken:.4e}, so a passing test above proves "
+            f"nothing",
+        )
+        self.assertLess(
+            fixed - seeded, 0.1 * (broken - seeded),
+            f"Table 1 grew the error {fixed - seeded:.3e} against the "
+            f"override's {broken - seeded:.3e}",
+        )
+        self.assertLess(abs(drift), 1e-12, "the override leaked mass after all")
+
+    def test_a_free_surface_through_a_filter_stays_bounded(self) -> None:
+        """
+        The other regime: a real front crossing the band, where the transition
+        and heal scans are live and the band is only partly wet.
+
+        The submerged fixture isolates the weight. This one is the geometry the
+        defect was found in -- a filter with a partly filled channel below it,
+        where the eps gradient across the outlet face points the bias into the
+        cell.
+
+        Measured over 2,000 steps from the same 5 % seed, ``max|eps - 1|`` over
+        the band's FLUID cells: the shipped rule holds it at 5.010e-02, the
+        deleted one takes it to 5.917e-02 (+18 %).
+
+        FLUID cells only, deliberately. An INTERFACE cell in the same band
+        reaches ``|eps - 1|`` of 0.53 under both rules, because
+        ``_redistribute`` applies no capacity check to its recipients and can
+        push a receiving interface cell over full -- documented, unchanged here,
+        and harmless because that cell is re-examined by
+        ``apply_transitions`` on the next step. A FLUID cell has no such
+        re-examination, which is the whole reason the defect lived there.
+        """
+        import physics.filling as pf
+        from physics.filling import PorousZone
+
+        shape = (5, 5, 18)
+        obstacle = np.zeros(shape, dtype=bool)
+        obstacle[0] = obstacle[-1] = True
+        obstacle[:, 0] = obstacle[:, -1] = True
+        obstacle[:, :, 0] = obstacle[:, :, -1] = True
+        units = self._units()
+        zone = PorousZone.inert(shape)
+        band = np.zeros(shape, dtype=bool)
+        band[1:4, 1:4, 5:8] = True
+        zone.porosity[band] = np.float32(0.85)
+        initial = ~obstacle & (np.arange(shape[2])[None, None, :] <= 5)
+        state = pf.create_state(
+            obstacle,
+            dx_m=self.DX_M,
+            dt_s=units.dt_s,
+            initial_fluid=initial,
+            porous=zone,
+        )
+        self.assertGreater(
+            int(np.count_nonzero(state.flags == pf.FLAG_INTERFACE)), 0,
+            "fixture has no free surface",
+        )
+        full = state.rho.astype(np.float64) * state.porous.porosity_f64
+        seed = band & (state.flags == pf.FLAG_FLUID)
+        self.assertGreater(int(np.count_nonzero(seed)), 0, "the band is dry")
+        state.mass[seed] = (full * 1.05)[seed]
+
+        seeded = self._worst_fill_fraction_error(state, seed)
+        worst = 0.0
+        for k in range(self.STEPS):
+            pf.step(state, units)
+            if (k + 1) % 100 == 0:
+                fluid_band = band & (state.flags == pf.FLAG_FLUID)
+                if fluid_band.any():
+                    worst = max(
+                        worst, self._worst_fill_fraction_error(state, fluid_band)
+                    )
+        self.assertGreater(worst, 0.0, "no FLUID cell stayed in the band")
+        self.assertLess(
+            worst, 1.05 * seeded,
+            f"a FLUID cell in or beside the filter reached eps "
+            f"{1 + worst:.4g} against a seeded {1 + seeded:.4g}; a full cell "
+            f"holds exactly its pore volume, so back-pressure belongs in rho, "
+            f"not here",
+        )
+
+    def test_the_exchange_is_unchanged_where_there_is_no_filter(self) -> None:
+        """
+        Bit-identity against plain Koerner Table 1 on a clear lattice.
+
+        The override was guarded on "any porous cell in the domain", so on a
+        model with no filter it never executed and its deletion cannot have
+        changed anything. Asserted rather than argued, and asserted against
+        :func:`_table1_advance_mass` -- an independent transcription of the
+        rule -- so the claim survives the old code being gone. A real free
+        surface, with transitions firing, because an all-FLUID box only
+        exercises the weight-1 branch.
+        """
+        import copy
+
+        import physics.filling as pf
+
+        shape = (5, 5, 18)
+        obstacle = np.zeros(shape, dtype=bool)
+        obstacle[0] = obstacle[-1] = True
+        obstacle[:, 0] = obstacle[:, -1] = True
+        obstacle[:, :, 0] = obstacle[:, :, -1] = True
+        units = self._units()
+        initial = ~obstacle & (np.arange(shape[2])[None, None, :] <= 5)
+        shipped = pf.create_state(
+            obstacle, dx_m=self.DX_M, dt_s=units.dt_s, initial_fluid=initial
+        )
+        self.assertGreater(
+            int(np.count_nonzero(shipped.flags == pf.FLAG_INTERFACE)), 0
+        )
+        self.assertGreater(int(np.count_nonzero(shipped.flags == pf.FLAG_GAS)), 0)
+        reference = copy.deepcopy(shipped)
+
+        original = pf.advance_mass
+        for k in range(300):
+            pf.step(shipped, units, use_numba=False)
+            pf.advance_mass = _table1_advance_mass
+            try:
+                pf.step(reference, units, use_numba=False)
+            finally:
+                pf.advance_mass = original
+            self.assertTrue(
+                np.array_equal(shipped.mass, reference.mass),
+                f"mass diverged from Table 1 at step {k + 1}",
+            )
+        self.assertTrue(np.array_equal(shipped.flags, reference.flags))
+        self.assertTrue(np.array_equal(shipped.f, reference.f))
+
+    def test_a_prefilled_filter_starts_exactly_full(self) -> None:
+        """
+        ``create_state`` seeds mass at ``rho * porosity``, not ``rho``.
+
+        Full is ``rho * porosity`` everywhere else in the solver -- in
+        ``fluid_fraction``, in ``apply_transitions``' threshold, in the heal, in
+        the stage's inlet top-up. Seeding a flat REFERENCE_DENSITY put a cell
+        that *starts* FLUID inside a filter at eps = 1/0.85 = 1.176, so every
+        porous fixture began 18 % over full and the exchange had to work it off.
+        The real assembly starts empty and its filter cells arrive through
+        ``apply_transitions``, which snaps them correctly -- this bit a restart
+        and every fixture, not Test 2.
+        """
+        import physics.filling as pf
+        from physics.filling import PorousZone
+
+        shape = (5, 5, 8)
+        obstacle = np.zeros(shape, dtype=bool)
+        obstacle[0] = obstacle[-1] = True
+        obstacle[:, 0] = obstacle[:, -1] = True
+        obstacle[:, :, 0] = obstacle[:, :, -1] = True
+        zone = PorousZone.inert(shape)
+        band = np.zeros(shape, dtype=bool)
+        band[1:4, 1:4, 3:6] = True
+        zone.porosity[band] = np.float32(0.85)
+        units = self._units()
+        state = pf.create_state(
+            obstacle,
+            dx_m=self.DX_M,
+            dt_s=units.dt_s,
+            initial_fluid=~obstacle,
+            porous=zone,
+        )
+        eps = pf.fluid_fraction(state)
+        fluid = state.flags == pf.FLAG_FLUID
+        np.testing.assert_allclose(eps[fluid & band], 1.0, rtol=1e-6)
+        np.testing.assert_allclose(eps[fluid & ~band], 1.0, rtol=1e-6)
+
+    def test_an_over_full_fluid_cell_aborts_the_run(self) -> None:
+        """
+        The precursor that would have named this defect where it happened.
+
+        A FLUID cell's fill fraction is unconstrained *and*, until now,
+        unobserved: the flag scans all select on FLAG_INTERFACE, so the only
+        thing that ever wrote a FLUID cell's mass was the exchange and nothing
+        checked what it wrote. On ``Test 2`` the first filter cell crossed
+        eps = 1 at step 7,650 and the run surfaced as a NaN at 16,493 --
+        8,800 steps of the mass ledger visibly wrong, reported as nothing.
+
+        Poisoning one cell mid-fill stands in for that. The abort has to name
+        the count, the part and the z-range, because "diverged" alone is what
+        made the original take a session to locate.
+
+        It also has to wait: the abort needs
+        :data:`~core.filling_stage.FLUID_FILL_FRACTION_CHECKS` consecutive
+        checks, so a single 200-step hydraulic transient cannot kill a correct
+        run. Poisoning a FLUID cell is exactly the shape that does *not* clear
+        on its own -- nothing writes a FLUID cell's mass but the exchange -- so
+        the breach is still there at the next check and the run dies one check
+        late, which is what this asserts.
+        """
+        import physics.filling as pf
+        from core.filling_stage import (
+            FLUID_FILL_FRACTION_CHECKS,
+            FLUID_FILL_FRACTION_MAX,
+            STATUS_DIVERGED,
+            DIVERGENCE_CHECK_INTERVAL,
+        )
+
+        poison_at = 2 * DIVERGENCE_CHECK_INTERVAL
+        abort_at = poison_at + (
+            FLUID_FILL_FRACTION_CHECKS - 1
+        ) * DIVERGENCE_CHECK_INTERVAL
+        original = pf.step
+        poisoned = []
+
+        def traced(state, units, **kwargs):
+            original(state, units, **kwargs)
+            if state.step_count == poison_at and not poisoned:
+                fluid = np.nonzero(state.flags == pf.FLAG_FLUID)
+                if len(fluid[0]):
+                    cell = tuple(int(a[0]) for a in fluid)
+                    state.mass[cell] = 5.0
+                    poisoned.append(cell)
+            return state
+
+        messages: list = []
+        pf.step = traced
+        try:
+            result = _run(
+                mesh=_walled_tower(nz=12), messages=messages,
+                **_head_mode(max_fill_time_s=0.3),
+            )
+        finally:
+            pf.step = original
+
+        self.assertTrue(poisoned, "the fill never produced a FLUID cell to poison")
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.status, STATUS_DIVERGED)
+        self.assertEqual(
+            result.diverged_at_step, abort_at,
+            f"the guard fired at step {result.diverged_at_step} against "
+            f"{abort_at}: it needs {FLUID_FILL_FRACTION_CHECKS} consecutive "
+            f"checks, no more and no fewer",
+        )
+        aborts = [m for m in messages if "ABORTED" in m and "fill fraction" in m]
+        self.assertTrue(aborts, f"the abort did not name the cause: {messages}")
+        self.assertIn("1 FLUID cell holds", aborts[-1])
+        self.assertIn(f"{FLUID_FILL_FRACTION_MAX:.1f}", aborts[-1])
+        self.assertIn("cast", aborts[-1])
+        self.assertIn("solve z", aborts[-1])
+
+    def test_a_single_check_transient_does_not_abort(self) -> None:
+        """
+        The other half of the two-check rule: one bad window must not kill a
+        run.
+
+        For a FLUID cell ``eps`` is very nearly ``1 + drho/rho`` -- ``state.rho``
+        is the start-of-step density and under Table 1 a FLUID cell's mass
+        increment is exactly its own ``drho`` -- so the band is also a
+        "no FLUID cell changed density by 10 % in one step" meter. A front
+        free-falling into a closed gate is a real water hammer and is entitled
+        to one such window; only a breach that is still there 200 steps later is
+        the bookkeeping coming apart.
+
+        Poisoned at one check and repaired before the next, so exactly one check
+        sees it. With a one-check abort this run dies; with two it finishes.
+        """
+        import physics.filling as pf
+        from core.filling_stage import DIVERGENCE_CHECK_INTERVAL, STATUS_DIVERGED
+
+        poison_at = 2 * DIVERGENCE_CHECK_INTERVAL
+        original = pf.step
+        held: dict = {}
+
+        def traced(state, units, **kwargs):
+            original(state, units, **kwargs)
+            if state.step_count == poison_at and "cell" not in held:
+                fluid = np.nonzero(state.flags == pf.FLAG_FLUID)
+                if len(fluid[0]):
+                    cell = tuple(int(a[0]) for a in fluid)
+                    held["cell"] = cell
+                    held["mass"] = float(state.mass[cell])
+                    state.mass[cell] = 5.0
+            elif state.step_count == poison_at + 1 and "cell" in held:
+                state.mass[held["cell"]] = held["mass"]
+                held["repaired"] = True
+            return state
+
+        messages: list = []
+        pf.step = traced
+        try:
+            result = _run(
+                mesh=_walled_tower(nz=12), messages=messages,
+                **_head_mode(max_fill_time_s=0.3),
+            )
+        finally:
+            pf.step = original
+
+        self.assertIn("cell", held, "the fill never produced a FLUID cell")
+        self.assertTrue(held.get("repaired"), "the poison was never removed")
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertNotEqual(
+            result.status, STATUS_DIVERGED,
+            f"a one-check transient aborted the run: {result.warnings}",
+        )
+        self.assertEqual(
+            [m for m in messages if "fill fraction outside" in m], []
+        )
+
+    def test_a_healthy_fill_does_not_trip_the_fill_fraction_guard(self) -> None:
+        """
+        The band has to clear the two harmless excursions that live just
+        outside [0, 1], or it is a guard that kills working pours.
+
+        ``state.rho`` is the start-of-step density while ``mass`` is the
+        end-of-step value, so every FLUID cell's reported eps is high by
+        ``drho/rho`` -- measured at 1-2 % on several hundred cells of a healthy
+        Test 2 run, plateauing, never growing. ``heal_submerged_interface``
+        separately flags a cell full at slightly under full mass. Both are
+        inside the band by a factor of five, and this asserts it on a fill that
+        actually completes.
+        """
+        from core.filling_stage import STATUS_DIVERGED
+
+        messages: list = []
+        result = _run(
+            mesh=_walled_tower(nz=12), messages=messages,
+            **_head_mode(max_fill_time_s=0.3),
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertNotEqual(result.status, STATUS_DIVERGED, result.warnings)
+        self.assertEqual(
+            [m for m in messages if "fill fraction outside" in m], []
+        )
+
+
+class PeriodicWrapTests(unittest.TestCase):
+    """
+    Why the solve grid is padded: an unwalled array face makes the lattice a
+    torus, on both step paths.
+
+    Every neighbour access in the solver is periodic -- Numba ``% n``, NumPy
+    ``np.roll`` -- and both are documented as relying on an obstacle shell to
+    make the wrap unreachable (``physics.fluid_flow.stream_kernel``: "real
+    domains are closed by obstacle cells, so the wrap never fires"). The stage
+    used to hand them a grid sized exactly to the geometry's bounding box, where
+    no such shell exists.
+
+    These tests assert the *solver's* half of the contract rather than the
+    stage's: given an unwalled face, the wrap fires and it is not a bug in the
+    solver. The stage-side guarantee that no such grid is ever built is
+    ``tests/test_filling_stage.py::MoldPadTests``.
+
+    The controls are what redirect the diagnosis. An open top **alone** is
+    completely clean -- the wrap needs metal on the *opposite* face -- which is
+    why the fix could keep every riser vented instead of sealing riser tops.
+    """
+
+    DX_M = 0.004
+    NU = 6.5e-7
+    NZ = 14
+    WIDTH = 3
+    STEPS = 40
+
+    def _channel(self, *, floor: bool, lid: bool):
+        """
+        A 3x3 channel walled in x and y, with the z faces optional.
+
+        Metal is seeded at the *bottom*. The top plane stands in for a riser
+        top: 12 planes of empty gas separate it from the metal, so any wet cell
+        there arrived through the array edge.
+        """
+        import physics.filling as pf
+        from physics.fluid_flow import lattice_units
+
+        n = self.WIDTH + 2
+        obstacle = np.ones((n, n, self.NZ), dtype=bool)
+        obstacle[1:1 + self.WIDTH, 1:1 + self.WIDTH, :] = False
+        if floor:
+            obstacle[:, :, 0] = True
+        if lid:
+            obstacle[:, :, self.NZ - 1] = True
+        fluid = np.zeros_like(obstacle)
+        z_lo = 1 if floor else 0
+        fluid[1:1 + self.WIDTH, 1:1 + self.WIDTH, z_lo:z_lo + 2] = True
+        units = lattice_units(self.DX_M, self.NU, u_max_physical_m_s=3.0)
+        state = pf.create_state(
+            obstacle, dx_m=self.DX_M, dt_s=units.dt_s, initial_fluid=fluid
+        )
+        top = np.zeros_like(obstacle)
+        top[:, :, self.NZ - 1] = True
+        top &= ~obstacle
+        return state, units, top
+
+    def _first_top_wet_step(self, *, floor, lid, use_numba):
+        """Step until the top plane wets, and report when and how many."""
+        import physics.filling as pf
+
+        state, units, top = self._channel(floor=floor, lid=lid)
+        first, count = None, 0
+        for s in range(1, self.STEPS + 1):
+            pf.step(state, units, use_numba=use_numba)
+            wet = (state.flags == pf.FLAG_FLUID) | (
+                state.flags == pf.FLAG_INTERFACE
+            )
+            n = int(np.count_nonzero(wet & top))
+            if first is None and n:
+                first, count = s, n
+        wet = (state.flags == pf.FLAG_FLUID) | (state.flags == pf.FLAG_INTERFACE)
+        return first, count, int(np.count_nonzero(wet & top))
+
+    def _both_paths(self):
+        from physics.fluid_flow import NUMBA_AVAILABLE
+
+        return (False, True) if NUMBA_AVAILABLE else (False,)
+
+    def test_metal_on_both_z_faces_floods_the_far_face_immediately(self) -> None:
+        """
+        The mechanism, on both paths: 9 cells of the top plane are INTERFACE at
+        step 1, 12 empty planes above the metal.
+
+        ``mass = 0.5`` on them names the writer exactly -- that is
+        ``mass[interface] = 0.5 * REFERENCE_DENSITY`` in ``create_state``'s
+        initial interface layer, whose ``_dilate`` rolls the ``z = 0`` plane
+        onto ``z = nz - 1``. On the real assembly the same ``_dilate`` is
+        reached later, through ``apply_transitions``' promote: measured at step
+        12,156, the step the front first occupied ``z = 0``, five RISER cells
+        created at ``z = 93`` with every wet donor a wrapped cast-floor cell 92
+        planes away.
+        """
+        for use_numba in self._both_paths():
+            with self.subTest(numba=use_numba):
+                first, count, _ = self._first_top_wet_step(
+                    floor=False, lid=False, use_numba=use_numba
+                )
+                self.assertEqual(
+                    first, 1,
+                    "the far z face did not wet, so this fixture no longer "
+                    "demonstrates the wrap the mold pad exists to remove",
+                )
+                self.assertEqual(count, self.WIDTH ** 2)
+
+    def test_an_open_top_alone_is_clean(self) -> None:
+        """
+        The control that redirected the diagnosis.
+
+        With an obstacle floor and the top still open the top plane stays GAS
+        for the whole run: the wrap needs metal on the *opposite* face, so an
+        open riser top is harmless by itself and the fix does not have to seal
+        one. Under the mold pad the riser keeps its atmosphere boundary and
+        ``_static_vent_mask`` keeps finding its vents, because the pad above a
+        riser top is still ``EMPTY_CELL``.
+        """
+        for use_numba in self._both_paths():
+            with self.subTest(numba=use_numba):
+                first, _, final = self._first_top_wet_step(
+                    floor=True, lid=False, use_numba=use_numba
+                )
+                self.assertIsNone(first, f"the top plane wet at step {first}")
+                self.assertEqual(final, 0)
+
+    def test_a_closed_channel_is_clean(self) -> None:
+        """The second control: floor and lid both obstacle, nothing wraps."""
+        for use_numba in self._both_paths():
+            with self.subTest(numba=use_numba):
+                first, _, final = self._first_top_wet_step(
+                    floor=True, lid=True, use_numba=use_numba
+                )
+                self.assertIsNone(first, f"the top plane wet at step {first}")
+                self.assertEqual(final, 0)
+
+    def test_the_stage_never_builds_an_unwalled_grid(self) -> None:
+        """
+        The stage's side of the contract, on the fixture that used to be a
+        torus.
+
+        ``_tower`` is fully dense -- every cell metal, so ``_obstacle_mask``
+        finds nothing solid and before the mold pad the lattice had no boundary
+        at all. That is exactly the condition the three tests above measure, and
+        it must now be unrepresentable: every face of the solved grid is
+        obstacle, and gravity has something to press against.
+        """
+        import physics.filling as pf
+
+        _, state = _final_state(dict(mesh=_tower(nz=8), max_fill_time_s=0.05))
+        obstacle = state.flags == pf.FLAG_OBSTACLE
+        for axis in (0, 1, 2):
+            for face in (0, -1):
+                plane = np.take(obstacle, face, axis=axis)
+                self.assertTrue(
+                    bool(plane.all()),
+                    f"axis {axis} face {face} has "
+                    f"{int(np.count_nonzero(~plane))} non-obstacle cells: the "
+                    f"lattice is a torus",
+                )
 
 
 class StatusReportingTests(unittest.TestCase):
@@ -1522,8 +2282,23 @@ class PressureInletTests(unittest.TestCase):
         Delivery is reported as weight, so a pour that reports 0 lb has not
         happened however many cells its flag count claims.
 
-        Measured: ``complete`` in 1,148 steps at 0.17 s, all 80 cells FLUID,
-        95 % by mass, 0.3 lb delivered against a 0.33 lb tower.
+        Measured: ``complete`` in 1.10 s, every metal cell FLUID, 0.6 lb
+        delivered against a 0.73 lb tower.
+
+        **The fixture changed from ``_tower`` to ``_walled_tower`` when the
+        solve grid gained its mold pad**
+        (:data:`~core.filling_stage.MOLD_PAD_CELLS`), and the cap with it,
+        0.5 s -> 2.0 s. ``_tower`` is a fully dense 2x2 column: before the pad
+        ``_obstacle_mask`` found nothing solid, so it was periodic in x and y as
+        well as z and the "fill" partly recirculated its own metal through the
+        domain edge. The pad does not just give it a floor -- it wraps a 2x2
+        channel in halfway bounce-back, which is the geometry the stage itself
+        refuses to trust (``MIN_CHOKE_THICKNESS_CELLS``), and the 4.4x slowdown
+        is what creep through a 2-cell no-slip channel costs, not what removing
+        a recirculation path costs. ``_walled_tower`` is the fixture that was
+        already written for this: a 3-cell channel inside a mold block, walled
+        by cores rather than by the pad, so the pad changes nothing about it and
+        the pour it measures is one the production code will stand behind.
 
         The full assertion is back. It was weakened to "84 % of cells" for one
         round, when the corrected Koerner pair weighting stopped FLUID mass
@@ -1536,7 +2311,8 @@ class PressureInletTests(unittest.TestCase):
         """
         messages: list = []
         result = _run(
-            mesh=_tower(nz=20), messages=messages, **_head_mode(max_fill_time_s=0.5)
+            mesh=_walled_tower(nz=20), messages=messages,
+            **_head_mode(max_fill_time_s=2.0),
         )
         self.assertIsNotNone(result)
         self.assertEqual(result.status, STATUS_COMPLETE)
@@ -1839,12 +2615,23 @@ class MassProgressReportingTests(unittest.TestCase):
         of liquid metal -- ``total_mass_kg``'s convention -- so a completed
         pour must have delivered about the casting's weight.
 
-        Measured: a 2x2x40 tower of quarter-inch cells is 2.5 in^3, which
-        ``pour_weight_lb`` puts at 0.65 lb of steel, and the run reports
-        0.6 lb delivered. The balance is the seed ``create_state`` starts with,
-        which came in before the inlet did anything.
+        Measured: a 3x3x40 channel of quarter-inch cells is 5.6 in^3, which
+        ``pour_weight_lb`` puts at 1.46 lb of steel, and the run reports
+        1.3 lb delivered -- 89 %. The balance is the seed ``create_state``
+        starts with, which came in before the inlet did anything.
 
-        The run reports ``complete`` at 98 % by mass, in 2,060 steps at 0.25 s.
+        The run reports ``complete`` at 1.50 s against a 3.0 s cap.
+
+        **The fixture changed from ``_tower`` to ``_walled_tower``, for the
+        reason spelled out in**
+        :meth:`PressureInletTests.test_a_head_driven_pour_fills_and_delivers_metal`:
+        ``_tower`` is fully dense, so before the mold pad it was periodic on all
+        three axes, and after the pad it is a 2x2 no-slip channel at the
+        thickness the stage warns is unresolvable. ``_walled_tower`` is walled by
+        cores rather than by the pad, so the pad changes nothing about it. The
+        ratio this test is actually about -- delivered weight against the
+        casting's own weight -- lands in the same place on either fixture.
+
         It was reading 92 % of cells for one round while the front's own
         leavings sat frozen as submerged interface cells -- see
         :meth:`PressureInletTests.test_a_head_driven_pour_fills_and_delivers_metal`
@@ -1854,9 +2641,9 @@ class MassProgressReportingTests(unittest.TestCase):
         """
         from core.filling_stage import pour_weight_lb
 
-        mesh = _tower(nz=40)
+        mesh = _walled_tower(nz=40)
         messages: list = []
-        result = _run(mesh=mesh, messages=messages, **_head_mode(max_fill_time_s=1.0))
+        result = _run(mesh=mesh, messages=messages, **_head_mode(max_fill_time_s=3.0))
         self.assertIsNotNone(result)
         self.assertEqual(result.status, STATUS_COMPLETE)
         self.assertEqual(result.filled_fraction, 1.0)
@@ -2647,9 +3434,14 @@ class MetalThroughAFilterTests(unittest.TestCase):
         """
         Mass conservation across the porous band. The free surface can hold at
         most one cell's worth per wet cell, so a total above that is the
-        bookkeeping having come apart -- and the porosity branch of the mass
-        exchange, which weights pairs touching a filter by the eps average, is
-        exactly the place it could.
+        bookkeeping having come apart.
+
+        The exchange's porous override was exactly the place it could, and is
+        gone -- see :class:`PorousPairWeightTests`. This total is the wrong
+        statistic for that defect and stays here for a different reason: the
+        override conserved mass *exactly* while eps ran to 7.76, so a passing
+        ceiling check said nothing about it. Fill fraction is the statistic
+        that sees it.
         """
         breaches = [
             (s["step"], s["wet_mass"], s["wet_cells"])

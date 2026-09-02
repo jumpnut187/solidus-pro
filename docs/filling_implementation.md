@@ -225,9 +225,15 @@ Weighting a FLUID cell's exchanges by ε instead makes the weight *be* the
 drift, and the drift then scales its own exchanges: on `Filling_Test`, per-cell
 mass in the full sprue reached ±70,000 and the run diverged at step 251,000.
 
-Pairs touching a filter keep the ε average, because inside a filter a full cell
-holds ρ·porosity rather than ρ and the w = 1 identity would walk the mass off
-that definition.
+Pairs touching a filter are no exception. They were for one round, on the
+argument that inside a filter a full cell holds ρ·porosity rather than ρ and the
+w = 1 identity would walk the mass off that definition. The argument names the
+right quantity and the override does the opposite of what it claims: an
+ε-dependent weight puts a cell's own bookkeeping error back into its exchange
+amplitude, and nothing in the solver can take mass out of a FLUID cell. See
+`docs/filling_field_notes.md` and `Test/session_diag_2026-09-02/`. The residual
+that is accepted instead is a bounded (1 − porosity)·Δρ per step, which
+telescopes to a few tenths of a percent of a cell's capacity over a whole fill.
 
 Interface cells have no neighbour populations on the gas side; reconstruct:
 
@@ -357,11 +363,32 @@ startup shock that will look like an instability.
 
 - Mold walls: **halfway bounce-back** on `OBSTACLE` cells. With TRT and
   Λ = 3/16 the wall sits exactly halfway between nodes.
+- **The solve grid is padded with one cell of `EMPTY_CELL` on every face** before
+  the obstacle mask is built, so every array face is `OBSTACLE`. Both step paths
+  index neighbours modulo the array; without a margin, a feature flush with the
+  geometry's bounding box is the periodic neighbour of whatever sits on the
+  opposite face. On `Test 2` that made 298 cast-floor cells the neighbours of
+  riser-top cells 93 planes away. See `core.filling_stage.MOLD_PAD_CELLS`; the
+  stage refuses to run and says which face if any is left open. Two further pad
+  planes above metal that reaches the original `+z` face are left open as
+  atmosphere, so an open riser can still overflow rather than pressurising
+  against a lid one cell up — but never within one cell in x or y of the inlet
+  mouth, whose `ensure_interface_skin` halo would otherwise wet them.
 - Chills and cores are obstacles hydrodynamically (`is_mold()` already gives the
   mask) but thermally active in F2.
 - Vents/risers open to atmosphere: gas cells at ρ_atm that accept displaced air.
   Without at least one, the cavity cannot fill and air compresses unphysically.
   Default every top-facing riser surface to vented, with a parameter to close it.
+- **Only the `+z` face of the meshed bounding box is air.** The vent set for the
+  entrapment check is the type-based one (a `RISER` cell with `EMPTY_CELL` above
+  it, plus the inlet), the headspace opened above top-face metal, and gas cells
+  on the original top plane. The sides and the floor were counted too for one
+  round, on the reading that nothing is modelled beyond the box — but the pad
+  settles that: the mold continues below the casting's floor and beside its
+  sides, which is why the pad is mold rather than air. Counting the floor made a
+  gas pocket pinned against it read as *vented*, which is the inverse of the
+  answer the detector exists to give. See
+  `core.filling_stage._open_air_mask`.
 
 ### 6.4 Air entrapment (F3)
 

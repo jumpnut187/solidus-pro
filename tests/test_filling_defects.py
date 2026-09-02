@@ -24,7 +24,7 @@ from physics.filling import (
 )
 from core.filling_stage import (
     EMPTY_CELL,
-    _domain_boundary_mask,
+    _open_air_mask,
     _entrapment_warning_if_no_vent,
     _static_vent_mask,
 )
@@ -189,17 +189,34 @@ class TestVentMaskConstruction(unittest.TestCase):
         self.assertTrue(vent[0, 0, 0])
         self.assertEqual(int(vent.sum()), 1)
 
-    def test_domain_boundary_mask_covers_only_the_edges(self):
-        shape = (3, 4, 5)
-        boundary = _domain_boundary_mask(shape)
+    def test_open_air_mask_is_the_top_face_and_nothing_else(self):
+        """
+        The sides and the floor of the meshed bounding box are mold, not air.
 
-        self.assertTrue(boundary[0, 0, 0])
-        self.assertTrue(boundary[-1, -1, -1])
-        self.assertTrue(boundary[0, 2, 3])  # x boundary, interior y/z
-        self.assertFalse(boundary[1, 1, 1])  # strictly interior
+        This asserted all six faces for as long as nothing was modelled beyond
+        the bounding box. Since the solve grid is padded with a cell of mold on
+        every face (``core.filling_stage.MOLD_PAD_CELLS``), five of those faces
+        are explicitly walled and physically are sand -- the box cuts through
+        the mold below the casting's floor and beside its sides. Only ``+z`` is
+        open air, and calling the floor a vent made a gas pocket pinned against
+        it read as vented, which is the exact inverse of the answer this mask
+        exists to produce.
+        """
+        shape = (3, 4, 5)
+        open_air = _open_air_mask(shape)
+
+        self.assertTrue(open_air[0, 0, -1])
+        self.assertTrue(open_air[-1, -1, -1])
+        self.assertTrue(open_air[1, 2, -1])  # interior x/y, top face
+        self.assertEqual(int(open_air.sum()), shape[0] * shape[1])
+        # The five faces that are mold.
+        self.assertFalse(open_air[0, 0, 0])   # the floor
+        self.assertFalse(open_air[0, 2, 3])   # an x side
+        self.assertFalse(open_air[1, 0, 3])   # a y side
+        self.assertFalse(open_air[1, 1, 1])   # strictly interior
 
     def test_full_vent_pipeline_frees_a_pocket_touching_an_open_riser_top(self):
-        # Wires _static_vent_mask + _domain_boundary_mask together with
+        # Wires _static_vent_mask + _open_air_mask together with
         # find_entrapped_gas, the way core.filling_stage assembles them each
         # periodic check.
         shape = (5, 5, 5)
@@ -212,13 +229,59 @@ class TestVentMaskConstruction(unittest.TestCase):
 
         inlet = np.zeros((0, 3), dtype=np.int64)
         static_vent = _static_vent_mask(dense, inlet, vent_risers_enabled=True)
-        boundary = _domain_boundary_mask(shape)
-        vent_mask = static_vent | (boundary & (flags == FLAG_GAS))
+        vent_mask = static_vent | (_open_air_mask(shape) & (flags == FLAG_GAS))
 
         entrapped = find_entrapped_gas(flags, vent_mask)
 
         self.assertFalse(entrapped[2, 2, 4])  # vented through the riser top
         self.assertTrue(entrapped[1, 1, 1])   # no path out
+
+    def test_a_pocket_on_the_floor_is_entrapped_not_vented(self):
+        """
+        A gas pocket pinned against the casting's floor has nowhere to go.
+
+        The floor is the ``z = 0`` plane of the meshed bounding box, which is
+        sand -- the mold continues below it, which is why the solve grid pads it
+        with obstacle. While all six faces counted as vents this pocket read as
+        **vented** and contributed 0 to the entrapped count, on the geometry
+        that is the textbook gas-porosity site. Measured on this fixture: 0
+        entrapped under the six-face mask, 1 under the top-face-only mask.
+        """
+        shape = (5, 5, 5)
+        dense = np.full(shape, EMPTY_CELL, dtype=np.int8)
+        dense[:, :, :] = PART_TYPE_CAST
+
+        flags = np.full(shape, FLAG_FLUID, dtype=np.uint8)
+        flags[2, 2, 0] = FLAG_GAS  # sitting on the floor, metal all around it
+
+        inlet = np.zeros((0, 3), dtype=np.int64)
+        static_vent = _static_vent_mask(dense, inlet, vent_risers_enabled=True)
+
+        shipped = static_vent | (_open_air_mask(shape) & (flags == FLAG_GAS))
+        self.assertEqual(int(find_entrapped_gas(flags, shipped).sum()), 1)
+        self.assertTrue(find_entrapped_gas(flags, shipped)[2, 2, 0])
+
+        # The mask this replaced, so the test says what it is guarding against
+        # rather than only asserting the new answer.
+        six_face = np.zeros(shape, dtype=bool)
+        six_face[[0, -1], :, :] = True
+        six_face[:, [0, -1], :] = True
+        six_face[:, :, [0, -1]] = True
+        stale = static_vent | (six_face & (flags == FLAG_GAS))
+        self.assertEqual(int(find_entrapped_gas(flags, stale).sum()), 0)
+
+    def test_a_pocket_on_a_side_face_is_entrapped_too(self):
+        """The same for the four ``x``/``y`` faces, which are also sand."""
+        shape = (5, 5, 5)
+        dense = np.full(shape, PART_TYPE_CAST, dtype=np.int8)
+        flags = np.full(shape, FLAG_FLUID, dtype=np.uint8)
+        flags[0, 2, 2] = FLAG_GAS
+
+        inlet = np.zeros((0, 3), dtype=np.int64)
+        static_vent = _static_vent_mask(dense, inlet, vent_risers_enabled=True)
+        vent_mask = static_vent | (_open_air_mask(shape) & (flags == FLAG_GAS))
+
+        self.assertTrue(find_entrapped_gas(flags, vent_mask)[0, 2, 2])
 
 
 # ---------------------------------------------------------------------------

@@ -137,11 +137,23 @@ MIN_CHOKE_THICKNESS_CELLS = 2.0
 
 #: Thickness at which a channel is resolved well enough to stop apologising for.
 #:
-#: Three is the observed floor, not a round number: ``Test_Model/Filling_Test``
-#: on a 0.20 in fill grid puts three cells across its 0.5 in gate, and that run
-#: time-caps at 57 % of cells with two of 154 gate cells ever going FLUID (see
-#: ``docs/filling_field_notes.md``). Above the hard minimum, below this, the
-#: fill is marginal rather than wrong -- worth saying, in a softer voice.
+#: Three is the observed floor, not a round number. ``Test_Model/Filling_Test``
+#: on a 0.20 in fill grid puts three cells across its 0.5 in gate, and it is the
+#: thinnest channel this solver has ever carried a complete fill through: it
+#: now completes 4,357/4,357 cells at 18.0 s, 97 % by mass -- but its peak
+#: lattice velocity reaches 0.446, about nine times the 0.05 the timestep was
+#: sized for, and the highest of the four validated assemblies. Complete is not
+#: the same as trustworthy at three cells.
+#:
+#: That run used to time-cap at 57 % of cells, and this docstring and the
+#: warning text both cited the figure. It was not the gate: a 20-column periodic
+#: wrap put the runner floor opposite the sprue mouth, so the pour boundary was
+#: being fed back into itself, and the fill completed the first time it ran with
+#: a mold pad in place. Measurements taken through a torus are not measurements
+#: -- see :data:`MOLD_PAD_CELLS` and ``docs/filling_field_notes.md``.
+#:
+#: Above the hard minimum, below this, the fill is marginal rather than wrong --
+#: worth saying, in a softer voice.
 MARGINAL_CHOKE_THICKNESS_CELLS = 3.0
 
 #: Parts the metal has to flow *through* on its way to the casting.
@@ -301,6 +313,133 @@ NEGATIVE_POPULATION_CASCADE_FRACTION = 0.02
 #: Cells that must be affected before the cascade fraction is consulted at all,
 #: so a handful of wet cells early in a pour cannot trip it on rounding.
 NEGATIVE_POPULATION_CASCADE_MIN_CELLS = 8
+
+#: Fill fraction band a FLUID cell's mass bookkeeping must stay inside.
+#:
+#: ``eps = m / (rho * porosity)`` is a *geometric* quantity: a full cell holds
+#: exactly its pore volume of metal, so eps outside [0, 1] is not a physical
+#: state at any pressure. Back-pressure belongs in ``rho``, and does go there.
+#:
+#: **What this actually measures on a FLUID cell.** ``state.rho`` is the
+#: *start-of-step* density (``physics/filling.py``'s ``_collide_stream_numba``)
+#: while ``state.mass`` is the end-of-step value, and under Koerner Table 1 a
+#: FLUID cell's mass increment is exactly its own ``drho``. So
+#: ``eps ~ 1 + drho/rho`` and the band reads as "no FLUID cell changed density
+#: by more than 10 % over one step". That is a narrower statement than the
+#: geometric one, and it is why the abort needs
+#: :data:`FLUID_FILL_FRACTION_CHECKS` rather than firing on a single check: a
+#: front slamming into a closed gate is a real water hammer, and a correct run
+#: is entitled to one 200-step window of it.
+#:
+#: The flag scans cannot see a breach. ``transition_scan_kernel``,
+#: ``apply_transitions`` and ``heal_submerged_interface`` all select on
+#: FLAG_INTERFACE, so a FLUID cell's mass is written by the Koerner exchange
+#: and by nothing else -- once it is over full there is no corrective path, and
+#: because the exchange conserves mass exactly, every unit of phantom fill is a
+#: unit missing from a real cell. Measured on ``Test 2`` with the old
+#: eps-weighted porous exchange: eps_max in the filter zone went 1.046 ->
+#: 3.711 -> 7.76 while eps_min fell to -1.17 and then -9.5, and the run
+#: surfaced as a NaN at step 16,493 -- 8,800 steps after the first breach at
+#: 7,650. A FLUID cell over full is a bookkeeping failure, and reporting it
+#: where it happens is the difference between naming the mechanism and naming
+#: the wreckage.
+#:
+#: **What it does not cover, measured.** On a mass-side amplifier -- the failure
+#: it was written against -- the band gives thousands of steps of warning. On a
+#: momentum-side blow-up it gives almost none: validated on Test 2, an
+#: exponential ``rho``/``u`` runaway at a filter inlet e-folded every 64 steps,
+#: and because ``rho`` grew in the denominator at the same time as ``mass`` grew
+#: in the numerator, ``eps`` sat at 1.008 until 32 steps before the field went
+#: non-finite -- inside this check's own 200-step cadence, so it never fired.
+#: Tightening the band does not fix that: 1.05 would have flagged that run 2,772
+#: steps early, but the same assembly reached 1.064 on a healthy stretch and
+#: carried on for 2,700 more steps. The missing precursor is a *velocity* one,
+#: and none exists yet.
+#:
+#: The band is wide on purpose. Two documented, harmless excursions sit just
+#: outside [0, 1]: the one-step ``drho/rho`` lag above -- measured at 1-2 % on
+#: several hundred healthy FLUID cells of a quiescent Test 2 field, plateauing,
+#: never growing -- and ``heal_submerged_interface``, which flags a cell FLUID
+#: and then has ``_redistribute`` strand its deficit back on it, leaving it
+#: *below* full. 10 % clears both by a factor of five while still catching the
+#: divergence 8,800 steps early.
+FLUID_FILL_FRACTION_MIN = -0.1
+FLUID_FILL_FRACTION_MAX = 1.1
+
+#: Consecutive divergence checks that must find the band breached before the
+#: run is aborted.
+#:
+#: Presence, not prevalence -- unlike the negative-population precursor above,
+#: which needed a 40-check window because an isolated negative self-heals. A
+#: FLUID cell outside the band does not self-heal: nothing in the solver writes
+#: a FLUID cell's mass except the exchange, so the *only* way a breach clears is
+#: for the cell to be demoted to INTERFACE and capped. Two checks is therefore
+#: the smallest window that distinguishes the two shapes this guard has to tell
+#: apart: a one-window hydraulic transient at a sealing gate (see
+#: :data:`FLUID_FILL_FRACTION_MIN` on what eps measures), against the real
+#: defect, which the diagnosis measured climbing monotonically from step ~7,650
+#: to a NaN at 16,493 -- 44 consecutive checks, so it still trips on the second.
+FLUID_FILL_FRACTION_CHECKS = 2
+
+#: Cells of mold laid on every face of the solve grid before it is solved.
+#:
+#: ``build_grid_mapping`` sizes the dense grid exactly to the voxel centres'
+#: bounding box, so a feature flush with the geometry's extent lies *on* an
+#: array face with nothing beyond it. Both step paths index neighbours modulo
+#: the array -- Numba ``% n``, NumPy ``np.roll`` -- and both document that they
+#: rely on an obstacle shell to make that wrap unreachable
+#: (``physics.fluid_flow.stream_kernel``: "real domains are closed by obstacle
+#: cells, so the wrap never fires"). Without a margin the shell does not exist
+#: and the lattice is a torus.
+#:
+#: Measured on ``Test 2``: 302 metal-to-metal wrap pairs across z, of which 298
+#: put a CAST cell on ``z = 0`` directly opposite a RISER cell on ``z = 93``,
+#: plus 117 across x and 55 across y. At step 12,156 -- the step the front
+#: first occupied ``z = 0`` -- ``apply_transitions``' promote dilation created
+#: five INTERFACE cells at ``z = 93``, every wet donor a wrapped cast-floor
+#: cell 92 empty planes away. The phantom pool then grew *downward* from the
+#: riser top for 3,594 steps and the run went non-finite with 1,263 negative
+#: riser cells. Both self-repair paths were blinded by the same wrap:
+#: ``reset_detached_interface_cells`` needs no wet neighbour and the wrap gave
+#: the cell nine; ``heal_submerged_interface`` needs no gas neighbour and the
+#: cell had plenty of real riser gas above it.
+#:
+#: One cell is enough, because ``_obstacle_mask`` makes ``EMPTY_CELL`` solid
+#: and every one of the ~40 wrapped accesses already handles an obstacle
+#: neighbour correctly. Measured cost on Test 2: 1,713,150 -> 1,801,824 cells
+#: (+5.2 %), all 339,824 metal cells preserved, all 2,247 riser-top vents
+#: preserved, and zero spurious upper-riser cells over 1,200 steps of the
+#: padded miniature against 140 on the unpadded one, on both step paths.
+#:
+#: Clamping the ~40 neighbour accesses instead would be 40 individually
+#: correct edits and 40 parity re-verifications, against one change here that
+#: touches no solver code at all -- which is why ``tests/test_filling_parity``
+#: is still valid after this fix.
+MOLD_PAD_CELLS = 1
+
+#: Extra cells above the original ``+z`` face, opened as atmosphere wherever
+#: metal reaches that face.
+#:
+#: :data:`MOLD_PAD_CELLS` on its own caps an open riser with bounce-back one
+#: cell above its top plane. The riser still fills -- the gas phase is a void,
+#: not a compressible fluid -- but it can no longer overflow, and a metered
+#: over-pour would pressurise the top cell instead of spilling out of it. These
+#: cells are ``EMPTY_CELL``-typed and simply not made solid, so they are GAS to
+#: the solver, excluded from ``_metal_mask`` and therefore from the fill
+#: fraction's numerator and denominator alike, and included in the vent term as
+#: the atmosphere they represent. The outermost plane stays obstacle, so the
+#: array face is still sealed and :data:`MOLD_PAD_CELLS`' guarantee holds.
+#:
+#: Not opened above the inlet mouth, or within one cell of it in x or y. The
+#: inlet is a Dirichlet source whose stream halo is kept wet by
+#: ``ensure_interface_skin`` every step, so headspace in the halo's reach would
+#: grow an interface skin *above* the geometry and let metal pool outside the
+#: metal mask, where the fill ledger cannot see it. The halo is an 18-direction
+#: dilation, so its reach on the plane above the mouth is the mouth's full
+#: 8-neighbourhood in (x, y) -- see the exclusion in ``run_filling_stage`` for
+#: the counts measured on Test 2. A pour mouth is already at atmosphere by
+#: definition; it needs no headspace.
+HEADSPACE_CELLS = 2
 
 #: Steps that must elapse before a stall can be declared at all. Reports are
 #: spaced at ``max_steps / 20``, so on a short step budget five of them can
@@ -841,23 +980,56 @@ def _static_vent_mask(
     return vent
 
 
-def _domain_boundary_mask(shape: Tuple[int, int, int]) -> np.ndarray:
+def _open_air_mask(shape: Tuple[int, int, int]) -> np.ndarray:
     """
-    Cells sitting on the outer envelope of the dense grid.
+    Cells on the one face of the meshed bounding box that is open to air.
 
-    ``build_grid_mapping`` sizes the dense grid exactly to the voxel
-    centres' bounding box (module docstring, "the dense shape must be
-    derived from the voxel centres"), so a cell at index 0 or ``shape - 1``
-    along any axis is at the true edge of the meshed geometry -- nothing is
-    modelled beyond it, and no wall was ever asserted there either. A GAS
-    cell found there is therefore open to atmosphere by omission, not by
-    any wall the user drew.
+    The top, ``+z``, and nothing else.
+
+    This used to be all six faces, on the reading that ``build_grid_mapping``
+    sizes the grid exactly to the voxel centres' bounding box (module
+    docstring, "the dense shape must be derived from the voxel centres"), so a
+    cell at index 0 or ``shape - 1`` along any axis is at the true edge of the
+    meshed geometry -- nothing modelled beyond it and no wall asserted there, so
+    a GAS cell found there was called open to atmosphere by omission. That was
+    the only defensible reading while nothing was modelled beyond the edge.
+
+    :data:`MOLD_PAD_CELLS` settled the question the other way for five of the
+    six faces, and settled it correctly: the mold does not stop where the
+    meshed geometry stops. The bounding box cuts through sand below the
+    casting's floor and beside its sides, which is why the pad is mold rather
+    than air, and why the solver bounce-backs off it. Gravity picks out the
+    remaining face: ``+z`` is the plane the pour cup and the risers break
+    through, and it is the only face the pad opens a headspace above.
+
+    Calling the other five faces vents was actively wrong for the thing the
+    mask feeds. A gas pocket pinned against the casting floor is the classic
+    gas-porosity site, and it read as **vented** -- the detector's answer
+    inverted at exactly the geometry it exists to flag.
+
+    **Pass the unpadded shape.** ``run_filling_stage`` solves on a padded grid
+    where every array face is obstacle and therefore never GAS, so this mask
+    built on the padded shape would be identically empty. The caller builds it
+    on the original shape and embeds it at the pad offset, which is where the
+    top of the meshed geometry still is.
+
+    Nearly, but not entirely, redundant with the headspace the pad opens above
+    top-face metal, and the remainder is why it stays. The headspace covers
+    every such column except the ring within one cell of the pour mouth, which
+    is excluded from it so the inlet's interface skin cannot pool metal above
+    the geometry (:data:`HEADSPACE_CELLS`); ``_static_vent_mask`` covers riser
+    tops and the mouth itself, by type. What is left over is that ring, where it
+    is neither riser nor inlet. Measured on a casting plate flush with the top
+    of its own bounding box with a 4-cell sprue punched through it: of 64
+    top-face cells, ``_static_vent_mask`` covers 4 and the headspace above
+    covers 48, and this term is the only thing covering the remaining **12** --
+    the ring of casting-top columns around the mouth. They are the top of the
+    mold immediately beside an open pour cup, so air is the right answer for
+    them.
     """
-    boundary = np.zeros(shape, dtype=bool)
-    boundary[[0, -1], :, :] = True
-    boundary[:, [0, -1], :] = True
-    boundary[:, :, [0, -1]] = True
-    return boundary
+    open_air = np.zeros(shape, dtype=bool)
+    open_air[:, :, -1] = True
+    return open_air
 
 
 def _entrapment_warning_if_no_vent(vent_mask: np.ndarray) -> Optional[str]:
@@ -875,7 +1047,7 @@ def _entrapment_warning_if_no_vent(vent_mask: np.ndarray) -> Optional[str]:
     return (
         "no vent path found for air-entrapment checking (vent_risers is "
         "off, no riser is present, and no gas cell currently touches the "
-        "inlet or the domain boundary): every gas pocket will read as "
+        "inlet or the open top of the mold): every gas pocket will read as "
         "entrapped until a vent opens"
     )
 
@@ -1795,7 +1967,49 @@ def run_filling_stage(
             )
         )
 
-    inlet_seeds = _resolve_inlet_cells(pour_location, mapping, solve_types, coarsening)
+    # Seal the lattice: one cell of mold on every face, plus the headspace
+    # above it. See MOLD_PAD_CELLS for the wrap this removes and HEADSPACE_CELLS
+    # for why the top gets more. Everything below this line works on the padded
+    # grid; ``solve_core`` is the view that still speaks the mapping's
+    # coordinates, and ``to_voxels`` is the only way a solve field is allowed
+    # back onto the voxel list.
+    pad_lo = int(MOLD_PAD_CELLS)
+    core_shape: Tuple[int, int, int] = (
+        int(solve_types.shape[0]),
+        int(solve_types.shape[1]),
+        int(solve_types.shape[2]),
+    )
+    core = tuple(slice(pad_lo, pad_lo + n) for n in core_shape)
+    solve_types = np.pad(
+        solve_types,
+        (
+            (pad_lo, pad_lo),
+            (pad_lo, pad_lo),
+            (pad_lo, pad_lo + int(HEADSPACE_CELLS)),
+        ),
+        mode="constant",
+        constant_values=EMPTY_CELL,
+    )
+    solve_core = solve_types[core]
+
+    def to_voxels(field: np.ndarray) -> np.ndarray:
+        """
+        One solve field back onto the voxel list, pad cropped off first.
+
+        ``gather_to_voxels`` asserts the dense shape against ``mapping.shape``,
+        and ``_upsample`` at coarsening 1 returns its input untouched, so a
+        padded field either raises there or -- at coarsening > 1 -- gathers
+        every voxel one cell off along all three axes. Cropping here is the one
+        place that cannot be forgotten per call site.
+        """
+        return gather_to_voxels(
+            mapping, _upsample(np.asarray(field)[core], mapping.shape, coarsening)
+        )
+
+    # Resolved on the unpadded view, because the pour point arrives in voxel
+    # coordinates and the mapping only knows those, then shifted onto the
+    # padded grid the solver runs on.
+    inlet_seeds = _resolve_inlet_cells(pour_location, mapping, solve_core, coarsening)
     if inlet_seeds.shape[0] == 0:
         emit(
             "Filling stage skipped: the pour location does not resolve to any "
@@ -1810,7 +2024,7 @@ def run_filling_stage(
     # kg/s -- correct, and exactly what a basin sitting on the whole sprue
     # does. See _expand_inlet_to_mouth for the measurement that made this
     # necessary: 8 cells of a sprue mouth is a jet, not a pour.
-    inlet = _expand_inlet_to_mouth(inlet_seeds, solve_types)
+    inlet = _expand_inlet_to_mouth(inlet_seeds, solve_core) + pad_lo
     inlet_seed_count = int(inlet_seeds.shape[0])
     inlet_widening = ""
     if inlet.shape[0] > inlet_seed_count:
@@ -1852,6 +2066,84 @@ def run_filling_stage(
     metal = _metal_mask(solve_types)
     if not np.any(metal):
         emit("Filling stage skipped: no metal cells in the assembly.")
+        return None
+
+    # Atmosphere over whatever reaches the original +z face -- the riser tops,
+    # and on some assemblies the sprue mouth. See HEADSPACE_CELLS.
+    headspace = np.zeros(solve_types.shape, dtype=bool)
+    if HEADSPACE_CELLS:
+        from scipy import ndimage
+
+        z_top = core[2].stop - 1
+        open_above = metal[:, :, z_top].copy()
+        # Keep the headspace out of the inlet's *whole reach*, not just out of
+        # the mouth's own columns.
+        #
+        # ``inlet_halo`` below is an 18-direction dilation of the mouth, and
+        # five of those directions carry c_z = +1: they land in the first
+        # headspace plane over the columns *diagonally beside* the mouth. If
+        # such a column is metal on the original top face its headspace is
+        # open, so it survives ``inlet_halo &= ~obstacle`` and
+        # ensure_interface_skin promotes it every step -- wet cells above the
+        # geometry, outside ``metal`` and cropped out of every result field, so
+        # their mass shows up in ``poured`` and nowhere else. Measured on Test
+        # 2's grid: 0 such cells for the sprue pour the validation suite runs,
+        # but 35 for a riser-top pour and 6 for a cast-top pour, both of which
+        # _expand_inlet_to_mouth explicitly supports. Same geometry, different
+        # click.
+        #
+        # An 8-neighbourhood in (x, y) is exactly the halo's footprint on the
+        # plane above, so clearing it is sufficient and costs only the ring of
+        # columns around the mouth -- which have the mouth's own atmosphere
+        # beside them anyway. binary_dilation rather than np.roll: it treats the
+        # array edge as False instead of wrapping, which is the whole point of
+        # this section of the file.
+        mouth = np.zeros(solve_types.shape[:2], dtype=bool)
+        on_mouth = inlet[:, 2] == z_top
+        mouth[inlet[on_mouth, 0], inlet[on_mouth, 1]] = True
+        open_above &= ~ndimage.binary_dilation(
+            mouth, structure=np.ones((3, 3), dtype=bool)
+        )
+        headspace[:, :, core[2].stop : core[2].stop + int(HEADSPACE_CELLS)] = (
+            open_above[:, :, None]
+        )
+        obstacle &= ~headspace
+
+    # The lattice is a torus unless every array face is solid, and both step
+    # paths wrap silently rather than raising -- so this is checked here, once,
+    # where the grid is built, rather than left to be rediscovered as a phantom
+    # pool 12,000 steps into a pour. See MOLD_PAD_CELLS.
+    #
+    # Reported the way every other unrunnable geometry in this function is
+    # reported -- emit and return None -- rather than raised. Nothing wraps
+    # maybe_run_filling in a try (core/simulation_pipeline.py:574,
+    # core/surrogate/pipeline.py:201), so raising here would tear down a run
+    # that has already paid for meshing, with no FillingResult and no message
+    # the UI can show. The message is the loud part.
+    open_faces = [
+        name
+        for name, plane in (
+            ("x = 0", obstacle[0]),
+            ("x = max", obstacle[-1]),
+            ("y = 0", obstacle[:, 0]),
+            ("y = max", obstacle[:, -1]),
+            ("z = 0", obstacle[:, :, 0]),
+            ("z = max", obstacle[:, :, -1]),
+        )
+        if not plane.all()
+    ]
+    if open_faces:
+        emit(
+            f"Filling stage skipped: the solve lattice is not closed. "
+            f"Non-obstacle cells sit on the {', '.join(open_faces)} "
+            f"face{'' if len(open_faces) == 1 else 's'} of the array, and both "
+            f"step paths index neighbours periodically, so opposite faces of "
+            f"the domain are neighbours of each other -- metal on one face "
+            f"would stream and exchange mass straight into whatever sits on "
+            f"the other, however far apart they are. The "
+            f"{pad_lo}-cell mold pad is what makes that unrepresentable and it "
+            f"has been defeated; this is a bug in the stage, not in the model."
+        )
         return None
 
     filter_zones = build_filter_zone_specs(
@@ -2334,8 +2626,11 @@ def run_filling_stage(
     # Head mode only: velocity mode is a pump, and a pump has no free surface.
     if inlet_mode != 1:
         solve_dx_in = mapping.dx_in * coarsening
+        # Padded z index, so the pad offset comes back off before the index
+        # becomes a height: index pad_lo is the original grid's z = 0.
         z_centres_in = float(mapping.origin_in[2]) + (
-            np.arange(solve_types.shape[2], dtype=np.float64) * coarsening
+            (np.arange(solve_types.shape[2], dtype=np.float64) - pad_lo)
+            * coarsening
             + (coarsening - 1) / 2.0
         ) * mapping.dx_in
         metal_top_z_in = float(
@@ -2406,21 +2701,38 @@ def run_filling_stage(
             warnings.append(
                 f"the {label} resolves to {thickness:.1f} cells across on a "
                 f"{dx_m * 1000:.1f} mm fill grid ({inches:.2f} in), which is "
-                f"the floor at which this solver has ever produced a usable "
-                f"fill -- Test_Model/Filling_Test, whose gate is also three "
-                f"cells, time-caps at 57% of cells. Treat the flow through "
-                f"the {label} as marginal, not as a result."
+                f"the thinnest channel this solver has ever carried a complete "
+                f"fill through -- and it carries it at the edge of the velocity "
+                f"range the timestep was sized for. Treat the flow through the "
+                f"{label} as marginal, not as a result; if it matters to the "
+                f"answer, resolve it and rerun."
             )
 
     # F3: air entrapment. The vent mask is reassembled at every periodic
-    # check (see below) because its "domain boundary gas" component is a
-    # live snapshot -- built once here, "static_vent" only covers the parts
-    # that do not change as the fill progresses (open riser tops, the
-    # inlet).
+    # check (see below) because its "open-air gas" component is a live
+    # snapshot -- built once here, "static_vent" only covers the parts that do
+    # not change as the fill progresses (open riser tops, the inlet).
     static_vent = _static_vent_mask(
         solve_types, inlet, bool(getattr(filling, "vent_risers", 1))
     )
-    boundary_mask = _domain_boundary_mask(solve_types.shape)
+    # Where the cavity is open to air, for the entrapment check.
+    #
+    # Two parts. The headspace the pad opens above top-face metal, which *is*
+    # the atmosphere over the risers and any non-poured feature that reaches
+    # the top; and the original grid's ``+z`` plane, which covers the ring of
+    # top-face columns the headspace deliberately skips beside the pour mouth.
+    # Built on the original shape and embedded at the pad offset, because on the
+    # padded grid every array face is obstacle and so never GAS -- measured: 0
+    # non-obstacle cells, against 2,247 riser-top vents _static_vent_mask still
+    # finds by type.
+    #
+    # The five other faces are deliberately NOT here; see _open_air_mask for
+    # why they used to be and why counting them was inverting the detector's
+    # answer on the geometry it exists to flag.
+    open_air_mask = np.zeros(solve_types.shape, dtype=bool)
+    open_air_mask[core] = _open_air_mask(core_shape)
+    open_air_mask |= headspace
+    open_air_mask &= ~obstacle
     entrapment_check_interval = max(
         1, int(getattr(filling, "entrapment_check_interval", 50))
     )
@@ -2450,12 +2762,8 @@ def run_filling_stage(
         frames.append(
             FillFrame(
                 time_s=step_index * units.dt_s,
-                fill_fraction=gather_to_voxels(
-                    mapping, _upsample(eps, mapping.shape, coarsening)
-                ).astype(np.float32),
-                speed_m_s=gather_to_voxels(
-                    mapping, _upsample(speed, mapping.shape, coarsening)
-                ).astype(np.float32),
+                fill_fraction=to_voxels(eps).astype(np.float32),
+                speed_m_s=to_voxels(speed).astype(np.float32),
             )
         )
 
@@ -2545,6 +2853,9 @@ def run_filling_stage(
     # Rolling window of "did this check see a negative population?", the
     # instability precursor -- see NEGATIVE_POPULATION_WINDOW.
     negative_history: List[int] = []
+    # Consecutive divergence checks that found a FLUID cell outside the fill
+    # fraction band -- see FLUID_FILL_FRACTION_CHECKS.
+    fill_fraction_breaches = 0
     # Delivery over the previous step, which is what the head boundary's
     # rate controller closes the loop on. Starts at zero, i.e. fully starved,
     # so the controller opens the boundary up from rest.
@@ -2933,19 +3244,69 @@ def run_filling_stage(
                 )
                 break
 
+            # A FLUID cell holding an impossible amount of metal.
+            #
+            # The second precursor, and the one that names a mechanism rather
+            # than its wreckage: see FLUID_FILL_FRACTION_MIN for what eps means
+            # for a FLUID cell, why a breach is invisible to every flag scan,
+            # and why two consecutive checks are required. Same 200-step cadence
+            # as everything else in this block -- three whole-grid vectorised
+            # passes, against a step that already does dozens.
+            fluid_cells = state.flags == FLAG_FLUID
+            eps_fluid = fluid_fraction(state)
+            out_of_band = fluid_cells & (
+                (eps_fluid < FLUID_FILL_FRACTION_MIN)
+                | (eps_fluid > FLUID_FILL_FRACTION_MAX)
+            )
+            offenders = int(np.count_nonzero(out_of_band))
+            fill_fraction_breaches = fill_fraction_breaches + 1 if offenders else 0
+            if fill_fraction_breaches >= FLUID_FILL_FRACTION_CHECKS:
+                worst = float(eps_fluid[out_of_band].max())
+                lowest = float(eps_fluid[out_of_band].min())
+                where_z = np.nonzero(np.any(out_of_band, axis=(0, 1)))[0]
+                parts = "/".join(
+                    sorted(
+                        CODE_TO_PART_TYPE[int(code)].value.replace("_", " ")
+                        for code in np.unique(solve_types[out_of_band])
+                        if int(code) in CODE_TO_PART_TYPE
+                    )
+                ) or "the mold pad"
+                status = STATUS_DIVERGED
+                diverged_at_step = taken
+                emit(
+                    f"Filling ABORTED: solver diverging at step {taken:,} "
+                    f"({taken * units.dt_s:.2f} s). {offenders:,} FLUID "
+                    f"cell{'' if offenders == 1 else 's'} "
+                    f"hold{'s' if offenders == 1 else ''} a fill fraction "
+                    f"outside "
+                    f"[{FLUID_FILL_FRACTION_MIN:.1f}, "
+                    f"{FLUID_FILL_FRACTION_MAX:.1f}] -- as low as "
+                    f"{lowest:.3f} and as high as {worst:.3f} -- in the "
+                    f"{parts}, at solve z "
+                    f"{int(where_z.min()) - pad_lo}-"
+                    f"{int(where_z.max()) - pad_lo}, and did so at "
+                    f"{FLUID_FILL_FRACTION_CHECKS} consecutive checks "
+                    f"({FLUID_FILL_FRACTION_CHECKS * DIVERGENCE_CHECK_INTERVAL:,} "
+                    f"steps), so this is not a transient. A full cell holds "
+                    f"exactly its pore volume, so the mass bookkeeping has "
+                    f"come apart rather than the metal having backed up: "
+                    f"nothing in the solver can take mass back out of a FLUID "
+                    f"cell, and because the exchange conserves mass exactly "
+                    f"the surplus was stolen from real cells. Results "
+                    f"discarded."
+                )
+                break
+
         if taken % entrapment_check_interval == 0:
             # Per output frame, not per step (design doc 6.4): a
             # connected-component labelling over the whole coarse grid every
             # single lattice step would be the single most expensive thing
             # in this loop.
-            vent_mask = static_vent | (boundary_mask & (state.flags == FLAG_GAS))
+            vent_mask = static_vent | (open_air_mask & (state.flags == FLAG_GAS))
             if vent_warning is None:
                 vent_warning = _entrapment_warning_if_no_vent(vent_mask)
             entrapped_now = find_entrapped_gas(state.flags, vent_mask)
-            entrapped_now_fine = _upsample(entrapped_now, mapping.shape, coarsening)
-            entrapped_now_count = int(
-                np.count_nonzero(gather_to_voxels(mapping, entrapped_now_fine))
-            )
+            entrapped_now_count = int(np.count_nonzero(to_voxels(entrapped_now)))
             peak_entrapped_voxels = max(peak_entrapped_voxels, entrapped_now_count)
 
         if taken % report_every == 0:
@@ -3042,13 +3403,12 @@ def run_filling_stage(
     # Final entrapment snapshot -- evaluated unconditionally rather than
     # relying on the last step happening to land on a check interval, so the
     # reported "final" set always reflects the state actually handed off.
-    final_vent_mask = static_vent | (boundary_mask & (state.flags == FLAG_GAS))
+    final_vent_mask = static_vent | (open_air_mask & (state.flags == FLAG_GAS))
     if vent_warning is None:
         vent_warning = _entrapment_warning_if_no_vent(final_vent_mask)
     entrapped_coarse = find_entrapped_gas(state.flags, final_vent_mask)
 
-    entrapped_fine = _upsample(entrapped_coarse, mapping.shape, coarsening)
-    entrapped_voxels = gather_to_voxels(mapping, entrapped_fine).astype(bool)
+    entrapped_voxels = to_voxels(entrapped_coarse).astype(bool)
     entrapped_count = int(np.count_nonzero(entrapped_voxels))
     # Peak, not just final: a pocket can be entrapped mid-fill and vent later
     # as the geometry around it changes, so the final count alone
@@ -3070,20 +3430,16 @@ def run_filling_stage(
         arrival_gap_s=float(getattr(filling, "cold_shut_arrival_gap_s", 0.5)),
         temperature_margin_c=float(getattr(filling, "cold_shut_temp_margin_c", 25.0)),
     )
-    cold_shut_fine = _upsample(cold_shut_coarse, mapping.shape, coarsening)
-    cold_shut_voxels = gather_to_voxels(mapping, cold_shut_fine).astype(bool)
+    cold_shut_voxels = to_voxels(cold_shut_coarse).astype(bool)
     cold_shut_count = int(np.count_nonzero(cold_shut_voxels))
 
     filled_coarse = state.flags == FLAG_FLUID
     fill_time_coarse = np.asarray(state.fill_time_s, dtype=np.float64)
 
-    fill_time_fine = _upsample(fill_time_coarse, mapping.shape, coarsening)
-    filled_fine = _upsample(filled_coarse, mapping.shape, coarsening)
+    fill_time_voxels = to_voxels(fill_time_coarse)
+    filled_voxels = to_voxels(filled_coarse).astype(bool)
 
-    fill_time_voxels = gather_to_voxels(mapping, fill_time_fine)
-    filled_voxels = gather_to_voxels(mapping, filled_fine).astype(bool)
-
-    voxel_metal = gather_to_voxels(mapping, _upsample(metal, mapping.shape, coarsening)).astype(bool)
+    voxel_metal = to_voxels(metal).astype(bool)
     filled_count = int(np.count_nonzero(filled_voxels & voxel_metal))
     misrun_count = int(np.count_nonzero(voxel_metal & ~filled_voxels))
 
@@ -3107,10 +3463,9 @@ def run_filling_stage(
     # that entered first and travelled furthest has been advecting and
     # losing heat to the mold the whole run, so it comes back cooler than
     # metal still at the gate.
-    temperature_dense_fine = _upsample(
-        np.asarray(state.temperature, dtype=np.float64), mapping.shape, coarsening
+    temperature_fill = to_voxels(
+        np.asarray(state.temperature, dtype=np.float64)
     )
-    temperature_fill = gather_to_voxels(mapping, temperature_dense_fine)
 
     # A cell can hold an arrival time and no temperature. fill_time_s is written
     # once, when metal first reaches a cell, and is never cleared; the
@@ -3213,7 +3568,7 @@ def run_filling_stage(
         inlet_voxel_count=int(inlet.shape[0]),
         filled_voxel_count=filled_count,
         misrun_voxel_count=misrun_count,
-        choke_area_cm2=measure_choke_area_cm2(solve_types, dx_m),
+        choke_area_cm2=measure_choke_area_cm2(solve_core, dx_m),
         filter_zones=filter_zones,
         steps=taken,
         fill_seconds=taken * units.dt_s,

@@ -1577,16 +1577,20 @@ if NUMBA_AVAILABLE:
                     #
                     # Pair weighting, in exact parity with
                     # physics.filling.advance_mass -- read its docstring for
-                    # why. Koerner's Table 1 averages the fill fraction over
+                    # the measurements behind this rule, including the ones
+                    # that removed the filter special case that used to sit
+                    # here. Koerner's Table 1 averages the fill fraction over
                     # interface-interface pairs only; a pair involving a FLUID
                     # cell exchanges at weight 1, which makes a FLUID cell's
                     # mass change equal its own density change and so stops it
-                    # drifting. Pairs touching a filter keep the eps average
-                    # because a full porous cell holds rho * porosity, not rho.
+                    # drifting. Pairs touching a filter follow the same rule as
+                    # every other pair: the weight has to be spatially uniform
+                    # for the direction sum to telescope, and it must not be a
+                    # function of the cell's own eps, or a cell's bookkeeping
+                    # error re-enters its own exchange amplitude.
                     por_here = porosity[x, y, z]
                     denom = np.float64(rho[x, y, z]) * por_here
-                    eps_here = mass_in[x, y, z] / denom if denom > 0.0 else 0.0
-                    eps_here_c = eps_here
+                    eps_here_c = mass_in[x, y, z] / denom if denom > 0.0 else 0.0
                     if eps_here_c < 0.0:
                         eps_here_c = 0.0
                     elif eps_here_c > 1.0:
@@ -1599,17 +1603,12 @@ if NUMBA_AVAILABLE:
                         nflag = flags[sx, sy, sz]
                         if nflag != _FLAG_INTERFACE and nflag != _FLAG_FLUID:
                             continue
-                        por_nb = porosity[sx, sy, sz]
-                        if por_here < 1.0 or por_nb < 1.0:
-                            nden = np.float64(rho[sx, sy, sz]) * por_nb
-                            eps_nb = (
-                                mass_in[sx, sy, sz] / nden if nden > 0.0 else 0.0
-                            )
-                            weight = 0.5 * (eps_here + eps_nb)
-                        elif flag == _FLAG_FLUID or nflag == _FLAG_FLUID:
+                        if flag == _FLAG_FLUID or nflag == _FLAG_FLUID:
                             weight = 1.0
                         else:
-                            nden = np.float64(rho[sx, sy, sz]) * por_nb
+                            nden = (
+                                np.float64(rho[sx, sy, sz]) * porosity[sx, sy, sz]
+                            )
                             eps_nb = (
                                 mass_in[sx, sy, sz] / nden if nden > 0.0 else 0.0
                             )

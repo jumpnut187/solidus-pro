@@ -111,11 +111,12 @@ def _fixture(
     A partly filled box, optionally with a filter slab across the middle.
 
     ``submerge`` fills *over* that slab and marks it primed, so the filter
-    cells are wet. The default fixture leaves them dry, which means it never
-    reaches the porosity branch of the mass exchange -- the branch that keeps
-    the eps average for pairs touching a filter, because a full porous cell
-    holds ``rho * porosity`` rather than ``rho``. See
-    :func:`physics.filling.advance_mass`.
+    cells are wet. The default fixture leaves them dry, which means the
+    exchange, the drag and the transition thresholds never see a wet cell with
+    ``porosity < 1`` at all -- and ``full = rho * porosity`` is the one place
+    porosity still changes the arithmetic on both paths. (It no longer changes
+    the *pair weight*: the porous override that used to sit there was deleted
+    for the measured feedback loop in :func:`physics.filling.advance_mass`.)
     """
     obstacle = np.zeros((n, n, n), dtype=bool)
     obstacle[0] = obstacle[-1] = True
@@ -260,10 +261,11 @@ class PorousParityTests(unittest.TestCase):
 
     def test_the_filter_is_actually_wet_when_submerged(self) -> None:
         """
-        Guard the other half: the mass exchange's porosity branch is only
-        reached by a pair where one cell has ``porosity < 1`` *and* holds
-        metal. The default fixture starts the metal above the slab, so it
-        never gets there.
+        Guard the other half: porosity only changes the arithmetic where a
+        cell with ``porosity < 1`` actually holds metal -- the drag, the
+        ``rho * porosity`` capacity, the gas reconstruction's ``1/eps``. The
+        default fixture starts the metal above the slab, so it never gets
+        there.
         """
         dry, _ = _fixture(with_filter=True)
         wet, _ = _fixture(with_filter=True, submerge=True)
@@ -289,9 +291,11 @@ class PorousParityTests(unittest.TestCase):
         """
         The pair weighting inside a filter, in both paths, held to round-off.
 
-        This is the only test that reaches the porosity branch, and it is a
-        branch the two implementations have to agree on exactly or the fast
-        path is quietly solving a different problem inside every filter.
+        This is the only test that runs the exchange over wet porous cells, and
+        the two implementations have to agree there exactly or the fast path is
+        quietly solving a different problem inside every filter. Since the
+        porous pair-weight override was deleted the weight itself is porosity
+        free, but the capacity, the drag and the reconstruction are not.
         """
         a, b, units = _twin(with_filter=True, submerge=True)
         for _ in range(30):
@@ -1090,8 +1094,10 @@ class ProvokedFixtureTests(unittest.TestCase):
 #: quiescent fixture never converts a cell (see PROVOKE_SEED), so on its own it
 #: would measure only the collide/stream/exchange chain and say nothing about
 #: whether a rounded fill fraction can flip a hysteresis crossing. The filter
-#: variants reach the porosity branch of the mass exchange, which weights by
-#: eps rather than 1 and so multiplies the rounding rather than cancelling it.
+#: variants run the exchange over wet porous cells, where ``full`` is
+#: ``rho * porosity`` and the drag reshapes the populations the exchange then
+#: differences -- a different rounding regime, even though the pair weight is
+#: now porosity free on both paths.
 DIVERGENCE_REGIMES: tuple[tuple[str, dict, bool], ...] = (
     ("quiescent", {}, False),
     ("quiescent + wet filter", {"with_filter": True, "submerge": True}, False),

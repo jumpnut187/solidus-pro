@@ -395,16 +395,37 @@ def create_state(
     flags = np.where(obstacle, FLAG_OBSTACLE, FLAG_GAS).astype(np.uint8)
     mass = np.zeros(shape, dtype=np.float64)
     temperature = np.full(shape, NO_TEMPERATURE, dtype=np.float32)
+    zone = porous if porous is not None else PorousZone.inert(shape)
 
     if initial_fluid is not None:
         fluid = np.asarray(initial_fluid, dtype=bool) & ~obstacle
         flags[fluid] = FLAG_FLUID
-        mass[fluid] = REFERENCE_DENSITY
+        # Full is ``rho * porosity``, which is what fluid_fraction,
+        # apply_transitions and heal_submerged_interface all divide by. Seeding
+        # REFERENCE_DENSITY flat put a cell that *starts* FLUID inside a filter
+        # at eps = 1/porosity -- 1.176 at the default 0.85 -- so the fixture
+        # began 18 % over full and the exchange had to work that off. Test 2
+        # starts empty and never saw it; a restart or a fixture that pre-fills
+        # a filter does.
+        #
+        # Read through the raw float32 array and widen the selected cells, not
+        # through ``zone.porosity_f64``. The float64 view caches on first access
+        # and invalidates only on a *shape* change (see PorousZone's docstring),
+        # so touching it here would move the cache fill from the first ``step``
+        # to construction -- and a caller that builds the state and *then* fills
+        # in ``porous.porosity`` would silently solve at porosity 1 while the
+        # float32 array the stage's inlet pin reads said 0.85. Widening first is
+        # exact: ``porosity_f64`` is ``porosity.astype(np.float64)``, so these
+        # are the same numbers.
+        por = zone.porosity
+        mass[fluid] = REFERENCE_DENSITY * por[fluid].astype(np.float64)
         # Gas cells touching fluid become the initial interface layer.
         neighbours = _dilate(fluid)
         interface = neighbours & ~fluid & ~obstacle
         flags[interface] = FLAG_INTERFACE
-        mass[interface] = 0.5 * REFERENCE_DENSITY
+        mass[interface] = (
+            0.5 * REFERENCE_DENSITY * por[interface].astype(np.float64)
+        )
         if initial_temperature_c is not None:
             temperature[fluid | interface] = np.float32(initial_temperature_c)
 
@@ -445,7 +466,7 @@ def create_state(
         flags=flags,
         fill_time_s=fill_time,
         temperature=temperature,
-        porous=porous if porous is not None else PorousZone.inert(shape),
+        porous=zone,
     )
 
 
@@ -677,8 +698,8 @@ def advance_mass(
     transition hysteresis lets an interface cell sit slightly outside the band,
     and an out-of-band eps would amplify exchanges the same way.
 
-    Pairs touching a filter are the one exception -- see the porosity branch in
-    the body.
+    Pairs touching a filter are **not** an exception. They used to be, and the
+    measurement that removed the exception is in the body's comment.
 
     Args:
         state: Solver state, before the mass update.
@@ -690,21 +711,56 @@ def advance_mass(
     """
     outgoing = np.asarray(f_post_collision, dtype=np.float64)
     incoming = np.asarray(f_streamed, dtype=np.float64)
-    eps_raw = fluid_fraction(state)
-    eps = np.clip(eps_raw, 0.0, 1.0)
+    eps = np.clip(fluid_fraction(state), 0.0, 1.0)
     fluid = state.flags == FLAG_FLUID
     wet = (state.flags == FLAG_INTERFACE) | fluid
     opp = OPPOSITE.astype(np.intp)
 
-    # Inside a filter a full cell holds ``rho * porosity``, not ``rho`` --
-    # fluid_fraction and apply_transitions both define it that way. Weight-1
-    # exchange makes mass track *rho*, so in a porous cell it would walk away
-    # from ``rho * porosity`` by ``(1 - porosity)`` times the density change,
-    # and the filter's own bookkeeping would drift out of band instead. Filter
-    # cells are few and their eps is bounded by the priming logic, so every
-    # pair touching one keeps the eps-average weighting it has always had.
-    porous = state.porous.porosity_f64 < 1.0
-    any_porous = bool(porous.any())
+    # There is no filter special case here, and the reason is measured.
+    #
+    # Every pair with a porous cell on either side used to be diverted to
+    # ``0.5 * (eps_A + eps_B)`` with eps *unclamped*, on the argument that a
+    # full porous cell holds ``rho * porosity`` rather than ``rho`` and so must
+    # not be handed a weight of 1. The argument is about the right quantity and
+    # the branch does the opposite of what it claims. The weight scales the
+    # exchange amplitude and is itself a function of the cell's own eps, so any
+    # eps error amplifies its own exchanges -- positive feedback, with nothing
+    # to arrest it, because every transition and heal scan selects on
+    # FLAG_INTERFACE only and a FLUID cell's mass is written by this exchange
+    # and by nothing else. Measured on the ``Test 2`` assembly at the filter
+    # outlet: the effective weight, which the scheme requires to be 1, reached
+    # +10.7 and -13.0, the sign inverted on 7.5 % of outflow samples, and 786
+    # of 2,009 FLUID samples of the filter's bottom plane sat over full against
+    # 1 of 754 INTERFACE samples of the same cells. eps_max in the porous zone
+    # climbed 1.05 -> 7.76 at 2.7e-4/step while the donors fell to eps = -9.5,
+    # and the run died on a negative-mass cell ~5,000 steps later. It also
+    # never achieved its stated purpose: at eps ~ 1 the eps average *is* 1, so
+    # the branch only starts to differ once eps has already drifted. Seeded at
+    # exactly eps = 1 on a closed porous box it stays there for 6,000 steps;
+    # seeded 5 % high it grows +25.8 %, at a rate independent of the seed.
+    #
+    # Two variants that look like the fix are worse and are deliberately not
+    # here. Weighting the FLUID branch by ``0.5 * (p_A + p_B)`` so mass tracks
+    # ``rho * porosity`` measured 6.52e-2 against HEAD's 6.38e-2, because the
+    # direction sum only telescopes into ``drho`` when the weight is uniform
+    # across a cell's directions -- a porosity-dependent weight takes three
+    # values across a filter face and the residual is then set by the
+    # individual populations (~1e-2), three orders above the ``(1 - p) * drho``
+    # drift it was meant to remove. Any spatially non-uniform weight has that
+    # defect. Re-pinning porous FLUID cells to ``rho * porosity`` through
+    # ``_redistribute`` is exact where a free surface crosses the filter and
+    # does *nothing at all* on a fully submerged one -- the state Test 2's
+    # filter is in for most of the run -- because ``_redistribute`` has no
+    # INTERFACE recipient and strands the correction back on the donor.
+    #
+    # What is accepted instead: at weight 1 a porous FLUID cell's mass tracks
+    # ``rho``, so it drifts from ``rho * porosity`` by ``(1 - p) * drho`` per
+    # step. That increment telescopes, so the whole-fill drift is ``(1 - p)``
+    # times the total density excursion -- a few tenths of a percent of a
+    # cell's capacity, measured +0.014 % over 6,000 steps -- and it cannot
+    # amplify, because with an eps-free weight there is no path from eps back
+    # into the exchange amplitude. A bounded 0.1 % offset in place of an
+    # exponential divergence is the trade Koerner's scheme makes.
 
     axes = (0, 1, 2)
     delta = np.zeros(state.shape, dtype=np.float64)
@@ -719,12 +775,6 @@ def advance_mass(
             1.0,
             0.5 * (eps + np.roll(eps, shift=shift, axis=axes)),
         )
-        if any_porous:
-            weight = np.where(
-                porous | np.roll(porous, shift=shift, axis=axes),
-                0.5 * (eps_raw + np.roll(eps_raw, shift=shift, axis=axes)),
-                weight,
-            )
 
         exchange = (incoming[ibar] - outgoing[i]) * weight
         delta += np.where(wet & neighbour_wet, exchange, 0.0)
@@ -2105,8 +2155,10 @@ def find_entrapped_gas(flags: np.ndarray, vent_mask: np.ndarray) -> np.ndarray:
         flags: Cell state, ``(nx, ny, nz)``.
         vent_mask: Boolean ``(nx, ny, nz)``, cells that count as open to
             atmosphere -- see ``core.filling_stage`` for how this is
-            assembled (open riser tops, the inlet, and gas cells currently on
-            the domain boundary). An all-``False`` mask makes every gas
+            assembled (open riser tops, the inlet, the headspace above the
+            mold, and gas cells currently on the mold's open top face; the
+            sides and floor of the bounding box are mold, not air, and are
+            deliberately not vents). An all-``False`` mask makes every gas
             pocket in the domain read as entrapped; this function has no way
             to distinguish "no vent exists" from "no vent has been reached
             yet", so the caller must detect and warn about that condition

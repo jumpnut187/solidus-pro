@@ -17,9 +17,16 @@ gated, every channel at least 5 cells across on its fill grid) fills all
 9,251 metal voxels in 9.0 s of simulated pour at the shipped defaults, with
 zero misruns, zero warnings, mass conserved, and every wet cell under the Mach
 guard — and survives the whole pipeline into solidification and defect
-analysis. What made that possible, and what remains open (under-resolved
-models such as `Filling_Test`'s 3-cell gate still time-cap honestly rather
-than finish), is in `filling_field_notes.md` under "Current state".
+analysis. What made that possible, and what remains open, is in
+`filling_field_notes.md` under "Current state".
+
+**Superseded (2026-09-02):** this file said `Filling_Test`'s 3-cell gate still
+time-capped honestly rather than finishing. It does finish — 4,357/4,357 cells,
+18.0 s, 97 % by mass — and the blocker was never the gate: the solve lattice
+wrapped periodically through its own bounding box, putting the runner floor
+opposite the sprue mouth. The `Full_Gating_Test` figures in this paragraph were
+measured through the same wrap on all three axes. Read the round-4 section of
+`filling_field_notes.md` before quoting any number from this file.
 
 A caution this file keeps on purpose: an earlier revision certified a 100 %
 fill that was a numerical blow-up dressed as a perfect pour — the completion

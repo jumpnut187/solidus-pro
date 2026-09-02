@@ -7,6 +7,185 @@ design document; `docs/filling_implementation.md` is the plan and
 
 ## Current state — read this first
 
+**Round 4 fixed two measured defects, and the numbers in this section are the
+first this stage has produced on a lattice that is not a torus.** The block
+between "Everything below this line predates the mold pad" and "Running a fill"
+was measured before that and is kept for history, not for reference; the
+sections from "Running a fill" onward are current.
+
+### The two defects
+
+**Mechanism 1 — the filter exchange amplified its own bookkeeping error.** For
+any exchange pair with a porous cell on either side, the Koerner mass exchange
+overrode Table 1 and weighted the pair by the *unclamped* fill-fraction average
+`0.5·(ε_A + ε_B)`. The weight scales the exchange amplitude and is itself a
+function of the cell's own ε, so an ε error amplified its own exchanges — and
+nothing could arrest it, because every transition and heal scan selects on
+`FLAG_INTERFACE` only, so a FLUID cell's mass is written by the exchange and by
+nothing else. Measured at Test 2's filter outlet: the effective weight, which
+the scheme requires to be 1, reached **+10.7 and −13.0**, with the sign inverted
+on 7.5 % of outflow samples; **786 of 2,009** FLUID samples of the filter's
+bottom plane sat over full against **1 of 754** INTERFACE samples of the same
+cells; ε climbed 1.046 → 3.711 → **7.76** while the donors it stole from fell to
+**−9.5**, and the run surfaced as a NaN 8,800 steps later. Mass was conserved to
+1e-16 throughout — this was never a leak, which is why every mass-ceiling check
+passed while it happened. The branch did not even achieve its stated purpose: at
+ε ≈ 1 the average *is* 1, so it only began to differ once ε had already drifted.
+Fixed by deleting it: plain Table 1 everywhere. `create_state` also now seeds
+mass at `ρ·porosity`, so a cell that *starts* FLUID inside a filter starts at
+ε = 1 rather than 1/porosity.
+
+**Mechanism 2 — the solve lattice was a torus.** The dense grid is sized exactly
+to the geometry's bounding box, with no mold margin, while both step paths index
+neighbours modulo the array (Numba `% n`, NumPy `np.roll`) and both document
+that they rely on an obstacle shell to make that wrap unreachable. There was no
+shell. On Test 2, **298** CAST cells on `z = 0` were the periodic neighbours of
+RISER cells on `z = 93`, 93 empty planes away; at step 12,156 — the step the
+front first occupied `z = 0` — `apply_transitions`' promote dilation created five
+INTERFACE cells at `z = 93` with every wet donor a wrapped cast-floor cell, and
+the phantom pool grew *downward* from the riser top for 3,594 steps until the
+field went non-finite with 1,263 negative-population riser cells. Both
+self-repair paths were blinded by the same wrap. Fixed in the stage, with no
+solver change: one cell of `EMPTY_CELL` mold on every face, plus two pad planes
+above metal that reaches the original `+z` face left open as atmosphere so an
+open riser can still overflow. The stage now refuses to run and names the face
+if any array face is left non-obstacle.
+
+Full diagnosis, probes, validation runs and ledgers:
+`Test/session_diag_2026-09-02/`.
+
+### `Test_Model/Full_Gating_Test` @ 0.20 in, coarsening 2 — complete
+
+**complete, 28,882 steps, 6.00 s of simulated pour** (was 18.0 s),
+1,354/1,354 cells, **95 % by mass**, **20.8 lb** delivered into a 21.9 lb
+cavity. `max|u|` **0.0557** against 0.273 before; `rho_max` **1.038** against
+1.142. Zero negative populations at every sample, no precursor abort.
+
+**The 18.0 s was not a slow fill, it was a throttled one.** The wrap fed the
+sprue mouth back-pressure from spurious wet cells, and the rate controller did
+what it is supposed to do with back-pressure: delivery decayed 88 → 36 → 21 →
+**2 %** of target and the endgame crawled for 12 s. Post-fix delivery holds
+**100 %** of the 4.39 lb/s target to 3.00 s. The metered pour is 19 lb ÷
+4.39 lb/s = **4.3 s**, so 6.0 s is credible and 18.0 s was 4x non-physical.
+
+**The riser now fills from the casting, not through a wormhole.** First wet
+riser cell at step **15,000**, at `z = 8` — the riser's own lowest plane — with
+**628** casting cells already wet below it. Before: step **1,500**, with **10**
+casting cells wet, fed directly by a 32-cell SPRUE↔RISER wrap across `x`. The
+riser's wet-cell count is now monotonic and its wet-z span contiguous at every
+one of 57 ledger rows; before, it flickered 14 → 6 → 32.
+
+**One thing to look at, not a regression.** `eps_min` over wet cells reaches
+**−0.71** against −0.058 before. These are INTERFACE cells — `eps_fluid_min`
+stays at **+0.0018** or above for the whole run, so the FLUID guard correctly
+does not fire — and the run completes clean. The front now advances at the full
+metered rate instead of a throttled one, so `_redistribute` drains donor
+interface cells harder and the transient mass debt is deeper. It resolves. But
+0.71 of a cell of debt is large, and the same excursion landing on a FLUID cell
+would abort the run.
+
+At **0.17 in** the same model also completes, 9.00 s, 50,949 steps, 96 % by
+mass. `max|u|` **0.488 → 0.249**, negative populations 9 → 1, front flicker
+10 → 1. It gains **two new warnings** — minimum fill temperature 1423 °C against
+a 1460 °C liquidus, and 65 voxels with a cold-shut signature — and they are
+honest: pre-fix the `x` wrap let the continuously fed sprue supply the casting
+and riser directly, so the coldest wet cell was always near fresh 1620 °C metal.
+The metal now has to travel sprue → runner → gate → casting → riser, and it
+arrives cooler. The wrap was hiding a real cold-shut risk.
+
+### `Test_Model/Filling_Test` @ 0.20 in, coarsening 2 — complete
+
+**complete, 4,357/4,357 cells at 18.0 s, 97 % by mass, 70.0 lb.** This model
+used to `time_cap` at 57 % of cells, and that figure was quoted in this file, in
+`MARGINAL_CHOKE_THICKNESS_CELLS`' docstring and in the solver's own marginal-gate
+warning text. **It was not the gate.** A **20-column** wrap across `z` put the
+runner floor directly opposite the **sprue mouth** — the Dirichlet inlet, held
+wet every step — so the pour boundary was an 18-direction neighbour of the
+runner floor and was being fed back into itself. The fill completed the first
+time it ran with a mold pad in place. Every citation of the 57 % has been
+removed.
+
+`max|u|` still peaks at **0.446** here, about nine times the 0.05 the timestep is
+sized for and the highest of the four validated runs. That is the pre-existing
+marginality of a 3-cell sprue/runner/gate, not new, and it is why the marginal
+warning exists. **Complete is not the same as trustworthy at three cells.**
+
+### What is no longer a baseline
+
+Pre-fix `Full_Gating_Test` wrapped on **all three axes**: 60 metal-to-metal
+pairs across `x` (including **32 SPRUE↔RISER**), 88 CAST↔CAST across `y` — the
+casting had no `y` walls at all — and 16 RUNNER↔SPRUE across `z`. **No number
+recorded against that model before this round is a baseline**, including the ones
+kept below. Any threshold calibrated against it needs re-measuring.
+
+**Entrapped-gas counts will rise** on models whose casting is flush with the
+bottom or the sides of its own bounding box. The four sides and the floor of the
+box are sand — the mold continues past the meshed geometry, which is why the pad
+is mold and not air — so they are no longer counted as vents. Only the top is.
+A pocket pinned against the casting floor now reads as entrapped, which is the
+right answer: it is the textbook gas-porosity site, and it used to read as
+vented.
+
+### `Test 2` (459 lb) — both mechanisms gone, and it still diverges
+
+4.3 mm auto-refined grid, solve grid **(137, 137, 98)** = (135, 135, 94) plus
+the pad and two headspace planes, **3,672** cells of atmosphere opened above the
+riser tops, all 339,824 metal cells preserved, all six faces obstacle, zero wrap
+pairs on any axis.
+
+Both target mechanisms are **verified eliminated at their own diagnosed
+locations**. Filter-cell ε stays at **≤ 1.0094 with no trend** across ~14,000
+steps of a wet filter, against 1.05 → **7.76** before. The riser holds **zero**
+wet cells above the front at every sample, against 719 over-filled cells at
+z 86-90 before. Delivery runs at 20.58 of 20.8 lb/s — 99 % of target,
+unthrottled.
+
+**It still does not pour.** The run survives to step **20,200** (first
+non-finite mass at 20,192) against 16,493 before, then diverges by a **new
+mechanism at a new location**: an exponential momentum/density runaway,
+**e-folding every 64 steps**, in a 2×4×7 pocket at filter #1's **inlet** —
+original `x[115,116] y[48,51] z[20,26]`, 14 FILTER and 11 RUNNER cells, all
+FLUID — where `rho` reaches ±1e15 and `u` 1e15 lattice. Mechanism 1 was at the
+filter *outlet*, grew at 2.7e-4/step and announced itself in ε 8,800 steps
+ahead; this grows at 0.0155/step — about 60 times faster — and shows up in
+momentum, not mass. `eps_filter_max` is pinned at 1.005 for 20,000 steps and only reaches 1.74
+*after* `max|u|` has already grown 8x, so the filter is dragged along by the
+instability rather than driving it.
+
+**The run was marginally stable for 16,000 steps before it tipped.** At 20-step
+sampling, `max|u|` spiked to **0.28–0.49 lattice** — six to ten times the design
+velocity — on **123** separate rows starting at step **4,180**, well before the
+filter was even wet, and damped every single time until the spike at ~20,020 did
+not. A 3-cell gate and a jet from the sprue into a porous zone is a marginally
+stable configuration, and this is what marginal looks like when it finally
+fails.
+
+**The new FLUID fill-fraction guard cannot see this one, and the reason is
+structural.** It watches `ε = m/(ρ·porosity)`; here `ρ` blows up in the
+denominator at the same time as `m` blows up in the numerator, so ε sat at 1.008
+until step **20,160** — **32 steps** before the NaN, inside the guard's own
+200-step cadence. Tightening the band does not fix it: 1.05 would have flagged
+this run 2,772 steps early, but the same assembly reached 1.064 on a healthy
+stretch and carried on for 2,700 more steps. **The missing precursor is a
+velocity one, and none exists.** Open item for round 5, along with the
+`overflow encountered in cast` at `_seed_promoted_cells` — `state.f` is float32,
+so a population only needs to pass 3.4e38 to become `inf`.
+
+Full test suite at the end of the round: **1,236 tests, 1 failure** — the known
+pre-existing full-suite-ordering flake in
+`SubmergedInterfaceHealingTests::test_a_deeper_tower_leaves_none_either`, which
+passes in isolation and fails identically at `HEAD`.
+
+### Everything below this line predates the mold pad
+
+**The paragraphs from here to "Running a fill" were measured on the torus, and
+several of their headline numbers are now known to be artefacts of it** — the
+`Filling_Test` 57 %/41 % figures and `Full_Gating_Test`'s 15 s and 45 s fill
+times in particular. They are kept because the mechanisms they document (the
+heal dwell, the ping-pong, the Mach excursion) are real and were fixed on their
+own merits, and because the history of what was believed when matters. Do not
+quote a number from below without checking it against the round-4 section above.
+
 **A configuration now produces a genuine `complete` fill, and it survives the
 whole pipeline.** `Test_Model/Full_Gating_Test` at 0.20 in voxels with
 `fill_grid_coarsening` 2 — the shipped default, giving a 0.40 in fill grid —
@@ -105,7 +284,11 @@ before. Give this grid a cap well past 45 s, or run it at the default
 coarsening 2, which finishes.
 
 *Measured on `Test_Model/Filling_Test` at 0.20 in, coarsening 2* — the harder
-model, whose 0.5 in gate is 3 cells on this grid. `time_capped` at the 60 s
+model, whose 0.5 in gate is 3 cells on this grid. **SUPERSEDED: this model now
+completes, 4,357/4,357 cells at 18.0 s, 97 % by mass, 70.0 lb. The 41 %/52 %
+below and the 57 % it is compared against were both measured with a 20-column
+runner-floor↔sprue-mouth wrap feeding the pour boundary back into itself; see
+the round-4 section. The gate was never the blocker.** `time_capped` at the 60 s
 cap (327,200 steps, 37 min wall), 41 % of cells and 52 % by mass, 36.6 lb into
 a 63.6 lb model. **All 1,191 frozen submerged interface cells are gone** — 0
 remain — and `max|u|` is 0.029 with 0 of 2,506 wet cells over the guard.
@@ -243,13 +426,15 @@ metallostatic pressure.
   kernel of this shape. Remaining levers are the float32/float64 conversion glue
   (~27 % of a step) and dense-box iteration, which wastes ~6.8x at the 0.147
   occupancy typical of gating assemblies.
-- **Grid convergence is unvalidated, and the two grids now disagree.** The
-  design doc asks for results to converge as `fill_grid_coarsening` → 1.
-  `Full_Gating_Test` completes at coarsening 2 in 15 s of pour and is still
-  filling its riser at coarsening 1 after 45 s, so the finer grid is not merely
-  slower to compute — its front advances differently in *simulated* time. That
-  is the next thing to measure, and until it is, quote the fill grid with every
-  result.
+- **Grid convergence is unvalidated, and has to be re-measured from scratch.**
+  The design doc asks for results to converge as `fill_grid_coarsening` → 1. The
+  disagreement this bullet used to report — `Full_Gating_Test` completing at
+  coarsening 2 in 15 s and still filling its riser at coarsening 1 after 45 s —
+  was measured through a lattice that wrapped on all three axes, so it says
+  nothing about convergence. Post-fix, both validated grids of that model
+  complete (10.2 mm in 6.00 s, 8.6 mm in 9.00 s), but those are two voxel sizes
+  at the same coarsening, not the coarsening sweep the question needs. Until
+  someone runs it, quote the fill grid with every result.
 - **The inlet** imposes a *pressure* in head mode: the metallostatic head
   rho = rho_0 (1 + g h / c_s^2), with the velocity measured back out of the
   inlet cells' own populations each step and clamped at the Mach guard. It is
@@ -300,9 +485,16 @@ metallostatic pressure.
   cell at the gate's root speak for the whole plate: on the `Test 2` assembly
   at 8.6 mm the gates are 11 × 13 × 2 — sealed — and the check reported 3.00
   cells and said nothing. Below 2 cells is a hard warning naming the part;
-  exactly 3 is a softer note, because 3 is the floor at which this solver has
-  ever produced a usable fill.
+  exactly 3 is a softer note, because 3 cells is the thinnest channel this
+  solver has carried a complete fill through — and it carries it with `max|u|`
+  at nine times the design velocity, so read "marginal" as written.
 - *"no pour location has been selected"* — the gate working; set one.
 - *Filling absent from the run header* — the analysis was not enabled.
 - *Every gas pocket reads as entrapped* — the vent mask is empty. The stage
-  warns about this; a cavity with no vent cannot fill physically either.
+  warns about this; a cavity with no vent cannot fill physically either. Note
+  that only the **top** of the meshed bounding box counts as open air: the sides
+  and the floor of the box are sand, so a pocket pinned against the casting
+  floor now reports as entrapped rather than vented. That is a change, and it is
+  the correct direction — a pocket on the floor is the textbook gas-porosity
+  site — so expect entrapped counts to go up on models whose casting is flush
+  with the bottom or the sides of its own bounding box.
