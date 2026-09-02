@@ -606,6 +606,19 @@ def run_pipeline(
             # for "the gating system" cannot tell an operator whether to
             # re-mesh the gate or the sprue.
             "choke_thickness_by_part": dict(filling_result.choke_thickness_by_part),
+            # Per body, since a part code covers every body of that type and
+            # the scalar above is the thinnest of them.
+            "choke_thickness_bodies_by_part": {
+                name: list(values)
+                for name, values in
+                filling_result.choke_thickness_bodies_by_part.items()
+            },
+            # Bodies too small to judge the grid by; reported, not acted on.
+            "choke_body_fragments_by_part": {
+                name: list(sizes)
+                for name, sizes in
+                filling_result.choke_body_fragments_by_part.items()
+            },
             "narrowest_choke_part": filling_result.narrowest_choke_part,
             "warnings": tuple(filling_result.warnings),
         }

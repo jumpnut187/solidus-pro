@@ -33,6 +33,10 @@ from core.filling_stage import (
 from core.filling_stage import (
     MIN_CHOKE_THICKNESS_CELLS,
     choose_fill_coarsening,
+    MIN_CHOKE_BODY_CELLS,
+    measure_choke_body_fragments,
+    measure_choke_thickness_components,
+    metal_path_severing,
 )
 from core.part_manager import (
     PART_TYPE_CAST,
@@ -876,6 +880,473 @@ def _choke_rig(gate_thickness, sprue_thickness=8, n=24):
     grid[:, a:a + sprue_thickness, b:b + gate_thickness] = PART_TYPE_GATE
     return grid
 
+
+
+def _two_gate_bodies(thick=6, thin=2, n=32):
+    """
+    Two disconnected GATE plates sharing the code, one healthy, one sealed.
+
+    Part codes are per *type*, not per instance, so both plates are
+    ``PART_TYPE_GATE`` -- which is the whole point. ``Test 2`` has two GATE
+    bodies and two FILTER bodies, so this is the assembly's own shape, not a
+    contrivance.
+    """
+    grid = np.full((n, 14, 14), EMPTY_CELL, dtype=np.int8)
+    grid[2:12, 3:11, 4:4 + thick] = PART_TYPE_GATE
+    grid[18:28, 3:11, 6:6 + thin] = PART_TYPE_GATE
+    return grid
+
+
+class ChokePerBodyTests(unittest.TestCase):
+    """
+    Requirement: the thickness guard measures each *body*, not each part code.
+
+    Codes are per type. Pooling one median over every body of a type lets a
+    healthy one outvote a sealed one, and the sealed one is the body the metal
+    cannot cross. ``Test 2`` ships two gates and two filters, so this is not a
+    hypothetical shape.
+    """
+
+    def test_a_pooled_median_hides_a_sealed_body(self) -> None:
+        """
+        The discriminating measurement, so the tests below cannot pass on a
+        fixture that lost the ability to fail.
+
+        On this grid the pooled median over both GATE bodies is **5.0 cells** --
+        above ``MARGINAL_CHOKE_THICKNESS_CELLS``, so the old code warned about
+        nothing at all -- while the thin body measures **1.0** and is sealed.
+        """
+        from core.filling_stage import _METAL_PATH_CODES, _local_thickness_cells
+
+        grid = _two_gate_bodies()
+        pooled = float(
+            np.median(
+                _local_thickness_cells(np.isin(grid, _METAL_PATH_CODES))[
+                    grid == PART_TYPE_GATE
+                ]
+            )
+        )
+        self.assertAlmostEqual(pooled, 5.0, places=6)
+        self.assertGreater(pooled, MIN_CHOKE_THICKNESS_CELLS)
+
+    def test_every_body_is_measured_thinnest_first(self) -> None:
+        grid = _two_gate_bodies()
+        bodies = measure_choke_thickness_components(grid)[PART_TYPE_GATE]
+        self.assertEqual(len(bodies), 2)
+        self.assertEqual(list(bodies), sorted(bodies))
+        self.assertAlmostEqual(bodies[0], 1.0, places=6)
+        self.assertAlmostEqual(bodies[1], 5.0, places=6)
+
+    def test_the_reported_thickness_is_the_thinnest_body(self) -> None:
+        """The scalar per code keeps its shape and changes its meaning."""
+        grid = _two_gate_bodies()
+        by_part = measure_choke_thickness_by_part(grid)
+        bodies = measure_choke_thickness_components(grid)
+        self.assertEqual(by_part[PART_TYPE_GATE], bodies[PART_TYPE_GATE][0])
+        self.assertLessEqual(by_part[PART_TYPE_GATE], MIN_CHOKE_THICKNESS_CELLS)
+
+    def test_a_single_body_is_unchanged(self) -> None:
+        """One body per code must read exactly as it always did."""
+        grid = _choke_rig(gate_thickness=6)
+        by_part = measure_choke_thickness_by_part(grid)
+        bodies = measure_choke_thickness_components(grid)
+        for code, value in by_part.items():
+            with self.subTest(code=code):
+                self.assertEqual(value, min(bodies[code]))
+        self.assertEqual(len(bodies[PART_TYPE_GATE]), 1)
+
+    def test_a_corner_touch_does_not_hide_the_thin_body(self) -> None:
+        """
+        6-connectivity, so a corner contact does not fuse two bodies.
+
+        This asserted the opposite for one round. 26-connectivity fuses two
+        same-code bodies that touch at a single corner, which reinstates the
+        exact defect separating bodies exists to remove: measured on an 8-cell
+        and a 2-cell GATE plate sharing one corner, 26-connectivity reports
+        **(7.0,)** and says nothing, while 6-connectivity reports
+        **(1.0, 7.0)** and hard-warns. Same silence as the pooled median.
+
+        The justification offered for 26 -- that splitting would invent thin
+        components out of corner contacts -- is measurably false, because
+        ``_local_thickness_cells`` is one map over the whole metal path that
+        bodies only *index* into: a 4-cell-thick diagonal staircase reads 3.0
+        under both connectivities, and a 1-cell diagonal string reads 1.0 under
+        both. And a corner-only contact is one diagonal D3Q19 link, which is
+        not a channel the solver can carry flow through, so fusing across it
+        asserts a path that is not there as well as hiding the thin body.
+        """
+        grid = np.full((30, 20, 20), EMPTY_CELL, dtype=np.int8)
+        grid[2:12, 2:10, 2:10] = PART_TYPE_GATE       # 8 cells thick
+        grid[12:22, 10:18, 10:12] = PART_TYPE_GATE    # 2 cells; shares a corner
+        bodies = measure_choke_thickness_components(grid)[PART_TYPE_GATE]
+        self.assertEqual(len(bodies), 2, "the corner contact fused the bodies")
+        self.assertAlmostEqual(bodies[0], 1.0, places=6)
+        self.assertLessEqual(
+            measure_choke_thickness_by_part(grid)[PART_TYPE_GATE],
+            MIN_CHOKE_THICKNESS_CELLS,
+            "the thin plate is hidden behind the thick one again",
+        )
+
+    def test_splitting_a_body_cannot_make_it_read_thinner(self) -> None:
+        """
+        The claim that justified 26-connectivity, measured and refuted.
+
+        The thickness map is global over the metal path, so how bodies are
+        labelled cannot change what any cell reads. A diagonal staircase
+        channel four cells thick reads the same under either connectivity even
+        though one sees a single body and the other sees many.
+        """
+        grid = np.full((30, 30, 30), EMPTY_CELL, dtype=np.int8)
+        for k in range(6):
+            grid[2 + 4 * k:6 + 4 * k, 2 + 4 * k:6 + 4 * k, 4:8] = PART_TYPE_GATE
+        bodies = measure_choke_thickness_components(grid)[PART_TYPE_GATE]
+        self.assertGreater(len(bodies), 1, "the staircase did not split")
+        self.assertEqual(
+            set(bodies), {3.0},
+            f"a split body read a different thickness: {bodies}",
+        )
+
+    def test_a_fragment_is_reported_but_does_not_drive_the_grid(self) -> None:
+        """
+        A stray body of a few cells must not pin the grid at coarsening 1.
+
+        Every body of a handful of cells reads a thickness of **1.0 at every
+        coarsening**, so before :data:`~core.filling_stage.MIN_CHOKE_BODY_CELLS`
+        one of them tripped the hard minimum, drove the refinement loop down to
+        1, and was *still* 1.0 there -- the run then proceeded at 8x the cells
+        and a shorter timestep under a warning nothing could clear. Separating
+        bodies is what exposed this; the pooled median used to dilute it.
+
+        Measured on a healthy 18x8x8 gate with a detached 2-cell fragment: the
+        fragment is listed in the bodies (so the number is visible), reported in
+        its own warning, and the reported thickness is the main body's 7.0. No
+        refinement.
+        """
+        grid = np.full((26, 14, 14), EMPTY_CELL, dtype=np.int8)
+        grid[2:20, 3:11, 3:11] = PART_TYPE_GATE     # healthy, 8 cells thick
+        grid[23, 3, 3:5] = PART_TYPE_GATE           # 2-cell fragment, detached
+
+        bodies = measure_choke_thickness_components(grid)[PART_TYPE_GATE]
+        self.assertEqual(len(bodies), 2, "the fragment was not seen at all")
+        self.assertAlmostEqual(bodies[0], 1.0, places=6)
+        # Visible, and not voting.
+        self.assertEqual(
+            measure_choke_body_fragments(grid), {PART_TYPE_GATE: (2,)}
+        )
+        self.assertAlmostEqual(
+            measure_choke_thickness_by_part(grid)[PART_TYPE_GATE], 7.0, places=6
+        )
+        decision = choose_fill_coarsening(grid, 2)
+        self.assertEqual(decision.coarsening, 2, "a fragment forced a refine")
+        self.assertEqual(decision.forced_by_cause, "")
+        self.assertEqual(decision.fragments_by_part, {PART_TYPE_GATE: (2,)})
+
+    def test_a_real_thin_plate_is_not_dismissed_as_a_fragment(self) -> None:
+        """
+        The floor has to stay below a genuine sealed cross-section.
+
+        8 cells is a 2x2x2 block, and real thin gates land between that and the
+        27 of a 3x3x3: a 3x3x1 plate is 9 cells and a 5x5x1 is 25. Both are
+        cross-sections the metal genuinely cannot cross, so both must still
+        force the refinement rather than be waved through as artefacts.
+        """
+        for side in (3, 5):
+            with self.subTest(side=side):
+                grid = np.full((20, 14, 14), EMPTY_CELL, dtype=np.int8)
+                grid[2:16, 3:11, 3:11] = PART_TYPE_RUNNER
+                grid[17, 3:3 + side, 3:3 + side] = PART_TYPE_GATE
+                cells = side * side
+                self.assertGreaterEqual(cells, MIN_CHOKE_BODY_CELLS)
+                self.assertEqual(measure_choke_body_fragments(grid), {})
+                self.assertAlmostEqual(
+                    measure_choke_thickness_by_part(grid)[PART_TYPE_GATE],
+                    1.0, places=6,
+                )
+
+    def test_a_code_made_only_of_fragments_is_still_measured(self) -> None:
+        """
+        The floor must not make a part disappear from the report entirely.
+
+        If every body of a code is below the floor there is nothing to fall
+        back on, so the code is measured on its fragments rather than dropped --
+        otherwise the guard would go quiet on exactly the geometry it should be
+        loudest about.
+        """
+        grid = np.full((20, 14, 14), EMPTY_CELL, dtype=np.int8)
+        grid[2:16, 3:11, 3:11] = PART_TYPE_RUNNER
+        grid[17, 3, 3:5] = PART_TYPE_GATE           # the only gate: 2 cells
+        self.assertIn(PART_TYPE_GATE, measure_choke_thickness_by_part(grid))
+        self.assertAlmostEqual(
+            measure_choke_thickness_by_part(grid)[PART_TYPE_GATE], 1.0, places=6
+        )
+        # Nothing was ignored, so nothing is reported as ignored.
+        self.assertEqual(measure_choke_body_fragments(grid), {})
+
+    def test_the_decision_refines_for_the_thin_body(self) -> None:
+        """
+        ``choose_fill_coarsening`` consumes the same numbers, so the sealed
+        body has to force the refinement it always should have.
+        """
+        grid = _two_gate_bodies(thick=12, thin=4)
+        decision = choose_fill_coarsening(grid, 2)
+        self.assertEqual(decision.forced_by, PART_TYPE_GATE)
+        self.assertEqual(decision.coarsening, 1)
+        self.assertTrue(decision.refined)
+        self.assertEqual(len(decision.components_by_part[PART_TYPE_GATE]), 2)
+
+
+class CoarseningSeversThePathTests(unittest.TestCase):
+    """
+    Requirement: a metal-path body the downsample deletes is not silent.
+
+    ``COARSENING_PRIORITY`` puts CORE and CHILL above GATE and RUNNER on
+    purpose -- a chill that vanishes changes the thermal answer -- and
+    ``coarsen_part_types`` gives each coarse block its single highest-priority
+    code. A gate one mesh cell thick against a core therefore becomes CORE, the
+    gate ends up with **zero** solve cells, and every thickness guard is keyed
+    on parts that are *present*, so nothing fires and the metal path is severed
+    in silence.
+    """
+
+    N = 24
+
+    def _sandwiched_gate(self):
+        """A one-fine-cell GATE plate with CORE immediately above it."""
+        grid = np.full((self.N, self.N, 14), PART_TYPE_CORE, dtype=np.int8)
+        grid[4:20, 4:20, 2:8] = PART_TYPE_SPRUE
+        grid[4:20, 4:20, 8] = PART_TYPE_GATE      # one cell; CORE at z = 9
+        grid[4:20, 4:20, 10:12] = PART_TYPE_RUNNER
+        return grid
+
+    def test_the_gate_vanishes_and_no_thickness_guard_can_see_it(self) -> None:
+        """The discriminating measurement: HEAD's silence, shown."""
+        grid = self._sandwiched_gate()
+        coarse = coarsen_part_types(grid, 2)
+        self.assertEqual(int(np.count_nonzero(grid == PART_TYPE_GATE)), 256)
+        self.assertEqual(int(np.count_nonzero(coarse == PART_TYPE_GATE)), 0)
+        # The old guard's whole input: the gate simply is not in the dict.
+        self.assertNotIn(PART_TYPE_GATE, measure_choke_thickness_by_part(coarse))
+
+    def test_the_total_erasure_is_detected(self) -> None:
+        """Total erasure, now the special case of the connectivity test."""
+        grid = self._sandwiched_gate()
+        severing = metal_path_severing(grid, coarsen_part_types(grid, 2), 2)
+        self.assertTrue(severing.severed)
+        self.assertEqual(severing.erased, {PART_TYPE_GATE: 1})
+        self.assertEqual(severing.parts, (PART_TYPE_GATE,))
+        self.assertIn("erased outright", severing.describe())
+
+    def _plate_and_boss(self, boss=12):
+        """
+        The geometry a presence test cannot see: severed in the *middle*.
+
+        Two thick runner blocks bridged by a one-fine-cell GATE plate, with a
+        chunky boss sitting on the plate -- the fillet-and-boss shape
+        ``measure_choke_thickness_by_part``'s docstring records Test 2's gates
+        having. At coarsening 2 the thin span goes to CORE while the boss
+        survives, so the gate keeps cells everywhere the old "did this body
+        keep *any* metal-path cell" test looked, and the metal path comes apart
+        anyway.
+        """
+        grid = np.full((36, 20, 24), PART_TYPE_CORE, dtype=np.int8)
+        grid[2:14, 4:16, 4:12] = PART_TYPE_RUNNER
+        grid[22:34, 4:16, 4:12] = PART_TYPE_RUNNER
+        grid[14:22, 4:16, 7] = PART_TYPE_GATE
+        grid[15:15 + boss, 6:6 + boss, 7:7 + boss] = PART_TYPE_GATE
+        return grid
+
+    def test_a_middle_severing_is_invisible_to_thickness_and_presence(self) -> None:
+        """
+        The discriminating measurement, so the fix cannot be mistaken for
+        belt-and-braces.
+
+        On this grid at coarsening 2 the gate keeps **175** cells, so no body
+        lost its metal path everywhere and the presence test returns nothing;
+        and every part measures **3.0 or more**, so nothing is at or below the
+        hard minimum either. The only thing the user heard was the generic
+        3-cell marginal note -- the identical sentence a healthy channel gets --
+        while the path was in two pieces.
+        """
+        grid = self._plate_and_boss()
+        coarse = coarsen_part_types(grid, 2)
+        self.assertGreater(int(np.count_nonzero(coarse == PART_TYPE_GATE)), 0)
+        by_part = measure_choke_thickness_by_part(coarse)
+        self.assertEqual(
+            [v for v in by_part.values() if 0.0 < v <= MIN_CHOKE_THICKNESS_CELLS],
+            [],
+            f"a thickness guard would have caught this after all: {by_part}",
+        )
+
+    def test_a_middle_severing_is_detected_by_connectivity(self) -> None:
+        grid = self._plate_and_boss()
+        severing = metal_path_severing(grid, coarsen_part_types(grid, 2), 2)
+        self.assertTrue(severing.severed)
+        self.assertEqual(severing.fine_components, 1)
+        self.assertGreaterEqual(severing.solve_components, 2)
+        self.assertEqual(severing.erased, {}, "this is a split, not an erasure")
+        self.assertEqual(severing.split, {PART_TYPE_GATE: 1})
+        self.assertIn("broken in two", severing.describe())
+
+    def test_a_middle_severing_forces_a_refinement(self) -> None:
+        grid = self._plate_and_boss()
+        decision = choose_fill_coarsening(grid, 2)
+        self.assertEqual(decision.coarsening, 1)
+        self.assertEqual(decision.forced_by_cause, "severed")
+        self.assertEqual(decision.forced_by, PART_TYPE_GATE)
+        self.assertFalse(decision.severing.severed, "the chosen grid is still cut")
+
+    def test_absorption_into_another_metal_part_is_not_severing(self) -> None:
+        """
+        Losing the *code* while keeping the *path* is routine and harmless.
+
+        A gate plate cutting through a sprue column leaves a one-cell sprue
+        stub, which becomes GATE at coarsening 2 because GATE outranks SPRUE.
+        The channel is still open, still connected and still measured -- the
+        thickness map is built over the whole metal path, not per part -- so
+        this must not fire. It is the stage's own choke rig, and keying on the
+        body's own code instead of on the metal path's connectivity reports it
+        as severed.
+        """
+        grid = _choke_rig(gate_thickness=6)
+        coarse = coarsen_part_types(grid, 2)
+        self.assertEqual(
+            len(measure_choke_thickness_components(grid)[PART_TYPE_SPRUE]), 2
+        )
+        severing = metal_path_severing(grid, coarse, 2)
+        self.assertFalse(severing.severed, severing.describe())
+        self.assertEqual(severing.fine_components, severing.solve_components)
+
+    def test_factor_one_can_never_sever(self) -> None:
+        grid = self._sandwiched_gate()
+        severing = metal_path_severing(grid, coarsen_part_types(grid, 1), 1)
+        self.assertFalse(severing.severed)
+        self.assertEqual(severing.erased, {})
+
+    def test_the_decision_refines_away_from_the_severed_grid(self) -> None:
+        grid = self._sandwiched_gate()
+        decision = choose_fill_coarsening(grid, 2)
+        self.assertEqual(decision.forced_by, PART_TYPE_GATE)
+        self.assertEqual(decision.coarsening, 1)
+        # The cause, not the state of the *chosen* grid: the grid that was
+        # picked is by definition unsevered, so asserting that instead says
+        # nothing about why the refinement happened.
+        self.assertEqual(decision.forced_by_cause, "severed")
+        self.assertIsNotNone(decision.forced_by_severing)
+        assert decision.forced_by_severing is not None
+        self.assertEqual(
+            decision.forced_by_severing.erased, {PART_TYPE_GATE: 1}
+        )
+        self.assertFalse(decision.severing.severed)
+        self.assertIn(PART_TYPE_GATE, decision.by_part)
+
+    def _severed_mesh(self, dx=DX_IN):
+        """
+        The same geometry as a mesh, so the stage itself can be driven.
+
+        A sprue column over a one-voxel GATE plate with CORE immediately below
+        it, so coarsening 2 gives that block to the core.
+        """
+        nx = ny = 12
+        nz = 12
+        centers = lattice_centers((nx, ny, nz), dx=dx, origin=(0.0, 0.0, 0.0))
+        index = np.rint(np.asarray(centers) / dx).astype(int)
+        types = np.full(len(centers), PART_TYPE_CORE, dtype=np.int8)
+        inside = (
+            (index[:, 0] >= 2) & (index[:, 0] <= nx - 3)
+            & (index[:, 1] >= 2) & (index[:, 1] <= ny - 3)
+        )
+        types[inside & (index[:, 2] >= 6)] = PART_TYPE_SPRUE
+        types[inside & (index[:, 2] == 5)] = PART_TYPE_GATE   # one voxel thick
+        mesh = _FakeMesh(centers, types, dx)
+        mesh._top_z = (nz - 1) * dx
+        mesh._pour_xy = (float(nx // 2) * dx, float(ny // 2) * dx)
+        return mesh
+
+    def test_the_stage_refuses_rather_than_solving_a_severed_path(self) -> None:
+        """
+        End to end: with auto-refinement off the stage must decline and say
+        why, not run a fill on a grid whose gate has no cells.
+
+        This is the stage's existing emit-and-return-None pattern -- the same
+        one it uses for an unresolvable pour point -- because there is nothing
+        to solve: the thickness guards are keyed on parts that are present, so
+        the fill would run with the path severed and report the misrun as a
+        result.
+        """
+        from core.filling_stage import maybe_run_filling
+        from core.pour_location import PourLocation
+
+        mesh = self._severed_mesh()
+        # Precondition: this mesh really does lose its gate at coarsening 2.
+        types = coarsen_part_types(
+            dense_part_types(
+                build_grid_mapping(
+                    np.asarray(mesh.voxel_centers, dtype=np.float64), DX_IN
+                ),
+                mesh.voxel_part_types,
+            ),
+            2,
+        )
+        self.assertEqual(int(np.count_nonzero(types == PART_TYPE_GATE)), 0)
+
+        options = _isolated_options()
+        options.solidification_params.filling.fill_grid_coarsening = 2
+        options.solidification_params.filling.choke_auto_resolution = 0
+        messages: list = []
+        try:
+            result = maybe_run_filling(
+                mesh, _Alloy(), options,
+                _Inputs(PourLocation(point_in=(
+                    mesh._pour_xy[0], mesh._pour_xy[1], mesh._top_z
+                ))),
+                progress_message_callback=messages.append,
+            )
+        finally:
+            options.solidification_params.filling.choke_auto_resolution = 1
+            options.solidification_params.filling.fill_grid_coarsening = 1
+
+        self.assertIsNone(result, "the stage solved a severed metal path")
+        refusals = [
+            m for m in messages
+            if "skipped" in m and "cuts the metal path" in m
+        ]
+        self.assertTrue(refusals, f"the stage did not say why: {messages}")
+        self.assertIn("gate", refusals[-1])
+        self.assertIn("choke_auto_resolution", refusals[-1])
+        # One remedy, not two: the second arm was unreachable, because a
+        # severed decision can only come back with auto-resolution off.
+        self.assertNotIn("Reduce fill_grid_coarsening or the voxel size", refusals[-1])
+
+    def test_a_disabled_auto_resolution_still_reports_the_severing(self) -> None:
+        """
+        With ``choke_auto_resolution`` off the stage may not refine, so the
+        decision has to carry the fact for the caller to refuse on.
+        """
+        grid = self._sandwiched_gate()
+        decision = choose_fill_coarsening(grid, 2, enabled=False)
+        self.assertEqual(decision.coarsening, 2)
+        self.assertTrue(decision.severing.severed)
+        self.assertEqual(decision.severing.erased, {PART_TYPE_GATE: 1})
+        self.assertFalse(decision.resolved)
+
+    def test_a_severed_path_is_only_reachable_with_auto_resolution_off(self) -> None:
+        """
+        The invariant the refusal's wording depends on.
+
+        Every grid the loop *chooses* has an intact path, and at coarsening 1
+        the solve grid is the mesh grid, so severing cannot survive into a
+        decision that was allowed to refine. The refusal therefore has one
+        remedy to offer, not two -- an ``else`` arm there would be dead code,
+        which is what it was.
+        """
+        for grid in (self._sandwiched_gate(), self._plate_and_boss()):
+            for configured in (1, 2, 3):
+                with self.subTest(configured=configured):
+                    decision = choose_fill_coarsening(grid, configured)
+                    self.assertFalse(
+                        decision.severing.severed,
+                        "an enabled decision came back severed",
+                    )
 
 class ChokeAutoResolutionTests(unittest.TestCase):
     """

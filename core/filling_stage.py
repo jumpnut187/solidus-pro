@@ -45,7 +45,7 @@ existence and silently remove the restriction the user placed.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -346,6 +346,69 @@ NEGATIVE_POPULATION_CASCADE_FRACTION = 0.02
 #: Cells that must be affected before the cascade fraction is consulted at all,
 #: so a handful of wet cells early in a pour cannot trip it on rounding.
 NEGATIVE_POPULATION_CASCADE_MIN_CELLS = 8
+
+#: Solve cells a metal-path body needs before it may drive the grid decision.
+#:
+#: A body of a handful of cells reads a thickness of **1.0 at every coarsening**
+#: -- measured: a single cell, a 1-cell plate and a 2-cell plate all come back
+#: 1.0 -- so it trips the hard minimum, forces the refinement loop down to
+#: coarsening 1, and is *still* 1.0 there. The run then proceeds at 8x the cells
+#: and a proportionally shorter timestep under a warning that no setting can
+#: clear, for a voxelisation fragment. Before bodies were separated the pooled
+#: median diluted it; now it would dictate the grid for the whole assembly.
+#:
+#: 8 = a 2x2x2 block: below that a body cannot contain a cube of cells in any
+#: orientation, so it has no cross-section to carry flow through and is a
+#: meshing artefact, not a channel. The bound is deliberately this low rather
+#: than the 27 of a 3x3x3 block, because real thin gates land between the two --
+#: a 3x3x1 plate is 9 cells and a 5x5x1 plate is 25, and both are genuine sealed
+#: cross-sections that *should* force a refinement. Fragments are reported (in
+#: ``choke_thickness_bodies_by_part`` and in a warning of their own) rather than
+#: hidden; they simply do not vote on the grid.
+MIN_CHOKE_BODY_CELLS = 8
+
+#: Face-only (6-neighbour) connectivity, for labelling metal-path bodies and
+#: comparing the metal path's connectivity across a coarsening.
+#:
+#: Two cells that touch only along an edge or at a corner share zero boundary
+#: area in the 3-D geometry the lattice discretises, so no flow crosses there --
+#: the same argument ``physics.filling.find_entrapped_gas`` makes for gas
+#: pockets, and the same connectivity ``build_filter_zone_specs`` uses for
+#: filter inserts. Built once at import; ``ndimage.generate_binary_structure``
+#: is not used because this module must stay importable without scipy at module
+#: scope.
+_SIX_CONNECTED: np.ndarray = np.zeros((3, 3, 3), dtype=bool)
+_SIX_CONNECTED[1, 1, :] = True
+_SIX_CONNECTED[1, :, 1] = True
+_SIX_CONNECTED[:, 1, 1] = True
+
+#: Consecutive divergence checks the cascade condition must hold before the run
+#: is aborted.
+#:
+#: The floor of 8 cells was chosen against models with tens of thousands of wet
+#: cells, where 8 is negligible. On a *small* model it is not: at 400 wet cells
+#: the 2 % fraction is 8 cells too, so both halves of the condition are met by
+#: 8 cells -- and the first divergence check lands at step 200, when a splat rim
+#: routinely carries that many transient negatives. One sample was enough to
+#: abort a run that was about to be fine. Nothing in the calibration justified
+#: acting on one sample; the two instrumented runs it came from were read over
+#: hundreds of them.
+#:
+#: Requiring two consecutive checks, the same shape as
+#: :data:`FLUID_FILL_FRACTION_CHECKS`, rather than a warm-up window. A warm-up
+#: would blind the guard for its first N steps, and a genuine cascade in the
+#: first few hundred steps is exactly as fatal as a late one -- the run should
+#: still die, 200 steps later, rather than not at all. Two checks costs 200
+#: steps of lead and buys immunity to a single transient.
+#:
+#: It keeps the recorded event: the round-2 ``Test 2`` cascade went from 5 to
+#: **3,681** negative cells -- 93 % of its wet cells -- inside one 200-step
+#: interval, and fired **27,958 steps** before the field went non-finite. A
+#: field that far gone does not recover in 200 steps, so the second check sees
+#: it too and the abort moves from step 35,750 to 35,950 out of 27,958 steps of
+#: warning. And if a cascade ever *did* clear after one sample, the prevalence
+#: window is still watching -- that is what it is for.
+NEGATIVE_POPULATION_CASCADE_CHECKS = 2
 
 #: Fill fraction band a FLUID cell's mass bookkeeping must stay inside.
 #:
@@ -1368,23 +1431,362 @@ def measure_choke_thickness_by_part(dense_types: np.ndarray) -> Dict[int, float]
     thinness is what it detects, which is the failure mode that stops a fill;
     a one-cell nick in a runner is not.
 
+    Per **body**, not per part code
+    -------------------------------
+    Part codes are per *type*, not per instance: every gate in the assembly is
+    ``PART_TYPE_GATE``. Pooling one median over all of them lets a healthy body
+    outvote a sealed one, which is not a hypothetical -- ``Test 2`` has two GATE
+    bodies and two FILTER bodies. Measured on a synthetic pair sharing the code,
+    one 6 cells thick and one 2: the pooled median reads **5.0 cells** and the
+    stage says nothing, while the 2-cell body is sealed and the metal cannot
+    cross it. So each code is split into connected bodies first and the
+    **thinnest body** is what gets reported and acted on.
+
+    26-connectivity, so two blocks meeting only at an edge or a corner count as
+    one body. That is the conservative direction here: over-splitting would
+    invent thin components out of corner contacts and cry wolf, and a corner
+    touch in cast metal really is one fused piece. (``build_filter_zone_specs``
+    labels with the default 6-connectivity instead, correctly -- there the
+    question is which *physical insert* a cell belongs to, and separate
+    inserts touching at a corner are still separate inserts.)
+
     Returns:
-        ``{part code: thickness in cells}`` for every metal-path part present.
-        Empty when the grid holds no gating metal.
+        ``{part code: thinnest resolvable body's thickness in cells}`` for every
+        metal-path part present. Bodies below :data:`MIN_CHOKE_BODY_CELLS` are
+        skipped here -- see that constant -- unless a code has nothing else, in
+        which case its thinnest fragment is reported so the code is not silently
+        absent. Empty when the grid holds no gating metal.
+        :func:`measure_choke_thickness_components` returns every body and
+        :func:`measure_choke_body_fragments` the ones skipped.
     """
+    by_part: Dict[int, float] = {}
+    for code, bodies in _choke_bodies(dense_types).items():
+        resolvable = [t for t, cells in bodies if cells >= MIN_CHOKE_BODY_CELLS]
+        by_part[code] = min(resolvable) if resolvable else min(
+            t for t, _ in bodies
+        )
+    return by_part
+
+
+def measure_choke_body_fragments(
+    dense_types: np.ndarray,
+) -> Dict[int, Tuple[int, ...]]:
+    """
+    Cell counts of the metal-path bodies too small to judge a grid by.
+
+    Reported rather than dropped: a fragment is a modelling or voxelisation
+    observation, not a resolution one, and a reader who sees a part's thickness
+    ignore a body it can see in the mesh should be told why. See
+    :data:`MIN_CHOKE_BODY_CELLS`.
+
+    Returns:
+        ``{part code: (cells, ...)}`` smallest first, only for codes that have
+        at least one such body *and* at least one body large enough to measure
+        -- a code made entirely of fragments is measured on them instead, so
+        nothing is being ignored there.
+    """
+    fragments: Dict[int, Tuple[int, ...]] = {}
+    for code, bodies in _choke_bodies(dense_types).items():
+        small = sorted(
+            cells for _, cells in bodies if cells < MIN_CHOKE_BODY_CELLS
+        )
+        if small and len(small) < len(bodies):
+            fragments[code] = tuple(small)
+    return fragments
+
+
+def _choke_bodies(
+    dense_types: np.ndarray,
+) -> Dict[int, Tuple[Tuple[float, int], ...]]:
+    """
+    ``{part code: ((thickness, cells), ...)}`` per connected body, thinnest
+    first.
+
+    The one measurement behind :func:`measure_choke_thickness_by_part`,
+    :func:`measure_choke_thickness_components` and
+    :func:`measure_choke_body_fragments`, so the three cannot disagree.
+
+    **6-connectivity**, matching ``build_filter_zone_specs``. Two same-code
+    bodies touching only at an edge or a corner are separate bodies, and that
+    matters: 26-connectivity fuses them, and fusing a sealed 2-cell plate onto a
+    healthy 8-cell one reports **7.0 cells and stays silent** where splitting
+    them reports **1.0 and hard-warns** -- the same "healthy body outvotes a
+    sealed one" failure that separating bodies exists to remove. A corner-only
+    contact is one diagonal D3Q19 link, which is not a channel the solver can
+    carry flow through, so fusing across it also asserts a path that is not
+    there.
+
+    Splitting costs nothing in false alarms, which is worth stating because the
+    opposite was assumed: ``_local_thickness_cells`` is computed **once** over
+    the whole metal path and each body only *indexes* into that map, so a body's
+    pieces cannot read thinner than the body did. Measured -- a 4-cell-thick
+    diagonal staircase channel reads 3.0 under both connectivities, and a
+    1-cell diagonal string reads 1.0 under both (as 1 body or as 20).
+    """
+    from scipy import ndimage
+
     dense_types = np.asarray(dense_types)
+    metal_path = np.isin(dense_types, _METAL_PATH_CODES)
+    if not np.any(metal_path):
+        return {}
     # One map over the whole connected path, so a gate cell touching the
     # runner is interior rather than boundary -- measuring each part in
     # isolation would report every junction as a constriction.
-    thickness = _local_thickness_cells(np.isin(dense_types, _METAL_PATH_CODES))
+    thickness = _local_thickness_cells(metal_path)
 
-    by_part: Dict[int, float] = {}
+    by_part: Dict[int, Tuple[Tuple[float, int], ...]] = {}
     for code in _METAL_PATH_CODES:
         part = dense_types == code
         if not np.any(part):
             continue
-        by_part[code] = max(0.0, float(np.median(thickness[part])))
+        labels, count = ndimage.label(part, structure=_SIX_CONNECTED)
+        bodies = []
+        for index in range(1, count + 1):
+            body = labels == index
+            cells = int(np.count_nonzero(body))
+            if not cells:
+                continue
+            bodies.append(
+                (max(0.0, float(np.median(thickness[body]))), cells)
+            )
+        if bodies:
+            by_part[code] = tuple(sorted(bodies))
     return by_part
+
+
+def measure_choke_thickness_components(
+    dense_types: np.ndarray,
+) -> Dict[int, Tuple[float, ...]]:
+    """
+    Thickness of every connected body of each metal-path part, thinnest first.
+
+    The per-body detail behind :func:`measure_choke_thickness_by_part`, which
+    reports only the first (thinnest) entry of each tuple. Kept separate so the
+    scalar-per-code shape that :class:`FillingResult` and the pipeline payload
+    already serialize does not change type -- see that function for why the
+    split exists at all.
+
+    Returns:
+        ``{part code: (thinnest, ..., thickest)}`` for every metal-path part
+        present, each value a median over that body's own cells. Includes the
+        bodies below :data:`MIN_CHOKE_BODY_CELLS` that
+        :func:`measure_choke_thickness_by_part` skips, so the reported list is
+        the whole truth about the grid.
+    """
+    return {
+        code: tuple(t for t, _ in bodies)
+        for code, bodies in _choke_bodies(dense_types).items()
+    }
+
+
+@dataclass(frozen=True)
+class MetalPathSevering:
+    """
+    What a coarsening did to the connectivity of the metal path.
+
+    Attributes:
+        severed: True when at least one connected run of metal path on the mesh
+            is broken, or gone, on the solve grid.
+        fine_components: Connected components of the metal-path mask on the
+            mesh grid.
+        solve_components: The same on the solve grid.
+        erased: ``{part code: bodies}`` for fine bodies of that code that kept
+            no metal-path cell anywhere -- total erasure. A *second* test, not
+            a special case of the connectivity one; see
+            :func:`metal_path_severing`.
+        split: ``{part code: fine components}`` for fine metal-path components
+            that came apart into two or more on the solve grid, attributed to
+            the codes that lost cells at the break.
+    """
+
+    severed: bool
+    fine_components: int
+    solve_components: int
+    erased: Dict[int, int]
+    split: Dict[int, int]
+
+    @property
+    def parts(self) -> Tuple[int, ...]:
+        """Every part code implicated, in flow order (sprue first)."""
+        codes = set(self.erased) | set(self.split)
+        return tuple(code for code in _METAL_PATH_CODES if code in codes)
+
+    def describe(self) -> str:
+        """One clause naming what happened, for a message."""
+        pieces = []
+        for code in _METAL_PATH_CODES:
+            if code in self.erased:
+                count = self.erased[code]
+                pieces.append(
+                    f"{count} {_METAL_PATH_LABELS.get(code, 'gating')} "
+                    f"{'body' if count == 1 else 'bodies'} erased outright"
+                )
+        broken = tuple(code for code in _METAL_PATH_CODES if code in self.split)
+        if broken:
+            names = "/".join(
+                _METAL_PATH_LABELS.get(code, "gating") for code in broken
+            )
+            pieces.append(f"the path through the {names} broken in two")
+        if not pieces:
+            return "the metal path is intact"
+        return " and ".join(pieces)
+
+
+def metal_path_severing(
+    fine_types: np.ndarray, solve_types: np.ndarray, factor: int
+) -> MetalPathSevering:
+    """
+    Whether the coarsening cut the metal path, by comparing its connectivity.
+
+    The failure this exists for
+    ---------------------------
+    :data:`COARSENING_PRIORITY` puts CORE and CHILL *above* GATE and RUNNER --
+    deliberately, because a chill that vanishes changes the thermal answer --
+    and :func:`coarsen_part_types` gives each coarse block the single
+    highest-priority code in it. So a channel one mesh cell thick against a core
+    becomes CORE. Every guard downstream is keyed on parts that are *present*:
+    :func:`measure_choke_thickness_by_part` skips a code with no cells, so the
+    sealed-choke check sees nothing to complain about and the metal path is
+    severed in silence. That is the worst shape a defect can have here -- the
+    run completes and reports a misrun on a path the solve grid never had.
+
+    Connectivity, not presence
+    --------------------------
+    The first version of this test asked whether each fine body kept *any*
+    metal-path cell, which only ever catches **total** erasure. A body severed
+    in its *middle* keeps cells at both ends and was never flagged -- and that
+    is the common geometry, not a corner case: a wide thin gate plate with a
+    boss or fillet somewhere along it, which
+    :func:`measure_choke_thickness_by_part`'s own docstring records Test 2's
+    gates having. Measured on exactly that shape: the fine metal path is **1**
+    connected component and the solve grid's is **2**, the old test returned
+    ``{}``, both parts measured 3.0 cells so nothing was at or below the hard
+    minimum, and the only thing the user heard was the generic 3-cell marginal
+    note -- the same sentence a perfectly healthy channel gets.
+
+    So the test is the connectivity itself. Label the metal-path mask on both
+    grids with the same 6-connectivity (see :data:`_SIX_CONNECTED`), map each
+    fine component onto the coarse blocks its cells fall in, and count the
+    distinct coarse components it lands on:
+
+    * **>= 2** -- the component came apart. Severing.
+    * **1** -- intact, however the part *codes* moved around inside it.
+
+    Total erasure is a **second** test, not a special case
+    -----------------------------------------------------
+    It is tempting to fold it in -- a component that lands on *zero* coarse
+    components has plainly gone -- and that is not sufficient, because a whole
+    part can vanish while the surviving path stays connected. A one-cell gate
+    stub hanging off a sprue column shares its fine metal-path component with
+    the sprue, so the component still lands on one coarse component (the
+    sprue's) and the connectivity test says intact -- while all 256 of the
+    gate's cells became CORE. The path is not cut, but a part of the casting is
+    simply missing from the grid, which is the same misrun-by-coarsening. So the
+    per-code check is kept alongside: for each fine body of each metal-path
+    code, did its blocks keep any metal-path cell at all.
+
+    That last point is what keeps the false positive away, and it is a real one:
+    losing a *code* while keeping the *path* is routine and harmless. A gate
+    plate cutting through a sprue column leaves a one-cell sprue stub that
+    becomes GATE at coarsening 2, because GATE outranks SPRUE -- the channel is
+    still open, still connected, and still measured, since the thickness map is
+    built over the whole metal path rather than per part. Keying on the body's
+    own code reports the stage's own choke rig as severed.
+
+    Args:
+        fine_types: The mesh-resolution dense part-type grid.
+        solve_types: The coarsened grid, as :func:`coarsen_part_types` returns.
+        factor: The coarsening factor relating the two.
+
+    Returns:
+        A :class:`MetalPathSevering`. Never severed at ``factor == 1``, where
+        the two grids are the same by construction.
+    """
+    from scipy import ndimage
+
+    fine_types = np.asarray(fine_types)
+    solve_types = np.asarray(solve_types)
+    factor = max(1, int(factor))
+
+    fine_mask = np.isin(fine_types, _METAL_PATH_CODES)
+    solve_mask = np.isin(solve_types, _METAL_PATH_CODES)
+    fine_labels, fine_count = ndimage.label(fine_mask, structure=_SIX_CONNECTED)
+    _solve_labels, solve_count = ndimage.label(
+        solve_mask, structure=_SIX_CONNECTED
+    )
+    intact = MetalPathSevering(
+        severed=False,
+        fine_components=int(fine_count),
+        solve_components=int(solve_count),
+        erased={},
+        split={},
+    )
+    if factor == 1 or not fine_count:
+        return intact
+
+    shape = solve_types.shape
+
+    def blocks_of(mask_labels: np.ndarray, index: int):
+        ix, iy, iz = np.nonzero(mask_labels == index)
+        if ix.size == 0:
+            return None
+        return (
+            np.minimum(ix // factor, shape[0] - 1),
+            np.minimum(iy // factor, shape[1] - 1),
+            np.minimum(iz // factor, shape[2] - 1),
+            (ix, iy, iz),
+        )
+
+    # (a) the connectivity comparison: did a connected run come apart?
+    split: Dict[int, int] = {}
+    for index in range(1, fine_count + 1):
+        mapped = blocks_of(fine_labels, index)
+        if mapped is None:
+            continue
+        cx, cy, cz, (ix, iy, iz) = mapped
+        landed = _solve_labels[cx, cy, cz]
+        if np.unique(landed[landed > 0]).size < 2:
+            continue
+        # Attribute the break to the codes that actually lost cells: a fine
+        # cell whose block came back non-metal-path is where the cut is.
+        lost = landed == 0
+        codes = np.unique(
+            fine_types[ix[lost], iy[lost], iz[lost]]
+            if np.any(lost)
+            else fine_types[ix, iy, iz]
+        )
+        for code in codes:
+            if int(code) in _METAL_PATH_CODES:
+                split[int(code)] = split.get(int(code), 0) + 1
+
+    # (b) the per-code check: did a whole body of a part vanish, connectivity
+    # of the survivors notwithstanding? See the docstring.
+    erased: Dict[int, int] = {}
+    for code in _METAL_PATH_CODES:
+        part = fine_types == code
+        if not np.any(part):
+            continue
+        part_labels, part_count = ndimage.label(part, structure=_SIX_CONNECTED)
+        gone = 0
+        for index in range(1, part_count + 1):
+            mapped = blocks_of(part_labels, index)
+            if mapped is None:
+                continue
+            cx, cy, cz, _ = mapped
+            if not np.any(np.isin(solve_types[cx, cy, cz], _METAL_PATH_CODES)):
+                gone += 1
+        if gone:
+            erased[code] = gone
+
+    if not (split or erased):
+        return intact
+    return MetalPathSevering(
+        severed=True,
+        fine_components=int(fine_count),
+        solve_components=int(solve_count),
+        erased=erased,
+        split=split,
+    )
 
 
 def narrowest_choke_part_code(by_part: Dict[int, float]) -> Optional[int]:
@@ -1414,16 +1816,43 @@ class CoarseningDecision:
         solve_types: The coarsened part-type grid at ``coarsening``, so the
             caller does not pay for the downsample twice.
         by_part: ``{part code: median thickness in cells}`` measured on
-            ``solve_types``.
-        forced_by: Part code that was at or below
-            :data:`MIN_CHOKE_THICKNESS_CELLS` at ``configured`` and forced the
+            ``solve_types`` -- the **thinnest body large enough to judge a grid
+            by**, see :func:`measure_choke_thickness_by_part`.
+        components_by_part: ``{part code: (thinnest, ..., thickest)}``, every
+            connected body of each code, fragments included. So
+            ``components_by_part[code][0]`` is the thinnest body outright and
+            ``by_part[code]`` is the thinnest one that votes; they differ
+            exactly when the code has a body below
+            :data:`MIN_CHOKE_BODY_CELLS` alongside a larger one.
+        fragments_by_part: ``{part code: (cells, ...)}`` for bodies too small
+            to judge the grid by -- see :data:`MIN_CHOKE_BODY_CELLS`. Reported,
+            not acted on.
+        severing: What ``coarsening`` did to the metal path's connectivity --
+            see :class:`MetalPathSevering`. ``severing.severed`` on the chosen
+            grid means the path is cut there and the caller must refuse rather
+            than solve it, which can only happen when auto-resolution was not
+            allowed to act: every grid the loop *chooses* has an intact path,
+            and at ``coarsening == 1`` the two grids are identical.
+        forced_by: Part code that blocked the configured grid and forced the
             refinement, or ``None`` when nothing did.
-        forced_by_thickness: That part's thickness at ``configured``.
+        forced_by_cause: Why that part blocked it -- ``"thickness"`` for a
+            channel at or below :data:`MIN_CHOKE_THICKNESS_CELLS`, ``"severed"``
+            for a metal path the downsample cut, ``""`` when nothing blocked.
+            Carried because the two need different sentences and because a
+            severed part has *no cells*, so its ``forced_by_thickness`` is 0.0
+            and reads as a nonsense measurement.
+        forced_by_thickness: That part's thickness at ``configured``, or 0.0
+            when ``forced_by_cause`` is ``"severed"``.
+        forced_by_severing: The severing that blocked the configured grid, when
+            ``forced_by_cause`` is ``"severed"``; ``None`` otherwise. Distinct
+            from ``severing``, which describes the grid actually chosen.
         cells_configured: Solve-grid cell count at ``configured``.
         cells_chosen: Solve-grid cell count at ``coarsening``.
         resolved: True when every metal-path part clears the hard minimum at
-            ``coarsening``. False means even coarsening 1 could not fix it and
-            the run proceeds under the hard warning.
+            ``coarsening`` **and** the metal path is connected there. False
+            means even coarsening 1 could not fix it and the run proceeds under
+            the hard warning -- or, when ``severing.severed``, must not proceed
+            at all.
         enabled: Whether auto-resolution was allowed to act.
     """
 
@@ -1431,8 +1860,13 @@ class CoarseningDecision:
     configured: int
     solve_types: np.ndarray
     by_part: Dict[int, float]
+    components_by_part: Dict[int, Tuple[float, ...]]
+    fragments_by_part: Dict[int, Tuple[int, ...]]
+    severing: MetalPathSevering
     forced_by: Optional[int]
+    forced_by_cause: str
     forced_by_thickness: float
+    forced_by_severing: Optional[MetalPathSevering]
     cells_configured: int
     cells_chosen: int
     resolved: bool
@@ -1490,71 +1924,115 @@ def choose_fill_coarsening(
     """
     configured = max(1, int(configured))
 
-    def measure(factor: int) -> Tuple[np.ndarray, Dict[int, float]]:
+    class _Measured(NamedTuple):
+        types: np.ndarray
+        by_part: Dict[int, float]
+        components: Dict[int, Tuple[float, ...]]
+        fragments: Dict[int, Tuple[int, ...]]
+        severing: MetalPathSevering
+
+    class _Blocked(NamedTuple):
+        code: Optional[int]
+        cause: str
+
+    def measure(factor: int) -> _Measured:
+        # One _choke_bodies call per factor, not three: the thickness map it
+        # builds is the expensive part of this whole function (an EDT sweep per
+        # half-cell of inscribed radius over the full grid), so the three public
+        # views are derived here rather than each recomputing it.
         types = coarsen_part_types(fine_types, factor)
-        return types, measure_choke_thickness_by_part(types)
-
-    def sealed(by_part: Dict[int, float]) -> Optional[int]:
-        """The upstream-most part at or below the hard minimum, if any."""
-        under = {
-            code: value
-            for code, value in by_part.items()
-            if 0.0 < value <= MIN_CHOKE_THICKNESS_CELLS
-        }
-        return narrowest_choke_part_code(under)
-
-    base_types, base_by_part = measure(configured)
-    cells_configured = int(np.prod(base_types.shape))
-    forced_by = sealed(base_by_part)
-
-    if not enabled or forced_by is None or configured == 1:
-        return CoarseningDecision(
-            coarsening=configured,
-            configured=configured,
-            solve_types=base_types,
-            by_part=base_by_part,
-            forced_by=forced_by,
-            forced_by_thickness=(
-                base_by_part[forced_by] if forced_by is not None else 0.0
-            ),
-            cells_configured=cells_configured,
-            cells_chosen=cells_configured,
-            resolved=forced_by is None,
-            enabled=enabled,
+        bodies = _choke_bodies(types)
+        by_part: Dict[int, float] = {}
+        fragments: Dict[int, Tuple[int, ...]] = {}
+        for code, group in bodies.items():
+            resolvable = [
+                t for t, cells in group if cells >= MIN_CHOKE_BODY_CELLS
+            ]
+            by_part[code] = (
+                min(resolvable) if resolvable else min(t for t, _ in group)
+            )
+            small = sorted(
+                cells for _, cells in group if cells < MIN_CHOKE_BODY_CELLS
+            )
+            if small and len(small) < len(group):
+                fragments[code] = tuple(small)
+        return _Measured(
+            types=types,
+            by_part=by_part,
+            components={
+                code: tuple(t for t, _ in group)
+                for code, group in bodies.items()
+            },
+            fragments=fragments,
+            severing=metal_path_severing(fine_types, types, factor),
         )
 
-    forced_by_thickness = base_by_part[forced_by]
+    def blocked(m: _Measured) -> _Blocked:
+        """
+        The upstream-most metal-path part this grid cannot carry, and why.
+
+        Two ways to fail, and a severed path is checked first because it is the
+        more severe *and* the more invisible: a part at or below the hard
+        minimum is a channel with no interior but at least has cells to
+        measure, whereas a part the coarsening cut may have none, so every
+        thickness check silently skips it. The cause travels with the code
+        because the two need different sentences -- a severed part's thickness
+        is 0.0, which reads as a measurement and is not one.
+        """
+        if m.severing.severed:
+            parts = m.severing.parts
+            return _Blocked(parts[0] if parts else None, "severed")
+        under = {
+            code: value
+            for code, value in m.by_part.items()
+            if 0.0 < value <= MIN_CHOKE_THICKNESS_CELLS
+        }
+        code = narrowest_choke_part_code(under)
+        return _Blocked(code, "thickness" if code is not None else "")
+
+    def decide(m: _Measured, factor: int, **kw) -> CoarseningDecision:
+        return CoarseningDecision(
+            coarsening=factor,
+            configured=configured,
+            solve_types=m.types,
+            by_part=m.by_part,
+            components_by_part=m.components,
+            fragments_by_part=m.fragments,
+            severing=m.severing,
+            cells_configured=cells_configured,
+            cells_chosen=int(np.prod(m.types.shape)),
+            enabled=enabled,
+            **kw,
+        )
+
+    base = measure(configured)
+    cells_configured = int(np.prod(base.types.shape))
+    first = blocked(base)
+    forced_kw = dict(
+        forced_by=first.code,
+        forced_by_cause=first.cause,
+        forced_by_thickness=(
+            base.by_part.get(first.code, 0.0)
+            if first.cause == "thickness" and first.code is not None
+            else 0.0
+        ),
+        forced_by_severing=base.severing if first.cause == "severed" else None,
+    )
+
+    if not enabled or first.code is None or configured == 1:
+        return decide(base, configured, resolved=first.code is None, **forced_kw)
+
     for factor in range(configured - 1, 0, -1):
-        types, by_part = measure(factor)
-        if sealed(by_part) is None:
-            return CoarseningDecision(
-                coarsening=factor,
-                configured=configured,
-                solve_types=types,
-                by_part=by_part,
-                forced_by=forced_by,
-                forced_by_thickness=forced_by_thickness,
-                cells_configured=cells_configured,
-                cells_chosen=int(np.prod(types.shape)),
-                resolved=True,
-                enabled=enabled,
-            )
+        m = measure(factor)
+        if blocked(m).code is None:
+            return decide(m, factor, resolved=True, **forced_kw)
         if factor == 1:
             # Out of room. Hand back the finest grid available and let the
             # caller warn: it is the best this mesh can do, and saying so is
-            # more use than silently running the coarse one.
-            return CoarseningDecision(
-                coarsening=1,
-                configured=configured,
-                solve_types=types,
-                by_part=by_part,
-                forced_by=forced_by,
-                forced_by_thickness=forced_by_thickness,
-                cells_configured=cells_configured,
-                cells_chosen=int(np.prod(types.shape)),
-                resolved=False,
-                enabled=enabled,
-            )
+            # more use than silently running the coarse one. The path cannot be
+            # severed here -- at factor 1 the two grids are the same -- so the
+            # caller warns rather than refusing.
+            return decide(m, 1, resolved=False, **forced_kw)
 
     raise AssertionError("unreachable: the loop above always returns")
 
@@ -1666,8 +2144,19 @@ class FillingResult:
             channel has no interior and halfway bounce-back seals it shut.
         choke_thickness_by_part: ``{"sprue"|"runner"|"filter"|"gate":
             thickness in cells}`` for every metal-path part present, so a
-            reader can see *which* body is under-resolved rather than only
-            that something is.
+            reader can see *which* part is under-resolved rather than only
+            that something is. The value is the **thinnest body** of that
+            part, not a pooled median over all of them -- see
+            :func:`measure_choke_thickness_by_part` for the two-gate case that
+            made the difference.
+        choke_thickness_bodies_by_part: The same keys, each mapped to *every*
+            connected body's thickness, thinnest first -- including the
+            fragments ``choke_thickness_by_part`` skips. Added alongside rather
+            than widening ``choke_thickness_by_part``, whose scalar-per-part
+            shape the pipeline payload and its readers already depend on.
+        choke_body_fragments_by_part: The same keys, each mapped to the cell
+            counts of the bodies below :data:`MIN_CHOKE_BODY_CELLS` that did
+            not vote on the grid decision.
         narrowest_choke_part: Name of the thinnest of them, or ``""`` when the
             grid holds no gating metal.
         choke_area_fine_cm2: The same cross-section measured on the *mesh*
@@ -1713,6 +2202,12 @@ class FillingResult:
     diverged_at_step: int = 0
     choke_thickness_cells: float = 0.0
     choke_thickness_by_part: Dict[str, float] = field(default_factory=dict)
+    choke_thickness_bodies_by_part: Dict[str, List[float]] = field(
+        default_factory=dict
+    )
+    choke_body_fragments_by_part: Dict[str, List[int]] = field(
+        default_factory=dict
+    )
     narrowest_choke_part: str = ""
     choke_area_fine_cm2: float = 0.0
     delivered_lb: float = 0.0
@@ -1980,13 +2475,34 @@ def run_filling_stage(
             coarsening_decision.cells_chosen
             / max(1, coarsening_decision.cells_configured)
         )
+        label = _METAL_PATH_LABELS.get(forced, "gating")
+        severing = coarsening_decision.forced_by_severing
+        if severing is not None:
+            # A severed part may have no cells at all, so there is no thickness
+            # to quote -- quoting one anyway printed "measured 0.0 cells
+            # across" for a part that was simply gone.
+            cause = (
+                f"coarsening x{coarsening_decision.configured} cut the metal "
+                f"path -- {severing.describe()}, "
+                f"{severing.fine_components} connected "
+                f"{'run' if severing.fine_components == 1 else 'runs'} of gating "
+                f"metal on the mesh against "
+                f"{severing.solve_components} on that grid. The downsample "
+                f"gives each coarse block its highest-priority code and mold "
+                f"outranks the flow path by design, so a channel one mesh cell "
+                f"thick against a core is replaced by the core"
+            )
+        else:
+            cause = (
+                f"the {label} measured "
+                f"{coarsening_decision.forced_by_thickness:.1f} cells across at "
+                f"coarsening x{coarsening_decision.configured}, at or below the "
+                f"{MIN_CHOKE_THICKNESS_CELLS:.0f} cells a channel needs before "
+                f"it has an interior"
+            )
         emit(
-            f"Filling: refining the fill grid -- the "
-            f"{_METAL_PATH_LABELS.get(forced, 'gating')} measured "
-            f"{coarsening_decision.forced_by_thickness:.1f} cells across at "
-            f"coarsening x{coarsening_decision.configured}, at or below the "
-            f"{MIN_CHOKE_THICKNESS_CELLS:.0f} cells a channel needs before it "
-            f"has an interior. Coarsening x{coarsening_decision.configured} -> "
+            f"Filling: refining the fill grid -- {cause}. "
+            f"Coarsening x{coarsening_decision.configured} -> "
             f"x{coarsening}, {coarsening_decision.cells_configured:,} -> "
             f"{coarsening_decision.cells_chosen:,} cells "
             f"({cost:.0f}x the cells, and a shorter timestep with them, so "
@@ -1999,6 +2515,34 @@ def run_filling_stage(
                 "warning below."
             )
         )
+
+    # The metal path is cut on the grid we were about to solve. Refusing rather
+    # than solving, because there is nothing to solve: the fill would run with
+    # the path severed and report the resulting misrun as a result.
+    #
+    # Only reachable with auto-resolution off. Every grid choose_fill_coarsening
+    # *chooses* has an intact path, and at coarsening 1 the solve grid is the
+    # mesh grid, so severing is impossible there -- which is why the remedy
+    # below names the toggle and does not offer a second arm for a case that
+    # cannot occur. See metal_path_severing.
+    if coarsening_decision.severing.severed:
+        severing = coarsening_decision.severing
+        emit(
+            f"Filling stage skipped: coarsening x{coarsening} cuts the metal "
+            f"path -- {severing.describe()}. The gating metal is "
+            f"{severing.fine_components} connected "
+            f"{'run' if severing.fine_components == 1 else 'runs'} on the mesh "
+            f"and {severing.solve_components} on the fill grid. The downsample "
+            f"gives each coarse block its highest-priority part code, and mold "
+            f"outranks the flow path by design (a chill that vanishes changes "
+            f"the thermal answer), so a channel one mesh cell thick against a "
+            f"core is replaced by the core. Nothing downstream can see it: the "
+            f"thickness guards are keyed on parts that are present, so the fill "
+            f"would run with the path severed and report a misrun. Set "
+            f"choke_auto_resolution to 1 and the stage will refine the grid "
+            f"itself, or reduce fill_grid_coarsening."
+        )
+        return None
 
     # Seal the lattice: one cell of mold on every face, plus the headspace
     # above it. See MOLD_PAD_CELLS for the wrap this removes and HEADSPACE_CELLS
@@ -2704,7 +3248,17 @@ def run_filling_stage(
             "Filling: channel thickness on the "
             f"{dx_m * 1000:.1f} mm fill grid -- "
             + ", ".join(
-                f"{_METAL_PATH_LABELS[code]} {choke_by_part[code]:.1f} cells"
+                f"{_METAL_PATH_LABELS[code]} "
+                + (
+                    "/".join(
+                        f"{value:.1f}"
+                        for value in coarsening_decision.components_by_part[code]
+                    )
+                    if len(coarsening_decision.components_by_part.get(code, ()))
+                    > 1
+                    else f"{choke_by_part[code]:.1f}"
+                )
+                + " cells"
                 for code in _METAL_PATH_CODES
                 if code in choke_by_part
             )
@@ -2714,11 +3268,20 @@ def run_filling_stage(
                 else ""
             )
         )
+    choke_components = coarsening_decision.components_by_part
     for code in _METAL_PATH_CODES:
         thickness = choke_by_part.get(code)
         if thickness is None or thickness <= 0.0:
             continue
+        # Name the body, not just the part code. A code covers every body of
+        # that type -- Test 2 has two gates and two filters -- and the number
+        # being warned about is the *thinnest* of them, so saying "the gate"
+        # when one gate is fine and the other is sealed sends the reader to
+        # the wrong geometry. See measure_choke_thickness_by_part.
+        bodies = choke_components.get(code, ())
         label = _METAL_PATH_LABELS[code]
+        if len(bodies) > 1:
+            label = f"thinnest of the {len(bodies)} {label} bodies"
         inches = thickness * dx_m * 39.3701
         if thickness <= MIN_CHOKE_THICKNESS_CELLS:
             warnings.append(
@@ -2740,6 +3303,26 @@ def run_filling_stage(
                 f"{label} as marginal, not as a result; if it matters to the "
                 f"answer, resolve it and rerun."
             )
+
+    # Bodies too small to judge the grid by, said out loud rather than dropped.
+    # A fragment always measures 1.0 and can never be resolved, so letting it
+    # drive the decision pins the grid at coarsening 1 forever -- see
+    # MIN_CHOKE_BODY_CELLS. It is a modelling observation, not a resolution one.
+    for code, sizes in coarsening_decision.fragments_by_part.items():
+        label = _METAL_PATH_LABELS.get(code, "gating")
+        listed = ", ".join(f"{size:,}" for size in sizes)
+        warnings.append(
+            f"{len(sizes)} disconnected "
+            f"{'fragment' if len(sizes) == 1 else 'fragments'} of {label} "
+            f"({listed} cells) "
+            f"{'was' if len(sizes) == 1 else 'were'} ignored by the choke "
+            f"guard: below {MIN_CHOKE_BODY_CELLS} cells a body has no "
+            f"cross-section in any orientation, and it would read as sealed at "
+            f"every resolution and pin the grid at coarsening 1 for good. The "
+            f"{label}'s reported thickness is its main body. Check the part "
+            f"assignment if you did not expect a detached "
+            f"{'piece' if len(sizes) == 1 else 'pieces'} of {label}."
+        )
 
     # F3: air entrapment. The vent mask is reassembled at every periodic
     # check (see below) because its "open-air gas" component is a live
@@ -2886,6 +3469,9 @@ def run_filling_stage(
     # Rolling window of "did this check see a negative population?", the
     # instability precursor -- see NEGATIVE_POPULATION_WINDOW.
     negative_history: List[int] = []
+    # Consecutive divergence checks the negative-population cascade condition
+    # has held -- see NEGATIVE_POPULATION_CASCADE_CHECKS.
+    cascade_streak = 0
     # Consecutive divergence checks that found a FLUID cell outside the fill
     # fraction band -- see FLUID_FILL_FRACTION_CHECKS.
     fill_fraction_breaches = 0
@@ -3243,11 +3829,17 @@ def run_filling_stage(
                 if len(negative_history) >= NEGATIVE_POPULATION_WINDOW
                 else 0.0
             )
-            cascading = (
+            cascading_now = (
                 negative_cells >= NEGATIVE_POPULATION_CASCADE_MIN_CELLS
                 and negative_cells
                 >= NEGATIVE_POPULATION_CASCADE_FRACTION * max(wet_cells, 1)
             )
+            # Presence over two consecutive checks, not one sample -- see
+            # NEGATIVE_POPULATION_CASCADE_CHECKS. On a small model the 8-cell
+            # floor and the 2 % fraction meet at ~400 wet cells, and the first
+            # check lands at step 200 while the splat rim is still transient.
+            cascade_streak = cascade_streak + 1 if cascading_now else 0
+            cascading = cascade_streak >= NEGATIVE_POPULATION_CASCADE_CHECKS
             if cascading or prevalence >= NEGATIVE_POPULATION_PREVALENCE:
                 status = STATUS_DIVERGED
                 diverged_at_step = taken
@@ -3255,8 +3847,12 @@ def run_filling_stage(
                     precursor = (
                         f"{negative_cells:,} of {wet_cells:,} wet cells "
                         f"({negative_cells / max(wet_cells, 1):.1%}) are "
-                        f"holding a negative population -- a reconstruction "
-                        f"cascade in progress"
+                        f"holding a negative population, at "
+                        f"{NEGATIVE_POPULATION_CASCADE_CHECKS} consecutive "
+                        f"checks "
+                        f"({NEGATIVE_POPULATION_CASCADE_CHECKS * DIVERGENCE_CHECK_INTERVAL} "
+                        f"steps) -- a reconstruction cascade in progress, not a "
+                        f"transient"
                     )
                 else:
                     precursor = (
@@ -3620,6 +4216,14 @@ def run_filling_stage(
         choke_thickness_by_part={
             _METAL_PATH_LABELS[code]: value
             for code, value in choke_by_part.items()
+        },
+        choke_thickness_bodies_by_part={
+            _METAL_PATH_LABELS[code]: list(values)
+            for code, values in choke_components.items()
+        },
+        choke_body_fragments_by_part={
+            _METAL_PATH_LABELS[code]: list(sizes)
+            for code, sizes in coarsening_decision.fragments_by_part.items()
         },
         narrowest_choke_part=(
             _METAL_PATH_LABELS[narrowest_code]

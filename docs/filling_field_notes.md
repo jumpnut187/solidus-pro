@@ -11,6 +11,9 @@ design document; `docs/filling_implementation.md` is the plan and
 filter-exchange fixes below cleared both of Test 2's blow-ups and exposed a
 third, at step 20,200: an **undamped odd-parity momentum mode**. It is fixed by
 one clamp, and the fix is not free — read "What moved, and what it cost".
+Separately, "Rounds 1-2 review" below covers three guards that were reporting on
+the wrong object and so failed silently; those are independent of the clamp and
+of the pad.
 
 ### The defect: ω⁻ → 0 as τ → ½
 
@@ -184,6 +187,137 @@ max |u(n) − u(n−1)| / max(|u(n)|, floor) would key on the mode's *character*
 rather than its amplitude, for one extra grid and two consecutive steps.
 
 Full diagnosis, fixture and validation: `Test/session_diag_2026-09-02/`.
+
+### Rounds 1-2 review: three guards that could not see what they were built for
+
+Independent of the τ⁻ clamp and the mold pad — these are the three findings from
+the adversarial review of `460ca0f..57b07d7` that survived three-refuter
+verification. All three are guards that report on the *wrong object*, so all
+three failed silently rather than loudly.
+
+**The choke-thickness guard pooled every body of a part into one median.** Part
+codes are per *type*, not per instance: every gate in an assembly is
+`PART_TYPE_GATE`. `measure_choke_thickness_by_part` took one median over all of
+them, so a healthy body outvoted a sealed one — and `Test 2` itself ships **two
+GATE bodies and two FILTER bodies**. Measured on a synthetic pair sharing the
+code, one 6 cells thick and one 2: the pooled median reads **5.0 cells**, above
+even the marginal threshold, so the stage said nothing at all, while the 2-cell
+plate reads **1.0** and is sealed shut. `choose_fill_coarsening` consumed the
+same dict, so it did not refine either. Each code is now split into connected
+bodies and the **thinnest body** is what is reported and acted on.
+
+The connectivity is **6** — face contact only. It was 26 for one round, on the
+argument that a corner touch is one fused piece and that splitting would invent
+thin components; both halves were wrong. 26-connectivity fuses two same-code
+bodies meeting at a single corner, which reinstates the very defect being fixed:
+measured on an 8-cell and a 2-cell GATE plate sharing one corner, 26 reports
+**(7.0,)** and says nothing where 6 reports **(1.0, 7.0)** and hard-warns — the
+same silence as the pooled median. And splitting costs nothing, because
+`_local_thickness_cells` is one map over the whole metal path that bodies only
+*index* into: a 4-cell-thick diagonal staircase reads 3.0 under both, and a
+1-cell diagonal string reads 1.0 under both. A corner-only contact is one
+diagonal D3Q19 link, so fusing across it asserts a channel that is not there as
+well as hiding the thin body.
+
+**Bodies below 8 cells do not vote.** Separating bodies exposed a second
+problem: a body of a handful of cells reads 1.0 at *every* coarsening, so one
+stray fragment forced the refinement loop to coarsening 1 — 8x the cells and a
+shorter timestep — and was still 1.0 there, leaving a hard warning nothing could
+clear. `MIN_CHOKE_BODY_CELLS = 8` is a 2x2x2 block: below that a body has no
+cross-section in any orientation. The floor is deliberately not the 27 of a
+3x3x3, because real sealed gates land between the two (a 3x3x1 plate is 9 cells,
+a 5x5x1 is 25) and those must still force a refinement. Fragments are reported —
+in `choke_thickness_bodies_by_part`, in `choke_body_fragments_by_part` and in a
+warning of their own — and simply do not drive the grid. A code made *only* of
+fragments is still measured on them, so the guard cannot go quiet on the
+geometry it should be loudest about. `choke_thickness_by_part`
+keeps its scalar-per-part shape, because the pipeline payload and its readers
+depend on it; the per-body detail is a new field alongside,
+`choke_thickness_bodies_by_part`. Warnings now name the body — "the thinnest of
+the 2 gate bodies" — because sending a reader to "the gate" when one gate is
+fine and the other is sealed sends them to the wrong geometry.
+
+**A coarse block could delete a metal-path part outright, and nothing
+downstream could tell.** `COARSENING_PRIORITY` puts CORE and CHILL *above* GATE
+and RUNNER — deliberately, and the docstring says why: a chill that vanishes
+changes the thermal answer — and `coarsen_part_types` gives each coarse block
+the single highest-priority code in it. So a gate one *fine* cell thick against
+a core becomes CORE at coarsening 2. Measured on the fixture: **256 fine GATE
+cells → 0 solve cells**, and because every thickness guard is keyed on parts
+that are *present*, `measure_choke_thickness_by_part` simply has no GATE key and
+nothing fires. The metal path is severed and the run reports a misrun as though
+it were a result. The priority order is left alone — it is right for the reason
+it gives, and reordering it globally would need `Full_Gating_Test` re-measured.
+Instead `metal_path_severing` compares the metal path's **connectivity** across
+the coarsening: label the SPRUE|RUNNER|GATE|FILTER mask on the fine grid and on
+the solve grid with the same 6-connectivity, map each fine component onto the
+coarse blocks its cells fall in, and flag a severing when a component lands on
+two or more coarse components.
+
+A presence test — "did this body keep *any* metal-path cell" — was the first
+version and it only ever catches **total** erasure. A body severed in its
+*middle* keeps cells at both ends, and that is the common geometry, not a corner
+case: a wide thin gate plate with a boss or fillet along it, which is what
+Test 2's gates have. Measured on exactly that shape at coarsening 2 — the gate
+keeps **175** cells so nothing is erased, and every part measures **3.0 or
+more** so nothing is at or below the hard minimum — the fine metal path is
+**1 connected run and the solve grid's is 2**, and the only thing the user heard
+was the generic 3-cell marginal note, the identical sentence a healthy channel
+gets.
+
+Total erasure is kept as a **second** check rather than folded in, because a
+whole part can vanish while the survivors stay connected: a one-cell gate stub
+hanging off a sprue column shares its fine component with the sprue, so the
+component still lands on one coarse component and the connectivity test says
+intact — while all 256 of the gate's cells became CORE. Both tests run.
+
+What neither fires on is losing the *code* while keeping the *path*, which is
+routine and harmless: a gate plate cutting a sprue column leaves a one-cell
+sprue stub that becomes GATE, since GATE outranks SPRUE, and the channel is
+still open, still connected and still measured. Keying on the body's own code
+instead reports the stage's own choke rig as severed.
+
+`choose_fill_coarsening` treats a severing as a sealed choke and refines toward
+1, carrying **why** it refined (`forced_by_cause`) rather than only which part:
+a severed part may have no cells at all, and quoting a thickness for it printed
+"the gate measured 0.0 cells across" for a gate that was simply gone. If the
+grid the stage is about to solve is still cut — which can only happen with
+`choke_auto_resolution` off, since every grid the loop *chooses* has an intact
+path and coarsening 1 is the mesh grid itself — the stage refuses with the
+emit-and-return-None pattern it already uses for an unresolvable pour point,
+with one remedy rather than two (the second arm was unreachable).
+
+**The negative-population cascade guard acted on a single sample.** The trigger
+is `>= max(8 cells, 2 % of wet cells)`, and the 8-cell floor was calibrated
+against models with tens of thousands of wet cells where 8 is negligible. On a
+small model it is not: at ~400 wet cells the 2 % fraction *is* 8 cells, so both
+halves are satisfied by 8 — and the first divergence check lands at **step
+200**, while a splat rim still routinely carries that many transient negatives.
+Measured on the fixture: 8 negative cells out of 68 wet, one sample, and the run
+was discarded. It now requires the condition at **two consecutive checks**, the
+same shape as the FLUID-eps band, rather than a warm-up window — a warm-up
+blinds the guard for its first N steps, and a genuine cascade at step 200 is
+exactly as fatal as one at step 20,000, so it should still abort 200 steps
+later rather than not at all. This keeps the recorded event: the round-2
+`Test 2` cascade went 5 → **3,681** negative cells (93 % of wet) inside one
+200-step interval and fired **27,958 steps** before the field went non-finite; a
+field that far gone does not recover in 200 steps, so the abort moves from step
+35,750 to 35,950 out of 27,958 steps of warning. And if a cascade ever did clear
+after one sample, the prevalence window is still watching — that is its job.
+
+Not done, and why: `data/surrogate_dataset/index.csv` still has no
+solver-version column, so its 74 captured samples cannot be told apart by solver
+generation. It is not fixable the way it was framed. `_append_index`
+(`core/surrogate/dataset.py`) writes a header only when the file does not exist,
+so adding a key to new rows would append seven values under the existing
+six-column header and `csv.DictReader` would swallow the extra silently;
+making it consistent means rewriting the existing index, which is modifying the
+dataset. The 74 existing rows also cannot be labelled retroactively whatever we
+do, and their `timestamp` column already separates them from anything captured
+after round 4 landed. The backward-compatible home for a `solver_commit` is the
+`.npz` record itself — `np.savez_compressed` in `capture_run`, read back with
+`npz.get("solver_commit", "")`, which `load_dataset` already tolerates for
+absent keys — and that is where it should go when someone wants it.
 
 ### Round 4: the mold pad and the filter exchange
 

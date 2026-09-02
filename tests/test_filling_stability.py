@@ -1769,6 +1769,152 @@ class GhostModeDampingTests(unittest.TestCase):
                 self.assertAlmostEqual(a, b, places=6)
 
 
+
+class NegativeCascadePersistenceTests(unittest.TestCase):
+    """
+    Requirement: one bad sample must not abort a run; two consecutive must.
+
+    The cascade trigger is ``>= max(8 cells, 2 % of wet cells)``, and the
+    8-cell floor was chosen against models with tens of thousands of wet cells,
+    where 8 is negligible. On a small model it is not: at ~400 wet cells the
+    2 % fraction is 8 cells too, so both halves are satisfied by 8 cells -- and
+    the *first* divergence check lands at step 200, while a splat rim still
+    routinely carries that many transient negatives. One sample was enough to
+    discard a run that was about to be fine.
+
+    Two consecutive checks, the same shape as
+    :data:`~core.filling_stage.FLUID_FILL_FRACTION_CHECKS`, rather than a
+    warm-up window: a warm-up blinds the guard for its first N steps, and a
+    genuine cascade at step 200 is exactly as fatal as one at step 20,000. It
+    should still abort, 200 steps later, rather than not at all.
+
+    The negatives are injected rather than provoked, so what is under test is
+    the guard's persistence logic and not a solver trajectory that might or
+    might not produce them.
+    """
+
+    def _run_with_injected_negatives(self, at_steps):
+        """
+        Drive the real stage, forcing negative populations at chosen steps.
+
+        Returns ``(result, messages, samples)`` where each sample records the
+        wet-cell count and how many cells were made negative, so the test can
+        assert the trigger's arithmetic was actually satisfied.
+        """
+        import physics.filling as pf
+        from core.filling_stage import (
+            DIVERGENCE_CHECK_INTERVAL,
+            NEGATIVE_POPULATION_CASCADE_FRACTION,
+            NEGATIVE_POPULATION_CASCADE_MIN_CELLS,
+        )
+
+        samples: list = []
+        original = pf.step
+
+        def traced(state, units, **kwargs):
+            original(state, units, **kwargs)
+            step_index = int(state.step_count)
+            wet = (state.flags == pf.FLAG_FLUID) | (
+                state.flags == pf.FLAG_INTERFACE
+            )
+            if step_index in at_steps:
+                ix, iy, iz = np.nonzero(wet)
+                # Exactly the trigger's own threshold, so the test cannot pass
+                # by injecting too few cells to fire it.
+                want = max(
+                    NEGATIVE_POPULATION_CASCADE_MIN_CELLS,
+                    int(np.ceil(
+                        NEGATIVE_POPULATION_CASCADE_FRACTION * max(ix.size, 1)
+                    )),
+                )
+                take = min(want, ix.size)
+                state.f[0, ix[:take], iy[:take], iz[:take]] = np.float32(-1e-6)
+                samples.append(
+                    {"step": step_index, "wet": int(ix.size), "negative": take}
+                )
+            elif step_index - 1 in at_steps:
+                # Clear them again, so only the checks in ``at_steps`` see a
+                # cascade. Without this the injection would persist and every
+                # later check would count it.
+                state.f[0][state.f[0] < 0.0] = np.float32(1e-9)
+            return state
+
+        messages: list = []
+        pf.step = traced
+        try:
+            result = _run(
+                mesh=_walled_tower(nz=12, width=5), messages=messages,
+                **_head_mode(max_fill_time_s=0.2),
+            )
+        finally:
+            pf.step = original
+        return result, messages, samples
+
+    def _cascade_aborts(self, messages):
+        return [
+            m for m in messages
+            if "ABORTED" in m and "cascade in progress" in m
+        ]
+
+    def test_one_check_of_negatives_does_not_abort(self) -> None:
+        """
+        The regression: a single 200-step sample, cleared before the next
+        check, must leave the run alone.
+        """
+        from core.filling_stage import (
+            DIVERGENCE_CHECK_INTERVAL, STATUS_DIVERGED,
+        )
+
+        result, messages, samples = self._run_with_injected_negatives(
+            {DIVERGENCE_CHECK_INTERVAL}
+        )
+        self.assertEqual(len(samples), 1, "the injection never happened")
+        self.assertGreaterEqual(samples[0]["negative"], 8)
+        # The regime the finding is about: a small model, where the 8-cell
+        # floor is a large share of the wet set rather than a rounding error.
+        self.assertLess(
+            samples[0]["wet"], 500,
+            "the fixture grew out of the small-model regime this guards",
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertNotEqual(
+            result.status, STATUS_DIVERGED,
+            f"one sample of {samples[0]['negative']} negative cells out of "
+            f"{samples[0]['wet']} wet aborted the run: {result.warnings}",
+        )
+        self.assertEqual(self._cascade_aborts(messages), [])
+
+    def test_two_consecutive_checks_do_abort(self) -> None:
+        """
+        And the guard must still work. Same fixture, same injection, held for
+        one more check -- the run dies at the second one, naming the
+        persistence so the message cannot be read as a single-sample abort.
+        """
+        from core.filling_stage import (
+            DIVERGENCE_CHECK_INTERVAL,
+            NEGATIVE_POPULATION_CASCADE_CHECKS,
+            STATUS_DIVERGED,
+        )
+
+        checks = {
+            DIVERGENCE_CHECK_INTERVAL * (k + 1)
+            for k in range(NEGATIVE_POPULATION_CASCADE_CHECKS)
+        }
+        result, messages, samples = self._run_with_injected_negatives(checks)
+        self.assertEqual(len(samples), NEGATIVE_POPULATION_CASCADE_CHECKS)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.status, STATUS_DIVERGED)
+        self.assertEqual(
+            result.diverged_at_step,
+            DIVERGENCE_CHECK_INTERVAL * NEGATIVE_POPULATION_CASCADE_CHECKS,
+            "the abort did not land on the last of the consecutive checks",
+        )
+        aborts = self._cascade_aborts(messages)
+        self.assertTrue(aborts, f"the cascade guard never fired: {messages}")
+        self.assertIn("consecutive checks", aborts[-1])
+
 class StatusReportingTests(unittest.TestCase):
     """
     "Could not get there", "needed longer" and "the answer is garbage" used to
