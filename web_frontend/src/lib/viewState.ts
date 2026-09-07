@@ -233,6 +233,24 @@ export type PourPick = {
   partId: string | null;
 };
 
+/**
+ * One entry of the mask code table.
+ *
+ * The dense mask grid stores `part-type code + 1`, because 0 has to mean "no
+ * metal in this cell". `code` is the byte as stored; `partTypeCode` is the
+ * engine's own code.
+ */
+export type GridPartType = {
+  code: number;
+  partTypeCode: number;
+  /** `cast`, `riser`, `chill`, ... matching the engine's PartType values. */
+  id: string;
+  label: string;
+  /** Linear RGB, 0..1. */
+  color: [number, number, number];
+  voxelCount: number;
+};
+
 /** What the viewport learned about the loaded results; the shell uses it to populate menus and stats. */
 export type GridMeta = {
   dims: [number, number, number];
@@ -251,6 +269,25 @@ export type GridMeta = {
   totalVolumeIn3: number;
   /** Summary statistics passthrough (defect volume, hotspot count, Chvorinov time, ...). */
   stats: Record<string, number | string>;
+
+  // --- Added by the viewport; optional so the shell can ignore them. ---
+
+  /**
+   * Legend unit per mode as the server reports it. Prefer this over the
+   * static `RESULT_MODE_UNITS` table when it is present: it is the unit the
+   * values in `ranges` are actually in.
+   */
+  units?: Partial<Record<ResultModeId, string>>;
+  /** Mask code table for this run, one entry per part type present. */
+  partTypes?: GridPartType[];
+  /**
+   * Modes the run produced but that carry no signal at all (a constant-zero
+   * field). Absent from `modes`, listed here so the shell can say "no data"
+   * rather than silently omitting a menu entry the user expected.
+   */
+  emptyModes?: ResultModeId[];
+  /** `dims[0] * dims[1] * dims[2]`; the number of cells in each dense grid. */
+  cellCount?: number;
 };
 
 /** Imperative operations the shell can invoke through a ref. */

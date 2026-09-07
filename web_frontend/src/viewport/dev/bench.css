@@ -1,0 +1,93 @@
+/* Styles for the development bench only. Not shipped by the application shell. */
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: #070a0f;
+  color: #e8edf5;
+  font: 12px/1.4 ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+
+.bench {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.bench-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: #10141c;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.bench-bar select,
+.bench-bar button,
+.bench-bar input[type='range'] {
+  font: inherit;
+  color: inherit;
+  background: #1b2230;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 5px;
+  padding: 3px 6px;
+}
+
+.bench-bar button {
+  cursor: pointer;
+}
+
+.bench-bar label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.bench-check {
+  gap: 4px;
+}
+
+.bench-spacer {
+  flex: 1;
+}
+
+/* The stage is the viewport's positioned ancestor: it fills this box. */
+.bench-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.bench-legend {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 2;
+}
+
+.bench-status,
+.bench-error {
+  position: absolute;
+  left: 14px;
+  bottom: 14px;
+  margin: 0;
+  padding: 5px 9px;
+  border-radius: 6px;
+  background: rgba(10, 14, 20, 0.85);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+.bench-error {
+  bottom: 44px;
+  color: #ff9b93;
+  border-color: rgba(255, 120, 110, 0.45);
+}

@@ -1,0 +1,266 @@
+/**
+ * Paints a result field onto a lit PBR surface.
+ *
+ * The result is a property of the *metal*, not of the mesh: a fragment's color
+ * comes from where it sits in the casting, not from a UV map. So instead of
+ * baking colors into vertices -- which quantizes the field to the tessellation
+ * of the STL and has to be rebuilt on every mode, scale or time change -- the
+ * field lives in a 3D texture and each fragment samples it at its own world
+ * position. Changing mode is a texture swap; scrubbing time is a uniform.
+ *
+ * It is a `MaterialPluginBase` rather than a `ShaderMaterial` for one reason:
+ * the painted surface still has to be *lit*. A `ShaderMaterial` would mean
+ * reimplementing image-based lighting, tone mapping and alpha blending to get
+ * back what `PBRMaterial` already does, and the casting would read as a flat
+ * cutout against an environment-lit scene. Injecting into the PBR fragment
+ * shader keeps every one of those and replaces only the albedo.
+ *
+ * Injection point: `CUSTOM_FRAGMENT_UPDATE_ALPHA`. Despite the name, that
+ * marker sits immediately after `surfaceAlbedo` and `alpha` are declared and
+ * before any lighting runs, which is exactly where the albedo has to change.
+ * (`CUSTOM_FRAGMENT_UPDATE_ALBEDO` does not exist in the PBR shader; it is a
+ * standard-material marker.)
+ */
+import {
+  Constants,
+  MaterialPluginBase,
+  RawTexture,
+  RawTexture3D,
+  Texture,
+  Vector3
+} from '@babylonjs/core';
+import type { AbstractEngine, Material, Scene, SubMesh, UniformBuffer } from '@babylonjs/core';
+
+/** Mask byte for cast metal: the engine's CAST code (0) plus one. */
+export const CAST_MASK_CODE = 1;
+
+const FIELD_SAMPLERS = ['fieldSamplerA', 'fieldSamplerB', 'fieldMaskSampler', 'fieldLutSampler'];
+
+const FIELD_UNIFORMS = [
+  'fieldTexelStep',
+  'fieldTexelBias',
+  'fieldQuant',
+  'fieldScale',
+  'fieldBlend',
+  'fieldStrength',
+  'fieldCastOnly'
+];
+
+export type FieldPaintState = {
+  /** World position of the center of cell (0, 0, 0). */
+  origin: Vector3;
+  /** Uniform voxel edge length, in inches. */
+  spacing: number;
+  /** Lattice dimensions. */
+  dims: [number, number, number];
+  /** Range the stored bytes decode to: `value = min + byte / 255 * (max - min)`. */
+  quantMin: number;
+  quantMax: number;
+  /** Legend range the colormap spans, in field units. */
+  scaleMin: number;
+  scaleMax: number;
+  /** Lerp weight between the two bound frame textures, 0..1. */
+  frameBlend: number;
+  /** 0 hides the field entirely and leaves the part's own color. */
+  strength: number;
+  /** Restrict painting to cast bodies. */
+  castOnly: boolean;
+};
+
+export const defaultFieldPaintState = (): FieldPaintState => ({
+  origin: Vector3.Zero(),
+  spacing: 1,
+  dims: [1, 1, 1],
+  quantMin: 0,
+  quantMax: 1,
+  scaleMin: 0,
+  scaleMax: 1,
+  frameBlend: 0,
+  strength: 0,
+  castOnly: false
+});
+
+/**
+ * A 1x1x1 stand-in bound whenever a real grid is not loaded.
+ *
+ * The samplers are declared unconditionally so that loading results never
+ * recompiles the shader -- a recompile mid-session shows up as a visible
+ * hitch, and a sampler left unbound is undefined behaviour on some drivers.
+ * `strength` is what actually turns painting on and off.
+ */
+export function createPlaceholderVolume(scene: Scene): RawTexture3D {
+  const texture = new RawTexture3D(
+    new Uint8Array([0]),
+    1,
+    1,
+    1,
+    Constants.TEXTUREFORMAT_R,
+    scene,
+    false,
+    false,
+    Texture.NEAREST_SAMPLINGMODE,
+    Constants.TEXTURETYPE_UNSIGNED_BYTE
+  );
+  texture.name = 'field-placeholder';
+  clampVolume(texture);
+  return texture;
+}
+
+export function createPlaceholderLut(scene: Scene): RawTexture {
+  const texture = RawTexture.CreateRGBATexture(
+    new Uint8Array([0, 0, 0, 255]),
+    1,
+    1,
+    scene,
+    false,
+    false,
+    Texture.NEAREST_SAMPLINGMODE
+  );
+  texture.name = 'field-lut-placeholder';
+  texture.wrapU = Texture.CLAMP_ADDRESSMODE;
+  texture.wrapV = Texture.CLAMP_ADDRESSMODE;
+  return texture;
+}
+
+/**
+ * Clamp on all three axes.
+ *
+ * A casting's surface sits half a voxel outside the outermost voxel *center*,
+ * so surface fragments legitimately sample just past the edge of the volume.
+ * Clamping makes that read the boundary cell; wrapping would fold the far side
+ * of the casting onto the near one.
+ */
+export function clampVolume(texture: RawTexture3D): void {
+  texture.wrapU = Texture.CLAMP_ADDRESSMODE;
+  texture.wrapV = Texture.CLAMP_ADDRESSMODE;
+  texture.wrapR = Texture.CLAMP_ADDRESSMODE;
+}
+
+export class FieldPaintPluginMaterial extends MaterialPluginBase {
+  state: FieldPaintState = defaultFieldPaintState();
+
+  fieldTextureA: RawTexture3D | null = null;
+  fieldTextureB: RawTexture3D | null = null;
+  maskTexture: RawTexture3D | null = null;
+  lutTexture: RawTexture | null = null;
+
+  private readonly _placeholderVolume: RawTexture3D;
+  private readonly _placeholderLut: RawTexture;
+  private readonly _texelToWorld = new Vector3();
+
+  constructor(material: Material, placeholderVolume: RawTexture3D, placeholderLut: RawTexture) {
+    super(material, 'CastSimFieldPaint', 200, { CASTSIM_FIELD_PAINT: true });
+    this._placeholderVolume = placeholderVolume;
+    this._placeholderLut = placeholderLut;
+    this._enable(true);
+  }
+
+  getClassName(): string {
+    return 'FieldPaintPluginMaterial';
+  }
+
+  getSamplers(samplers: string[]): void {
+    samplers.push(...FIELD_SAMPLERS);
+  }
+
+  getUniforms() {
+    // `externalUniforms` registers the names so the Effect resolves their
+    // locations; the declarations themselves are emitted into
+    // CUSTOM_FRAGMENT_DEFINITIONS below rather than through the `ubo` or
+    // `fragment` entries. Those two land in ADDITIONAL_UBO_DECLARATION and
+    // ADDITIONAL_FRAGMENT_DECLARATION respectively, and the PBR shader
+    // includes exactly one of those blocks depending on whether the engine
+    // has uniform buffers -- which Babylon switches off for a blocklist of
+    // drivers, SwiftShader among them. Declaring into either block alone
+    // compiles on some machines and fails on others.
+    // CUSTOM_FRAGMENT_DEFINITIONS is present in both.
+    return { externalUniforms: [...FIELD_UNIFORMS] };
+  }
+
+  getCustomCode(shaderType: string): { [pointName: string]: string } | null {
+    if (shaderType !== 'fragment') return null;
+    return {
+      CUSTOM_FRAGMENT_DEFINITIONS: `
+uniform highp sampler3D fieldSamplerA;
+uniform highp sampler3D fieldSamplerB;
+uniform highp sampler3D fieldMaskSampler;
+uniform sampler2D fieldLutSampler;
+uniform vec3 fieldTexelStep;
+uniform vec3 fieldTexelBias;
+uniform vec2 fieldQuant;
+uniform vec2 fieldScale;
+uniform float fieldBlend;
+uniform float fieldStrength;
+uniform float fieldCastOnly;
+`,
+      // Runs after `vec3 surfaceAlbedo` and `float alpha` exist and before
+      // any lighting, so the painted color is shaded like a real surface
+      // rather than pasted on top of one.
+      CUSTOM_FRAGMENT_UPDATE_ALPHA: `
+  if (fieldStrength > 0.0) {
+    vec3 fieldUvw = vPositionW * fieldTexelStep + fieldTexelBias;
+    float maskCode = texture(fieldMaskSampler, fieldUvw).r * 255.0;
+    bool insideMetal = maskCode > 0.5;
+    bool paintable = insideMetal && (fieldCastOnly < 0.5 || abs(maskCode - 1.0) < 0.5);
+    if (paintable) {
+      float normalized = mix(
+        texture(fieldSamplerA, fieldUvw).r,
+        texture(fieldSamplerB, fieldUvw).r,
+        fieldBlend
+      );
+      float value = fieldQuant.x + normalized * (fieldQuant.y - fieldQuant.x);
+      float span = fieldScale.y - fieldScale.x;
+      float t = span > 1e-9 ? clamp((value - fieldScale.x) / span, 0.0, 1.0) : 0.0;
+      vec3 painted = texture(fieldLutSampler, vec2(t, 0.5)).rgb;
+      surfaceAlbedo = mix(surfaceAlbedo, painted, fieldStrength);
+    }
+  }
+`
+    };
+  }
+
+  /**
+   * Write the uniforms straight onto the effect.
+   *
+   * Not through the `UniformBuffer` argument: these uniforms are declared
+   * outside the material's uniform block (see `getUniforms`), so a buffer
+   * write would land somewhere the shader never reads.
+   */
+  bindForSubMesh(
+    _uniformBuffer: UniformBuffer,
+    _scene: Scene,
+    _engine: AbstractEngine,
+    subMesh: SubMesh
+  ): void {
+    const effect = subMesh.effect;
+    if (!effect) return;
+
+    const state = this.state;
+    const [nx, ny, nz] = state.dims;
+    const spacing = state.spacing > 1e-9 ? state.spacing : 1;
+
+    // World -> texture coordinate, folded into a multiply and an add so the
+    // fragment shader does not repeat the division per pixel:
+    //   uvw = ((p - origin) / spacing + 0.5) / dims
+    // The +0.5 lands cell centers on texel centers; without it every sample
+    // is half a voxel off and the field slides against the geometry.
+    this._texelToWorld.set(1 / (spacing * nx), 1 / (spacing * ny), 1 / (spacing * nz));
+    effect.setFloat3('fieldTexelStep', this._texelToWorld.x, this._texelToWorld.y, this._texelToWorld.z);
+    effect.setFloat3(
+      'fieldTexelBias',
+      0.5 / nx - state.origin.x * this._texelToWorld.x,
+      0.5 / ny - state.origin.y * this._texelToWorld.y,
+      0.5 / nz - state.origin.z * this._texelToWorld.z
+    );
+    effect.setFloat2('fieldQuant', state.quantMin, state.quantMax);
+    effect.setFloat2('fieldScale', state.scaleMin, state.scaleMax);
+    effect.setFloat('fieldBlend', state.frameBlend);
+    effect.setFloat('fieldStrength', state.strength);
+    effect.setFloat('fieldCastOnly', state.castOnly ? 1 : 0);
+
+    effect.setTexture('fieldSamplerA', this.fieldTextureA ?? this._placeholderVolume);
+    effect.setTexture('fieldSamplerB', this.fieldTextureB ?? this.fieldTextureA ?? this._placeholderVolume);
+    effect.setTexture('fieldMaskSampler', this.maskTexture ?? this._placeholderVolume);
+    effect.setTexture('fieldLutSampler', this.lutTexture ?? this._placeholderLut);
+  }
+}

@@ -10,7 +10,47 @@ from scipy import ndimage
 from scipy.spatial import cKDTree
 
 
-VALID_SURFACE_MODES = {"shrinkage", "hotspot", "niyama", "fraction_liquid"}
+#: Public mode id -> the visualization key(s) it reads, most specific first.
+#:
+#: Isosurface extraction used to serve four modes, all of them 0..1 risk
+#: fields. Every scalar the engine produces is now contourable, which means
+#: two things this table encodes: modes whose artifact key does not match
+#: their public name (``solidification_time`` is stored as
+#: ``solidification_times``), and modes with more than one historical spelling.
+#: It is deliberately the same vocabulary as ``web.fields.SCALAR_MODE_SOURCES``
+#: -- the isosurface and the painted grid must never disagree about what
+#: "niyama" means.
+SURFACE_MODE_SOURCES: Dict[str, tuple[str, ...]] = {
+    "shrinkage": ("shrinkage",),
+    "porosity": ("porosity",),
+    "feed_modulus": ("feed_modulus",),
+    "hotspot": ("hotspot",),
+    "solidification_time": ("solidification_times",),
+    "niyama_raw": ("niyama_raw",),
+    "niyama": ("niyama_risk", "niyama"),
+    "combined_feed_risk": ("combined_feed_risk",),
+    "hot_tear": ("hot_tear",),
+    "sand_burn_in": ("sand_burn_in",),
+    "gas_generation": ("gas_generation",),
+    "gas_entrapment": ("gas_entrapment",),
+    "gas_porosity": ("gas_porosity_risk", "gas_porosity"),
+    "feeding_quality": ("feeding_quality",),
+    "feeding_blocked": ("feeding_blocked",),
+    "feeding_path_lengths": ("feeding_path_lengths",),
+    "feeding_open_fraction": ("feeding_open_fraction",),
+    "thermal_stress": ("thermal_stress",),
+    "distortion": ("distortion",),
+    "crack_susceptibility": ("crack_susceptibility",),
+    "sdas": ("sdas",),
+    "predicted_uts": ("predicted_uts",),
+    "fill_time": ("fill_time",),
+}
+
+#: Modes whose values are a fraction by construction, so a threshold outside
+#: 0..1 is a caller error rather than a field-unit value.
+_UNIT_INTERVAL_MODES = frozenset({"fraction_liquid"})
+
+VALID_SURFACE_MODES = frozenset(SURFACE_MODE_SOURCES) | _UNIT_INTERVAL_MODES
 
 
 @dataclass(frozen=True)
@@ -23,14 +63,29 @@ class SurfaceRequest:
 
 
 def normalize_surface_request(mode: str, threshold: float, time_percent: float = 0.0) -> SurfaceRequest:
-    """Validate and clamp user-facing surface request parameters."""
+    """
+    Validate user-facing surface request parameters.
+
+    ``threshold`` is in **field units**: seconds for ``solidification_time``,
+    inches for ``feed_modulus``, MPa for ``thermal_stress``, and a 0..1
+    fraction for the risk fields. It used to be clamped to 0..1 unconditionally,
+    which was invisible while only risk fields were contourable and would
+    silently collapse every feed-modulus request onto the 1-inch isosurface
+    now that they are not. Only genuinely fractional modes are still clamped.
+    """
     normalized_mode = mode.strip().lower()
     if normalized_mode not in VALID_SURFACE_MODES:
         raise ValueError(f"Unsupported surface mode: {mode}")
 
+    value = float(threshold)
+    if not np.isfinite(value):
+        value = 0.0
+    if normalized_mode in _UNIT_INTERVAL_MODES:
+        value = float(np.clip(value, 0.0, 1.0))
+
     return SurfaceRequest(
         mode=normalized_mode,
-        threshold=float(np.clip(threshold, 0.0, 1.0)),
+        threshold=value,
         time_percent=float(np.clip(time_percent, 0.0, 100.0)),
     )
 
@@ -63,7 +118,18 @@ def build_surface_payload(
         return _empty_payload(request, reason="no finite values")
 
     centers = centers[finite_mask]
-    values = np.clip(values[finite_mask].astype(np.float32), 0.0, 1.0)
+    values = values[finite_mask].astype(np.float32)
+    if request.mode in _UNIT_INTERVAL_MODES:
+        values = np.clip(values, 0.0, 1.0)
+    if request.mode == "fill_time":
+        # -1 marks metal the fill never reached and is not a sample of the
+        # arrival-time field; contouring it would drag the isosurface through
+        # a value the physics never produced.
+        arrived = values >= 0.0
+        if not np.any(arrived):
+            return _empty_payload(request, reason="no filled voxels")
+        centers = centers[arrived]
+        values = values[arrived]
     if request.mode == "fraction_liquid":
         interior_mask = _interior_voxel_mask(
             centers,
@@ -84,10 +150,17 @@ def build_surface_payload(
     volume, origin, spacing = _build_scalar_volume(centers, values)
     effective_smooth_sigma = 0.35 if request.mode == "fraction_liquid" else smooth_sigma
     if effective_smooth_sigma > 0.0 and min(volume.shape) >= 4:
-        volume = ndimage.gaussian_filter(volume, sigma=effective_smooth_sigma)
+        smoothed = ndimage.gaussian_filter(volume, sigma=effective_smooth_sigma)
+        # Smoothing is cosmetic: it rounds the staircase off the lattice. It
+        # must never be the reason a real feature disappears. A defect pocket a
+        # couple of voxels across -- exactly the size that matters most -- has
+        # its peak pulled below the threshold by the blur, so when that
+        # happens the raw volume is contoured instead of reporting nothing.
+        if float(np.max(smoothed)) >= request.threshold:
+            volume = smoothed
 
     if float(np.max(volume)) < request.threshold:
-        return _empty_payload(request, active_count=active_count, reason="smoothed below threshold")
+        return _empty_payload(request, active_count=active_count, reason="below threshold after gridding")
 
     mesh = _extract_with_vtk(volume, origin, spacing, request.threshold)
     mesh.update(
@@ -121,10 +194,11 @@ def _values_for_request(visualization_data: Dict[str, Any], request: SurfaceRequ
         time_factor = request.time_percent / 100.0
         return np.clip((1.0 - (times_arr / max_time)) - time_factor, 0.0, 1.0).astype(np.float32)
 
-    values = visualization_data.get(request.mode)
-    if values is None:
-        return None
-    return np.asarray(values, dtype=np.float32)
+    for key in SURFACE_MODE_SOURCES.get(request.mode, (request.mode,)):
+        values = visualization_data.get(key)
+        if values is not None:
+            return np.asarray(values, dtype=np.float32)
+    return None
 
 
 def _interior_voxel_mask(
@@ -262,7 +336,17 @@ def _build_scalar_volume(centers: np.ndarray, values: np.ndarray) -> tuple[np.nd
         dtype=np.float32,
     )
 
-    volume = np.zeros((len(x_values) + 2, len(y_values) + 2, len(z_values) + 2), dtype=np.float32)
+    # The padding ring has to sit at or below every sample so the contour
+    # closes around the casting instead of clipping against the box. Zero was
+    # right while every field was a 0..1 risk; a field in physical units can
+    # legitimately go negative, and seeding the whole volume at zero would then
+    # bury part of it under the padding.
+    background = min(0.0, float(np.min(values))) if values.size else 0.0
+    volume = np.full(
+        (len(x_values) + 2, len(y_values) + 2, len(z_values) + 2),
+        background,
+        dtype=np.float32,
+    )
     ix = _nearest_axis_indices(centers[:, 0], x_values) + 1
     iy = _nearest_axis_indices(centers[:, 1], y_values) + 1
     iz = _nearest_axis_indices(centers[:, 2], z_values) + 1
