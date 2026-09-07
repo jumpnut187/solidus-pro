@@ -16,10 +16,17 @@ export type TopBarProps = {
   isBusy: boolean;
   job: JobState;
   onScreenshot: () => void;
-  onExport: (kind: 'screenshot' | 'animation' | 'report' | 'projectFile') => void;
-  onHelp: (topic: 'guide' | 'hardware' | 'about') => void;
-  /** Export entries that are not built yet stay visible but disabled. */
-  exportsAvailable: { animation: boolean; report: boolean; projectFile: boolean };
+  onExport: (
+    kind: 'screenshot' | 'animation' | 'report' | 'projectFile' | 'importProjectFile' | 'riserDesign'
+  ) => void;
+  onHelp: (topic: 'guide' | 'shortcuts' | 'hardware' | 'about') => void;
+  /** Entries that need a project or results stay visible but disabled. */
+  exportsAvailable: {
+    animation: boolean;
+    report: boolean;
+    projectFile: boolean;
+    riserDesign: boolean;
+  };
 };
 
 export function TopBar({
@@ -69,11 +76,21 @@ export function TopBar({
           <FolderOpen size={13} />
           Open
         </button>
-        <button type="button" className="btn btn-ghost btn-sm" onClick={onSaveProject}>
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          onClick={onSaveProject}
+          title="Save now (Cmd/Ctrl+Shift+S). Settings already save themselves as you change them; this writes the name and settings immediately."
+        >
           <Save size={13} />
           Save
         </button>
-        <button type="button" className="btn btn-ghost btn-sm" onClick={onSaveProjectAs}>
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          onClick={onSaveProjectAs}
+          title="Save a copy under a new name and switch to it. Parts and settings are copied; results stay with the original."
+        >
           Save As
         </button>
       </div>
@@ -127,26 +144,36 @@ export function TopBar({
           Screenshot
         </button>
         <Menu
-          label="Export"
+          label="Tools"
           items={[
-            { label: 'Screenshot (PNG)', onSelect: () => onExport('screenshot') },
+            { label: 'Design', heading: true },
             {
-              label: 'Animation (GIF / MP4)',
+              label: 'Automatic Riser Design',
+              onSelect: () => onExport('riserDesign'),
+              disabled: !exportsAvailable.riserDesign
+            },
+            { label: 'Export', heading: true },
+            { label: 'Screenshot (PNG)', onSelect: () => onExport('screenshot'), shortcut: `${'\u2318'}S` },
+            {
+              label: 'Animation (WebM)',
               onSelect: () => onExport('animation'),
               disabled: !exportsAvailable.animation
             },
-            { label: 'Report', onSelect: () => onExport('report'), disabled: !exportsAvailable.report },
+            { label: 'Report...', onSelect: () => onExport('report'), disabled: !exportsAvailable.report },
             {
-              label: 'Project File (.solidus-project.json)',
+              label: 'Project File',
               onSelect: () => onExport('projectFile'),
               disabled: !exportsAvailable.projectFile
-            }
+            },
+            { label: 'Import', heading: true },
+            { label: 'Project File...', onSelect: () => onExport('importProjectFile') }
           ]}
         />
         <Menu
           label="Help"
           items={[
             { label: 'Help Guide', onSelect: () => onHelp('guide'), shortcut: 'F1' },
+            { label: 'Keyboard Shortcuts', onSelect: () => onHelp('shortcuts'), shortcut: '?' },
             { label: 'Hardware Info', onSelect: () => onHelp('hardware') },
             { label: 'About Solidus Pro', onSelect: () => onHelp('about') }
           ]}

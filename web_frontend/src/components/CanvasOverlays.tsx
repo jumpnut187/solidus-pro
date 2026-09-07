@@ -1,7 +1,7 @@
 import { Upload, X } from 'lucide-react';
 
 import { formatCount, formatNumber } from '../lib/format';
-import { RESULT_MODE_LABELS, type GridMeta, type ProbeReading } from '../lib/viewState';
+import { RESULT_MODE_LABELS, type GridMeta, type MeasureResult, type ProbeReading } from '../lib/viewState';
 import type { Toast } from '../hooks/useToasts';
 
 /**
@@ -42,28 +42,61 @@ export function StatsChip({ meta }: { meta: GridMeta | null }) {
   );
 }
 
-export function ProbeReadout({ reading, onClear }: { reading: ProbeReading; onClear: () => void }) {
+/**
+ * The probe value and the last measurement, in one card.
+ *
+ * They share a corner because they are the same kind of answer — "what is it
+ * here?" — and because two floating cards fighting for the top-left is worse
+ * than one that grows a section.
+ */
+export function ProbeReadout({
+  reading,
+  measurement,
+  onClear
+}: {
+  reading: ProbeReading | null;
+  measurement: MeasureResult | null;
+  onClear: () => void;
+}) {
   return (
     <div className="probe-readout" aria-live="polite">
       <div className="row">
-        <strong style={{ fontSize: 'var(--fs-sm)' }}>{RESULT_MODE_LABELS[reading.mode]}</strong>
+        <strong style={{ fontSize: 'var(--fs-sm)' }}>
+          {reading ? RESULT_MODE_LABELS[reading.mode] : 'Measurement'}
+        </strong>
         <div className="spacer" />
-        <button type="button" className="btn btn-ghost btn-icon" onClick={onClear} aria-label="Clear probe">
+        <button
+          type="button"
+          className="btn btn-ghost btn-icon"
+          onClick={onClear}
+          aria-label="Clear probe and measurements"
+          title="Clear probe and measurements"
+        >
           <X size={12} />
         </button>
       </div>
       <dl>
-        <dt>Value</dt>
-        <dd>
-          {reading.value === null ? '--' : formatNumber(reading.value, 4)}
-          {reading.unit ? ` ${reading.unit}` : ''}
-        </dd>
-        <dt>Point</dt>
-        <dd>{reading.point.map((value) => value.toFixed(2)).join(', ')}</dd>
-        {reading.partType ? (
+        {reading ? (
           <>
-            <dt>Body</dt>
-            <dd>{reading.partType}</dd>
+            <dt>Value</dt>
+            <dd>
+              {reading.value === null ? '--' : formatNumber(reading.value, 4)}
+              {reading.unit ? ` ${reading.unit}` : ''}
+            </dd>
+            <dt>Point</dt>
+            <dd>{reading.point.map((value) => value.toFixed(2)).join(', ')}</dd>
+            {reading.partType ? (
+              <>
+                <dt>Body</dt>
+                <dd>{reading.partType}</dd>
+              </>
+            ) : null}
+          </>
+        ) : null}
+        {measurement ? (
+          <>
+            <dt>Distance</dt>
+            <dd>{formatNumber(measurement.distanceIn, 4)} in</dd>
           </>
         ) : null}
       </dl>

@@ -54,3 +54,52 @@ export function Group({ title, children, action }: { title: string; children: Re
     </div>
   );
 }
+
+export type CollapsibleGroupProps = {
+  title: string;
+  /** Stable key the shell persists the open/closed state under. */
+  id: string;
+  collapsed: boolean;
+  onToggle: (collapsed: boolean) => void;
+  /** A short summary shown on the header while the section is closed. */
+  summary?: ReactNode;
+  children: ReactNode;
+};
+
+/**
+ * A titled section that folds away.
+ *
+ * The results panel is long enough that at 1366x768 its lower sections sat
+ * below the fold; folding the ones you are not using is how a panel that deep
+ * stays usable. The open/closed state is persisted, so the panel comes back
+ * arranged the way it was left.
+ */
+export function CollapsibleGroup({
+  title,
+  id,
+  collapsed,
+  onToggle,
+  summary,
+  children
+}: CollapsibleGroupProps) {
+  const bodyId = `group-${id}`;
+  return (
+    <div className="group">
+      <button
+        type="button"
+        className="group-head group-toggle"
+        aria-expanded={!collapsed}
+        aria-controls={bodyId}
+        onClick={() => onToggle(!collapsed)}
+      >
+        <span className={collapsed ? 'group-chevron' : 'group-chevron is-open'} aria-hidden="true" />
+        <span className="group-title">{title}</span>
+        <span className="group-rule" />
+        {collapsed && summary ? <span className="group-summary">{summary}</span> : null}
+      </button>
+      <div id={bodyId} hidden={collapsed} className="group-body">
+        {children}
+      </div>
+    </div>
+  );
+}

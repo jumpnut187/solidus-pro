@@ -8,6 +8,7 @@ export type ShortcutHandlers = {
   saveProject: () => void;
   fitCamera: () => void;
   helpGuide: () => void;
+  shortcuts: () => void;
   escape: () => void;
   togglePlayback: () => void;
 };
@@ -28,7 +29,7 @@ function isTextEntry(target: EventTarget | null): boolean {
 /**
  * The desktop accelerators, in the browser: F5 run, Shift+F5 stop,
  * Ctrl/Cmd+O add part, Ctrl/Cmd+S screenshot, Ctrl/Cmd+Shift+S save project,
- * Home fit, F1 help, Escape close, Space play/pause.
+ * Home fit, F1 help, ? shortcuts, Escape close, Space play/pause.
  *
  * Escape is deliberately left to fire even inside a text field — it is how you
  * back out of an edit — while every other shortcut defers to typing.
@@ -68,6 +69,13 @@ export function useKeyboardShortcuts(handlers: ShortcutHandlers): void {
       if (event.key === 'F1') {
         event.preventDefault();
         handlersNow.helpGuide();
+        return;
+      }
+      // '?' is Shift+/ on most layouts, so match the produced character
+      // rather than the physical key.
+      if (event.key === '?') {
+        event.preventDefault();
+        handlersNow.shortcuts();
         return;
       }
       if (event.key === 'Home') {

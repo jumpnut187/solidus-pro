@@ -1,4 +1,7 @@
 import { Modal } from './Modal';
+// Single source of truth for the version: the manifest that is already
+// bumped on release, rather than a constant that quietly goes stale.
+import { version as appVersion } from '../../../package.json';
 import { formatNumber } from '../../lib/format';
 import type { AlloyGuideRow, HardwareInfo } from '../../lib/api';
 
@@ -137,6 +140,74 @@ export function HardwareInfoModal({ hardware, onClose }: { hardware: HardwareInf
   );
 }
 
+/** Modifier label for the platform the page is actually running on. */
+const MOD = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? 'Cmd' : 'Ctrl';
+
+const SHORTCUTS: { group: string; items: [string, string][] }[] = [
+  {
+    group: 'Simulation',
+    items: [
+      ['F5', 'Run simulation'],
+      ['Shift + F5', 'Stop simulation']
+    ]
+  },
+  {
+    group: 'Project',
+    items: [
+      [`${MOD} + O`, 'Add CAD parts'],
+      [`${MOD} + Shift + S`, 'Save project'],
+      [`${MOD} + S`, 'Export screenshot']
+    ]
+  },
+  {
+    group: 'View',
+    items: [
+      ['Home', 'Fit the model to the view'],
+      ['Space', 'Play / pause a time mode'],
+      ['Escape', 'Close the top panel, dialog or tool']
+    ]
+  },
+  {
+    group: 'Help',
+    items: [
+      ['F1', 'Help guide'],
+      ['?', 'This cheat sheet']
+    ]
+  }
+];
+
+export function ShortcutsModal({ onClose }: { onClose: () => void }) {
+  return (
+    <Modal
+      title="Keyboard Shortcuts"
+      size="sm"
+      onClose={onClose}
+      footer={
+        <>
+          <div className="spacer" />
+          <button type="button" className="btn btn-primary" onClick={onClose}>
+            Close
+          </button>
+        </>
+      }
+    >
+      <div className="property-sheet">
+        {SHORTCUTS.map((group) => (
+          <div key={group.group}>
+            <p className="property-section-title">{group.group}</p>
+            {group.items.map(([keys, description]) => (
+              <div className="property-row" key={keys}>
+                <span className="property-label">{description}</span>
+                <span className="property-value">{keys}</span>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    </Modal>
+  );
+}
+
 export function AboutModal({ onClose }: { onClose: () => void }) {
   return (
     <Modal
@@ -160,7 +231,7 @@ export function AboutModal({ onClose }: { onClose: () => void }) {
         </p>
         <dl className="kv-grid">
           <dt>Version</dt>
-          <dd>2.0</dd>
+          <dd>{appVersion}</dd>
           <dt>Interface</dt>
           <dd>Web</dd>
         </dl>

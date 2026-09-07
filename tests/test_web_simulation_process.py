@@ -211,6 +211,10 @@ class SimulationWorkerInputsTests(unittest.TestCase):
                                     max_concurrent_simulations=1,
                                     reserve_memory_mb=0,
                                     min_sim_memory_mb=0,
+                                    # A plain dict stands in for the Manager
+                                    # proxy the queue normally passes; the
+                                    # worker only ever get/sets whole values.
+                                    simulation_logs={},
                                 )
 
         self.assertIn("inputs", captured)

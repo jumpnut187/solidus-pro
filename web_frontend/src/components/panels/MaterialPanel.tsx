@@ -6,6 +6,8 @@ export type MaterialPanelProps = {
   alloy: string;
   materials: MaterialInfo[];
   onSelectAlloy: (alloy: string) => void;
+  /** The API is unreachable, so "loading" would be a lie. */
+  offline?: boolean;
   onClose: () => void;
 };
 
@@ -62,7 +64,7 @@ function sections(material: MaterialInfo): { title: string; rows: Row[] }[] {
   ];
 }
 
-export function MaterialPanel({ alloy, materials, onSelectAlloy, onClose }: MaterialPanelProps) {
+export function MaterialPanel({ alloy, materials, onSelectAlloy, offline, onClose }: MaterialPanelProps) {
   const material = materials.find((item) => item.name === alloy) ?? null;
   return (
     <SetupPanel title="Material" onClose={onClose}>
@@ -99,6 +101,10 @@ export function MaterialPanel({ alloy, materials, onSelectAlloy, onClose }: Mate
             Alloy properties come from the simulation engine's material database and are not editable here.
           </p>
         </>
+      ) : offline ? (
+        <p className="status-note status-note-warning">
+          Alloy properties are unavailable while the server is unreachable.
+        </p>
       ) : (
         <p className="status-note">Loading alloy properties...</p>
       )}

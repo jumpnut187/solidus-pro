@@ -11,6 +11,11 @@ from collections import OrderedDict
 from typing import Any, Callable, Dict, Optional
 
 from config.hardware_config import hardware
+
+#: Lines kept per job. A four-minute solve emits a few hundred distinct
+#: progress strings; five hundred holds a whole run plus a traceback without
+#: letting a pathological solver grow the Manager dict without bound.
+JOB_LOG_LINES = 500
 from web.services.fair_share import (
     can_start_simulation,
     compute_thread_share,
@@ -142,6 +147,7 @@ def _simulation_process_worker(
     max_concurrent_simulations: int,
     reserve_memory_mb: int,
     min_sim_memory_mb: int,
+    simulation_logs: Dict[str, Any],
 ) -> None:
     """
     Standalone entry point for a simulation subprocess.
@@ -151,6 +157,31 @@ def _simulation_process_worker(
     def _check_cancelled() -> bool:
         return stop_flags.get(sim_id, False)
 
+    def _log(message: str) -> None:
+        """Append one line to this job's ring buffer.
+
+        The worker is a separate *process* (spawn on macOS), so nothing it
+        prints reaches the Flask process. Progress text is the only narration a
+        user gets during a four-minute solve, and ``active_simulations`` drops
+        its entry the moment the job ends -- so the log lives in its own
+        Manager dict that outlives the run.
+
+        A Manager dict does not proxy nested mutation: the list has to be read,
+        copied, appended to and written back, exactly like the status entries
+        below. Consecutive duplicates are dropped, because the solver emits the
+        same "Solidifying: 61%" string many times in a row.
+        """
+        try:
+            with queue_lock:
+                lines = list(simulation_logs.get(sim_id, []))
+                if lines and lines[-1].endswith(message):
+                    return
+                lines.append(f"{time.strftime('%H:%M:%S')}  {message}")
+                simulation_logs[sim_id] = lines[-JOB_LOG_LINES:]
+        except Exception:
+            # Logging must never be the reason a simulation fails.
+            pass
+
     def _update_active(**kwargs: Any) -> None:
         with queue_lock:
             if sim_id in active_simulations:
@@ -159,6 +190,7 @@ def _simulation_process_worker(
                 active_simulations[sim_id] = entry
 
     def _set_progress(progress: int, message: str) -> None:
+        _log(message)
         with queue_lock:
             if sim_id in active_simulations:
                 entry = dict(active_simulations[sim_id])
@@ -200,6 +232,9 @@ def _simulation_process_worker(
         )
 
         def progress_message(message: str) -> None:
+            # Bucketed into four canned strings below, which throws away the
+            # detail the solver bothered to produce. Log the real line first.
+            _log(message)
             if message.startswith("Generating adaptive voxel mesh"):
                 _set_progress(15, "Generating adaptive voxel mesh...")
             elif message.startswith("Assigning part types"):
@@ -249,6 +284,7 @@ def _simulation_process_worker(
         with queue_lock:
             simulation_results[sim_id] = artifact
 
+        _log("Simulation complete")
         _update_active(status="completed", message="Simulation complete", progress=100)
 
     except Exception as exc:
@@ -256,11 +292,16 @@ def _simulation_process_worker(
         from web import repository as repo
 
         if isinstance(exc, SimulationCancelledError):
+            _log("Simulation cancelled")
             _update_active(status="cancelled", message="Simulation cancelled", progress=0)
             repo.mark_project_status(db_path, sim_id, "cancelled")
         else:
             import traceback
             traceback.print_exc()
+            # The traceback is the whole value of a failure log, and it would
+            # otherwise live only in the server's stdout.
+            for line in traceback.format_exc().splitlines():
+                _log(line)
             _update_active(status="error", message=str(exc), progress=0)
             repo.mark_project_status(db_path, sim_id, "error")
 
@@ -314,6 +355,10 @@ def _simulation_process_worker(
                 max_concurrent_simulations=max_concurrent_simulations,
                 reserve_memory_mb=reserve_memory_mb,
                 min_sim_memory_mb=min_sim_memory_mb,
+                # One process runs several jobs back to back, so the buffer has
+                # to be threaded through this chained call too or every job
+                # after the first loses its log.
+                simulation_logs=simulation_logs,
             )
 
 
@@ -355,6 +400,10 @@ class SimulationQueueManager:
         self.running_count = self._manager.Value('i', 0)
         self.thread_budget = self._manager.Value('i', 0)
         self.sim_memory_mb = self._manager.dict()
+        # Per-job progress log. Deliberately separate from active_simulations,
+        # which is popped the moment a job ends -- the log is most wanted right
+        # after a failure. Trimmed by clear_tracking and by the LRU below.
+        self.simulation_logs = self._manager.dict()
     def _usable_cores(self) -> int:
         """Logical cores minus those reserved for the OS/web server."""
         logical = int(getattr(hardware, "logical_cores", 0) or (os.cpu_count() or 1))
@@ -567,6 +616,7 @@ class SimulationQueueManager:
                 self.config.max_concurrent_simulations,
                 self.config.reserve_memory_mb,
                 self.config.min_sim_memory_mb,
+                self.simulation_logs,
             ),
             # Not a daemon: simulation workers need to be able to spawn
             # additional child processes (e.g. part-assignment ProcessPool)
@@ -706,6 +756,20 @@ class SimulationQueueManager:
 
         return cancelled
 
+    def get_log(self, sim_id: str) -> Optional[list[str]]:
+        """This job's progress log, newest last, or None when nothing is kept.
+
+        Survives completion on purpose: the lines that explain a failure are
+        wanted after the job has gone, not during it.
+        """
+        self._init_manager()
+        with self.queue_lock:
+            logs = self.simulation_logs
+            if logs is None:
+                return None
+            lines = logs.get(sim_id)
+            return list(lines) if lines is not None else None
+
     def clear_tracking(self, sim_id: str) -> None:
         self._init_manager()
         with self.queue_lock:
@@ -715,3 +779,6 @@ class SimulationQueueManager:
             procs = self.simulation_processes
             if procs:
                 procs.pop(sim_id, None)
+            logs = self.simulation_logs
+            if logs:
+                logs.pop(sim_id, None)

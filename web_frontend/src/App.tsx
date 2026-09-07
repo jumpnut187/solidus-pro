@@ -3,7 +3,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CanvasStage } from './components/CanvasStage';
 import { IconRail } from './components/IconRail';
 import { ResultsPanel } from './components/ResultsPanel';
-import { Toasts } from './components/CanvasOverlays';
 import { TopBar } from './components/TopBar';
 import { TransportBar } from './components/TransportBar';
 import { AnalysisPanel } from './components/panels/AnalysisPanel';
@@ -14,7 +13,14 @@ import { PerformancePanel } from './components/panels/PerformancePanel';
 import { ProjectsPanel } from './components/panels/ProjectsPanel';
 import { SolidificationPanel } from './components/panels/SolidificationPanel';
 import { ConfirmDialog, PromptDialog, type ConfirmRequest, type PromptRequest } from './components/modals/ConfirmDialog';
-import { AboutModal, HardwareInfoModal, HelpGuideModal } from './components/modals/InfoModals';
+import { AboutModal, HardwareInfoModal, HelpGuideModal, ShortcutsModal } from './components/modals/InfoModals';
+import { AnimationModal } from './components/modals/AnimationModal';
+import { ReportModal } from './components/modals/ReportModal';
+import { RiserDesignModal } from './components/modals/RiserDesignModal';
+import { LogDrawer } from './components/LogDrawer';
+import { useJobLog } from './hooks/useJobLog';
+import { recordAnimation } from './lib/animationExport';
+import { StatisticsModal } from './components/modals/StatisticsModal';
 import { OpenProjectModal } from './components/modals/OpenProjectModal';
 import { SolidificationModal } from './components/modals/SolidificationModal';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
@@ -22,13 +28,18 @@ import { useSimulationJob } from './hooks/useSimulationJob';
 import { useToasts } from './hooks/useToasts';
 import {
   api,
+  saveFile,
   type AlloyGuideRow,
   type HardwareInfo,
   type MaterialInfo,
   type ProjectPart,
   type ProjectRecord,
   type ProjectSettings,
-  type ProjectSummary
+  type ProjectSummary,
+  type ReportFormat,
+  type ReportSectionToggles,
+  type RiserDesignResult,
+  type RiserRecommendation
 } from './lib/api';
 import { arrangeGrid, arrangeLine, DUPLICATE_OFFSET, type Axis } from './lib/arrange';
 import { analysisDefaults, buildSolidificationDefaults, defaultSettings, loadStoredSettings, meshDefaults, performanceDefaults, saveStoredSettings } from './lib/defaults';
@@ -44,12 +55,11 @@ import {
 } from './lib/uiPrefs';
 import {
   isTimeMode,
-  type CameraPreset,
   type GridMeta,
+  type MeasureResult,
   type ProbeReading,
   type ResultViewState,
-  type ViewportHandle,
-  type ViewportTool
+  type ViewportHandle
 } from './lib/viewState';
 
 const CAD_PATTERN = /\.(stl|step|stp)$/i;
@@ -59,7 +69,18 @@ const PLAYBACK_STEP_PERCENT = 1;
 /** How long to wait after the last edit before persisting settings. */
 const AUTOSAVE_DEBOUNCE_MS = 700;
 
-type ModalId = 'openProject' | 'solidification' | 'help' | 'hardware' | 'about' | null;
+type ModalId =
+  | 'openProject'
+  | 'solidification'
+  | 'statistics'
+  | 'riser'
+  | 'report'
+  | 'animation'
+  | 'help'
+  | 'hardware'
+  | 'about'
+  | 'shortcuts'
+  | null;
 
 export function App() {
   const [settings, setSettings] = useState<ProjectSettings>(loadStoredSettings);
@@ -75,12 +96,17 @@ export function App() {
   const [materials, setMaterials] = useState<MaterialInfo[]>([]);
   const [hardware, setHardware] = useState<HardwareInfo | null>(null);
   const [alloyGuide, setAlloyGuide] = useState<AlloyGuideRow[]>([]);
+  /** Set when the API cannot be reached at all, so panels can say why. */
+  const [offline, setOffline] = useState(false);
+  const [referenceAttempt, setReferenceAttempt] = useState(0);
 
   const [resultsAvailable, setResultsAvailable] = useState(false);
   const [resultsVersion, setResultsVersion] = useState(0);
   const [gridMeta, setGridMeta] = useState<GridMeta | null>(null);
   const [viewportStatus, setViewportStatus] = useState<string | null>(null);
   const [probe, setProbe] = useState<ProbeReading | null>(null);
+  const [measurement, setMeasurement] = useState<MeasureResult | null>(null);
+  const [defectVolume, setDefectVolume] = useState<number | null>(null);
 
   const [modal, setModal] = useState<ModalId>(null);
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
@@ -88,11 +114,23 @@ export function App() {
 
   const [uploading, setUploading] = useState(false);
   const [loadingProject, setLoadingProject] = useState(false);
+  const [riserResult, setRiserResult] = useState<RiserDesignResult | null>(null);
+  const [riserBusy, setRiserBusy] = useState(false);
+  const [riserApplying, setRiserApplying] = useState(false);
+  const [riserError, setRiserError] = useState<string | null>(null);
+  const [reportFormats, setReportFormats] = useState<ReportFormat[]>([]);
+  const [reportBusy, setReportBusy] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
+  const [animationBusy, setAnimationBusy] = useState(false);
+  const [animationProgress, setAnimationProgress] = useState(0);
+  const [animationError, setAnimationError] = useState<string | null>(null);
   const [meshEstimate, setMeshEstimate] = useState<MeshStatus>(null);
   const [mlStatus, setMlStatus] = useState<MeshStatus>(null);
   const [loop, setLoop] = useState(true);
 
   const viewportRef = useRef<ViewportHandle | null>(null);
+  const animationAbort = useRef<AbortController | null>(null);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
   const addPartsRef = useRef<() => void>(() => undefined);
   const skipAutosave = useRef(true);
 
@@ -108,25 +146,49 @@ export function App() {
   }, []);
 
   // --- Reference data ------------------------------------------------------
+  // The alloy list is the canary: if it cannot be fetched the API is not
+  // reachable, and every panel should say so rather than sitting on a
+  // "Loading..." that will never resolve.
   useEffect(() => {
-    api.materials().then(setMaterials).catch((error: unknown) => fail(error, 'Unable to load alloys'));
+    let cancelled = false;
+    api
+      .materials()
+      .then((payload) => {
+        if (cancelled) return;
+        setMaterials(payload);
+        setOffline(false);
+      })
+      .catch(() => {
+        if (!cancelled) setOffline(true);
+      });
     api.hardware().then(setHardware).catch(() => setHardware(null));
     api
       .helpAlloys()
       .then((payload) => setAlloyGuide(payload.alloys))
       .catch(() => setAlloyGuide([]));
-  }, [fail]);
+    api
+      .reportFormats()
+      .then((payload) => setReportFormats(payload.formats))
+      .catch(() => setReportFormats([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [referenceAttempt]);
 
   const refreshProjects = useCallback(async () => {
     setProjectsLoading(true);
     try {
       setProjects(await api.listProjects());
+      setOffline(false);
     } catch (error) {
-      fail(error, 'Unable to list projects');
+      // A failed list is the same signal as a failed alloy fetch; report it
+      // through the banner rather than a toast the user has to dismiss.
+      setOffline(true);
+      void error;
     } finally {
       setProjectsLoading(false);
     }
-  }, [fail]);
+  }, []);
 
   useEffect(() => {
     void refreshProjects();
@@ -293,7 +355,10 @@ export function App() {
   const saveProject = useCallback(async () => {
     try {
       const id = await ensureProject();
-      succeed('Project saved.');
+      // Settings already persist on a debounce as they change, so this is a
+      // confirmation, not a rescue. Saying so stops people wondering what they
+      // would have lost by not pressing it.
+      succeed('Project saved. Settings also save automatically as you change them.');
       void refreshProjects();
       return id;
     } catch (error) {
@@ -337,7 +402,7 @@ export function App() {
             const created = await api.duplicateProject(sourceId, name);
             await openProject(created.id, { silent: true });
             setSettings((current) => ({ ...current, name }));
-            succeed(`Saved as "${name}".`);
+            succeed(`Now working on the copy "${name}". Results stay with the original.`);
             void refreshProjects();
           } catch (error) {
             fail(error, 'Unable to save a copy');
@@ -620,6 +685,181 @@ export function App() {
     }
   }, [settings.name, succeed, fail]);
 
+  const jobLog = useJobLog(projectId, shell.logOpen, job.isBusy);
+
+  const clearMeasurements = useCallback(() => {
+    viewportRef.current?.clearMeasurements();
+    setMeasurement(null);
+  }, []);
+
+  /**
+   * Ask the viewport for the volume above the current threshold.
+   *
+   * Deliberately on demand rather than recomputed on every threshold tick: the
+   * handle walks the whole dense grid, which is not something to do sixty
+   * times a second while a slider is being dragged.
+   */
+  const recomputeDefectVolume = useCallback(() => {
+    const value = viewportRef.current?.defectVolumeIn3() ?? null;
+    setDefectVolume(value);
+    if (value === null) warn('Defect volume is only defined for threshold modes.');
+  }, [warn]);
+
+  // A stale volume is worse than none: it is a number for a threshold the user
+  // has already moved past.
+  useEffect(() => setDefectVolume(null), [view.threshold, view.mode, view.castOnly, resultsVersion]);
+
+  // --- Riser design --------------------------------------------------------
+  const analyzeRisers = useCallback(
+    async (params: { max_risers: number; modulus_factor: number; feeding_constant: number }) => {
+      if (!projectId) return;
+      setRiserBusy(true);
+      setRiserError(null);
+      setRiserResult(null);
+      try {
+        setRiserResult(await api.riserDesign(projectId, params));
+      } catch (error) {
+        setRiserError(error instanceof Error ? error.message : 'Riser design failed');
+      } finally {
+        setRiserBusy(false);
+      }
+    },
+    [projectId]
+  );
+
+  const applyRisers = useCallback(
+    async (risers: RiserRecommendation[]) => {
+      if (!projectId) return;
+      setRiserApplying(true);
+      try {
+        const response = await api.applyRisers(projectId, risers);
+        // The new parts have no geometry in the response, so pull each one's
+        // mesh before adding it: the renderer builds a part once and never
+        // revisits it, so a part added blind would stay invisible.
+        const withMeshes = await Promise.all(
+          response.parts.map(async (part) => {
+            const meshData = await api.partMesh(projectId, part.id).catch(() => undefined);
+            return meshData ? { ...part, meshData } : part;
+          })
+        );
+        setParts((current) => [...current, ...withMeshes]);
+        setModal(null);
+        succeed(`Added ${response.added} riser${response.added === 1 ? '' : 's'} to the assembly.`);
+      } catch (error) {
+        setRiserError(error instanceof Error ? error.message : 'Unable to add the risers');
+      } finally {
+        setRiserApplying(false);
+      }
+    },
+    [projectId, succeed]
+  );
+
+  // --- Exports -------------------------------------------------------------
+  const generateReport = useCallback(
+    async (format: string, sections: ReportSectionToggles) => {
+      if (!projectId) return;
+      setReportBusy(true);
+      setReportError(null);
+      try {
+        let screenshot: string | undefined;
+        if (sections.screenshot && viewportRef.current) {
+          const blob = await viewportRef.current.screenshot({ width: 1600, height: 1000 });
+          screenshot = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result));
+            reader.onerror = () => reject(new Error('Could not read the screenshot'));
+            reader.readAsDataURL(blob);
+          });
+        }
+        saveFile(await api.generateReport(projectId, { format, sections, screenshot }));
+        setModal(null);
+        succeed('Report downloaded.');
+      } catch (error) {
+        setReportError(error instanceof Error ? error.message : 'Report generation failed');
+      } finally {
+        setReportBusy(false);
+      }
+    },
+    [projectId, succeed]
+  );
+
+  const recordAnimationExport = useCallback(
+    async ({ fps, frames }: { fps: number; frames: number }) => {
+      const canvas = document.querySelector<HTMLCanvasElement>('canvas.viewport-canvas');
+      if (!canvas) {
+        setAnimationError('The viewport is not ready.');
+        return;
+      }
+      const controller = new AbortController();
+      animationAbort.current = controller;
+      setAnimationBusy(true);
+      setAnimationError(null);
+      setAnimationProgress(0);
+      // Playback must not fight the recorder for the time slider.
+      patchView({ playing: false });
+      try {
+        const { blob, extension } = await recordAnimation(canvas, {
+          fps,
+          frames,
+          signal: controller.signal,
+          onSeek: (timePercent) => patchView({ timePercent }),
+          onProgress: setAnimationProgress
+        });
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const base = (settings.name ?? 'solidus').replace(/[^\w-]+/g, '_');
+        saveFile({ blob, filename: `${base}_${view.mode}_${stamp}.${extension}` });
+        setModal(null);
+        succeed('Animation downloaded.');
+      } catch (error) {
+        setAnimationError(error instanceof Error ? error.message : 'Recording failed');
+      } finally {
+        animationAbort.current = null;
+        setAnimationBusy(false);
+      }
+    },
+    [patchView, settings.name, succeed, view.mode]
+  );
+
+  const exportProjectFile = useCallback(async () => {
+    if (!projectId) {
+      warn('Save the project before exporting it.');
+      return;
+    }
+    try {
+      saveFile(await api.exportProjectFile(projectId));
+      succeed('Project file downloaded.');
+    } catch (error) {
+      fail(error, 'Export failed');
+    }
+  }, [projectId, succeed, fail, warn]);
+
+  const importProjectFiles = useCallback(
+    async (files: File[]) => {
+      const projectFile = files.find((file) => file.name.endsWith('.json'));
+      if (!projectFile) {
+        warn('Select a .solidus-project.json file, together with its CAD files.');
+        return;
+      }
+      const cadFiles = files.filter((file) => file !== projectFile && CAD_PATTERN.test(file.name));
+      try {
+        const response = await api.importProjectFile(projectFile, cadFiles);
+        await openProject(response.id, { silent: true });
+        void refreshProjects();
+        if (response.missing_parts.length) {
+          warn(
+            `Imported, but ${response.missing_parts.length} part file was not supplied: ` +
+              `${response.missing_parts.join(', ')}. Add the CAD files and re-import to restore them.`
+          );
+        } else {
+          succeed(`Imported "${response.project.name}".`);
+        }
+      } catch (error) {
+        fail(error, 'Import failed');
+      }
+    },
+    [openProject, refreshProjects, succeed, warn, fail]
+  );
+
   // --- Keyboard ------------------------------------------------------------
   const closeTopLayer = useCallback(() => {
     if (promptRequest) return setPromptRequest(null);
@@ -641,6 +881,7 @@ export function App() {
     saveProject: () => void saveProject(),
     fitCamera: () => viewportRef.current?.setCamera('fit'),
     helpGuide: () => setModal('help'),
+    shortcuts: () => setModal('shortcuts'),
     escape: closeTopLayer,
     togglePlayback: () => {
       if (isTimeMode(view.mode) && resultsAvailable) patchView({ playing: !view.playing });
@@ -747,6 +988,7 @@ export function App() {
           <MaterialPanel
             alloy={settings.alloy}
             materials={materials}
+            offline={offline}
             onSelectAlloy={(alloy) => setSettings((current) => ({ ...current, alloy }))}
             onClose={closePanel}
           />
@@ -829,6 +1071,7 @@ export function App() {
             projects={projects}
             currentProjectId={projectId}
             loading={projectsLoading}
+            offline={offline}
             onOpen={(id) => void openProject(id)}
             onRefresh={() => void refreshProjects()}
             onNew={newProject}
@@ -868,7 +1111,8 @@ export function App() {
     projectsLoading,
     openProject,
     refreshProjects,
-    newProject
+    newProject,
+    offline
   ]);
 
   return (
@@ -891,11 +1135,39 @@ export function App() {
         onScreenshot={() => void takeScreenshot()}
         onExport={(kind) => {
           if (kind === 'screenshot') void takeScreenshot();
-          else notify('This export arrives in the next milestone.');
+          else if (kind === 'animation') setModal('animation');
+          else if (kind === 'report') setModal('report');
+          else if (kind === 'projectFile') void exportProjectFile();
+          else if (kind === 'importProjectFile') importInputRef.current?.click();
+          else if (kind === 'riserDesign') setModal('riser');
         }}
-        onHelp={(topic) => setModal(topic === 'guide' ? 'help' : topic === 'hardware' ? 'hardware' : 'about')}
-        exportsAvailable={{ animation: false, report: false, projectFile: false }}
+        onHelp={(topic) => setModal(topic === 'guide' ? 'help' : topic)}
+        exportsAvailable={{
+          animation: resultsAvailable,
+          report: Boolean(projectId),
+          projectFile: Boolean(projectId),
+          riserDesign: resultsAvailable
+        }}
       />
+
+      {offline ? (
+        <div className="connection-banner" role="alert">
+          <span>
+            Cannot reach the simulation server. Panels will stay empty and runs cannot start until it
+            responds.
+          </span>
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => {
+              setReferenceAttempt((attempt) => attempt + 1);
+              void refreshProjects();
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      ) : null}
 
       <div className="workspace">
         <IconRail active={shell.activePanel} onSelect={setPanel} partCount={parts.length} />
@@ -914,7 +1186,10 @@ export function App() {
           tool={shell.tool}
           probe={probe}
           onProbe={setProbe}
-          onMeasure={(result) => notify(`Distance: ${result.distanceIn.toFixed(3)} in`)}
+          onMeasure={(result) => {
+            setMeasurement(result);
+            notify(`Distance: ${result.distanceIn.toFixed(3)} in`);
+          }}
           pourLocation={settings.pour_location ?? null}
           onPourPicked={(pick) => {
             setSettings((current) => ({
@@ -936,6 +1211,14 @@ export function App() {
           onError={(message) => fail(message)}
           onAddFiles={(files) => void addFiles(files)}
           busy={loadingProject || uploading}
+          hasParts={parts.length > 0}
+          onOrthoChange={(next) => patchShell({ ortho: next })}
+          onToolChange={(next) => patchShell({ tool: next })}
+          onCamera={(preset) => viewportRef.current?.setCamera(preset)}
+          onClearMeasurements={clearMeasurements}
+          measurement={measurement}
+          toasts={toasts.toasts}
+          onDismissToast={toasts.dismiss}
           onRequestAddParts={() => {
             patchShell({ activePanel: 'parts' });
             window.setTimeout(() => addPartsRef.current(), 0);
@@ -943,19 +1226,32 @@ export function App() {
           registerAddParts={(open) => {
             addPartsRef.current = open;
           }}
+          log={
+            <LogDrawer
+              open={shell.logOpen}
+              onToggle={() => patchShell({ logOpen: !shell.logOpen })}
+              lines={jobLog.lines}
+              available={jobLog.available}
+              isRunning={job.isBusy}
+            />
+          }
         />
         <ResultsPanel
           collapsed={shell.resultsCollapsed}
           onToggleCollapsed={() => patchShell({ resultsCollapsed: !shell.resultsCollapsed })}
+          sectionsCollapsed={shell.sectionsCollapsed}
+          onSectionToggle={(id, next) =>
+            patchShell({ sectionsCollapsed: { ...shell.sectionsCollapsed, [id]: next } })
+          }
           view={view}
           onViewChange={patchView}
           meta={gridMeta}
           resultsAvailable={resultsAvailable}
-          ortho={shell.ortho}
-          onOrthoChange={(ortho) => patchShell({ ortho })}
-          tool={shell.tool}
-          onToolChange={(tool: ViewportTool) => patchShell({ tool })}
-          onCamera={(preset: CameraPreset) => viewportRef.current?.setCamera(preset)}
+          measurement={measurement}
+          onClearMeasurements={clearMeasurements}
+          defectVolumeIn3={defectVolume}
+          onRecomputeDefectVolume={recomputeDefectVolume}
+          onOpenStatistics={() => setModal('statistics')}
         />
       </div>
 
@@ -993,16 +1289,65 @@ export function App() {
         />
       ) : null}
 
+      {modal === 'statistics' ? <StatisticsModal meta={gridMeta} onClose={() => setModal(null)} /> : null}
+      {modal === 'riser' ? (
+        <RiserDesignModal
+          result={riserResult}
+          analyzing={riserBusy}
+          applying={riserApplying}
+          error={riserError}
+          onAnalyze={(params) => void analyzeRisers(params)}
+          onApply={(risers) => void applyRisers(risers)}
+          onClose={() => setModal(null)}
+        />
+      ) : null}
+      {modal === 'report' ? (
+        <ReportModal
+          formats={reportFormats}
+          busy={reportBusy}
+          error={reportError}
+          canCaptureView={parts.length > 0}
+          onGenerate={(format, sections) => void generateReport(format, sections)}
+          onClose={() => setModal(null)}
+        />
+      ) : null}
+      {modal === 'animation' ? (
+        <AnimationModal
+          busy={animationBusy}
+          progress={animationProgress}
+          error={animationError}
+          frameCount={gridMeta?.frames.fraction_liquid?.count ?? gridMeta?.frames.fill?.count ?? 0}
+          onRecord={(options) => void recordAnimationExport(options)}
+          onCancel={() => {
+            animationAbort.current?.abort();
+            if (!animationBusy) setModal(null);
+          }}
+          onClose={() => setModal(null)}
+        />
+      ) : null}
       {modal === 'help' ? <HelpGuideModal alloys={alloyGuide} onClose={() => setModal(null)} /> : null}
       {modal === 'hardware' ? <HardwareInfoModal hardware={hardware} onClose={() => setModal(null)} /> : null}
       {modal === 'about' ? <AboutModal onClose={() => setModal(null)} /> : null}
+      {modal === 'shortcuts' ? <ShortcutsModal onClose={() => setModal(null)} /> : null}
+
+      {/* Project-file import: a project JSON plus the CAD files it references. */}
+      <input
+        ref={importInputRef}
+        type="file"
+        accept=".json,.stl,.step,.stp"
+        multiple
+        className="visually-hidden"
+        onChange={(event) => {
+          void importProjectFiles(Array.from(event.target.files ?? []));
+          event.target.value = '';
+        }}
+      />
 
       {confirmRequest ? (
         <ConfirmDialog request={confirmRequest} onClose={() => setConfirmRequest(null)} />
       ) : null}
       {promptRequest ? <PromptDialog request={promptRequest} onClose={() => setPromptRequest(null)} /> : null}
 
-      <Toasts toasts={toasts.toasts} onDismiss={toasts.dismiss} />
     </div>
   );
 }

@@ -8,6 +8,7 @@ export type ProjectsPanelProps = {
   projects: ProjectSummary[];
   currentProjectId: string | null;
   loading: boolean;
+  offline?: boolean;
   onOpen: (projectId: string) => void;
   onRefresh: () => void;
   onNew: () => void;
@@ -19,6 +20,7 @@ export function ProjectsPanel({
   projects,
   currentProjectId,
   loading,
+  offline,
   onOpen,
   onRefresh,
   onNew,
@@ -44,7 +46,11 @@ export function ProjectsPanel({
       </div>
 
       <Group title={`Recent (${projects.length})`}>
-        {loading && projects.length === 0 ? (
+        {offline && projects.length === 0 ? (
+          <p className="status-note status-note-warning">
+            The server is not responding, so the project list cannot be read.
+          </p>
+        ) : loading && projects.length === 0 ? (
           <p className="status-note">Loading projects...</p>
         ) : recent.length === 0 ? (
           <p className="status-note">

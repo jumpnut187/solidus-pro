@@ -263,6 +263,101 @@ export type AlloyGuideRow = {
   niyama_threshold: number;
 };
 
+// --- Riser design ----------------------------------------------------------
+
+export type RiserRecommendation = {
+  index: number;
+  riser_type: string;
+  shape: string;
+  position: [number, number, number];
+  diameter_in: number;
+  height_in: number;
+  volume_in3: number;
+  surface_area_in2: number;
+  modulus_in: number;
+  voxels_fed: number;
+  confidence: number;
+  rationale: string;
+};
+
+export type RiserCoverage = {
+  covered_fraction: number;
+  covered_voxels: number;
+  uncovered_voxels: number;
+  n_risers: number;
+  avg_riser_diameter_in: number;
+  total_riser_volume_in3: number;
+};
+
+export type RiserDesignResult = {
+  recommendations: RiserRecommendation[];
+  /** Coincident risers the server collapsed into one. */
+  merged_duplicates: number;
+  coverage: RiserCoverage;
+  voxel_count: number;
+  voxel_size_in: number;
+};
+
+export type RiserDesignRequest = {
+  max_risers: number;
+  modulus_factor: number;
+  feeding_constant: number;
+};
+
+// --- Reports ---------------------------------------------------------------
+
+export type ReportFormat = {
+  id: 'html' | 'markdown' | 'pdf';
+  label: string;
+  available: boolean;
+  reason: string | null;
+};
+
+export type ReportSectionToggles = {
+  settings: boolean;
+  parts: boolean;
+  statistics: boolean;
+  screenshot: boolean;
+};
+
+// --- Job log ---------------------------------------------------------------
+
+export type JobLog = {
+  lines: string[];
+  /** Total lines held server-side; pass as `since` to fetch only the tail. */
+  total: number;
+  available: boolean;
+};
+
+/** A file the server sent as an attachment, with the name it chose. */
+export type DownloadedFile = { blob: Blob; filename: string };
+
+function filenameFrom(response: Response, fallback: string): string {
+  const disposition = response.headers.get('Content-Disposition') ?? '';
+  const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition);
+  return match ? decodeURIComponent(match[1]) : fallback;
+}
+
+async function requestFile(url: string, init: RequestInit, fallback: string): Promise<DownloadedFile> {
+  const response = await fetch(url, init);
+  if (!response.ok) {
+    // An error comes back as JSON even on a download route, so read it as
+    // text and surface the server's reason rather than "500".
+    const text = await response.text().catch(() => '');
+    let message = `Request failed: ${response.status}`;
+    try {
+      const parsed: unknown = JSON.parse(text);
+      if (typeof parsed === 'object' && parsed !== null && typeof (parsed as { error?: unknown }).error === 'string') {
+        message = (parsed as { error: string }).error;
+      }
+    } catch {
+      /* not JSON; keep the status message */
+    }
+    throw new Error(message);
+  }
+  return { blob: await response.blob(), filename: filenameFrom(response, fallback) };
+}
+
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   const data: unknown = await response.json().catch(() => ({}));
@@ -380,7 +475,57 @@ export const api = {
     return requestJson<VolumePayload>(`/api/projects/${projectId}/volume?${params.toString()}`);
   },
 
+  /** Progress lines for a run; `since` returns only what is new. */
+  projectLog: (projectId: string, since = 0) =>
+    requestJson<JobLog>(`/api/projects/${projectId}/log?since=${since}`),
+
+  // --- Riser design --------------------------------------------------------
+  riserDesign: (projectId: string, params: RiserDesignRequest) =>
+    requestJson<RiserDesignResult>(`/api/projects/${projectId}/riser-design`, jsonBody(params)),
+  applyRisers: async (projectId: string, risers: RiserRecommendation[]) => {
+    const payload = await requestJson<{ parts: StoredPart[]; added: number }>(
+      `/api/projects/${projectId}/riser-design/apply`,
+      jsonBody({ risers })
+    );
+    return { parts: payload.parts.map(adoptPart), added: payload.added };
+  },
+
+  // --- Reports -------------------------------------------------------------
+  reportFormats: () => requestJson<{ formats: ReportFormat[] }>('/api/report/formats'),
+  generateReport: (
+    projectId: string,
+    body: { format: string; sections: ReportSectionToggles; screenshot?: string }
+  ) => requestFile(`/api/projects/${projectId}/report`, jsonBody(body), 'report.html'),
+
+  // --- Project files -------------------------------------------------------
+  exportProjectFile: (projectId: string) =>
+    requestFile(`/api/projects/${projectId}/export`, { method: 'GET' }, 'project.solidus-project.json'),
+  importProjectFile: (projectFile: File, cadFiles: File[]) => {
+    const form = new FormData();
+    form.append('project', projectFile);
+    for (const file of cadFiles) form.append('files', file);
+    return requestJson<{
+      id: string;
+      project: ProjectRecord;
+      missing_parts: string[];
+      schema_version: number;
+    }>('/api/projects/import', { method: 'POST', body: form });
+  },
+
   // --- Environment ---------------------------------------------------------
   hardware: () => requestJson<HardwareInfo>('/api/hardware'),
   helpAlloys: () => requestJson<{ alloys: AlloyGuideRow[] }>('/api/help/alloys')
 };
+
+/** Hand a fetched attachment to the browser as a download. */
+export function saveFile({ blob, filename }: DownloadedFile): void {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  // Revoking synchronously can beat the download in some browsers.
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}

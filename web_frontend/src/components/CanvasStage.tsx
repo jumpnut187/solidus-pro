@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState, type MutableRefObject } from 'react';
+import { useEffect, useRef, useState, type MutableRefObject, type ReactNode } from 'react';
 
-import { DropVeil, EmptyState, ProbeReadout, StatsChip } from './CanvasOverlays';
+import { DropVeil, EmptyState, ProbeReadout, StatsChip, Toasts } from './CanvasOverlays';
+import { ViewportToolbar } from './ViewportToolbar';
 import { ColorBar } from '../viewport/ColorBar';
 import { ResultsViewport } from '../viewport/ResultsViewport';
 import type { PourLocationPayload, ProjectPart } from '../lib/api';
 import type {
+  CameraPreset,
   GridMeta,
   MeasureResult,
   PourPick,
@@ -13,6 +15,7 @@ import type {
   ViewportHandle,
   ViewportTool
 } from '../lib/viewState';
+import type { Toast } from '../hooks/useToasts';
 
 export type CanvasStageProps = {
   viewportRef: MutableRefObject<ViewportHandle | null>;
@@ -39,9 +42,19 @@ export type CanvasStageProps = {
   onAddFiles: (files: File[]) => void;
   /** A project or upload is in flight, so an empty canvas is not yet "empty". */
   busy: boolean;
+  hasParts: boolean;
+  onOrthoChange: (ortho: boolean) => void;
+  onToolChange: (tool: ViewportTool) => void;
+  onCamera: (preset: CameraPreset) => void;
+  onClearMeasurements: () => void;
+  measurement: MeasureResult | null;
+  toasts: Toast[];
+  onDismissToast: (id: number) => void;
   onRequestAddParts: () => void;
   /** Hands the shell a way to open this stage's file picker from a shortcut. */
   registerAddParts: (open: () => void) => void;
+  /** The job log drawer, anchored to the foot of the canvas. */
+  log?: ReactNode;
 };
 
 /**
@@ -76,8 +89,17 @@ export function CanvasStage(props: CanvasStageProps) {
     onError,
     onAddFiles,
     busy,
+    hasParts,
+    onOrthoChange,
+    onToolChange,
+    onCamera,
+    onClearMeasurements,
+    measurement,
+    toasts,
+    onDismissToast,
     onRequestAddParts,
-    registerAddParts
+    registerAddParts,
+    log
   } = props;
 
   const [dragDepth, setDragDepth] = useState(0);
@@ -132,13 +154,32 @@ export function CanvasStage(props: CanvasStageProps) {
       {parts.length === 0 && !busy ? <EmptyState onAddParts={onRequestAddParts} /> : null}
       {dragDepth > 0 ? <DropVeil /> : null}
 
+      <ViewportToolbar
+        tool={tool}
+        onToolChange={onToolChange}
+        ortho={ortho}
+        onOrthoChange={onOrthoChange}
+        onCamera={onCamera}
+        onClearMeasurements={onClearMeasurements}
+        hasParts={hasParts}
+      />
+
       {view.showLegend && resultsAvailable ? (
         <div className="overlay-colorbar">
           <ColorBar view={view} meta={gridMeta} orientation="vertical" />
         </div>
       ) : null}
 
-      {probe ? <ProbeReadout reading={probe} onClear={() => onProbe(null)} /> : null}
+      {probe || measurement ? (
+        <ProbeReadout
+          reading={probe}
+          measurement={measurement}
+          onClear={() => {
+            onProbe(null);
+            onClearMeasurements();
+          }}
+        />
+      ) : null}
       {gridMeta && resultsAvailable ? <StatsChip meta={gridMeta} /> : null}
 
       {status ? (
@@ -146,6 +187,9 @@ export function CanvasStage(props: CanvasStageProps) {
           {status}
         </div>
       ) : null}
+
+      <Toasts toasts={toasts} onDismiss={onDismissToast} />
+      {log}
 
       <input
         ref={fileRef}

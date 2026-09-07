@@ -35,21 +35,39 @@ export type PanelId =
   | 'solidification'
   | 'projects';
 
+/** Foldable sections of the results panel, keyed by `CollapsibleGroup` id. */
+export type ResultSectionId = 'field' | 'threshold' | 'scale' | 'section' | 'display' | 'statistics';
+
 export type ShellPrefs = {
   /** Which docked setup panel is open, or null for none. */
   activePanel: PanelId | null;
   resultsCollapsed: boolean;
+  /** Which results-panel sections are folded away. */
+  sectionsCollapsed: Record<ResultSectionId, boolean>;
   /** Orthographic projection. The desktop defaults to orthographic. */
   ortho: boolean;
   tool: ViewportTool;
+  /** The job log drawer at the foot of the canvas. */
+  logOpen: boolean;
   view: ResultViewState;
 };
 
 export const defaultShellPrefs: ShellPrefs = {
   activePanel: 'parts',
   resultsCollapsed: false,
+  // Field and threshold are what you reach for first; scale, section and the
+  // statistics table are reference material, so they start folded.
+  sectionsCollapsed: {
+    field: false,
+    threshold: false,
+    scale: true,
+    section: false,
+    display: false,
+    statistics: true
+  },
   ortho: true,
   tool: 'select',
+  logOpen: false,
   view: defaultResultViewState
 };
 

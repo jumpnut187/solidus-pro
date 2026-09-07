@@ -92,7 +92,9 @@
    * The shell is sized so 52 + 380 + 320 of chrome still leaves a usable
    * canvas at 1366px wide, and 48 + 44 of bars leaves 676px at 768 tall.
    */
-  --rail-w: 52px;
+  --rail-w: 60px;
+  /* Height of the collapsed job-log strip; canvas overlays sit above it. */
+  --log-strip-h: 26px;
   --setup-w: 380px;
   --results-w: 320px;
   --topbar-h: 48px;

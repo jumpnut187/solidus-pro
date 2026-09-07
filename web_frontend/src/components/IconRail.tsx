@@ -16,8 +16,8 @@ const ENTRIES: RailEntry[] = [
   { id: 'mesh', label: 'Mesh', title: 'Mesh parameters', Icon: Grid3x3 },
   { id: 'analysis', label: 'Analysis', title: 'Analysis options', Icon: Layers },
   { id: 'performance', label: 'Perf', title: 'Performance options', Icon: Gauge },
-  { id: 'solidification', label: 'Solid', title: 'Solidification parameters', Icon: Thermometer },
-  { id: 'projects', label: 'Files', title: 'Projects', Icon: FolderOpen }
+  { id: 'solidification', label: 'Params', title: 'Solidification parameters', Icon: Thermometer },
+  { id: 'projects', label: 'Projects', title: 'Saved projects', Icon: FolderOpen }
 ];
 
 /**
