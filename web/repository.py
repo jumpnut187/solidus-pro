@@ -7,8 +7,35 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional, Tuple, cast
 import json
+import re
 import sqlite3
 import uuid
+
+
+#: Matches the collision-avoidance prefix stamped onto every stored upload:
+#: an 8-hex ``file_id``, optionally followed by a ``_b<N>`` body index.
+_UPLOAD_PREFIX_RE = re.compile(r"^[0-9a-f]{8}(?:_b\d+)?_")
+
+
+def strip_upload_prefix(stem: str) -> str:
+    """Remove any stored-upload prefixes from a file stem.
+
+    Uploads are written to disk as ``<file_id>_b<body>_<name>.stl`` so two
+    people uploading ``cast.stl`` do not collide. Re-uploading a file that was
+    itself pulled back out of the upload folder therefore used to compound the
+    prefixes (``3c3a67b8_b0_602e27b4_b0_cast``) and that compounded string was
+    what the user saw as the part name. Strip every prefix layer so the display
+    name is always the original file stem.
+
+    Falls back to the input when stripping would leave nothing behind.
+    """
+    cleaned = stem
+    while True:
+        stripped = _UPLOAD_PREFIX_RE.sub("", cleaned, count=1)
+        if stripped == cleaned:
+            break
+        cleaned = stripped
+    return cleaned or stem
 
 
 def get_db(database_path: Path) -> sqlite3.Connection:
@@ -174,6 +201,98 @@ def update_project(database_path: Path, project_id: str, data: Dict[str, Any]) -
                 project_id,
             ),
         )
+
+
+def rename_project(database_path: Path, project_id: str, name: str) -> bool:
+    """Set a project's display name. Returns False when the project is gone."""
+    with get_db_connection(database_path) as db:
+        cursor = db.execute(
+            "UPDATE projects SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (name, project_id),
+        )
+        return cursor.rowcount > 0
+
+
+def duplicate_project(
+    database_path: Path,
+    project_id: str,
+    name: str,
+    part_filepaths: Dict[str, str],
+) -> Optional[str]:
+    """Copy a project's settings and parts into a new draft project.
+
+    Results are deliberately not copied: ``status``, ``artifact_path`` and
+    ``summary_json`` reset, so the copy is a fresh setup to re-run rather than
+    a second row pointing at someone else's artifact.
+
+    ``part_filepaths`` maps each source part id to the path its copy should
+    reference. The caller duplicates the files on disk first, because two rows
+    sharing one path would make deleting either project unlink geometry the
+    other still needs (:func:`delete_project` unlinks what it finds).
+    Parts missing from the map keep the original path.
+    """
+    source = get_project(database_path, project_id)
+    if source is None:
+        return None
+    new_id = str(uuid.uuid4())[:12]
+    with get_db_connection(database_path) as db:
+        db.execute(
+            """
+            INSERT INTO projects (
+                id, name, description, alloy, voxel_size, refinement_level,
+                memory_mode, analysis_options, performance_options,
+                solidification_params, ui_state, status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft')
+            """,
+            (
+                new_id,
+                name,
+                source.get("description", ""),
+                source["alloy"],
+                float(source["voxel_size"]),
+                int(source["refinement_level"]),
+                source["memory_mode"],
+                json.dumps(source["analysis_options"]),
+                json.dumps(source["performance_options"]),
+                json.dumps(source["solidification_params"]),
+                json.dumps(source["ui_state"]),
+            ),
+        )
+        rows = db.execute(
+            "SELECT * FROM parts WHERE project_id = ? ORDER BY created_at ASC",
+            (project_id,),
+        ).fetchall()
+        for row in rows:
+            part = dict(row)
+            db.execute(
+                """
+                INSERT INTO parts (
+                    id, project_id, name, part_type, filepath,
+                    position_x, position_y, position_z,
+                    rotation_x, rotation_y, rotation_z,
+                    scale, visible, is_open_top
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4())[:8],
+                    new_id,
+                    part["name"],
+                    part["part_type"],
+                    part_filepaths.get(str(part["id"]), str(part["filepath"])),
+                    part["position_x"],
+                    part["position_y"],
+                    part["position_z"],
+                    part["rotation_x"],
+                    part["rotation_y"],
+                    part["rotation_z"],
+                    part["scale"],
+                    part["visible"],
+                    part["is_open_top"],
+                ),
+            )
+    return new_id
 
 
 def delete_project(database_path: Path, project_id: str) -> list[str]:
@@ -354,6 +473,13 @@ def _loads(value: Any, default: Dict[str, Any]) -> Dict[str, Any]:
 def _normalize_part(row: Dict[str, Any]) -> Dict[str, Any]:
     row["visible"] = bool(row.get("visible", 1))
     row["is_open_top"] = bool(row.get("is_open_top", 0))
+    # Rows written before uploads carried a clean display name hold the storage
+    # filename verbatim ("602e27b4_b0_cast", or worse after a re-upload). Strip
+    # the prefix on read so existing projects show the same name a new upload
+    # would get. A part the user renames is written back through update_part
+    # and keeps whatever they chose -- the pattern is specific enough (8 hex
+    # digits, optional _b<N>, underscore) that a real name will not match it.
+    row["name"] = strip_upload_prefix(str(row.get("name", "")))
     return row
 
 
@@ -374,11 +500,16 @@ def _default_analysis_options() -> Dict[str, Any]:
 
 
 def _default_performance_options() -> Dict[str, Any]:
+    # ``use_gpu`` mirrors the desktop Performance dialog, which seeds it from
+    # config.settings.use_gpu (True). The simulation queue already reads the
+    # key; it simply had no UI or default on the web side.
     return {
+        "use_gpu": True,
         "use_incremental": False,
         "use_chunked_voxelization": False,
         "part_assignment_mode": "auto",
         "part_assignment_workers": 0,
         "part_assignment_batch_size": 2500,
+        "max_voxels_for_visualization": 90000,
     }
 

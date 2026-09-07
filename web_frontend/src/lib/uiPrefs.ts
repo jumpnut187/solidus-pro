@@ -1,3 +1,22 @@
+/**
+ * Everything the shell remembers between sessions: which project was open,
+ * how the workspace was arranged, and the full `ResultViewState`.
+ *
+ * The project id in particular is the fix for the most damaging bug in the old
+ * client — it lived only in React state, so a browser refresh silently threw
+ * away the parts, the settings and the results of whatever the user was
+ * working on.
+ */
+import { defaultResultViewState, type ResultViewState, type ViewportTool } from './viewState';
+import { deepMerge } from './defaults';
+
+/**
+ * The single-axis section shape the legacy renderer takes.
+ *
+ * Kept for the viewport adapter (`src/viewport/ResultsViewport.tsx`), which
+ * flattens the shell's three-axis `SectionState` down to this. The shell
+ * itself works in `viewState.SectionState`; do not add fields here.
+ */
 export type SectionState = {
   enabled: boolean;
   mode: 'single' | 'slab';
@@ -7,90 +26,74 @@ export type SectionState = {
   invert: boolean;
 };
 
-export const defaultUiPrefs = {
-  resultMode: 'fraction_liquid',
-  threshold: 30,
-  timePercent: 0,
-  flSpeed: 1,
-  modelOpacity: 34,
-  showModel: true,
-  showResults: true,
-  section: {
-    enabled: false,
-    mode: 'single' as 'single' | 'slab',
-    axis: 'z' as 'x' | 'y' | 'z',
-    position: 50,
-    thickness: 10,
-    invert: false,
-  } as SectionState,
-  ortho: false,
+export type PanelId =
+  | 'parts'
+  | 'material'
+  | 'mesh'
+  | 'analysis'
+  | 'performance'
+  | 'solidification'
+  | 'projects';
+
+export type ShellPrefs = {
+  /** Which docked setup panel is open, or null for none. */
+  activePanel: PanelId | null;
+  resultsCollapsed: boolean;
+  /** Orthographic projection. The desktop defaults to orthographic. */
+  ortho: boolean;
+  tool: ViewportTool;
+  view: ResultViewState;
 };
 
-export type UiPrefs = typeof defaultUiPrefs;
+export const defaultShellPrefs: ShellPrefs = {
+  activePanel: 'parts',
+  resultsCollapsed: false,
+  ortho: true,
+  tool: 'select',
+  view: defaultResultViewState
+};
 
-const UI_STORAGE_KEY = 'solidus.ui.v1';
+const SHELL_STORAGE_KEY = 'solidus.shell.v1';
+const PROJECT_STORAGE_KEY = 'solidus.projectId.v1';
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function deepMerge<T>(base: T, override: unknown): T {
-  if (!isPlainObject(base) || !isPlainObject(override)) {
-    return override === undefined ? base : (override as T);
-  }
-  const result: Record<string, unknown> = { ...base };
-  for (const key of Object.keys(base)) {
-    if (key in override) {
-      result[key] = deepMerge((base as Record<string, unknown>)[key], (override as Record<string, unknown>)[key]);
-    }
-  }
-  return result as T;
-}
-
-export function loadUiPrefs(): UiPrefs {
-  if (typeof window === 'undefined') return defaultUiPrefs;
+export function loadShellPrefs(): ShellPrefs {
+  if (typeof window === 'undefined') return defaultShellPrefs;
   try {
-    const raw = window.localStorage.getItem(UI_STORAGE_KEY);
-    if (!raw) return defaultUiPrefs;
-    return deepMerge(defaultUiPrefs, JSON.parse(raw)) as UiPrefs;
+    const raw = window.localStorage.getItem(SHELL_STORAGE_KEY);
+    if (!raw) return defaultShellPrefs;
+    const merged = deepMerge(defaultShellPrefs, JSON.parse(raw) as unknown);
+    // Playback never survives a reload: coming back to a page that is quietly
+    // animating is disorienting, and the frames are not loaded yet anyway.
+    return { ...merged, view: { ...merged.view, playing: false } };
   } catch {
-    return defaultUiPrefs;
+    return defaultShellPrefs;
   }
 }
 
-export function saveUiPrefs(prefs: UiPrefs): void {
+export function saveShellPrefs(prefs: ShellPrefs): void {
   if (typeof window === 'undefined') return;
   try {
-    window.localStorage.setItem(UI_STORAGE_KEY, JSON.stringify(prefs));
+    window.localStorage.setItem(SHELL_STORAGE_KEY, JSON.stringify(prefs));
   } catch {
     /* storage unavailable - ignore */
   }
 }
 
-export type ModeControl = {
-  legendTitle: string;
-  thresholdLabel: string;
-  defaultThreshold: number;
-};
+export function loadStoredProjectId(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.localStorage.getItem(PROJECT_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
 
-export const MODE_CONTROL: Record<string, ModeControl> = {
-  shrinkage: { legendTitle: 'Shrinkage / Porosity Risk', thresholdLabel: 'X-Ray Level %', defaultThreshold: 30 },
-  feed_modulus: { legendTitle: 'Feed Modulus (in)', thresholdLabel: 'Feed Modulus Range %', defaultThreshold: 20 },
-  hotspot: { legendTitle: 'Hot Spot Intensity', thresholdLabel: 'Min Intensity %', defaultThreshold: 50 },
-  niyama_raw: { legendTitle: 'Niyama (raw)', thresholdLabel: 'Min Value %', defaultThreshold: 10 },
-  niyama: { legendTitle: 'Niyama Defect Risk', thresholdLabel: 'Min Defect Risk %', defaultThreshold: 30 },
-  combined_feed_risk: { legendTitle: 'Combined Feed Risk', thresholdLabel: 'Min Value %', defaultThreshold: 10 },
-  fraction_liquid: { legendTitle: 'Fraction Liquid', thresholdLabel: '', defaultThreshold: 30 },
-  // Empty thresholdLabel marks this as a time-sliced mode (Sidebar shows
-  // the timeline scrubber instead of the threshold slider), same as
-  // fraction_liquid above.
-  fill_time: { legendTitle: 'Fill Time', thresholdLabel: '', defaultThreshold: 0 },
-  hot_tear: { legendTitle: 'Hot Tear Risk', thresholdLabel: 'Min Risk %', defaultThreshold: 30 },
-  sand_burn_in: { legendTitle: 'Sand Burn-In', thresholdLabel: 'Min Risk %', defaultThreshold: 30 },
-  feeding_quality: { legendTitle: 'Blocked Feeding', thresholdLabel: 'Min Value %', defaultThreshold: 10 },
-  thermal_stress: { legendTitle: 'Thermal Stress', thresholdLabel: 'Min Value %', defaultThreshold: 10 },
-  distortion: { legendTitle: 'Distortion', thresholdLabel: 'Min Value %', defaultThreshold: 10 },
-  crack_susceptibility: { legendTitle: 'Crack Susceptibility', thresholdLabel: 'Min Risk %', defaultThreshold: 10 },
-  sdas: { legendTitle: 'SDAS', thresholdLabel: 'Min Value %', defaultThreshold: 10 },
-  predicted_uts: { legendTitle: 'Low UTS', thresholdLabel: 'Min Value %', defaultThreshold: 10 },
-};
+export function saveStoredProjectId(projectId: string | null): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (projectId) window.localStorage.setItem(PROJECT_STORAGE_KEY, projectId);
+    else window.localStorage.removeItem(PROJECT_STORAGE_KEY);
+  } catch {
+    /* storage unavailable - ignore */
+  }
+}

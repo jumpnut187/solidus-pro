@@ -18,6 +18,7 @@ from web.payloads import (
     build_part_manager,
     build_result_fields_payload,
     build_volume_payload,
+    load_part_mesh_data,
     read_artifact,
     upload_cad_file,
 )
@@ -55,23 +56,44 @@ def health():
 
 @api_bp.route("/materials")
 def materials():
-    payload = []
-    for name in get_all_alloy_names():
-        alloy = get_alloy(name)
-        payload.append(
-            {
-                "name": name,
-                "full_name": alloy.name,
-                "liquidus_temp": alloy.liquidus_temp,
-                "solidus_temp": alloy.solidus_temp,
-                "volumetric_shrinkage": round(alloy.volumetric_shrinkage, 2),
-                "feeding_multiplier": alloy.feeding_distance_multiplier,
-                "niyama_threshold": alloy.niyama_threshold,
-                "hot_tear_susceptibility": getattr(alloy, "hot_tear_susceptibility", 0.0),
-                "sand_burn_in_susceptibility": getattr(alloy, "sand_burn_in_susceptibility", 0.0),
-            }
-        )
-    return jsonify(payload)
+    return jsonify([material_payload(name) for name in get_all_alloy_names()])
+
+
+def material_payload(name: str) -> Dict[str, Any]:
+    """Serialize one alloy for the Material panel.
+
+    Carries every property the desktop Material dialog lists read-only, not
+    just the handful the first web client needed: freezing range, pour
+    temperature, both shrinkage figures, the thermal group (conductivity,
+    specific heat, latent heat, diffusivity) and both densities. The web panel
+    is meant to reach desktop parity, and a foundry engineer picking an alloy
+    reads these numbers before committing to a four-minute run.
+    """
+    alloy = get_alloy(name)
+    return {
+        "name": name,
+        "full_name": alloy.name,
+        "liquidus_temp": float(alloy.liquidus_temp),
+        "solidus_temp": float(alloy.solidus_temp),
+        "freezing_range": float(alloy.freezing_range),
+        "pouring_temp": float(alloy.pouring_temp),
+        "volumetric_shrinkage": round(float(alloy.volumetric_shrinkage), 2),
+        "linear_shrinkage": float(alloy.linear_shrinkage),
+        "feeding_multiplier": float(alloy.feeding_distance_multiplier),
+        "niyama_threshold": float(alloy.niyama_threshold),
+        "hot_tear_susceptibility": float(getattr(alloy, "hot_tear_susceptibility", 0.0)),
+        "sand_burn_in_susceptibility": float(getattr(alloy, "sand_burn_in_susceptibility", 0.0)),
+        "gas_sensitivity": float(getattr(alloy, "gas_sensitivity", 0.0)),
+        "thermal_conductivity": float(alloy.thermal_conductivity),
+        "specific_heat": float(alloy.specific_heat),
+        "latent_heat": float(alloy.latent_heat),
+        "thermal_diffusivity": float(alloy.thermal_diffusivity),
+        "density_liquid": float(alloy.density_liquid),
+        "density_solid": float(alloy.density_solid),
+        "critical_fraction_solid": float(alloy.critical_fraction_solid),
+        "dendrite_arm_spacing": float(alloy.dendrite_arm_spacing),
+        "surface_tension": float(getattr(alloy, "surface_tension", 0.0)),
+    }
 
 
 @api_bp.route("/uploads", methods=["POST"])
@@ -109,7 +131,34 @@ def get_project(project_id: str):
     project = repo.get_project(database_path(), project_id)
     if project is None:
         return jsonify({"error": "Project not found"}), 404
-    return jsonify({"project": project, "parts": repo.get_parts(database_path(), project_id)})
+    parts = repo.get_parts(database_path(), project_id)
+    # ``?include_mesh=1`` re-reads each part's stored CAD file so a reloaded
+    # project renders its geometry. It is opt-in because a large assembly can
+    # push the response into the tens of megabytes; clients that only need the
+    # settings (the project list, a rename) should not pay for it. The
+    # per-part route below is the incremental alternative.
+    if request.args.get("include_mesh") in {"1", "true", "True"}:
+        for part in parts:
+            mesh_data = load_part_mesh_data(str(part.get("filepath") or ""))
+            if mesh_data is not None:
+                part["mesh_data"] = mesh_data
+    return jsonify({"project": project, "parts": parts})
+
+
+@api_bp.route("/projects/<project_id>/parts/<part_id>/mesh")
+def part_mesh(project_id: str, part_id: str):
+    """Triangle geometry for one stored part, for restoring a project view.
+
+    The shell fetches these in parallel after a refresh so parts appear one by
+    one instead of the whole assembly blocking on the largest STL.
+    """
+    part = repo.get_part(database_path(), project_id, part_id)
+    if part is None:
+        return jsonify({"error": "Part not found"}), 404
+    mesh_data = load_part_mesh_data(str(part.get("filepath") or ""))
+    if mesh_data is None:
+        return jsonify({"error": "Part geometry is unavailable"}), 404
+    return jsonify({"mesh_data": mesh_data})
 
 
 @api_bp.route("/projects/<project_id>", methods=["PUT"])

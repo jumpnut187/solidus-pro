@@ -24,6 +24,7 @@ from core.part_manager import (
 )
 from core.simulation_pipeline import PipelineResult
 from core.surface_extraction import build_surface_payload, normalize_surface_request
+from web.repository import strip_upload_prefix
 
 
 BASIC_SURFACE_MODES = {
@@ -111,6 +112,8 @@ def _sanitize_body_name(name: str) -> str:
     return sanitized or "body"
 
 
+
+
 def upload_cad_file(file: FileStorage, upload_folder: Path) -> List[Dict[str, Any]]:
     """Load a CAD file (STL or STEP) and return one file entry per body.
 
@@ -196,7 +199,7 @@ def upload_cad_file(file: FileStorage, upload_folder: Path) -> List[Dict[str, An
     # already provides real CAD body names that we trust.
     is_single_body = len(body_items) == 1
     if is_single_body:
-        fallback_name = os.path.splitext(filename)[0]
+        fallback_name = strip_upload_prefix(os.path.splitext(filename)[0])
         body_items = [(fallback_name, body_items[0][1])]
 
     entries: List[Dict[str, Any]] = []
@@ -209,7 +212,11 @@ def upload_cad_file(file: FileStorage, upload_folder: Path) -> List[Dict[str, An
         # Fan out each body as its own STL file. Downstream code
         # expects STL on disk regardless of the original upload format,
         # so this preserves the existing pipeline without changes.
-        body_filename = f"{file_id}_b{body_index}_{_sanitize_body_name(body_name)}.stl"
+        # ``body_name`` for a single-body upload has already had any stored
+        # prefix stripped; a STEP body name never carries one. Strip again so
+        # the on-disk name gains exactly one prefix layer no matter what.
+        display_name = strip_upload_prefix(_sanitize_body_name(body_name))
+        body_filename = f"{file_id}_b{body_index}_{display_name}.stl"
         body_path = upload_folder / body_filename
         body_mesh.export(str(body_path))
 
@@ -221,6 +228,9 @@ def upload_cad_file(file: FileStorage, upload_folder: Path) -> List[Dict[str, An
             {
                 "file_id": f"{file_id}_b{body_index}",
                 "filename": body_filename,
+                # The name the UI should show: the original file (or CAD body)
+                # stem, free of the storage prefix.
+                "display_name": display_name,
                 "filepath": str(body_path),
                 "source_file": filename,
                 "body_name": body_name,
@@ -258,6 +268,31 @@ def upload_stl_file(file: FileStorage, upload_folder: Path) -> List[Dict[str, An
     don't break. Internally identical to ``upload_cad_file``.
     """
     return upload_cad_file(file, upload_folder)
+
+
+def load_part_mesh_data(filepath: str) -> Optional[Dict[str, Any]]:
+    """Re-read a stored part file and rebuild its ``mesh_data`` payload.
+
+    Upload responses carry the triangle soup the viewport needs, but nothing
+    persisted it: a browser refresh dropped every part's geometry because the
+    project row only stores the path on disk. This reads that path back so a
+    reloaded project renders identically to a freshly uploaded one.
+
+    Returns ``None`` when the file is missing or unreadable rather than
+    raising, so one broken part cannot fail a whole project load.
+    """
+    if not filepath:
+        return None
+    path = Path(filepath)
+    if not path.exists():
+        return None
+    try:
+        loaded = trimesh.load(str(path), force="mesh")
+    except Exception:
+        return None
+    if not isinstance(loaded, trimesh.Trimesh) or len(loaded.faces) == 0:
+        return None
+    return _build_mesh_data(loaded)
 
 
 def build_part_manager(parts_data: list[Dict[str, Any]]) -> PartManager:

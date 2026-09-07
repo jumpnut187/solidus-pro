@@ -1,0 +1,285 @@
+/* Real dialogs: a backdrop, a focus trap, Escape to close. Sized so even the
+ * tallest one (Solidification Parameters, 45 fields over 8 tabs) fits inside a
+ * 768px-tall window without the page behind it moving. */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: grid;
+  place-items: center;
+  padding: var(--sp-5);
+  background: rgba(4, 6, 10, 0.66);
+  backdrop-filter: blur(3px);
+  animation: modal-fade 120ms ease-out;
+}
+
+.modal {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-height: 100%;
+  min-height: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-1);
+  box-shadow: var(--shadow-modal);
+  animation: modal-rise 140ms ease-out;
+}
+
+.modal-sm {
+  max-width: 420px;
+}
+
+.modal-md {
+  max-width: 620px;
+}
+
+.modal-lg {
+  max-width: 880px;
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  flex: 0 0 auto;
+  padding: var(--sp-4) var(--sp-5);
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-title {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+
+.modal-subtitle {
+  color: var(--text-faint);
+  font-size: var(--fs-sm);
+}
+
+.modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--sp-5);
+}
+
+.modal-body-flush {
+  padding: 0;
+}
+
+.modal-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex: 0 0 auto;
+  padding: var(--sp-4) var(--sp-5);
+  border-top: 1px solid var(--border);
+}
+
+@keyframes modal-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes modal-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .modal-backdrop,
+  .modal {
+    animation: none;
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * Tabs (Solidification Parameters)
+ * ----------------------------------------------------------------------- */
+
+.tabs {
+  display: flex;
+  align-items: stretch;
+  gap: var(--sp-1);
+  padding: 0 var(--sp-5);
+  border-bottom: 1px solid var(--border);
+  /* `overflow-x: auto` on its own also clips vertically, which shaved the
+   * descenders off "Feeding" and "Air Gap". The explicit height plus visible
+   * vertical overflow keeps the labels and the active underline intact. */
+  overflow-x: auto;
+  overflow-y: visible;
+  scrollbar-width: none;
+}
+
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.tab {
+  position: relative;
+  flex: 0 0 auto;
+  min-height: 38px;
+  padding: 0 var(--sp-4);
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--fs-base);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: var(--text);
+}
+
+.tab[aria-selected='true'] {
+  color: var(--accent-hover);
+}
+
+.tab[aria-selected='true']::after {
+  content: '';
+  position: absolute;
+  left: var(--sp-3);
+  right: var(--sp-3);
+  bottom: -1px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+}
+
+/* A parameter row: label + unit on the left, control on the right. Two columns
+ * so 45 fields stay legible instead of turning into a wall of stacked pairs. */
+.param-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.param-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 118px;
+  align-items: center;
+  gap: var(--sp-5);
+  min-width: 0;
+  /* Capped and centred: an uncapped row in an 880px dialog left a hand's width
+   * of dead space between a label and the value it belongs to. */
+  width: 100%;
+  max-width: 620px;
+  margin-inline: auto;
+}
+
+.param-row.is-slider {
+  grid-template-columns: minmax(0, 1fr) minmax(90px, 1fr) 96px;
+  max-width: 760px;
+}
+
+.param-label {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.param-name {
+  font-size: var(--fs-base);
+  overflow-wrap: anywhere;
+}
+
+.param-unit {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+}
+
+.param-subgroup {
+  width: 100%;
+  max-width: 760px;
+  margin: var(--sp-4) auto 0;
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--border);
+}
+
+/* --------------------------------------------------------------------------
+ * Project list
+ * ----------------------------------------------------------------------- */
+
+.project-table-wrap {
+  max-height: min(60vh, 460px);
+  overflow-y: auto;
+}
+
+.project-name-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.project-name-cell strong {
+  font-weight: 550;
+  overflow-wrap: anywhere;
+}
+
+.project-actions {
+  display: flex;
+  gap: var(--sp-2);
+  justify-content: flex-end;
+}
+
+/* --------------------------------------------------------------------------
+ * Help / About / Hardware content
+ * ----------------------------------------------------------------------- */
+
+.prose {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  font-size: var(--fs-md);
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+.prose h3 {
+  color: var(--text);
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+
+.prose ul {
+  margin: 0;
+  padding-left: var(--sp-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.kv-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--sp-2) var(--sp-5);
+  font-size: var(--fs-base);
+}
+
+.kv-grid dt {
+  color: var(--text-faint);
+}
+
+.kv-grid dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}

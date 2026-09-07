@@ -1,23 +1,34 @@
-import type { ProjectSettings } from './api';
+import type { AnalysisOptions, PerformanceOptions, ProjectSettings, SolidificationParams } from './api';
+import { FILTER_KEYS, PARAM_DEFS } from './solidificationFields';
 
-export const analysisDefaults = {
+/**
+ * Analysis toggles, matching `ui/dialogs/analysis_options_dialog.py`.
+ * `gas_porosity` was missing from the web client entirely.
+ */
+export const analysisDefaults: AnalysisOptions = {
   shrinkage: true,
   hotspot: true,
   niyama: false,
   hot_tear: false,
   sand_burn_in: false,
+  gas_porosity: false,
   fraction_liquid: true,
   feeding_path: false,
   stress_analysis: false,
   microstructure: false,
   // Mold-filling (CFD) analysis. Gated in the UI on a pour location existing
-  // (see AnalysisDrawer / App.tsx) and on the backend by
-  // core.filling_stage.maybe_run_filling.
+  // and on the backend by core.filling_stage.maybe_run_filling.
   filling: false,
   sand_restraint_index: 0.5
 };
 
-export const performanceDefaults = {
+/**
+ * Performance options. `use_gpu` is read by
+ * `web/services/simulation_queue.py` and had no web control before; the
+ * desktop defaults it on from `config.settings.use_gpu`.
+ */
+export const performanceDefaults: PerformanceOptions = {
+  use_gpu: true,
   use_incremental: false,
   use_chunked_voxelization: false,
   part_assignment_mode: 'parallel',
@@ -26,116 +37,71 @@ export const performanceDefaults = {
   max_voxels_for_visualization: 90000
 };
 
-export const solidificationDefaults = {
-  feeding: {
-    base_feeding_distance: 6,
-    min_influence_factor: 0.6,
-    riser_max_reduction: 0.1,
-    riser_min_reduction: 1,
-    post_contact_reduction: 0.35,
-    disconnected_neck_floor: 0.7,
-    shrink_scalar: 1,
-    feeding_zone_vertical_bias: 0.5
-  },
-  chill: {
-    max_chill_boost: 3,
-    shrinkage_radius_multiplier: 1.5,
-    shrinkage_max_reduction: 0.15,
-    shrinkage_min_reduction: 1,
-    thickness_fallback_voxels: 5
-  },
-  exothermic: {
-    ignition_delay: 10,
-    burn_duration: 120,
-    insulation_only_factor: 0.7,
-    full_exothermic_factor: 0.5,
-    decay_time_constant: 60
-  },
-  air_gap: {
-    time_constant: 60,
-    surface_influence_depth: 0.5,
-    max_slowdown: 0.75
-  },
-  thermal_boundary: {
-    mold_temperature: 21,
-    chill_temperature: 21,
-    htc_cast_interface: 500,
-    htc_riser_post: 350,
-    htc_riser: 220,
-    htc_gating: 400
-  },
-  timing: {
-    chvorinov_mold_constant: 280,
-    safety_factor_with_risers: 2.5,
-    safety_factor_no_risers: 1.5,
-    min_simulation_time: 120,
-    max_simulation_time: 14400,
-    sand_saturation_time: 30,
-    max_hot_sand_slowdown: 0.6
-  },
-  hot_tear: {
-    mold_restraint_index: 0.5,
-    metal_mold_friction_index: 0.5,
-    core_restraint_index: 0.0,
-    low_melting_impurity_index: 0.0,
-    hot_tear_zone_threshold: 0.0,
-    healing_relief_strength: 0.65,
-    surface_restraint_depth_inches: 0.5,
-    solid_path_search_depth: 8
-  },
-  filling: {
-    pour_rate_lb_s: 5,
-    pour_time_s: 0,
-    pour_temperature_c: 0,
-    initial_head_in: 4,
-    fill_grid_coarsening: 2,
-    choke_auto_resolution: 1,
-    max_fill_time_s: 60,
-    smagorinsky_cs: 0.16,
-    lattice_velocity_max: 0.05,
-    wall_htc_multiplier: 1,
-    inlet_mode_code: 0,
-    pour_mode_code: 0,
-    vent_risers: 1,
-    cold_shut_arrival_gap_s: 0.5,
-    cold_shut_temp_margin_c: 25,
-    entrapment_check_interval: 50,
-    filter: {
-      porosity: 0.85,
-      pore_diameter_mm: 2.54,
-      ergun_prefactor: 2.2,
-      forchheimer_c_f: 0.55,
-      contact_angle_deg: 120,
-      window_fraction: 0.45,
-      rated_velocity_warn_factor: 1.5,
-      head_fraction_warn: 0.25,
-      priming_enabled: 1,
-      drag_enabled: 1
+/**
+ * Solidification defaults derived from the single field table rather than
+ * repeated by hand — the old copy had drifted from the desktop dialog and the
+ * two disagreed on several defaults.
+ */
+export function buildSolidificationDefaults(): SolidificationParams {
+  const params: SolidificationParams = {};
+  for (const def of PARAM_DEFS) {
+    const group = (params[def.group] ??= {});
+    if (def.group === 'filling' && FILTER_KEYS.has(def.key)) {
+      const filter = (group.filter ??= {}) as Record<string, number>;
+      filter[def.key] = def.default;
+    } else {
+      group[def.key] = def.default;
     }
   }
+  return params;
+}
+
+export const solidificationDefaults: SolidificationParams = buildSolidificationDefaults();
+
+export const meshDefaults = {
+  voxelSize: 0.1,
+  voxelSizeMin: 0.02,
+  voxelSizeMax: 0.5,
+  voxelSizeStep: 0.02,
+  refinementMin: 1,
+  refinementMax: 4,
+  refinement: 3
 };
 
 export function defaultSettings(): ProjectSettings {
   return {
-    name: `Solidus Flow ${new Date().toLocaleString()}`,
+    name: 'Untitled Casting',
     alloy: 'WCB',
-    voxel_size: 0.1,
-    refinement_level: 3,
+    voxel_size: meshDefaults.voxelSize,
+    refinement_level: meshDefaults.refinement,
     memory_mode: 'auto',
     analysis_options: { ...analysisDefaults },
     performance_options: { ...performanceDefaults },
-    solidification_params: structuredClone(solidificationDefaults),
+    solidification_params: buildSolidificationDefaults(),
     pour_location: null
   };
 }
 
-const SETTINGS_STORAGE_KEY = 'solidus.settings.v1';
+/** Niyama threshold hints, matching `AnalysisOptionsDialog.update_niyama_info`. */
+const NIYAMA_HINTS: Record<string, number> = { WCB: 1.0, CF8: 0.7, C958: 1.2 };
+
+export function niyamaHint(alloy: string): string {
+  const threshold = NIYAMA_HINTS[alloy] ?? 1.0;
+  return `Niyama threshold for ${alloy}: below ${threshold.toFixed(1)} indicates risk.`;
+}
+
+const SETTINGS_STORAGE_KEY = 'solidus.settings.v2';
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function deepMerge<T>(base: T, override: unknown): T {
+/**
+ * Merge stored settings over the defaults, keeping only keys the defaults
+ * declare. A key that has since been removed from the app cannot resurrect
+ * itself out of a stale localStorage blob.
+ */
+export function deepMerge<T>(base: T, override: unknown): T {
   if (!isPlainObject(base) || !isPlainObject(override)) {
     return override === undefined ? base : (override as T);
   }
@@ -153,7 +119,7 @@ export function loadStoredSettings(): ProjectSettings {
   try {
     const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
     if (!raw) return defaultSettings();
-    return deepMerge(defaultSettings(), JSON.parse(raw));
+    return deepMerge(defaultSettings(), JSON.parse(raw) as unknown);
   } catch {
     return defaultSettings();
   }
@@ -167,22 +133,3 @@ export function saveStoredSettings(settings: ProjectSettings): void {
     /* storage unavailable (private mode / quota) - ignore */
   }
 }
-
-export const resultModes = [
-  { id: 'shrinkage', label: 'Shrinkage / Porosity', color: '#ff3f24' },
-  { id: 'feed_modulus', label: 'Feed Modulus', color: '#ffd21a' },
-  { id: 'hotspot', label: 'Hot Spots', color: '#ff9f1c' },
-  { id: 'niyama_raw', label: 'Raw Niyama', color: '#38bdf8' },
-  { id: 'niyama', label: 'Niyama Risk', color: '#b85cff' },
-  { id: 'combined_feed_risk', label: 'Combined Feed Risk', color: '#f43f5e' },
-  { id: 'fraction_liquid', label: 'Fraction Liquid', color: '#ff5c1f' },
-  { id: 'fill_time', label: 'Fill Time', color: '#2f6fed' },
-  { id: 'hot_tear', label: 'Hot Tear Risk', color: '#20d3ff' },
-  { id: 'sand_burn_in', label: 'Sand Burn-In', color: '#c08142' },
-  { id: 'feeding_quality', label: 'Blocked Feeding', color: '#ff2d55' },
-  { id: 'thermal_stress', label: 'Thermal Stress', color: '#5eead4' },
-  { id: 'distortion', label: 'Distortion', color: '#a3e635' },
-  { id: 'crack_susceptibility', label: 'Crack Susceptibility', color: '#f472b6' },
-  { id: 'sdas', label: 'SDAS', color: '#facc15' },
-  { id: 'predicted_uts', label: 'Low UTS', color: '#ef4444' }
-];

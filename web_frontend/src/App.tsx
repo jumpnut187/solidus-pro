@@ -1,515 +1,1008 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { BabylonViewport } from './components/BabylonViewport';
-import { ResultLegend } from './components/ResultLegend';
-import { Sidebar, type DrawerId } from './components/Sidebar';
-import { PartsDrawer } from './components/drawers/PartsDrawer';
-import { MaterialDrawer } from './components/drawers/MaterialDrawer';
-import { MeshDrawer } from './components/drawers/MeshDrawer';
-import { AnalysisDrawer } from './components/drawers/AnalysisDrawer';
-import { PerformanceDrawer } from './components/drawers/PerformanceDrawer';
-import { SolidificationDrawer } from './components/drawers/SolidificationDrawer';
-import type { PourLocationPick } from './components/BabylonViewport';
-import { api, type MaterialInfo, type ProjectPart, type ResultFieldsPayload } from './lib/api';
-import { loadStoredSettings, saveStoredSettings } from './lib/defaults';
-import { loadUiPrefs, saveUiPrefs, type UiPrefs } from './lib/uiPrefs';
+import { CanvasStage } from './components/CanvasStage';
+import { IconRail } from './components/IconRail';
+import { ResultsPanel } from './components/ResultsPanel';
+import { Toasts } from './components/CanvasOverlays';
+import { TopBar } from './components/TopBar';
+import { TransportBar } from './components/TransportBar';
+import { AnalysisPanel } from './components/panels/AnalysisPanel';
+import { MaterialPanel } from './components/panels/MaterialPanel';
+import { MeshPanel, type MeshStatus } from './components/panels/MeshPanel';
+import { PartsPanel } from './components/panels/PartsPanel';
+import { PerformancePanel } from './components/panels/PerformancePanel';
+import { ProjectsPanel } from './components/panels/ProjectsPanel';
+import { SolidificationPanel } from './components/panels/SolidificationPanel';
+import { ConfirmDialog, PromptDialog, type ConfirmRequest, type PromptRequest } from './components/modals/ConfirmDialog';
+import { AboutModal, HardwareInfoModal, HelpGuideModal } from './components/modals/InfoModals';
+import { OpenProjectModal } from './components/modals/OpenProjectModal';
+import { SolidificationModal } from './components/modals/SolidificationModal';
+import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
+import { useSimulationJob } from './hooks/useSimulationJob';
+import { useToasts } from './hooks/useToasts';
+import {
+  api,
+  type AlloyGuideRow,
+  type HardwareInfo,
+  type MaterialInfo,
+  type ProjectPart,
+  type ProjectRecord,
+  type ProjectSettings,
+  type ProjectSummary
+} from './lib/api';
+import { arrangeGrid, arrangeLine, DUPLICATE_OFFSET, type Axis } from './lib/arrange';
+import { analysisDefaults, buildSolidificationDefaults, defaultSettings, loadStoredSettings, meshDefaults, performanceDefaults, saveStoredSettings } from './lib/defaults';
+import { formatCount } from './lib/format';
+import { inferPartType } from './lib/partTypes';
+import {
+  loadShellPrefs,
+  loadStoredProjectId,
+  saveShellPrefs,
+  saveStoredProjectId,
+  type PanelId,
+  type ShellPrefs
+} from './lib/uiPrefs';
+import {
+  isTimeMode,
+  type CameraPreset,
+  type GridMeta,
+  type ProbeReading,
+  type ResultViewState,
+  type ViewportHandle,
+  type ViewportTool
+} from './lib/viewState';
 
-const MAX_RESULT_POINTS = 120000;
+const CAD_PATTERN = /\.(stl|step|stp)$/i;
+/** Playback tick. 90 ms matches the desktop timer; speed scales the step. */
+const PLAYBACK_INTERVAL_MS = 90;
+const PLAYBACK_STEP_PERCENT = 1;
+/** How long to wait after the last edit before persisting settings. */
+const AUTOSAVE_DEBOUNCE_MS = 700;
+
+type ModalId = 'openProject' | 'solidification' | 'help' | 'hardware' | 'about' | null;
 
 export function App() {
-  const [settings, setSettings] = useState(loadStoredSettings);
-  const [ui, setUi] = useState<UiPrefs>(loadUiPrefs);
-  const [projectId, setProjectId] = useState<string | null>(null);
-  const [materials, setMaterials] = useState<MaterialInfo[]>([]);
+  const [settings, setSettings] = useState<ProjectSettings>(loadStoredSettings);
+  const [shell, setShell] = useState<ShellPrefs>(loadShellPrefs);
+  // Seeded from storage, not from an effect: the effect that persists this id
+  // runs on mount too, and starting at null made it erase the very id the
+  // restore was about to read.
+  const [projectId, setProjectId] = useState<string | null>(loadStoredProjectId);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [projectsLoading, setProjectsLoading] = useState(false);
   const [parts, setParts] = useState<ProjectPart[]>([]);
   const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
-  const [status, setStatus] = useState('Ready');
-  const [progress, setProgress] = useState(0);
-  const [isRunning, setIsRunning] = useState(false);
-  const [isPlayingTimeline, setIsPlayingTimeline] = useState(false);
-  const [results, setResults] = useState<Record<string, unknown> | null>(null);
-  const [resultFields, setResultFields] = useState<ResultFieldsPayload | null>(null);
-  const [meshEstimate, setMeshEstimate] = useState('No mesh estimate');
-  const [mlStatus, setMlStatus] = useState('No ML recommendation yet');
-  const [cameraCommand, setCameraCommand] = useState<string | null>(null);
-  const [activeDrawer, setActiveDrawer] = useState<DrawerId | null>(null);
-  const [pourPickMode, setPourPickMode] = useState(false);
+  const [materials, setMaterials] = useState<MaterialInfo[]>([]);
+  const [hardware, setHardware] = useState<HardwareInfo | null>(null);
+  const [alloyGuide, setAlloyGuide] = useState<AlloyGuideRow[]>([]);
 
-  const material = materials.find((item) => item.name === settings.alloy);
-  const resultsReady = Boolean(results && resultFields);
-  const statusWarning = /axis mismatch|⚠/i.test(status);
-  const activeResultCount = useMemo(
-    () => countActiveResults(resultFields, ui.resultMode, ui.threshold, ui.timePercent),
-    [resultFields, ui.resultMode, ui.threshold, ui.timePercent]
-  );
+  const [resultsAvailable, setResultsAvailable] = useState(false);
+  const [resultsVersion, setResultsVersion] = useState(0);
+  const [gridMeta, setGridMeta] = useState<GridMeta | null>(null);
+  const [viewportStatus, setViewportStatus] = useState<string | null>(null);
+  const [probe, setProbe] = useState<ProbeReading | null>(null);
 
-  function patchUi(patch: Partial<UiPrefs>) {
-    setUi((prev) => ({ ...prev, ...patch }));
-  }
+  const [modal, setModal] = useState<ModalId>(null);
+  const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
+  const [promptRequest, setPromptRequest] = useState<PromptRequest | null>(null);
 
-  useEffect(() => {
-    saveStoredSettings(settings);
-  }, [settings]);
+  const [uploading, setUploading] = useState(false);
+  const [loadingProject, setLoadingProject] = useState(false);
+  const [meshEstimate, setMeshEstimate] = useState<MeshStatus>(null);
+  const [mlStatus, setMlStatus] = useState<MeshStatus>(null);
+  const [loop, setLoop] = useState(true);
 
-  useEffect(() => {
-    saveUiPrefs(ui);
-  }, [ui]);
+  const viewportRef = useRef<ViewportHandle | null>(null);
+  const addPartsRef = useRef<() => void>(() => undefined);
+  const skipAutosave = useRef(true);
 
-  useEffect(() => {
-    api.materials().then(setMaterials).catch((error) => setStatus(error.message));
+  const toasts = useToasts();
+  const { notify, succeed, fail, warn } = toasts;
+
+  const view = shell.view;
+  const patchShell = useCallback((patch: Partial<ShellPrefs>) => {
+    setShell((current) => ({ ...current, ...patch }));
+  }, []);
+  const patchView = useCallback((patch: Partial<ResultViewState>) => {
+    setShell((current) => ({ ...current, view: { ...current.view, ...patch } }));
   }, []);
 
+  // --- Reference data ------------------------------------------------------
   useEffect(() => {
-    if (!isPlayingTimeline || ui.resultMode !== 'fraction_liquid' || !resultsReady) return;
-    const interval = window.setInterval(() => {
-      setUi((prev) => {
-        const next = prev.timePercent + prev.flSpeed;
-        return { ...prev, timePercent: next >= 100 ? 0 : Math.min(100, next) };
-      });
-    }, 90);
-    return () => window.clearInterval(interval);
-  }, [isPlayingTimeline, ui.resultMode, resultsReady]);
+    api.materials().then(setMaterials).catch((error: unknown) => fail(error, 'Unable to load alloys'));
+    api.hardware().then(setHardware).catch(() => setHardware(null));
+    api
+      .helpAlloys()
+      .then((payload) => setAlloyGuide(payload.alloys))
+      .catch(() => setAlloyGuide([]));
+  }, [fail]);
 
-  useEffect(() => {
-    if (ui.resultMode !== 'fraction_liquid') {
-      setIsPlayingTimeline(false);
+  const refreshProjects = useCallback(async () => {
+    setProjectsLoading(true);
+    try {
+      setProjects(await api.listProjects());
+    } catch (error) {
+      fail(error, 'Unable to list projects');
+    } finally {
+      setProjectsLoading(false);
     }
-  }, [ui.resultMode]);
+  }, [fail]);
 
   useEffect(() => {
-    // Mold filling can only run against an inlet point, so if the pour
-    // location is ever cleared, force the analysis toggle off with it --
-    // AnalysisDrawer only disables the checkbox, it doesn't clear a value
-    // that was already set.
+    void refreshProjects();
+  }, [refreshProjects]);
+
+  // --- Persistence ---------------------------------------------------------
+  useEffect(() => saveStoredSettings(settings), [settings]);
+  useEffect(() => saveShellPrefs(shell), [shell]);
+  useEffect(() => saveStoredProjectId(projectId), [projectId]);
+
+  const job = useSimulationJob({
+    onCompleted: () => {
+      setResultsAvailable(true);
+      setResultsVersion((version) => version + 1);
+      patchView({ timePercent: 0, playing: false });
+      succeed('Simulation complete.');
+      // The project row is now `completed`; refresh so the list and the Open
+      // dialog show it as having results.
+      void refreshProjects();
+    },
+    onError: (message) => fail(message, 'Simulation failed')
+  });
+
+  // Mold filling can only run against an inlet point, so if the pour location
+  // is cleared the analysis toggle has to come off with it -- the panel only
+  // disables the checkbox, it does not clear a value that was already set.
+  useEffect(() => {
     if (!settings.pour_location && settings.analysis_options.filling) {
-      setSettings((prev) => ({
-        ...prev,
-        analysis_options: { ...prev.analysis_options, filling: false }
+      setSettings((current) => ({
+        ...current,
+        analysis_options: { ...current.analysis_options, filling: false }
       }));
     }
   }, [settings.pour_location, settings.analysis_options.filling]);
 
-  async function ensureProject(): Promise<string> {
+  // Debounced autosave. Panels apply live, so the project row has to keep up
+  // without the user pressing anything -- but not on every keystroke, and not
+  // immediately after a project is loaded (that would just echo it back).
+  useEffect(() => {
+    if (!projectId) return;
+    if (skipAutosave.current) {
+      skipAutosave.current = false;
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      api.updateProject(projectId, settings).catch((error: unknown) => fail(error, 'Unable to save project'));
+    }, AUTOSAVE_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [projectId, settings, fail]);
+
+  // --- Playback ------------------------------------------------------------
+  useEffect(() => {
+    if (!view.playing || !isTimeMode(view.mode) || !resultsAvailable) return;
+    const timer = window.setInterval(() => {
+      setShell((current) => {
+        const next = current.view.timePercent + PLAYBACK_STEP_PERCENT * current.view.speed;
+        if (next >= 100) {
+          return {
+            ...current,
+            view: { ...current.view, timePercent: loop ? 0 : 100, playing: loop }
+          };
+        }
+        return { ...current, view: { ...current.view, timePercent: next } };
+      });
+    }, PLAYBACK_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [view.playing, view.mode, view.speed, resultsAvailable, loop]);
+
+  // --- Project lifecycle ---------------------------------------------------
+  const applyProjectRecord = useCallback((project: ProjectRecord) => {
+    // Merge over the defaults so a project saved before a setting existed still
+    // opens with a complete, valid settings object.
+    setSettings({
+      name: project.name,
+      alloy: project.alloy || 'WCB',
+      voxel_size: project.voxel_size ?? meshDefaults.voxelSize,
+      refinement_level: project.refinement_level ?? meshDefaults.refinement,
+      memory_mode: project.memory_mode || 'auto',
+      analysis_options: { ...analysisDefaults, ...(project.analysis_options ?? {}) },
+      performance_options: { ...performanceDefaults, ...(project.performance_options ?? {}) },
+      solidification_params: {
+        ...buildSolidificationDefaults(),
+        ...(project.solidification_params ?? {})
+      },
+      pour_location: project.pour_location ?? null
+    });
+  }, []);
+
+  const openProject = useCallback(
+    async (id: string, options?: { silent?: boolean }) => {
+      try {
+        setLoadingProject(true);
+        const { project, parts: storedParts } = await api.getProject(id);
+        skipAutosave.current = true;
+        applyProjectRecord(project);
+        setProjectId(id);
+        setParts([]);
+        setSelectedPartId(storedParts[0]?.id ?? null);
+        setGridMeta(null);
+        setProbe(null);
+        job.reset(project.status === 'completed' ? 'Results ready' : 'Ready');
+        setResultsAvailable(project.status === 'completed');
+        setResultsVersion((version) => version + 1);
+        if (!options?.silent) succeed(`Opened "${project.name}".`);
+
+        // Geometry is not in the project row, so fetch each part's triangles in
+        // parallel and append each part only once its mesh is in hand: the
+        // renderer builds a part's geometry the first time it sees the part and
+        // never revisits it, so a part added before its mesh arrives would stay
+        // invisible for the rest of the session. Appending in original order
+        // keeps the table stable however the requests interleave.
+        const order = new Map(storedParts.map((part, index) => [part.id, index]));
+        await Promise.all(
+          storedParts.map(async (part) => {
+            const meshData = await api.partMesh(id, part.id).catch(() => undefined);
+            // A part whose file is gone is still listed; it just cannot render.
+            const loaded = meshData ? { ...part, meshData } : part;
+            setParts((current) =>
+              [...current, loaded].sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0))
+            );
+          })
+        );
+        return true;
+      } catch (error) {
+        if (options?.silent) {
+          // A remembered project that no longer exists must not wedge startup:
+          // fall back to an empty session instead of showing a dead id.
+          setProjectId(null);
+          saveStoredProjectId(null);
+        } else {
+          fail(error, 'Unable to open the project');
+        }
+        return false;
+      } finally {
+        setLoadingProject(false);
+      }
+    },
+    [applyProjectRecord, fail, job, succeed]
+  );
+
+  // Restore the last project on load. This is the fix for the old client's
+  // worst behaviour: the project id lived only in React state, so a refresh
+  // silently discarded the parts, the settings and the results.
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (restoredRef.current) return;
+    restoredRef.current = true;
+    const stored = loadStoredProjectId();
+    if (stored) void openProject(stored, { silent: true });
+  }, [openProject]);
+
+  const ensureProject = useCallback(async (): Promise<string> => {
     if (projectId) {
       await api.updateProject(projectId, settings);
       return projectId;
     }
     const created = await api.createProject(settings);
+    skipAutosave.current = true;
     setProjectId(created.id);
+    void refreshProjects();
     return created.id;
-  }
+  }, [projectId, settings, refreshProjects]);
 
-  async function handleFiles(files: FileList | File[]) {
-    const fileArray = Array.from(files).filter((file) => /\.(stl|step|stp)$/i.test(file.name));
-    if (!fileArray.length) return;
-    setStatus(`Uploading ${fileArray.length} CAD file(s)...`);
-    const nextProjectId = await ensureProject();
-    const uploaded = await api.uploadFiles(fileArray);
-    const added: ProjectPart[] = [];
-    for (const file of uploaded.files) {
-      const response = await api.addPart(nextProjectId, {
-        name: file.filename.replace(/\.(stl|step|stp)$/i, ''),
-        part_type: file.part_type,
-        filepath: file.filepath,
-        position_x: 0,
-        position_y: 0,
-        position_z: 0,
-        rotation_x: 0,
-        rotation_y: 0,
-        rotation_z: 0,
-        scale: 1,
-        visible: true,
-        is_open_top: false,
-        meshData: file.mesh_data
-      });
-      added.push({ ...response.part, meshData: file.mesh_data });
-    }
-    setParts((current) => [...current, ...added]);
-    setSelectedPartId(added.at(-1)?.id ?? selectedPartId);
-    setStatus(`Loaded ${added.length} part(s)`);
-  }
-
-  async function updateSelectedPart(patch: Partial<ProjectPart>) {
-    if (!projectId) return;
-    const targetId = patch.id ?? selectedPartId;
-    if (!targetId) return;
-    const current = parts.find((p) => p.id === targetId);
-    if (!current) return;
-    const next = { ...current, ...patch };
-    if (patch.part_type && patch.part_type !== 'riser' && next.is_open_top) {
-      next.is_open_top = false;
-    }
-    setParts((prev) => prev.map((part) => (part.id === next.id ? next : part)));
-    if (patch.id && selectedPartId !== patch.id) setSelectedPartId(patch.id);
+  const saveProject = useCallback(async () => {
     try {
-      await api.updatePart(projectId, next);
+      const id = await ensureProject();
+      succeed('Project saved.');
+      void refreshProjects();
+      return id;
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Unable to update part');
+      fail(error, 'Unable to save the project');
+      return null;
     }
-  }
+  }, [ensureProject, fail, refreshProjects, succeed]);
 
-  async function removePart(partId: string) {
-    if (!projectId) return;
-    setParts((current) => current.filter((p) => p.id !== partId));
-    if (selectedPartId === partId) setSelectedPartId(null);
-    try {
-      await api.deletePart(projectId, partId);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Unable to remove part');
-    }
-  }
+  const newProject = useCallback(() => {
+    setConfirmRequest({
+      title: 'New project',
+      message: 'Start a new project? The current one stays saved on the server and can be reopened.',
+      confirmLabel: 'New project',
+      onConfirm: () => {
+        skipAutosave.current = true;
+        setSettings(defaultSettings());
+        setProjectId(null);
+        setParts([]);
+        setSelectedPartId(null);
+        setResultsAvailable(false);
+        setGridMeta(null);
+        setProbe(null);
+        job.reset();
+        patchShell({ activePanel: 'parts' });
+        notify('Started a new project.');
+      }
+    });
+  }, [job, notify, patchShell]);
 
-  async function clearAllParts() {
-    if (!projectId) return;
-    const ids = parts.map((p) => p.id);
-    setParts([]);
-    setSelectedPartId(null);
-    for (const id of ids) {
+  const saveProjectAs = useCallback(() => {
+    setPromptRequest({
+      title: 'Save As',
+      label: 'New project name',
+      initialValue: `${settings.name ?? 'Untitled Casting'} (copy)`,
+      confirmLabel: 'Save a copy',
+      hint: 'Copies the parts and every setting. Results stay with the original.',
+      onSubmit: (name) => {
+        void (async () => {
+          try {
+            const sourceId = await ensureProject();
+            const created = await api.duplicateProject(sourceId, name);
+            await openProject(created.id, { silent: true });
+            setSettings((current) => ({ ...current, name }));
+            succeed(`Saved as "${name}".`);
+            void refreshProjects();
+          } catch (error) {
+            fail(error, 'Unable to save a copy');
+          }
+        })();
+      }
+    });
+  }, [ensureProject, fail, openProject, refreshProjects, settings.name, succeed]);
+
+  // --- Parts ---------------------------------------------------------------
+  const addFiles = useCallback(
+    async (files: File[]) => {
+      const accepted = files.filter((file) => CAD_PATTERN.test(file.name));
+      if (!accepted.length) {
+        if (files.length) warn('Only STL, STEP and STP files can be added.');
+        return;
+      }
+      setUploading(true);
+      notify(`Uploading ${accepted.length} file${accepted.length === 1 ? '' : 's'}...`);
       try {
-        await api.deletePart(projectId, id);
-      } catch {
-        // ignore individual failures
+        const target = await ensureProject();
+        const uploaded = await api.uploadFiles(accepted);
+        const added: ProjectPart[] = [];
+        for (const file of uploaded.files) {
+          // Prefer the server's clean display name; fall back to the stored
+          // filename minus its extension only if an older server omits it.
+          const name = file.display_name || file.filename.replace(/\.[^.]+$/, '');
+          const response = await api.addPart(target, {
+            name,
+            part_type: file.part_type ?? inferPartType(name),
+            filepath: file.filepath,
+            position_x: 0,
+            position_y: 0,
+            position_z: 0,
+            rotation_x: 0,
+            rotation_y: 0,
+            rotation_z: 0,
+            scale: 1,
+            visible: true,
+            is_open_top: false,
+            meshData: file.mesh_data
+          });
+          added.push({ ...response.part, meshData: file.mesh_data });
+        }
+        setParts((current) => [...current, ...added]);
+        setSelectedPartId(added.at(-1)?.id ?? null);
+        succeed(`Added ${added.length} part${added.length === 1 ? '' : 's'}.`);
+        void refreshProjects();
+      } catch (error) {
+        fail(error, 'Upload failed');
+      } finally {
+        setUploading(false);
       }
-    }
-  }
+    },
+    [ensureProject, fail, notify, refreshProjects, succeed, warn]
+  );
 
-  async function duplicatePart(partId: string) {
-    if (!projectId) return;
-    const part = parts.find((p) => p.id === partId);
-    if (!part) return;
-    try {
-      const response = await api.addPart(projectId, {
-        name: `${part.name} (copy)`,
-        part_type: part.part_type,
-        filepath: part.filepath,
-        position_x: part.position_x,
-        position_y: part.position_y,
-        position_z: part.position_z,
-        rotation_x: part.rotation_x,
-        rotation_y: part.rotation_y,
-        rotation_z: part.rotation_z,
-        scale: part.scale,
-        visible: part.visible,
-        is_open_top: part.is_open_top,
-        meshData: part.meshData
+  const updatePart = useCallback(
+    (partId: string, patch: Partial<ProjectPart>) => {
+      let next: ProjectPart | null = null;
+      setParts((current) =>
+        current.map((part) => {
+          if (part.id !== partId) return part;
+          const merged = { ...part, ...patch };
+          // Open-top only means anything on a riser; changing the type away
+          // from riser has to clear the flag, not leave it set and invisible.
+          if (patch.part_type && patch.part_type !== 'riser') merged.is_open_top = false;
+          next = merged;
+          return merged;
+        })
+      );
+      if (!projectId || !next) return;
+      api.updatePart(projectId, next).catch((error: unknown) => fail(error, 'Unable to update the part'));
+    },
+    [projectId, fail]
+  );
+
+  const removePart = useCallback(
+    (partId: string) => {
+      setParts((current) => current.filter((part) => part.id !== partId));
+      setSelectedPartId((current) => (current === partId ? null : current));
+      if (!projectId) return;
+      api.deletePart(projectId, partId).catch((error: unknown) => fail(error, 'Unable to remove the part'));
+    },
+    [projectId, fail]
+  );
+
+  const duplicatePart = useCallback(
+    (partId: string) => {
+      const part = parts.find((item) => item.id === partId);
+      if (!part || !projectId) return;
+      void (async () => {
+        try {
+          const response = await api.addPart(projectId, {
+            name: `${part.name} (copy)`,
+            part_type: part.part_type,
+            filepath: part.filepath,
+            position_x: part.position_x + DUPLICATE_OFFSET[0],
+            position_y: part.position_y + DUPLICATE_OFFSET[1],
+            position_z: part.position_z + DUPLICATE_OFFSET[2],
+            rotation_x: part.rotation_x,
+            rotation_y: part.rotation_y,
+            rotation_z: part.rotation_z,
+            scale: part.scale,
+            visible: part.visible,
+            is_open_top: part.is_open_top,
+            meshData: part.meshData
+          });
+          setParts((current) => [...current, { ...response.part, meshData: part.meshData }]);
+          setSelectedPartId(response.part.id);
+        } catch (error) {
+          fail(error, 'Unable to duplicate the part');
+        }
+      })();
+    },
+    [parts, projectId, fail]
+  );
+
+  const clearAllParts = useCallback(() => {
+    if (!parts.length) return;
+    setConfirmRequest({
+      title: 'Clear all parts',
+      message: `Remove all ${parts.length} parts from this project? The uploaded files are deleted from the server.`,
+      confirmLabel: 'Remove all',
+      destructive: true,
+      onConfirm: () => {
+        const ids = parts.map((part) => part.id);
+        setParts([]);
+        setSelectedPartId(null);
+        if (!projectId) return;
+        void Promise.all(ids.map((id) => api.deletePart(projectId, id).catch(() => undefined))).then(() =>
+          notify('All parts removed.')
+        );
+      }
+    });
+  }, [parts, projectId, notify]);
+
+  const applyPositions = useCallback(
+    (patches: { id: string; position_x: number; position_y: number; position_z: number }[]) => {
+      if (!patches.length) {
+        warn('Parts need loaded geometry before they can be arranged.');
+        return;
+      }
+      const byId = new Map(patches.map((patch) => [patch.id, patch]));
+      setParts((current) =>
+        current.map((part) => {
+          const patch = byId.get(part.id);
+          return patch ? { ...part, ...patch } : part;
+        })
+      );
+      if (!projectId) return;
+      // Persist from the merged values rather than the stale `parts` closure.
+      setParts((current) => {
+        for (const part of current) {
+          if (byId.has(part.id)) {
+            api.updatePart(projectId, part).catch(() => undefined);
+          }
+        }
+        return current;
       });
-      setParts((current) => [...current, { ...response.part, meshData: part.meshData }]);
-      setSelectedPartId(response.part.id);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Unable to duplicate part');
-    }
-  }
+    },
+    [projectId, warn]
+  );
 
-  async function updateMeshPreview() {
-    const nextProjectId = await ensureProject();
-    try {
-      const preview = await api.meshPreview(nextProjectId, settings.voxel_size);
-      let estimate = `${preview.estimated_voxels.toLocaleString()} voxels, ${preview.estimated_memory_mb.toFixed(0)} MB`;
-      if (!preview.can_proceed && preview.recommended_voxel_size) {
-        estimate += ` | Safe size: ${preview.recommended_voxel_size.toFixed(3)}"`;
+  const arrangeGridAction = useCallback(() => {
+    setPromptRequest({
+      title: 'Arrange in a grid',
+      label: 'Space between parts (inches)',
+      initialValue: '1.0',
+      onSubmit: (value) => {
+        const spacing = Number(value);
+        if (!Number.isFinite(spacing) || spacing < 0) {
+          warn('Enter a spacing of zero or more inches.');
+          return;
+        }
+        applyPositions(arrangeGrid(parts, spacing));
       }
-      setMeshEstimate(estimate);
-      if (!preview.can_proceed) setStatus(preview.message);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Mesh preview failed');
-    }
-  }
+    });
+  }, [applyPositions, parts, warn]);
 
-  async function applyMlMesh() {
-    const nextProjectId = await ensureProject();
-    setMlStatus('Requesting ML mesh recommendation...');
+  const arrangeLineAction = useCallback(() => {
+    setPromptRequest({
+      title: 'Arrange in a line',
+      label: 'Axis (X, Y or Z)',
+      initialValue: 'X',
+      hint: 'Parts are spaced one inch apart along this axis and aligned to the origin on the others.',
+      onSubmit: (value) => {
+        const axis = value.trim().toLowerCase();
+        if (axis !== 'x' && axis !== 'y' && axis !== 'z') {
+          warn('Enter X, Y or Z.');
+          return;
+        }
+        applyPositions(arrangeLine(parts, axis as Axis, 1));
+      }
+    });
+  }, [applyPositions, parts, warn]);
+
+  // --- Mesh ----------------------------------------------------------------
+  const estimateMesh = useCallback(async () => {
     try {
-      const rec = await api.mlMesh(nextProjectId);
+      const target = await ensureProject();
+      const preview = await api.meshPreview(target, settings.voxel_size);
+      const detail = `${formatCount(preview.estimated_voxels)} voxels, ${preview.estimated_memory_mb.toFixed(0)} MB`;
+      setMeshEstimate({
+        text: preview.can_proceed
+          ? detail
+          : `${detail}. ${preview.message} Safe voxel size: ${preview.recommended_voxel_size.toFixed(3)} in.`,
+        tone: preview.can_proceed ? 'success' : 'warning'
+      });
+    } catch (error) {
+      fail(error, 'Mesh estimate failed');
+    }
+  }, [ensureProject, settings.voxel_size, fail]);
+
+  const applyMlMesh = useCallback(async () => {
+    setMlStatus({ text: 'Requesting a recommendation...', tone: 'info' });
+    try {
+      const target = await ensureProject();
+      const recommendation = await api.mlMesh(target);
       setSettings((current) => ({
         ...current,
-        voxel_size: rec.base_voxel_size,
-        refinement_level: rec.refinement_level
+        voxel_size: recommendation.base_voxel_size,
+        refinement_level: recommendation.refinement_level
       }));
-      const source = rec.used_model ? 'ML model' : 'heuristic';
-      setMlStatus(
-        `${source}: ${rec.base_voxel_size.toFixed(3)}" @ refinement ${rec.refinement_level} ` +
-          `(confidence ${rec.confidence.toFixed(2)}) — ${rec.reason}` +
-          (rec.warning ? ` — Warning: ${rec.warning}` : '')
-      );
-      setStatus('Applied ML mesh recommendation.');
+      const source = recommendation.used_model ? 'ML model' : 'heuristic';
+      setMlStatus({
+        text:
+          `${source}: ${recommendation.base_voxel_size.toFixed(3)} in at refinement ${recommendation.refinement_level} ` +
+          `(confidence ${recommendation.confidence.toFixed(2)}). ${recommendation.reason}` +
+          (recommendation.warning ? ` Warning: ${recommendation.warning}` : ''),
+        tone: recommendation.warning ? 'warning' : 'success'
+      });
     } catch (error) {
-      setMlStatus(error instanceof Error ? error.message : 'ML mesh failed');
+      setMlStatus({ text: error instanceof Error ? error.message : 'ML mesh failed', tone: 'warning' });
     }
-  }
+  }, [ensureProject]);
 
-  async function runSimulation() {
+  // --- Run -----------------------------------------------------------------
+  const runSimulation = useCallback(async () => {
     if (!parts.length) {
-      setStatus('Upload at least one CAD part first.');
+      warn('Add at least one CAD part before running.');
       return;
     }
-    const nextProjectId = await ensureProject();
-    setResults(null);
-    setResultFields(null);
-    setIsRunning(true);
-    setProgress(0);
-    setStatus('Submitting simulation...');
+    if (job.isBusy) return;
     try {
-      await api.runProject(nextProjectId);
-      pollStatus(nextProjectId);
+      const target = await ensureProject();
+      setResultsAvailable(false);
+      setGridMeta(null);
+      patchView({ playing: false, timePercent: 0 });
+      await job.start(target);
     } catch (error) {
-      setIsRunning(false);
-      setStatus(error instanceof Error ? error.message : 'Simulation failed to start');
+      fail(error, 'Unable to start the simulation');
     }
-  }
+  }, [parts.length, job, ensureProject, patchView, fail, warn]);
 
-  async function pollStatus(id: string) {
+  const stopSimulation = useCallback(() => {
+    if (!projectId || !job.isBusy) return;
+    void job.cancel(projectId);
+  }, [projectId, job]);
+
+  // --- Screenshot ----------------------------------------------------------
+  const takeScreenshot = useCallback(async () => {
+    const handle = viewportRef.current;
+    if (!handle) return;
     try {
-      const job = await api.status(id);
-      setProgress(job.progress ?? 0);
-      setStatus(job.message || job.status);
-      if (job.status === 'completed') {
-        const payload = await api.results(id);
-        setResults(payload.data);
-        setStatus('Loading result cache...');
-        const fields = await api.resultFields(id, { maxPoints: MAX_RESULT_POINTS });
-        setResultFields(fields);
-        patchUi({ resultMode: 'fraction_liquid', timePercent: 0 });
-        setIsPlayingTimeline(false);
-        setProgress(100);
-        setIsRunning(false);
-        setStatus('Simulation complete');
-      } else if (job.status === 'error' || job.status === 'cancelled') {
-        setIsRunning(false);
-      } else {
-        window.setTimeout(() => pollStatus(id), job.status === 'queued' ? 1500 : 650);
-      }
+      const blob = await handle.screenshot();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      link.download = `${(settings.name ?? 'solidus').replace(/[^\w-]+/g, '_')}_${stamp}.png`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      // Revoke on the next tick; revoking synchronously can beat the download.
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      succeed('Screenshot saved.');
     } catch (error) {
-      setIsRunning(false);
-      setStatus(error instanceof Error ? error.message : 'Status polling failed');
+      fail(error, 'Screenshot failed');
     }
-  }
+  }, [settings.name, succeed, fail]);
 
-  async function cancelSimulation() {
-    if (!projectId) return;
-    await api.cancelProject(projectId);
-    setIsRunning(false);
-    setStatus('Simulation cancelled');
-  }
+  // --- Keyboard ------------------------------------------------------------
+  const closeTopLayer = useCallback(() => {
+    if (promptRequest) return setPromptRequest(null);
+    if (confirmRequest) return setConfirmRequest(null);
+    if (modal) return setModal(null);
+    if (shell.tool !== 'select') return patchShell({ tool: 'select' });
+    if (shell.activePanel) return patchShell({ activePanel: null });
+  }, [promptRequest, confirmRequest, modal, shell.tool, shell.activePanel, patchShell]);
 
-  function handlePourLocationPicked(pick: PourLocationPick) {
-    setSettings((prev) => ({
-      ...prev,
-      pour_location: {
-        schema_version: 1,
-        point_in: pick.point,
-        normal: pick.normal,
-        part_id: pick.partId
-      }
-    }));
-    setPourPickMode(false);
-    setStatus('Pour location set.');
-  }
+  useKeyboardShortcuts({
+    run: () => void runSimulation(),
+    stop: stopSimulation,
+    addPart: () => {
+      patchShell({ activePanel: 'parts' });
+      // The panel mounts on the next paint; open its picker after that.
+      window.setTimeout(() => addPartsRef.current(), 0);
+    },
+    screenshot: () => void takeScreenshot(),
+    saveProject: () => void saveProject(),
+    fitCamera: () => viewportRef.current?.setCamera('fit'),
+    helpGuide: () => setModal('help'),
+    escape: closeTopLayer,
+    togglePlayback: () => {
+      if (isTimeMode(view.mode) && resultsAvailable) patchView({ playing: !view.playing });
+    }
+  });
 
-  function clearPourLocation() {
-    setSettings((prev) => ({ ...prev, pour_location: null }));
-    setPourPickMode(false);
-  }
+  // --- Project list actions ------------------------------------------------
+  const renameProject = useCallback(
+    (project: ProjectSummary) => {
+      setPromptRequest({
+        title: 'Rename project',
+        label: 'Project name',
+        initialValue: project.name,
+        confirmLabel: 'Rename',
+        onSubmit: (name) => {
+          void api
+            .renameProject(project.id, name)
+            .then(() => {
+              if (project.id === projectId) setSettings((current) => ({ ...current, name }));
+              void refreshProjects();
+              succeed(`Renamed to "${name}".`);
+            })
+            .catch((error: unknown) => fail(error, 'Unable to rename the project'));
+        }
+      });
+    },
+    [projectId, refreshProjects, succeed, fail]
+  );
 
-  function setAnalysis(key: string, value: boolean | number) {
-    setSettings((prev) => {
-      const current = prev.analysis_options[key as keyof typeof prev.analysis_options];
-      return {
-        ...prev,
-        analysis_options: {
-          ...prev.analysis_options,
-          [key]: typeof current === 'number' ? Number(value) : Boolean(value),
-        },
-      };
-    });
-  }
+  const duplicateProject = useCallback(
+    (project: ProjectSummary) => {
+      void api
+        .duplicateProject(project.id)
+        .then((created) => {
+          void refreshProjects();
+          succeed(`Duplicated as "${created.project.name}".`);
+        })
+        .catch((error: unknown) => fail(error, 'Unable to duplicate the project'));
+    },
+    [refreshProjects, succeed, fail]
+  );
+
+  const deleteProject = useCallback(
+    (project: ProjectSummary) => {
+      setConfirmRequest({
+        title: 'Delete project',
+        message: `Delete "${project.name}"? Its parts, uploaded files and results are removed permanently.`,
+        confirmLabel: 'Delete',
+        destructive: true,
+        onConfirm: () => {
+          void api
+            .deleteProject(project.id)
+            .then(() => {
+              if (project.id === projectId) {
+                setProjectId(null);
+                setParts([]);
+                setSelectedPartId(null);
+                setResultsAvailable(false);
+                setGridMeta(null);
+              }
+              void refreshProjects();
+              notify(`Deleted "${project.name}".`);
+            })
+            .catch((error: unknown) => fail(error, 'Unable to delete the project'));
+        }
+      });
+    },
+    [projectId, refreshProjects, notify, fail]
+  );
+
+  // --- Derived -------------------------------------------------------------
+  const hasPourLocation = Boolean(settings.pour_location);
+  const closePanel = useCallback(() => patchShell({ activePanel: null }), [patchShell]);
+  const setPanel = useCallback((panel: PanelId | null) => patchShell({ activePanel: panel }), [patchShell]);
+
+  const panel = useMemo(() => {
+    switch (shell.activePanel) {
+      case 'parts':
+        return (
+          <PartsPanel
+            parts={parts}
+            selectedPartId={selectedPartId}
+            onSelectPart={setSelectedPartId}
+            onAddFiles={(files) => void addFiles(files)}
+            onUpdatePart={updatePart}
+            onRemovePart={removePart}
+            onDuplicatePart={duplicatePart}
+            onClearAll={clearAllParts}
+            onArrangeGrid={arrangeGridAction}
+            onArrangeLine={arrangeLineAction}
+            onClose={closePanel}
+            pourLocation={settings.pour_location ?? null}
+            tool={shell.tool}
+            onSetTool={(tool) => patchShell({ tool })}
+            onClearPourLocation={() => {
+              setSettings((current) => ({ ...current, pour_location: null }));
+              patchShell({ tool: 'select' });
+            }}
+            uploading={uploading}
+          />
+        );
+      case 'material':
+        return (
+          <MaterialPanel
+            alloy={settings.alloy}
+            materials={materials}
+            onSelectAlloy={(alloy) => setSettings((current) => ({ ...current, alloy }))}
+            onClose={closePanel}
+          />
+        );
+      case 'mesh':
+        return (
+          <MeshPanel
+            settings={settings}
+            onPatch={(patch) => setSettings((current) => ({ ...current, ...patch }))}
+            onEstimate={() => void estimateMesh()}
+            onApplyMlMesh={() => void applyMlMesh()}
+            estimate={meshEstimate}
+            mlStatus={mlStatus}
+            busy={job.isBusy}
+            hasParts={parts.length > 0}
+            onReset={() =>
+              setSettings((current) => ({
+                ...current,
+                voxel_size: meshDefaults.voxelSize,
+                refinement_level: meshDefaults.refinement,
+                memory_mode: 'auto'
+              }))
+            }
+            onClose={closePanel}
+          />
+        );
+      case 'analysis':
+        return (
+          <AnalysisPanel
+            options={settings.analysis_options}
+            alloy={settings.alloy}
+            hasPourLocation={hasPourLocation}
+            onToggle={(key, value) =>
+              setSettings((current) => ({
+                ...current,
+                analysis_options: { ...current.analysis_options, [key]: value }
+              }))
+            }
+            onNumber={(key, value) =>
+              setSettings((current) => ({
+                ...current,
+                analysis_options: { ...current.analysis_options, [key]: value }
+              }))
+            }
+            onReset={() => setSettings((current) => ({ ...current, analysis_options: { ...analysisDefaults } }))}
+            onClose={closePanel}
+          />
+        );
+      case 'performance':
+        return (
+          <PerformancePanel
+            options={settings.performance_options}
+            hardware={hardware}
+            onSet={(key, value) =>
+              setSettings((current) => ({
+                ...current,
+                performance_options: { ...current.performance_options, [key]: value }
+              }))
+            }
+            onReset={() =>
+              setSettings((current) => ({ ...current, performance_options: { ...performanceDefaults } }))
+            }
+            onClose={closePanel}
+          />
+        );
+      case 'solidification':
+        return (
+          <SolidificationPanel
+            params={settings.solidification_params}
+            onOpenModal={() => setModal('solidification')}
+            onReset={() =>
+              setSettings((current) => ({ ...current, solidification_params: buildSolidificationDefaults() }))
+            }
+            onClose={closePanel}
+          />
+        );
+      case 'projects':
+        return (
+          <ProjectsPanel
+            projects={projects}
+            currentProjectId={projectId}
+            loading={projectsLoading}
+            onOpen={(id) => void openProject(id)}
+            onRefresh={() => void refreshProjects()}
+            onNew={newProject}
+            onBrowse={() => setModal('openProject')}
+            onClose={closePanel}
+          />
+        );
+      default:
+        return null;
+    }
+  }, [
+    shell.activePanel,
+    shell.tool,
+    parts,
+    selectedPartId,
+    addFiles,
+    updatePart,
+    removePart,
+    duplicatePart,
+    clearAllParts,
+    arrangeGridAction,
+    arrangeLineAction,
+    closePanel,
+    settings,
+    patchShell,
+    uploading,
+    materials,
+    estimateMesh,
+    applyMlMesh,
+    meshEstimate,
+    mlStatus,
+    job.isBusy,
+    hasPourLocation,
+    hardware,
+    projects,
+    projectId,
+    projectsLoading,
+    openProject,
+    refreshProjects,
+    newProject
+  ]);
 
   return (
-    <div className="app-shell">
-      <Sidebar
-        parts={parts}
-        settings={settings}
-        resultsReady={resultsReady}
-        resultFields={resultFields}
-        results={results}
-        ui={ui}
-        patchUi={patchUi}
-        isRunning={isRunning}
-        progress={progress}
-        status={status}
-        statusWarning={statusWarning}
-        activeResultCount={activeResultCount}
-        isPlayingTimeline={isPlayingTimeline}
-        setIsPlayingTimeline={setIsPlayingTimeline}
+    <div className="app">
+      <TopBar
+        projectName={settings.name ?? ''}
+        onProjectNameChange={(name) => setSettings((current) => ({ ...current, name }))}
+        onNewProject={newProject}
+        onOpenProject={() => {
+          void refreshProjects();
+          setModal('openProject');
+        }}
+        onSaveProject={() => void saveProject()}
+        onSaveProjectAs={saveProjectAs}
         onRun={() => void runSimulation()}
-        onStop={() => void cancelSimulation()}
-        onOpenDrawer={setActiveDrawer}
-        setCameraCommand={setCameraCommand}
+        onStop={stopSimulation}
+        canRun={parts.length > 0}
+        isBusy={job.isBusy}
+        job={job.job}
+        onScreenshot={() => void takeScreenshot()}
+        onExport={(kind) => {
+          if (kind === 'screenshot') void takeScreenshot();
+          else notify('This export arrives in the next milestone.');
+        }}
+        onHelp={(topic) => setModal(topic === 'guide' ? 'help' : topic === 'hardware' ? 'hardware' : 'about')}
+        exportsAvailable={{ animation: false, report: false, projectFile: false }}
       />
-      <main className="stage">
-        <BabylonViewport
-          parts={parts}
-          selectedPartId={selectedPartId}
-          resultFields={resultFields}
-          resultMode={ui.resultMode}
-          threshold={ui.threshold}
-          timePercent={ui.timePercent}
-          modelOpacity={ui.modelOpacity / 100}
-          showModel={ui.showModel}
-          showResults={ui.showResults}
-          cameraCommand={cameraCommand}
-          onCameraHandled={() => setCameraCommand(null)}
-          ortho={ui.ortho}
-          section={ui.section}
-          onPartSelected={(id) => setSelectedPartId(id)}
-          pourPickMode={pourPickMode}
-          pourLocation={settings.pour_location ?? null}
-          onPourLocationPicked={handlePourLocationPicked}
-        />
-        <ResultLegend
-          resultMode={ui.resultMode}
-          resultFields={resultFields}
-          visible={resultsReady && ui.showResults}
-        />
-      </main>
 
-      {activeDrawer === 'parts' && (
-        <PartsDrawer
+      <div className="workspace">
+        <IconRail active={shell.activePanel} onSelect={setPanel} partCount={parts.length} />
+        {panel}
+        <CanvasStage
+          viewportRef={viewportRef}
+          projectId={projectId}
           parts={parts}
           selectedPartId={selectedPartId}
-          onSelectPart={(id) => setSelectedPartId(id)}
-          onUpdatePart={(patch) => void updateSelectedPart(patch)}
-          onAddParts={(files) => void handleFiles(files)}
-          onRemovePart={(id) => void removePart(id)}
-          onClearAll={() => void clearAllParts()}
-          onDuplicatePart={(id) => void duplicatePart(id)}
-          onClose={() => setActiveDrawer(null)}
+          onSelectPart={setSelectedPartId}
+          resultsAvailable={resultsAvailable}
+          resultsVersion={resultsVersion}
+          view={view}
+          onViewChange={patchView}
+          ortho={shell.ortho}
+          tool={shell.tool}
+          probe={probe}
+          onProbe={setProbe}
+          onMeasure={(result) => notify(`Distance: ${result.distanceIn.toFixed(3)} in`)}
           pourLocation={settings.pour_location ?? null}
-          pourPickMode={pourPickMode}
-          onTogglePourPick={() => setPourPickMode((prev) => !prev)}
-          onClearPourLocation={clearPourLocation}
+          onPourPicked={(pick) => {
+            setSettings((current) => ({
+              ...current,
+              pour_location: {
+                schema_version: 1,
+                point_in: pick.point,
+                normal: pick.normal,
+                part_id: pick.partId
+              }
+            }));
+            patchShell({ tool: 'select' });
+            succeed('Pour location set.');
+          }}
+          gridMeta={gridMeta}
+          onGridMeta={setGridMeta}
+          status={viewportStatus}
+          onStatus={setViewportStatus}
+          onError={(message) => fail(message)}
+          onAddFiles={(files) => void addFiles(files)}
+          busy={loadingProject || uploading}
+          onRequestAddParts={() => {
+            patchShell({ activePanel: 'parts' });
+            window.setTimeout(() => addPartsRef.current(), 0);
+          }}
+          registerAddParts={(open) => {
+            addPartsRef.current = open;
+          }}
         />
-      )}
-      {activeDrawer === 'material' && (
-        <MaterialDrawer
-          settings={settings}
-          setSettings={setSettings}
-          materials={materials}
-          material={material}
-          onClose={() => setActiveDrawer(null)}
+        <ResultsPanel
+          collapsed={shell.resultsCollapsed}
+          onToggleCollapsed={() => patchShell({ resultsCollapsed: !shell.resultsCollapsed })}
+          view={view}
+          onViewChange={patchView}
+          meta={gridMeta}
+          resultsAvailable={resultsAvailable}
+          ortho={shell.ortho}
+          onOrthoChange={(ortho) => patchShell({ ortho })}
+          tool={shell.tool}
+          onToolChange={(tool: ViewportTool) => patchShell({ tool })}
+          onCamera={(preset: CameraPreset) => viewportRef.current?.setCamera(preset)}
         />
-      )}
-      {activeDrawer === 'mesh' && (
-        <MeshDrawer
-          settings={settings}
-          setSettings={setSettings}
-          projectId={projectId}
-          meshEstimate={meshEstimate}
-          mlStatus={mlStatus}
-          updateMeshPreview={updateMeshPreview}
-          applyMlMesh={applyMlMesh}
-          onClose={() => setActiveDrawer(null)}
+      </div>
+
+      <TransportBar
+        view={view}
+        onViewChange={patchView}
+        meta={gridMeta}
+        resultsAvailable={resultsAvailable}
+        loop={loop}
+        onLoopChange={setLoop}
+      />
+
+      {modal === 'openProject' ? (
+        <OpenProjectModal
+          projects={projects}
+          currentProjectId={projectId}
+          loading={projectsLoading}
+          onOpen={(id) => {
+            setModal(null);
+            void openProject(id);
+          }}
+          onRename={renameProject}
+          onDuplicate={duplicateProject}
+          onDelete={deleteProject}
+          onRefresh={() => void refreshProjects()}
+          onClose={() => setModal(null)}
         />
-      )}
-      {activeDrawer === 'analysis' && (
-        <AnalysisDrawer
-          settings={settings}
-          setAnalysis={setAnalysis}
-          onClose={() => setActiveDrawer(null)}
+      ) : null}
+
+      {modal === 'solidification' ? (
+        <SolidificationModal
+          params={settings.solidification_params}
+          onChange={(params) => setSettings((current) => ({ ...current, solidification_params: params }))}
+          onClose={() => setModal(null)}
         />
-      )}
-      {activeDrawer === 'performance' && (
-        <PerformanceDrawer
-          settings={settings}
-          setSettings={setSettings}
-          onClose={() => setActiveDrawer(null)}
-        />
-      )}
-      {activeDrawer === 'solidification' && (
-        <SolidificationDrawer
-          settings={settings}
-          setSettings={setSettings}
-          onClose={() => setActiveDrawer(null)}
-        />
-      )}
+      ) : null}
+
+      {modal === 'help' ? <HelpGuideModal alloys={alloyGuide} onClose={() => setModal(null)} /> : null}
+      {modal === 'hardware' ? <HardwareInfoModal hardware={hardware} onClose={() => setModal(null)} /> : null}
+      {modal === 'about' ? <AboutModal onClose={() => setModal(null)} /> : null}
+
+      {confirmRequest ? (
+        <ConfirmDialog request={confirmRequest} onClose={() => setConfirmRequest(null)} />
+      ) : null}
+      {promptRequest ? <PromptDialog request={promptRequest} onClose={() => setPromptRequest(null)} /> : null}
+
+      <Toasts toasts={toasts.toasts} onDismiss={toasts.dismiss} />
     </div>
   );
-}
-
-function countActiveResults(
-  resultFields: ResultFieldsPayload | null,
-  resultMode: string,
-  threshold: number,
-  timePercent: number
-): number | null {
-  if (!resultFields || resultFields.empty) return null;
-  if (resultMode === 'fraction_liquid') {
-    const values = fractionLiquidValues(resultFields, timePercent);
-    if (!values.length) return null;
-    return values.reduce((count, value) => count + (value >= 0.01 ? 1 : 0), 0);
-  }
-  if (resultMode === 'fill_time') {
-    const info = resultFields.fill_time;
-    if (!info) return null;
-    const cutoff = thresholdForResultMode(resultFields, resultMode, threshold, timePercent);
-    let count = 0;
-    for (let i = 0; i < info.values.length; i += 1) {
-      // Misruns always count as "active" (shown) -- they render on their
-      // own always-visible layer, independent of the sweep position.
-      if (info.misrun[i] || info.values[i] >= cutoff) count += 1;
-    }
-    return count;
-  }
-  const field = resultFields.fields[resultMode];
-  if (!field) return null;
-  const cutoff = thresholdForResultMode(resultFields, resultMode, threshold);
-  return field.values.reduce((count, value) => count + (Number.isFinite(value) && value >= cutoff ? 1 : 0), 0);
-}
-
-function thresholdForResultMode(
-  resultFields: ResultFieldsPayload,
-  resultMode: string,
-  threshold: number,
-  timePercent = 0
-): number {
-  if (resultMode === 'niyama_raw') return 0.01;
-  if (resultMode === 'fill_time') {
-    const maxT = resultFields.fill_time?.max_finite_time_s ?? 0;
-    if (maxT <= 0) return 0;
-    const progress = Math.min(1, Math.max(0, timePercent / 100));
-    return maxT * (1 - progress);
-  }
-  const fraction = Math.min(1, Math.max(0, threshold / 100));
-  if (resultMode === 'feed_modulus') {
-    const field = resultFields.fields.feed_modulus;
-    if (!field) return 0;
-    return field.min + ((field.max - field.min) * fraction);
-  }
-  return fraction;
-}
-
-function fractionLiquidValues(resultFields: ResultFieldsPayload, timePercent: number): number[] {
-  const frames = resultFields.fraction_liquid?.frames ?? [];
-  const framePercents = resultFields.fraction_liquid?.frame_percents ?? [];
-  if (frames.length) return interpolateFrames(frames, framePercents, timePercent);
-  const progress = timePercent / 100;
-  const frontWidth = resultFields.solidification.front_width || 0.075;
-  return resultFields.solidification.normalized_times.map((time) => Math.max(0, Math.min(1, (time - progress) / frontWidth)));
-}
-
-function interpolateFrames(frames: number[][], framePercents: number[], timePercent: number): number[] {
-  if (!frames.length) return [];
-  if (frames.length === 1 || !framePercents.length) return frames[0];
-  const target = Math.min(100, Math.max(0, timePercent));
-  if (target <= framePercents[0]) return frames[0];
-  const lastIndex = frames.length - 1;
-  if (target >= framePercents[lastIndex]) return frames[lastIndex];
-  let after = 1;
-  while (after < framePercents.length && framePercents[after] < target) after += 1;
-  const before = Math.max(0, after - 1);
-  const beforePercent = framePercents[before] ?? 0;
-  const afterPercent = framePercents[after] ?? 100;
-  const alpha = (target - beforePercent) / Math.max(afterPercent - beforePercent, 1e-6);
-  const beforeFrame = frames[before] ?? [];
-  const afterFrame = frames[after] ?? beforeFrame;
-  return beforeFrame.map((value, index) => value * (1 - alpha) + (afterFrame[index] ?? value) * alpha);
 }
