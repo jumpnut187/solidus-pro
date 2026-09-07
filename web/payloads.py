@@ -23,7 +23,11 @@ from core.part_manager import (
     infer_part_type_from_name,
 )
 from core.simulation_pipeline import PipelineResult
-from core.surface_extraction import build_surface_payload, normalize_surface_request
+from core.surface_extraction import (
+    VALID_SURFACE_MODES,
+    build_surface_payload,
+    normalize_surface_request,
+)
 from web.repository import strip_upload_prefix
 
 
@@ -51,7 +55,12 @@ ADVANCED_SURFACE_MODES = {
     "sdas",
     "predicted_uts",
 }
-SURFACE_MODES = BASIC_SURFACE_MODES | ADVANCED_SURFACE_MODES
+# Every mode the isosurface extractor understands is reachable through
+# ``/surface``, including the ones the desktop app never had a view for
+# (``solidification_time``, the gas fields). The two sets above are kept
+# because they still decide *how* a mode is rendered below, not whether it is
+# accepted.
+SURFACE_MODES = BASIC_SURFACE_MODES | ADVANCED_SURFACE_MODES | set(VALID_SURFACE_MODES)
 
 # Extensions accepted by upload_cad_file. STL is handled natively by
 # trimesh; STEP requires the optional ``cascadio`` package.
@@ -388,9 +397,22 @@ def read_artifact(path: str) -> Dict[str, Any]:
 
 
 def write_artifact(path: Path, artifact: Dict[str, Any]) -> None:
+    """
+    Persist a completed run, plus the dense grid sidecar the viewport reads.
+
+    The sidecar is written here, once, at the only moment the full artifact is
+    already in memory. Building it lazily on first request works (see
+    ``web.fields.load_grids``) but means the first person to open a finished
+    run waits out a 50-100 MB JSON parse.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         json.dump(artifact, handle)
+    # Imported here rather than at module scope: web.fields pulls in scipy,
+    # and this module is imported by paths that only need the CAD helpers.
+    from web.fields import write_sidecar_for_artifact
+
+    write_sidecar_for_artifact(path, artifact)
 
 
 def build_result_fields_payload(
@@ -474,14 +496,20 @@ def build_fork_surface_payload(
         # renders the static "all filled voxels" map -- see load_fill_time /
         # BabylonViewport for the interactive misrun-aware sweep.
         return build_voxel_glyph_payload(visualization, normalized_mode, 0.0, time_percent, max_voxels=12_000)
-    if normalized_mode in {"shrinkage", "hotspot", "feed_modulus", "niyama", "niyama_raw", "combined_feed_risk"}:
-        return build_voxel_glyph_payload(visualization, normalized_mode, threshold, time_percent, max_voxels=8_000)
-    if normalized_mode in BASIC_SURFACE_MODES:
-        return build_surface_payload(
+    # Every remaining scalar mode contours to a smooth isosurface. Six of them
+    # used to be answered with a cube-glyph mesh capped at 8,000 voxels, which
+    # is both a staircase where the result should be a surface and a silent
+    # 80 percent data loss on a 41,000-voxel run. The extractor handles them
+    # all now that it accepts field units, so the glyph builder survives only
+    # as the fallback for a mode it cannot contour.
+    try:
+        payload = build_surface_payload(
             visualization,
             normalize_surface_request(normalized_mode, threshold, time_percent),
         )
-    return build_voxel_glyph_payload(visualization, normalized_mode, threshold, time_percent)
+    except ValueError:
+        return build_voxel_glyph_payload(visualization, normalized_mode, threshold, time_percent)
+    return payload
 
 
 def build_volume_payload(

@@ -1,0 +1,797 @@
+"""
+Dense 3D field grids for the web viewport.
+
+The engine hands the web layer a *sparse* result: a list of occupied voxel
+centers plus one value per voxel per mode. That shape is fine for drawing
+cubes and useless for anything else. Painting a continuous field on the real
+casting surface -- the way commercial casting simulators do -- means sampling a
+3D texture at each fragment's world position, and a 3D texture needs a dense
+lattice.
+
+This module turns the sparse artifact into that dense lattice and persists it
+as a compact binary sidecar (``<artifact>.grid.npz``) beside the JSON, so the
+50-100 MB JSON is parsed exactly once in the life of a run instead of once per
+HTTP request.
+
+Three things matter about the layout and are relied on by the client:
+
+1. The lattice is uniform. Every voxel is ``base_voxel_size`` on a side, so
+   ``dims``, ``origin`` and ``spacing`` fully describe it.
+2. Cells are indexed x-fastest: ``index = ix + nx * (iy + ny * iz)``. That is
+   exactly a WebGL 3D texture of width ``nx``, height ``ny``, depth ``nz``.
+3. Scalar grids are *hole-filled*. A cell outside the metal carries the value
+   of the nearest cell inside it. Leaving those cells at zero would make
+   trilinear sampling fade every surface toward the bottom of the colormap,
+   which is the single most visible artifact of naive volume painting: a blue
+   halo hugging the whole casting. The mask grid, not the scalar grid, is what
+   says where metal actually is.
+
+``origin`` is the world position of the **center** of cell ``(0, 0, 0)``, so a
+world point maps to a texture coordinate as
+``((p - origin) / spacing + 0.5) / dims``.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field as dataclass_field
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+import json
+import threading
+
+import numpy as np
+from scipy import ndimage
+
+from core.part_manager import CODE_TO_PART_TYPE, PART_TYPE_COLORS, PART_TYPE_CAST
+
+
+# --------------------------------------------------------------------------
+# Mode catalogue
+# --------------------------------------------------------------------------
+
+#: Public mode id -> the key it is stored under in ``visualization``.
+#:
+#: The artifact's key names grew organically (``solidification_times`` plural,
+#: ``gas_porosity_risk`` suffixed, ``niyama`` and ``niyama_risk`` duplicated);
+#: the client's ``RESULT_MODE_IDS`` is the name the UI uses. This table is the
+#: only place the two vocabularies meet.
+SCALAR_MODE_SOURCES: Dict[str, Tuple[str, ...]] = {
+    "shrinkage": ("shrinkage",),
+    "porosity": ("porosity",),
+    "feed_modulus": ("feed_modulus",),
+    "hotspot": ("hotspot",),
+    "solidification_time": ("solidification_times",),
+    "niyama_raw": ("niyama_raw",),
+    "niyama": ("niyama_risk", "niyama"),
+    "combined_feed_risk": ("combined_feed_risk",),
+    "hot_tear": ("hot_tear",),
+    "sand_burn_in": ("sand_burn_in",),
+    "gas_generation": ("gas_generation",),
+    "gas_entrapment": ("gas_entrapment",),
+    "gas_porosity": ("gas_porosity_risk", "gas_porosity"),
+    "feeding_quality": ("feeding_quality",),
+    "thermal_stress": ("thermal_stress",),
+    "distortion": ("distortion",),
+    "crack_susceptibility": ("crack_susceptibility",),
+    "sdas": ("sdas",),
+    "predicted_uts": ("predicted_uts",),
+    "fill_time": ("fill_time",),
+}
+
+#: Legend unit per mode. Mirrors ``RESULT_MODE_UNITS`` on the client; an absent
+#: entry means a dimensionless 0..1 risk field.
+MODE_UNITS: Dict[str, str] = {
+    "feed_modulus": "in",
+    "solidification_time": "s",
+    "fill_time": "s",
+    "fill_animation": "s",
+    "thermal_stress": "MPa",
+    "distortion": "in",
+    "sdas": "µm",
+    "predicted_uts": "MPa",
+    "feeding_path_lengths": "in",
+}
+
+#: Modes animated by the time scrubber rather than a threshold.
+TIME_MODES = ("fraction_liquid", "fill_animation")
+
+#: Modes whose per-voxel values are only meaningful where the fill reached, or
+#: where the value is a physical time rather than a risk. ``fill_time`` marks a
+#: misrun with -1 and a non-metal voxel with NaN (see ``core.filling_stage``),
+#: so neither may be treated as a sample of the field.
+_NON_NEGATIVE_ONLY_MODES = frozenset({"fill_time"})
+
+_QUANT_MAX = 255.0
+
+
+# --------------------------------------------------------------------------
+# Grid model
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Lattice:
+    """The uniform voxel lattice a run was solved on."""
+
+    dims: Tuple[int, int, int]
+    origin: Tuple[float, float, float]
+    spacing: float
+
+    @property
+    def cell_count(self) -> int:
+        nx, ny, nz = self.dims
+        return int(nx) * int(ny) * int(nz)
+
+
+@dataclass
+class ScalarGrid:
+    """One dense scalar field, quantized to bytes plus the range to undo it."""
+
+    values: np.ndarray  # uint8, flat, x-fastest
+    minimum: float
+    maximum: float
+    mean: float
+    #: True when the source array carried no signal at all (constant zero).
+    empty: bool = False
+
+    def dequantize(self) -> np.ndarray:
+        span = self.maximum - self.minimum
+        if span <= 0.0:
+            return np.full(self.values.shape, self.minimum, dtype=np.float32)
+        return (self.minimum + (self.values.astype(np.float32) / _QUANT_MAX) * span).astype(np.float32)
+
+
+@dataclass
+class FrameStack:
+    """A time series of dense scalar grids, quantized to bytes."""
+
+    frames: np.ndarray  # uint8, (count, cell_count)
+    times_s: np.ndarray  # float32, (count,)
+    minimum: float = 0.0
+    maximum: float = 1.0
+
+    @property
+    def count(self) -> int:
+        return int(self.frames.shape[0])
+
+
+@dataclass
+class FieldGrids:
+    """Everything the viewport needs about one run, in dense form."""
+
+    lattice: Lattice
+    mask: np.ndarray  # uint8, flat: 0 outside, otherwise part-type code + 1
+    scalars: Dict[str, ScalarGrid] = dataclass_field(default_factory=dict)
+    stacks: Dict[str, FrameStack] = dataclass_field(default_factory=dict)
+    voxel_count: int = 0
+    cast_voxel_count: int = 0
+    total_volume_in3: float = 0.0
+    stats: Dict[str, Any] = dataclass_field(default_factory=dict)
+    part_type_counts: Dict[int, int] = dataclass_field(default_factory=dict)
+
+
+# --------------------------------------------------------------------------
+# Building
+# --------------------------------------------------------------------------
+
+
+def derive_lattice(centers: np.ndarray, sizes: Optional[np.ndarray] = None) -> Lattice:
+    """
+    Recover the uniform lattice the sparse centers were sampled from.
+
+    Follows the pattern in ``core.surface_extraction._build_scalar_volume``:
+    the unique coordinate values along each axis are the lattice planes. The
+    spacing is taken from the per-voxel size when it is uniform (it always is
+    for a run at ``base_voxel_size``) and from the median inter-plane gap
+    otherwise, and ``dims`` comes from the extent rather than the number of
+    unique values -- an axis can have an entirely empty plane in the middle of
+    the casting, and counting occupied planes would silently shear the grid.
+    """
+    if centers.size == 0:
+        return Lattice(dims=(1, 1, 1), origin=(0.0, 0.0, 0.0), spacing=1.0)
+
+    spacing = 0.0
+    if sizes is not None and sizes.size:
+        finite = sizes[np.isfinite(sizes) & (sizes > 0.0)]
+        if finite.size:
+            spacing = float(np.median(finite))
+
+    if spacing <= 0.0:
+        gaps: List[float] = []
+        for axis in range(3):
+            unique = np.unique(np.round(centers[:, axis].astype(np.float64), 6))
+            if unique.size >= 2:
+                diffs = np.diff(unique)
+                positive = diffs[diffs > 1e-9]
+                if positive.size:
+                    gaps.append(float(np.min(positive)))
+        spacing = float(np.min(gaps)) if gaps else 1.0
+
+    origin: List[float] = []
+    dims: List[int] = []
+    for axis in range(3):
+        column = centers[:, axis].astype(np.float64)
+        low = float(np.min(column))
+        high = float(np.max(column))
+        origin.append(low)
+        dims.append(int(round((high - low) / spacing)) + 1)
+
+    return Lattice(
+        dims=(dims[0], dims[1], dims[2]),
+        origin=(origin[0], origin[1], origin[2]),
+        spacing=float(spacing),
+    )
+
+
+def _flat_indices(centers: np.ndarray, lattice: Lattice) -> np.ndarray:
+    """Map voxel centers onto flat, x-fastest cell indices."""
+    nx, ny, nz = lattice.dims
+    ox, oy, oz = lattice.origin
+    spacing = lattice.spacing
+    ix = np.clip(np.rint((centers[:, 0].astype(np.float64) - ox) / spacing), 0, nx - 1).astype(np.int64)
+    iy = np.clip(np.rint((centers[:, 1].astype(np.float64) - oy) / spacing), 0, ny - 1).astype(np.int64)
+    iz = np.clip(np.rint((centers[:, 2].astype(np.float64) - oz) / spacing), 0, nz - 1).astype(np.int64)
+    return ix + nx * (iy + ny * iz)
+
+
+def _nearest_known_map(known: np.ndarray, lattice: Lattice) -> np.ndarray:
+    """
+    For every cell, the flat index of the nearest cell where ``known`` is true.
+
+    ``known`` is a flat, x-fastest boolean grid. The Euclidean distance
+    transform is the expensive part of building a sidecar, so the map derived
+    from the occupancy mask is computed once and reused for every scalar field;
+    only a mode defined on a strict subset of the metal pays for a second one.
+    """
+    nx, ny, nz = lattice.dims
+    volume = np.asarray(known, dtype=bool).reshape((nz, ny, nx))
+    unknown = ~volume
+    if not np.any(unknown):
+        return np.arange(lattice.cell_count, dtype=np.int64)
+    if np.all(unknown):
+        return np.zeros(lattice.cell_count, dtype=np.int64)
+
+    # distance_transform_edt measures distance to the nearest ZERO of its
+    # input, so the "unknown" grid is what goes in: the feature it walks
+    # towards is a known cell.
+    indices = ndimage.distance_transform_edt(unknown, return_distances=False, return_indices=True)
+    kz, ky, kx = indices  # each (nz, ny, nx)
+    flat = kx.astype(np.int64) + nx * (ky.astype(np.int64) + ny * kz.astype(np.int64))
+    return np.asarray(flat, dtype=np.int64).reshape(-1)
+
+
+def _quantize(dense: np.ndarray, minimum: float, maximum: float) -> np.ndarray:
+    span = maximum - minimum
+    if span <= 0.0:
+        return np.zeros(dense.shape, dtype=np.uint8)
+    scaled = (dense.astype(np.float64) - minimum) / span
+    return np.clip(np.rint(scaled * _QUANT_MAX), 0.0, _QUANT_MAX).astype(np.uint8)
+
+
+def _scatter_and_fill(
+    values: np.ndarray,
+    cell_indices: np.ndarray,
+    sample_mask: np.ndarray,
+    nearest: np.ndarray,
+    lattice: Lattice,
+) -> np.ndarray:
+    """
+    Scatter sparse per-voxel values onto the dense lattice, then fill the rest.
+
+    ``sample_mask`` selects which voxels carry a usable value (a misrun voxel
+    in ``fill_time`` does not). Cells with no value take the value of the
+    nearest cell that has one -- via ``nearest``, which is computed once
+    against the occupancy mask, plus a second, mode-specific pass in the rarer
+    case where a mode is undefined on some *occupied* cells.
+    """
+    cell_count = lattice.cell_count
+    dense = np.zeros(cell_count, dtype=np.float32)
+    known = np.zeros(cell_count, dtype=bool)
+    if not np.any(sample_mask):
+        return dense
+
+    dense[cell_indices[sample_mask]] = values[sample_mask]
+    known[cell_indices[sample_mask]] = True
+
+    filled: np.ndarray = dense[nearest]
+    if np.all(known[nearest]):
+        return filled
+
+    mode_nearest = _nearest_known_map(known, lattice)
+    return np.asarray(dense[mode_nearest], dtype=np.float32)
+
+
+def build_field_grids(visualization: Dict[str, Any], summary: Optional[Dict[str, Any]] = None) -> FieldGrids:
+    """Build every dense grid for one run from its visualization payload."""
+    summary = summary or {}
+    centers = np.asarray(visualization.get("centers") or [], dtype=np.float64)
+    if centers.size == 0:
+        empty_lattice = Lattice(dims=(1, 1, 1), origin=(0.0, 0.0, 0.0), spacing=1.0)
+        return FieldGrids(lattice=empty_lattice, mask=np.zeros(1, dtype=np.uint8))
+    centers = centers.reshape((-1, 3))
+    n_voxels = int(centers.shape[0])
+
+    sizes = np.asarray(visualization.get("sizes") or [], dtype=np.float64)
+    lattice = derive_lattice(centers, sizes if sizes.size == n_voxels else None)
+    cell_count = lattice.cell_count
+    cell_indices = _flat_indices(centers, lattice)
+
+    raw_part_types = visualization.get("part_types")
+    if raw_part_types is not None and len(raw_part_types) == n_voxels:
+        part_types = np.asarray(raw_part_types, dtype=np.int32)
+    else:
+        part_types = np.full(n_voxels, PART_TYPE_CAST, dtype=np.int32)
+
+    # Code + 1 so that 0 stays available for "outside the metal". Nearest-value
+    # sampling of this grid on the GPU is what decides whether a fragment gets
+    # painted at all.
+    mask = np.zeros(cell_count, dtype=np.uint8)
+    mask[cell_indices] = np.clip(part_types + 1, 0, 255).astype(np.uint8)
+
+    nearest = _nearest_known_map(mask != 0, lattice)
+
+    grids = FieldGrids(
+        lattice=lattice,
+        mask=mask,
+        voxel_count=n_voxels,
+        cast_voxel_count=int(np.sum(part_types == PART_TYPE_CAST)),
+        total_volume_in3=float(summary.get("total_volume", 0.0) or 0.0),
+        stats=_flatten_stats(summary),
+    )
+    codes, counts = np.unique(part_types, return_counts=True)
+    grids.part_type_counts = {int(code): int(count) for code, count in zip(codes, counts)}
+
+    for mode, source_keys in SCALAR_MODE_SOURCES.items():
+        values = _first_present(visualization, source_keys, n_voxels)
+        if values is None:
+            continue
+        sample_mask = np.isfinite(values)
+        if mode in _NON_NEGATIVE_ONLY_MODES:
+            sample_mask &= values >= 0.0
+        if not np.any(sample_mask):
+            continue
+        usable = values[sample_mask]
+        minimum = float(np.min(usable))
+        maximum = float(np.max(usable))
+        mean = float(np.mean(usable))
+        dense = _scatter_and_fill(
+            np.where(sample_mask, values, 0.0).astype(np.float32),
+            cell_indices,
+            sample_mask,
+            nearest,
+            lattice,
+        )
+        grids.scalars[mode] = ScalarGrid(
+            values=_quantize(dense, minimum, maximum),
+            minimum=minimum,
+            maximum=maximum,
+            mean=mean,
+            empty=bool(maximum <= minimum),
+        )
+
+    fraction_liquid = _build_frame_stack(
+        visualization.get("fraction_liquid_history"),
+        visualization.get("fraction_liquid_times"),
+        cell_indices,
+        nearest,
+        lattice,
+        n_voxels,
+    )
+    if fraction_liquid is not None:
+        grids.stacks["fraction_liquid"] = fraction_liquid
+
+    fill = _build_frame_stack(
+        visualization.get("fill_animation_history"),
+        visualization.get("fill_animation_times"),
+        cell_indices,
+        nearest,
+        lattice,
+        n_voxels,
+    )
+    if fill is not None:
+        grids.stacks["fill_animation"] = fill
+
+    return grids
+
+
+def _first_present(
+    visualization: Dict[str, Any], keys: Iterable[str], expected: int
+) -> Optional[np.ndarray]:
+    for key in keys:
+        raw = visualization.get(key)
+        if raw is None:
+            continue
+        arr = np.asarray(raw, dtype=np.float64).reshape(-1)
+        if arr.size == expected:
+            return arr
+    return None
+
+
+def _build_frame_stack(
+    history: Any,
+    times: Any,
+    cell_indices: np.ndarray,
+    nearest: np.ndarray,
+    lattice: Lattice,
+    expected: int,
+) -> Optional[FrameStack]:
+    if not isinstance(history, list) or not history:
+        return None
+    frames: List[np.ndarray] = []
+    for snapshot in history:
+        arr = np.asarray(snapshot, dtype=np.float64).reshape(-1)
+        if arr.size != expected:
+            return None
+        finite = np.isfinite(arr)
+        dense = _scatter_and_fill(
+            np.where(finite, np.clip(arr, 0.0, 1.0), 0.0).astype(np.float32),
+            cell_indices,
+            finite,
+            nearest,
+            lattice,
+        )
+        frames.append(_quantize(dense, 0.0, 1.0))
+
+    time_arr = np.asarray(times if times is not None else [], dtype=np.float32).reshape(-1)
+    if time_arr.size != len(frames):
+        # No usable clock: space the frames evenly so the scrubber still maps
+        # a percentage onto a frame index.
+        time_arr = np.linspace(0.0, 1.0, len(frames), dtype=np.float32).reshape(-1)
+    return FrameStack(frames=np.stack(frames, axis=0), times_s=time_arr)
+
+
+def _flatten_stats(summary: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Flatten the artifact summary into the scalar dictionary the shell shows.
+
+    ``GridMeta.stats`` is a flat ``Record<string, number | string>``; the
+    artifact nests its statistics one level deep (``shrinkage_stats.max``).
+    Flattening here rather than on the client keeps the statistics panel free
+    of per-run special cases.
+    """
+    flat: Dict[str, Any] = {}
+    for key, value in summary.items():
+        if key in {"raw_ranges", "available_modes"}:
+            continue
+        if isinstance(value, dict):
+            for sub_key, sub_value in value.items():
+                if isinstance(sub_value, (int, float, str, bool)):
+                    flat[f"{key.removesuffix('_stats')}_{sub_key}"] = _scalar(sub_value)
+        elif isinstance(value, (int, float, str, bool)):
+            flat[key] = _scalar(value)
+    return flat
+
+
+def _scalar(value: Any) -> Any:
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number if np.isfinite(number) else 0.0
+    return str(value)
+
+
+# --------------------------------------------------------------------------
+# Metadata
+# --------------------------------------------------------------------------
+
+
+def build_grid_metadata(grids: FieldGrids) -> Dict[str, Any]:
+    """The JSON body of ``GET /api/projects/<id>/grid``."""
+    modes: List[str] = []
+    empty_modes: List[str] = []
+    ranges: Dict[str, Dict[str, float]] = {}
+    units: Dict[str, str] = {}
+    for mode, grid in grids.scalars.items():
+        ranges[mode] = {"min": grid.minimum, "max": grid.maximum, "mean": grid.mean}
+        if mode in MODE_UNITS:
+            units[mode] = MODE_UNITS[mode]
+        if grid.empty:
+            empty_modes.append(mode)
+        else:
+            modes.append(mode)
+
+    frames: Dict[str, Dict[str, Any]] = {}
+    if "fraction_liquid" in grids.stacks:
+        stack = grids.stacks["fraction_liquid"]
+        frames["fraction_liquid"] = {"count": stack.count, "times_s": [float(t) for t in stack.times_s]}
+        modes.append("fraction_liquid")
+    if "fill_animation" in grids.stacks:
+        stack = grids.stacks["fill_animation"]
+        frames["fill"] = {"count": stack.count, "times_s": [float(t) for t in stack.times_s]}
+        modes.append("fill_animation")
+        units["fill_animation"] = MODE_UNITS["fill_animation"]
+
+    nx, ny, nz = grids.lattice.dims
+    return {
+        "dims": [int(nx), int(ny), int(nz)],
+        "origin": [float(v) for v in grids.lattice.origin],
+        "spacing": float(grids.lattice.spacing),
+        "modes": sorted(set(modes)),
+        "emptyModes": sorted(set(empty_modes)),
+        "ranges": ranges,
+        "units": units,
+        "frames": frames,
+        "voxelCount": int(grids.voxel_count),
+        "castVoxelCount": int(grids.cast_voxel_count),
+        "cellCount": int(grids.lattice.cell_count),
+        "totalVolumeIn3": float(grids.total_volume_in3),
+        "partTypes": _part_type_table(grids.part_type_counts),
+        "stats": grids.stats,
+        "quantization": {"dtype": "uint8", "levels": int(_QUANT_MAX) + 1},
+    }
+
+
+def _part_type_table(counts: Dict[int, int]) -> List[Dict[str, Any]]:
+    """Mask code -> part type, name and display color, for the whole run."""
+    table: List[Dict[str, Any]] = []
+    for code in sorted(counts):
+        part_type = CODE_TO_PART_TYPE.get(int(code))
+        color = PART_TYPE_COLORS.get(part_type) if part_type is not None else None
+        table.append(
+            {
+                "code": int(code) + 1,
+                "partTypeCode": int(code),
+                "id": part_type.value if part_type is not None else f"type_{int(code)}",
+                "label": str(part_type) if part_type is not None else f"Type {int(code)}",
+                "color": [float(c) for c in color] if color is not None else [0.7, 0.75, 0.8],
+                "voxelCount": int(counts[code]),
+            }
+        )
+    return table
+
+
+# --------------------------------------------------------------------------
+# Sidecar persistence
+# --------------------------------------------------------------------------
+
+SIDECAR_VERSION = 1
+
+
+def sidecar_path(artifact_path: Path | str) -> Path:
+    """``.../<id>.json`` -> ``.../<id>.grid.npz``."""
+    path = Path(artifact_path)
+    return path.with_name(path.stem + ".grid.npz")
+
+
+def save_sidecar(path: Path, grids: FieldGrids) -> None:
+    """Write the dense grids as a single compressed ``.npz``."""
+    payload: Dict[str, np.ndarray] = {
+        "version": np.asarray([SIDECAR_VERSION], dtype=np.int32),
+        "dims": np.asarray(grids.lattice.dims, dtype=np.int32),
+        "origin": np.asarray(grids.lattice.origin, dtype=np.float64),
+        "spacing": np.asarray([grids.lattice.spacing], dtype=np.float64),
+        "mask": grids.mask,
+        "counts": np.asarray(
+            [grids.voxel_count, grids.cast_voxel_count], dtype=np.int64
+        ),
+        "total_volume": np.asarray([grids.total_volume_in3], dtype=np.float64),
+        "meta_json": np.frombuffer(
+            json.dumps(
+                {
+                    "stats": grids.stats,
+                    "part_type_counts": {str(k): v for k, v in grids.part_type_counts.items()},
+                }
+            ).encode("utf-8"),
+            dtype=np.uint8,
+        ),
+    }
+    for mode, grid in grids.scalars.items():
+        payload[f"scalar__{mode}"] = grid.values
+        payload[f"scalar_range__{mode}"] = np.asarray(
+            [grid.minimum, grid.maximum, grid.mean, 1.0 if grid.empty else 0.0], dtype=np.float64
+        )
+    for key, stack in grids.stacks.items():
+        payload[f"stack__{key}"] = stack.frames
+        payload[f"stack_times__{key}"] = stack.times_s
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("wb") as handle:
+        np.savez_compressed(handle, **payload)  # type: ignore[arg-type]
+    temporary.replace(path)
+
+
+def load_sidecar(path: Path) -> Optional[FieldGrids]:
+    """Read a sidecar back, or ``None`` when it is absent or from an older build."""
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            if int(data["version"][0]) != SIDECAR_VERSION:
+                return None
+            dims = tuple(int(v) for v in data["dims"])
+            lattice = Lattice(
+                dims=(dims[0], dims[1], dims[2]),
+                origin=tuple(float(v) for v in data["origin"]),  # type: ignore[arg-type]
+                spacing=float(data["spacing"][0]),
+            )
+            counts = data["counts"]
+            meta = json.loads(bytes(data["meta_json"]).decode("utf-8"))
+            grids = FieldGrids(
+                lattice=lattice,
+                mask=np.asarray(data["mask"], dtype=np.uint8),
+                voxel_count=int(counts[0]),
+                cast_voxel_count=int(counts[1]),
+                total_volume_in3=float(data["total_volume"][0]),
+                stats=dict(meta.get("stats", {})),
+                part_type_counts={int(k): int(v) for k, v in meta.get("part_type_counts", {}).items()},
+            )
+            for key in data.files:
+                if key.startswith("scalar__"):
+                    mode = key.split("__", 1)[1]
+                    rng = data[f"scalar_range__{mode}"]
+                    grids.scalars[mode] = ScalarGrid(
+                        values=np.asarray(data[key], dtype=np.uint8),
+                        minimum=float(rng[0]),
+                        maximum=float(rng[1]),
+                        mean=float(rng[2]),
+                        empty=bool(rng[3] > 0.5),
+                    )
+                elif key.startswith("stack__"):
+                    stack_key = key.split("__", 1)[1]
+                    grids.stacks[stack_key] = FrameStack(
+                        frames=np.asarray(data[key], dtype=np.uint8),
+                        times_s=np.asarray(data[f"stack_times__{stack_key}"], dtype=np.float32),
+                    )
+            return grids
+    except (OSError, KeyError, ValueError, EOFError):
+        return None
+
+
+def write_sidecar_for_artifact(artifact_path: Path | str, artifact: Dict[str, Any]) -> Optional[Path]:
+    """
+    Build and persist the sidecar for an artifact that is being written.
+
+    Failures are swallowed on purpose: a run whose results are otherwise good
+    must not be lost because the render sidecar could not be produced. The
+    lazy path in :func:`load_grids` rebuilds it on first request.
+    """
+    try:
+        grids = build_field_grids(artifact.get("visualization", {}), artifact.get("summary", {}))
+        if grids.voxel_count == 0:
+            return None
+        path = sidecar_path(artifact_path)
+        save_sidecar(path, grids)
+        return path
+    except Exception:  # pragma: no cover - defensive; never fail a completed run
+        return None
+
+
+# --------------------------------------------------------------------------
+# In-process cache
+# --------------------------------------------------------------------------
+
+
+class _GridCache:
+    """
+    Tiny LRU over ``FieldGrids``, keyed by project and artifact mtime.
+
+    A dense grid for a million-voxel run is tens of megabytes, so the cache is
+    deliberately shallow. The mtime is part of the key so a re-run of the same
+    project invalidates the entry rather than serving the previous run's field.
+    """
+
+    def __init__(self, max_entries: int = 3) -> None:
+        self._max = max_entries
+        self._entries: Dict[Tuple[str, int, int], FieldGrids] = {}
+        self._order: List[Tuple[str, int, int]] = []
+        self._lock = threading.Lock()
+
+    def get(self, key: Tuple[str, int, int]) -> Optional[FieldGrids]:
+        with self._lock:
+            grids = self._entries.get(key)
+            if grids is not None:
+                self._order.remove(key)
+                self._order.append(key)
+            return grids
+
+    def put(self, key: Tuple[str, int, int], grids: FieldGrids) -> None:
+        with self._lock:
+            if key in self._entries:
+                self._order.remove(key)
+            self._entries[key] = grids
+            self._order.append(key)
+            while len(self._order) > self._max:
+                evicted = self._order.pop(0)
+                self._entries.pop(evicted, None)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+            self._order.clear()
+
+
+_CACHE = _GridCache()
+
+
+def clear_cache() -> None:
+    """Drop every cached grid. Used by tests and by a fresh app instance."""
+    _CACHE.clear()
+
+
+def load_grids(
+    project_id: str,
+    artifact_path: Path | str,
+    *,
+    artifact: Optional[Dict[str, Any]] = None,
+) -> Optional[FieldGrids]:
+    """
+    Get the dense grids for a run, building and caching them as needed.
+
+    Order of preference: the in-process LRU, then the on-disk sidecar, then a
+    one-time rebuild from the JSON artifact (which is then written to disk so
+    the next process does not pay for it either).
+    """
+    path = Path(artifact_path)
+    try:
+        stat = path.stat()
+    except OSError:
+        if artifact is None:
+            return None
+        stat = None
+
+    key = (project_id, int(stat.st_mtime_ns) if stat else 0, int(stat.st_size) if stat else 0)
+    cached = _CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    sidecar = sidecar_path(path)
+    grids: Optional[FieldGrids] = None
+    if stat is not None and sidecar.exists() and sidecar.stat().st_mtime_ns >= stat.st_mtime_ns:
+        grids = load_sidecar(sidecar)
+
+    if grids is None:
+        source = artifact
+        if source is None:
+            if not path.exists():
+                return None
+            with path.open("r", encoding="utf-8") as handle:
+                source = json.load(handle)
+        grids = build_field_grids(source.get("visualization", {}), source.get("summary", {}))
+        if grids.voxel_count == 0:
+            return None
+        try:
+            save_sidecar(sidecar, grids)
+        except OSError:  # pragma: no cover - read-only artifact directory
+            pass
+
+    _CACHE.put(key, grids)
+    return grids
+
+
+# --------------------------------------------------------------------------
+# Binary responses
+# --------------------------------------------------------------------------
+
+
+def mask_bytes(grids: FieldGrids) -> bytes:
+    return np.ascontiguousarray(grids.mask, dtype=np.uint8).tobytes()
+
+
+def scalar_bytes(grid: ScalarGrid, dtype: str) -> bytes:
+    """
+    Serialize one scalar grid.
+
+    ``u8`` is the wire default: the client uploads it straight into a
+    ``RawTexture3D`` and undoes the quantization in the shader with the min/max
+    it already has from the metadata. ``f32`` is offered for callers that want
+    field units without a second multiply -- little-endian, matching every
+    platform the viewport runs on.
+    """
+    if dtype == "f32":
+        return np.ascontiguousarray(grid.dequantize(), dtype="<f4").tobytes()
+    return np.ascontiguousarray(grid.values, dtype=np.uint8).tobytes()
+
+
+def frame_bytes(stack: FrameStack, start: int, count: int) -> Tuple[bytes, int, int]:
+    """Consecutive frames as one Uint8 block; returns ``(bytes, start, count)``."""
+    total = stack.count
+    begin = max(int(start), 0)
+    if begin >= total:
+        # Past the end is an empty window, not the last frame. A client paging
+        # with start += count has to be able to see that it is done.
+        return b"", begin, 0
+    length = int(np.clip(count, 0, total - begin))
+    if length <= 0:
+        return b"", begin, 0
+    block = stack.frames[begin : begin + length]
+    return np.ascontiguousarray(block, dtype=np.uint8).tobytes(), begin, length

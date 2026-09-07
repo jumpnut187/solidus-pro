@@ -408,6 +408,31 @@ def build_visualization_payload(
                 "unfilled_voxels": unfilled_count,
             }
 
+    # Playback frames from the pour, gathered onto voxels by the filling stage
+    # (``core.filling_stage.FillFrame``). ``fill_time`` alone gives a static
+    # arrival-time map that a slider can sweep; these are the actual free
+    # surface at each instant, including the partial cells that are the
+    # advancing front, which is what makes a fill animation read as metal
+    # flowing rather than as cells switching on. The engine holds them only
+    # when a filling stage ran and was trustworthy.
+    fill_frames = getattr(engine, "_fill_frames", None)
+    if fill_frames:
+        fill_history: list[list[float]] = []
+        fill_times: list[float] = []
+        for frame in fill_frames:
+            fraction = getattr(frame, "fill_fraction", None)
+            if fraction is None:
+                continue
+            fraction_arr = np.asarray(fraction, dtype=np.float32)
+            if len(fraction_arr) != n_voxels:
+                continue
+            fill_history.append(np.clip(fraction_arr[indices], 0.0, 1.0).tolist())
+            fill_times.append(float(getattr(frame, "time_s", 0.0)))
+        if fill_history:
+            visualization_data["fill_animation_history"] = fill_history
+            visualization_data["fill_animation_times"] = fill_times
+            result_data["fill_animation_frames"] = len(fill_history)
+
     return result_data, visualization_data
 
 
