@@ -4,8 +4,17 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QFrame, QLabel, QGroupBox, QPushButton, QVBoxLayout, QWidget
+from ui.qt import (
+    QDialog,
+    QDialogButtonBox,
+    QFrame,
+    QGroupBox,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+    Qt,
+)
 
 
 class DraggableDialog(QDialog):
@@ -109,12 +118,14 @@ class DraggableDialog(QDialog):
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
-            self._drag_position = event.globalPos() - self.frameGeometry().topLeft()
+            self._drag_position = (
+                event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            )
             event.accept()
 
     def mouseMoveEvent(self, event) -> None:
         if event.buttons() == Qt.LeftButton and self._drag_position is not None:
-            self.move(event.globalPos() - self._drag_position)
+            self.move(event.globalPosition().toPoint() - self._drag_position)
             event.accept()
 
     def mouseReleaseEvent(self, event) -> None:

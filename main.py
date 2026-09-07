@@ -5,8 +5,7 @@ Optimized for Apple M3 - Multi-core CPU, GPU, and Neural Engine acceleration
 
 import sys
 import os
-from PyQt5.QtWidgets import QApplication
-from PyQt5.QtCore import Qt
+from ui.qt import QApplication
 
 # Set multiprocessing start method for macOS
 if sys.platform == 'darwin':
@@ -23,9 +22,7 @@ def main():
     error_logger.info(f"Python version: {sys.version}")
     error_logger.info(f"Platform: {sys.platform}")
     
-    # Enable high DPI scaling for Retina displays
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    # Qt 6 scales for high-DPI displays by default; the Qt 5 AA_* attributes are gone.
     
     app = QApplication(sys.argv)
     app.setApplicationName("Solidus Pro")
@@ -37,7 +34,7 @@ def main():
     
     error_logger.info("Application window opened")
     
-    exit_code = app.exec_()
+    exit_code = app.exec()
     error_logger.info(f"Application closed with exit code: {exit_code}")
     
     sys.exit(exit_code)

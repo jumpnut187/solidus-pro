@@ -4,16 +4,16 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt5.QtWidgets import (
+from ui.qt import (
+    QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
-    QVBoxLayout,
-    QTextBrowser,
     QFormLayout,
-    QComboBox,
-    QSpinBox,
-    QCheckBox,
     QLabel,
+    QSpinBox,
+    QTextBrowser,
+    QVBoxLayout,
 )
 
 from core.surrogate.backend import backend_device_name

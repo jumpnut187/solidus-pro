@@ -151,7 +151,7 @@ class MainWindowFillTimeModeMappingTests(unittest.TestCase):
     Calls the unbound method against a MagicMock host rather than
     constructing a real MainWindow, the same way
     MainWindowPourLocationGateTests in tests/test_pour_picker.py exercises
-    ``_on_pour_location_changed``. No vtk/PyQt5 stubbing is needed here (and
+    ``_on_pour_location_changed``. No vtk/Qt stubbing is needed here (and
     none is installed) because nothing under test touches a real widget or a
     real CastingVisualizer -- every attribute the method reads or writes is a
     MagicMock stand-in.

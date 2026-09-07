@@ -15,9 +15,13 @@ Enhanced Features:
 import numpy as np
 import vtk
 from vtk.util import numpy_support
-from vtk.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
-from PyQt5.QtWidgets import QWidget, QVBoxLayout
-from PyQt5.QtCore import QTimer, pyqtSignal
+from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
+from ui.qt import (
+    QTimer,
+    QVBoxLayout,
+    QWidget,
+    Signal,
+)
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Tuple, Callable, Set
 from collections import OrderedDict
@@ -900,7 +904,7 @@ class CastingVisualizer(QWidget):
     # Emitted with the new PourLocation when a pick lands, or with None when
     # the pour location is cleared. main_window listens to keep its label
     # and the "Mold Filling" analysis gate in sync.
-    pour_location_changed = pyqtSignal(object)
+    pour_location_changed = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)

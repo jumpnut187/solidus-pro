@@ -6,7 +6,10 @@ import threading
 import time
 from typing import Any, Optional
 
-from PyQt5.QtCore import QThread, pyqtSignal
+from ui.qt import (
+    QThread,
+    Signal,
+)
 
 from core.mesh_ml import log_mesh_training_example, recommend_mesh_settings
 from core.simulation_pipeline import PipelineInputs, SimulationCancelledError, run_pipeline
@@ -15,9 +18,9 @@ from core.simulation_pipeline import PipelineInputs, SimulationCancelledError, r
 class SimulationWorker(QThread):
     """Background thread for running simulation."""
 
-    progress = pyqtSignal(str)
-    detailed_progress = pyqtSignal(int, int, str)  # current, total, stage
-    finished = pyqtSignal(bool, str)
+    progress = Signal(str)
+    detailed_progress = Signal(int, int, str)  # current, total, stage
+    finished = Signal(bool, str)
 
     def __init__(
         self,
@@ -198,8 +201,8 @@ class SimulationWorker(QThread):
 class MeshSuggestionWorker(QThread):
     """Background worker that generates ML mesh recommendations."""
 
-    result_ready = pyqtSignal(object)
-    error = pyqtSignal(str)
+    result_ready = Signal(object)
+    error = Signal(str)
 
     def __init__(self, stl_loader: Any, target_accuracy: Optional[float] = None) -> None:
         super().__init__()
@@ -217,9 +220,9 @@ class MeshSuggestionWorker(QThread):
 class SurrogateTrainWorker(QThread):
     """Background worker that trains a surrogate model from captured data."""
 
-    progress = pyqtSignal(str)
-    detailed_progress = pyqtSignal(int, int, str)  # current, total, stage
-    finished = pyqtSignal(bool, str, object)  # success, status, summary
+    progress = Signal(str)
+    detailed_progress = Signal(int, int, str)  # current, total, stage
+    finished = Signal(bool, str, object)  # success, status, summary
 
     def __init__(
         self,
@@ -275,9 +278,9 @@ class SurrogateTrainWorker(QThread):
 class SurrogateWorker(QThread):
     """Background worker that runs a surrogate (NPU/ML) simulation."""
 
-    progress = pyqtSignal(str)
-    detailed_progress = pyqtSignal(int, int, str)  # current, total, stage
-    finished = pyqtSignal(bool, str)
+    progress = Signal(str)
+    detailed_progress = Signal(int, int, str)  # current, total, stage
+    finished = Signal(bool, str)
 
     def __init__(
         self,
@@ -354,9 +357,9 @@ class SurrogateWorker(QThread):
 class DeepTrainWorker(QThread):
     """Background worker that trains the deep 3D U-Net surrogate."""
 
-    progress = pyqtSignal(str)
-    detailed_progress = pyqtSignal(int, int, str)  # current, total, stage
-    finished = pyqtSignal(bool, str, object)  # success, status, summary
+    progress = Signal(str)
+    detailed_progress = Signal(int, int, str)  # current, total, stage
+    finished = Signal(bool, str, object)  # success, status, summary
 
     def __init__(
         self,
@@ -434,8 +437,8 @@ class DeepTrainWorker(QThread):
 class DeepExportWorker(QThread):
     """Background worker that exports the deep model to an NPU target."""
 
-    progress = pyqtSignal(str)
-    finished = pyqtSignal(bool, str, object)  # success, status, result
+    progress = Signal(str)
+    finished = Signal(bool, str, object)  # success, status, result
 
     def __init__(self, model_dir: str, target: str, out_dir: str) -> None:
         super().__init__()
@@ -475,10 +478,10 @@ class DeepAutoTrainWorker(QThread):
     (emitting a reason) or retrains on the entire accumulated dataset.
     """
 
-    progress = pyqtSignal(str)
-    detailed_progress = pyqtSignal(int, int, str)  # current, total, stage
-    finished = pyqtSignal(bool, str, object)  # success, status, summary
-    skipped = pyqtSignal(str)
+    progress = Signal(str)
+    detailed_progress = Signal(int, int, str)  # current, total, stage
+    finished = Signal(bool, str, object)  # success, status, summary
+    skipped = Signal(str)
 
     def __init__(
         self,

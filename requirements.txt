@@ -1,7 +1,7 @@
 # ============================================================================
 # CORE DEPENDENCIES (required for all platforms)
 # ============================================================================
-PyQt5>=5.15.9              # GUI framework (desktop version)
+PySide6>=6.11.2            # GUI framework (desktop version) - Qt 6, LGPL v3
 numpy>=1.24.0              # Numerical computing
 scipy>=1.10.0              # Scientific computing (spatial trees, distance calculations)
 vtk>=9.2.6                 # 3D visualization (desktop version)

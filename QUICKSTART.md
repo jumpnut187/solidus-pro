@@ -14,7 +14,7 @@ pip3 install -r requirements.txt
 ```
 
 This will install:
-- PyQt5 (GUI framework)
+- PySide6 (GUI framework)
 - VTK (3D visualization)
 - NumPy, SciPy (numerical computing)
 - Numba (JIT compilation for M3 optimization)
@@ -219,9 +219,9 @@ Covers all seven alloys: WCB, CF8, C958, C964, CA6NM, MONEL400 and IN625.
 
 ### Application Won't Start
 
-**Error: "No module named 'PyQt5'"**
+**Error: "No module named 'PySide6'"**
 ```bash
-pip3 install PyQt5
+pip3 install PySide6
 ```
 
 **Error: "No module named 'vtk'"**

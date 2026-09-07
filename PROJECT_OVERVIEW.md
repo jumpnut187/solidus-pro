@@ -44,7 +44,7 @@ This is a professional-grade casting solidification simulator that predicts **sh
 ```
 Python_Cast_Sim/
 │
-├── main.py                    # Desktop entry point (PyQt5 + VTK)
+├── main.py                    # Desktop entry point (PySide6 + VTK)
 ├── run_web.py                 # Web entry point (Flask + React/Babylon)
 ├── run.py                     # Dependency check, then launches main.py
 ├── install.sh                 # Installation script
@@ -82,7 +82,7 @@ Python_Cast_Sim/
 │   ├── gas_porosity.py
 │   └── units.py               # The three length zones live here
 │
-├── ui/                        # PyQt5 desktop
+├── ui/                        # PySide6 desktop
 │   ├── main_window.py, visualizer.py, workers.py
 │   └── dialogs/
 │
@@ -101,7 +101,7 @@ Python_Cast_Sim/
 
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
-| **GUI** | PyQt5 | Modern, native macOS interface |
+| **GUI** | PySide6 | Modern, native macOS interface |
 | **3D Visualization** | VTK | Professional CAD-quality rendering |
 | **Numerical** | NumPy, SciPy | Fast array operations |
 | **Acceleration** | Numba | JIT compilation, parallel loops |

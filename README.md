@@ -17,7 +17,7 @@ Most casting simulators are six-figure enterprise packages locked to Windows wor
 ## Features That Matter
 
 ### Dual Interface — Desktop + Web
-- **Desktop**: PyQt5 + VTK — full 3D interactivity, cross-sections, animations, measurement tools
+- **Desktop**: PySide6 + VTK — full 3D interactivity, cross-sections, animations, measurement tools
 - **Web**: Flask + React + Babylon.js — collaborate in-browser at `localhost:5050`
 - **One engine**: `core/simulation_pipeline.py` drives both, so you get identical results everywhere
 
@@ -196,7 +196,7 @@ References: [NIST Scheil notes](https://www.ctcms.nist.gov/~kattner/solidifc/sch
 
 | Layer | Technology |
 |---|---|
-| Desktop GUI | PyQt5 |
+| Desktop GUI | PySide6 (Qt 6) |
 | Desktop 3D | VTK |
 | Web Backend | Flask + Flask-CORS |
 | Web Frontend | React 19 + TypeScript + Vite + Babylon.js |

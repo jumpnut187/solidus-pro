@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PyQt5.QtWidgets import (
+from ui.qt import (
     QCheckBox,
     QComboBox,
     QDialog,

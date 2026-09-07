@@ -12,19 +12,51 @@ Enhanced Visualization Features:
 - Measurement tools
 """
 
-from PyQt5.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QComboBox, QSlider, QGroupBox,
-    QFileDialog, QProgressBar, QDoubleSpinBox, QCheckBox,
-    QMessageBox, QSplitter, QGridLayout, QListWidget, QListWidgetItem,
-    QInputDialog, QMenu, QAction, QDialog, QDialogButtonBox, QFrame,
-    QTextEdit, QApplication, QSpinBox, QTabWidget, QScrollArea,
+from ui.qt import (
+    QAbstractItemView,
+    QAction,
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QCursor,
+    QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QFileSystemWatcher,
+    QFont,
+    QFrame,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
+    QInputDialog,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QObject,
     QPlainTextEdit,
-    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QWidgetAction
+    QPoint,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QSlider,
+    QSpinBox,
+    QSplitter,
+    QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QTextEdit,
+    QTimer,
+    QVBoxLayout,
+    QWidget,
+    QWidgetAction,
+    Qt,
+    Signal,
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QPoint, QObject, QTimer, QFileSystemWatcher
-from PyQt5.QtGui import QFont, QCursor
 import json
 import sys
 import os
@@ -241,7 +273,7 @@ def format_filling_notice(summary: Optional[Dict[str, Any]]) -> Dict[str, str]:
 class MaterialDialog(DraggableDialog):
     """Modal dialog for material selection with detailed property display"""
     
-    alloy_changed = pyqtSignal(str)
+    alloy_changed = Signal(str)
     
     def __init__(self, parent=None):
         super().__init__(parent, "Material Properties")
@@ -340,8 +372,8 @@ class MaterialDialog(DraggableDialog):
 class MeshDialog(DraggableDialog):
     """Modal dialog for mesh parameters"""
     
-    settings_changed = pyqtSignal(float, int, str)  # voxel_size, refinement, memory_mode
-    apply_ml_requested = pyqtSignal()
+    settings_changed = Signal(float, int, str)  # voxel_size, refinement, memory_mode
+    apply_ml_requested = Signal()
     
     def __init__(self, parent=None):
         super().__init__(parent, "Mesh Parameters")
@@ -445,7 +477,7 @@ class MeshDialog(DraggableDialog):
 class PerformanceDialog(DraggableDialog):
     """Modal dialog for performance/acceleration options"""
     
-    options_changed = pyqtSignal(dict)  # Emit dict of performance settings
+    options_changed = Signal(dict)  # Emit dict of performance settings
     
     def __init__(self, parent=None):
         super().__init__(parent, "Performance Options")
@@ -634,12 +666,12 @@ class PerformanceDialog(DraggableDialog):
 class VisualizationDialog(DraggableDialog):
     """Modal dialog for visualization settings including cross-sections, colormaps, and legend"""
     
-    colormap_changed = pyqtSignal(str)
-    color_scale_changed = pyqtSignal(float, float)
-    cross_section_changed = pyqtSignal(str, bool, float, int)  # axis, enabled, position, direction
-    cross_section_interaction_started = pyqtSignal(str)  # axis
-    cross_section_interaction_ended = pyqtSignal(str)  # axis
-    show_legend_changed = pyqtSignal(bool)
+    colormap_changed = Signal(str)
+    color_scale_changed = Signal(float, float)
+    cross_section_changed = Signal(str, bool, float, int)  # axis, enabled, position, direction
+    cross_section_interaction_started = Signal(str)  # axis
+    cross_section_interaction_ended = Signal(str)  # axis
+    show_legend_changed = Signal(bool)
     
     def __init__(self, parent=None):
         super().__init__(parent, "Visualization Settings")
@@ -946,10 +978,10 @@ class VisualizationDialog(DraggableDialog):
 class MeasurementDialog(DraggableDialog):
     """Modal dialog for measurement tools"""
     
-    measure_distance_requested = pyqtSignal()
-    clear_measurements_requested = pyqtSignal()
-    calculate_volume_requested = pyqtSignal(float)  # threshold
-    dialog_closed = pyqtSignal()  # Emitted when dialog is closed
+    measure_distance_requested = Signal()
+    clear_measurements_requested = Signal()
+    calculate_volume_requested = Signal(float)  # threshold
+    dialog_closed = Signal()  # Emitted when dialog is closed
     
     def __init__(self, parent=None):
         super().__init__(parent, "Measurement Tools")
@@ -1043,10 +1075,10 @@ class MeasurementDialog(DraggableDialog):
 class AnimationExportDialog(DraggableDialog):
     """Modal dialog for animation export"""
     
-    start_recording = pyqtSignal()
-    stop_recording = pyqtSignal()
-    export_gif = pyqtSignal(str, int)  # filepath, fps
-    export_mp4 = pyqtSignal(str, int)  # filepath, fps
+    start_recording = Signal()
+    stop_recording = Signal()
+    export_gif = Signal(str, int)  # filepath, fps
+    export_mp4 = Signal(str, int)  # filepath, fps
     
     def __init__(self, parent=None):
         super().__init__(parent, "Animation Export")
@@ -1189,7 +1221,7 @@ class AnimationExportDialog(DraggableDialog):
 
 class ConsoleOutputStream(QObject):
     """Custom stream to capture stdout/stderr and emit signals"""
-    text_written = pyqtSignal(str)
+    text_written = Signal(str)
     
     def __init__(self):
         super().__init__()
@@ -1704,7 +1736,7 @@ class ConsoleWindow(QDialog):
 class RiserDesignDialog(DraggableDialog):
     """Modal dialog for automatic riser design using Heuvers' circle method"""
     
-    add_risers_requested = pyqtSignal(list)  # List of riser recommendations to add
+    add_risers_requested = Signal(list)  # List of riser recommendations to add
     
     def __init__(self, parent=None):
         super().__init__(parent, "Automatic Riser Design")
@@ -2005,7 +2037,7 @@ class SolidificationParamsDialog(DraggableDialog):
     Emits params_changed(dict) on Confirm with the full nested dict.
     """
 
-    params_changed = pyqtSignal(dict)
+    params_changed = Signal(dict)
 
     # Field definitions: (group_key, field_key, label, default, min, max, step, decimals, unit, tooltip)
     # A field is rendered as a slider+spin pair when its key is in SLIDER_FIELDS.
@@ -5364,13 +5396,13 @@ class MainWindow(QMainWindow):
 
     def _show_surrogate_model_info(self) -> None:
         dialog = SurrogateModelInfoDialog(self.surrogate_model, self)
-        dialog.exec_()
+        dialog.exec()
 
     def _open_surrogate_settings_dialog(self) -> None:
         from ui.surrogate_dialog import SurrogateSettingsDialog
 
         dialog = SurrogateSettingsDialog(self)
-        dialog.exec_()
+        dialog.exec()
 
     def _autoload_surrogate_model(self) -> None:
         """Restore the last-used surrogate model at startup (no dialogs).
@@ -5445,7 +5477,7 @@ class MainWindow(QMainWindow):
             return
 
         dialog = SurrogateTrainDialog(self)
-        if dialog.exec_() != QDialog.Accepted:
+        if dialog.exec() != QDialog.Accepted:
             return
         options = dialog.options()
 
@@ -5552,7 +5584,7 @@ class MainWindow(QMainWindow):
             return
 
         dialog = DeepTrainDialog(self)
-        if dialog.exec_() != QDialog.Accepted:
+        if dialog.exec() != QDialog.Accepted:
             return
         options = dialog.options()
 
@@ -5704,7 +5736,7 @@ class MainWindow(QMainWindow):
             return
 
         dialog = DeepExportDialog(self, model_dir=model_dir)
-        if dialog.exec_() != QDialog.Accepted:
+        if dialog.exec() != QDialog.Accepted:
             return
         options = dialog.options()
 
@@ -7045,7 +7077,7 @@ class MainWindow(QMainWindow):
         
         try:
             from core.report_generator import ReportGenerator, SimulationReport
-            from PyQt5.QtWidgets import QFileDialog
+            from ui.qt import QFileDialog
             
             # Get save path from user
             filepath, filter_used = QFileDialog.getSaveFileName(

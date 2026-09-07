@@ -5,12 +5,14 @@ import unittest
 
 from tests.helpers.module_stubs import (
     install_stub_modules,
+    make_qt_stub_modules,
+    make_vtk_qt_stub_modules,
     restore_modules,
     snapshot_modules,
 )
 
 # Captured before any stub is installed, so tearDownModule can hand the real
-# vtk/PyQt5 modules back to whatever runs next in this process.
+# vtk/Qt modules back to whatever runs next in this process.
 _MODULE_SNAPSHOT = snapshot_modules()
 
 
@@ -106,30 +108,14 @@ def _install_cross_section_stubs() -> None:
     numpy_support_module.numpy_to_vtk = lambda *args, **kwargs: _DummyVTKClass()
     vtk_util_module.numpy_support = numpy_support_module
 
-    vtk_qt_module = types.ModuleType("vtk.qt")
-    qvtk_module = types.ModuleType("vtk.qt.QVTKRenderWindowInteractor")
-    qvtk_module.QVTKRenderWindowInteractor = _DummyVTKClass
-    vtk_qt_module.QVTKRenderWindowInteractor = qvtk_module
-
-    pyqt5_module = types.ModuleType("PyQt5")
-    qtwidgets_module = types.ModuleType("PyQt5.QtWidgets")
-    qtwidgets_module.QWidget = _DummyVTKClass
-    qtwidgets_module.QVBoxLayout = _DummyVTKClass
-    qtcore_module = types.ModuleType("PyQt5.QtCore")
-    qtcore_module.QTimer = _DummyVTKClass
-    qtcore_module.pyqtSignal = lambda *a, **k: _DummyVTKClass()
-
     # Forced install; tearDownModule restores the real modules. Also drops
     # ui.visualizer/ui.main_window so they re-import against these stubs.
     install_stub_modules({
         "vtk": vtk_module,
         "vtk.util": vtk_util_module,
         "vtk.util.numpy_support": numpy_support_module,
-        "vtk.qt": vtk_qt_module,
-        "vtk.qt.QVTKRenderWindowInteractor": qvtk_module,
-        "PyQt5": pyqt5_module,
-        "PyQt5.QtWidgets": qtwidgets_module,
-        "PyQt5.QtCore": qtcore_module,
+        **make_vtk_qt_stub_modules(_DummyVTKClass),
+        **make_qt_stub_modules(_DummyVTKClass, lambda *a, **k: _DummyVTKClass()),
     })
 
 

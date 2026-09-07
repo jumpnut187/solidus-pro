@@ -88,7 +88,7 @@ We use reference points to communicate quickly with each other.
 - **Ambiguity:** If required information is missing, state assumptions briefly or ask a single concise clarifying question.
 - **Tool Failure:** If a tool fails, attempt one retry with adjusted parameters. If it fails again, explain the precise limitation clearly and suggest alternative next steps.
 
-Solidus Pro — Python casting solidification simulator. Same engine drives a PyQt5/VTK desktop app and a Flask + React/Babylon.js web app.
+Solidus Pro — Python casting solidification simulator. Same engine drives a PySide6/VTK desktop app and a Flask + React/Babylon.js web app.
 
 ## Entrypoints
 

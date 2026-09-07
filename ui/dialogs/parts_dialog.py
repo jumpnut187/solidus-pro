@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QBrush, QColor
-from PyQt5.QtWidgets import (
+from ui.qt import (
     QAbstractItemView,
+    QBrush,
     QCheckBox,
+    QColor,
     QComboBox,
     QDoubleSpinBox,
     QGridLayout,
@@ -14,10 +14,13 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QPalette,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QWidget,
+    Qt,
+    Signal,
 )
 
 from core.part_manager import PART_TYPE_DISPLAY_NAMES
@@ -27,17 +30,17 @@ from .base import DraggableDialog
 class PartsDialog(DraggableDialog):
     """Modal dialog for managing parts with batch part type assignment"""
 
-    add_part_requested = pyqtSignal()
-    remove_part_requested = pyqtSignal()
-    clear_parts_requested = pyqtSignal()
-    part_selected = pyqtSignal(str)
-    position_changed = pyqtSignal(float, float, float)
-    rotation_changed = pyqtSignal(float, float, float)
-    batch_part_types_confirmed = pyqtSignal(dict)
-    arrange_grid_requested = pyqtSignal()
-    arrange_line_requested = pyqtSignal()
-    duplicate_requested = pyqtSignal()
-    open_top_changed = pyqtSignal(str, bool)
+    add_part_requested = Signal()
+    remove_part_requested = Signal()
+    clear_parts_requested = Signal()
+    part_selected = Signal(str)
+    position_changed = Signal(float, float, float)
+    rotation_changed = Signal(float, float, float)
+    batch_part_types_confirmed = Signal(dict)
+    arrange_grid_requested = Signal()
+    arrange_line_requested = Signal()
+    duplicate_requested = Signal()
+    open_top_changed = Signal(str, bool)
 
     #: Dropdown entries, derived so a new PartType is selectable automatically.
     PART_TYPE_OPTIONS = list(PART_TYPE_DISPLAY_NAMES.values())
@@ -118,10 +121,12 @@ class PartsDialog(DraggableDialog):
             }
         """)
 
+        # Qt 6 exposes enum members on the metaclass, so these have to come off
+        # QPalette itself -- `palette.Text` raised AttributeError under PySide6.
         palette = self.parts_table.palette()
-        palette.setColor(palette.Text, QColor(255, 255, 255))
-        palette.setColor(palette.HighlightedText, QColor(255, 255, 255))
-        palette.setColor(palette.WindowText, QColor(255, 255, 255))
+        palette.setColor(QPalette.Text, QColor(255, 255, 255))
+        palette.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
+        palette.setColor(QPalette.WindowText, QColor(255, 255, 255))
         self.parts_table.setPalette(palette)
         self.content_layout.addWidget(self.parts_table)
 

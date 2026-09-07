@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from PyQt5.QtCore import pyqtSignal
-from PyQt5.QtWidgets import (
+from ui.qt import (
     QCheckBox,
     QDoubleSpinBox,
     QFrame,
@@ -11,6 +10,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QVBoxLayout,
+    Signal,
 )
 
 from .base import DraggableDialog
@@ -19,7 +19,7 @@ from .base import DraggableDialog
 class AnalysisOptionsDialog(DraggableDialog):
     """Modal dialog for selecting analysis types to run"""
 
-    options_changed = pyqtSignal(dict)
+    options_changed = Signal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent, "Analysis Options")

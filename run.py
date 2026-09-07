@@ -18,7 +18,7 @@ def check_python_version():
 
 def check_dependencies():
     """Check if dependencies are installed"""
-    required = ['PyQt5', 'numpy', 'vtk', 'trimesh', 'numba']
+    required = ['PySide6', 'numpy', 'vtk', 'trimesh', 'numba']
     missing = []
 
     for package in required:

@@ -18,7 +18,7 @@ core/               # Physics simulation engine
 ├── part_manager.py # Multi-part STL loading with positioning/transforms
 └── mesh_ml.py      # ML-powered mesh recommendations from simulation history
 
-ui/                 # PyQt5 GUI
+ui/                 # PySide6 GUI
 ├── main_window.py  # Main application with sidebar controls + multi-part support
 └── visualizer.py   # VTK-based 3D visualization with SolidWorks-style controls
 
@@ -52,7 +52,7 @@ models/             # Trained ML models (generated after training)
 - **Physical Cores Only**: Uses physical cores only (no hyperthreading) to minimize memory usage
 - **Thread Allocation**: Reserves 1 core for system tasks (if 3+ cores available)
 - **Numba JIT**: All hot loops use `@jit(nopython=True, parallel=True, fastmath=True, cache=True)`
-- **GPU**: PyOpenCL with Metal backend (currently disabled due to PyQt5 stability issues)
+- **GPU**: PyOpenCL with Metal backend (currently disabled due to Qt stability issues)
 - **Memory Manager**: Automatic disk-backed storage for large arrays to prevent RAM exhaustion
 
 ### Parallel Processing
@@ -414,13 +414,16 @@ actor = vtk.vtkActor()
 actor.SetMapper(mapper)
 ```
 
-### PyQt5 Threading
+### Qt Threading
 **Critical**: Long-running simulations must use `QThread` to avoid blocking UI:
 ```python
+from ui.qt import QThread, Signal
+
+
 class SimulationWorker(QThread):
-    progress = pyqtSignal(str)
-    detailed_progress = pyqtSignal(int, int, str)
-    finished = pyqtSignal(bool)
+    progress = Signal(str)
+    detailed_progress = Signal(int, int, str)
+    finished = Signal(bool)
     
     def run(self):
         # Run simulation in background
@@ -429,13 +432,13 @@ class SimulationWorker(QThread):
 
 ### macOS-Specific Considerations
 - Multiprocessing requires `spawn` start method (set in `main.py`)
-- High DPI scaling enabled for Retina displays
+- High-DPI scaling is automatic in Qt 6; the Qt 5 `AA_*` attributes are gone from `main.py`
 - Metal backend via OpenCL (GPU acceleration currently disabled)
 - CPU detection uses `sysctl` commands
 
 ### Windows-Specific Considerations
 - If `wmic` command fails during CPU detection, program falls back gracefully
-- PyQt5 requires appropriate Visual C++ redistributables
+- Qt requires appropriate Visual C++ redistributables
 - Use backslashes in file paths or raw strings
 
 ### Linux-Specific Considerations
@@ -454,7 +457,7 @@ class SimulationWorker(QThread):
 ## Entry Points
 
 ### Main Application
-- **`main.py`**: PyQt5 application entry point
+- **`main.py`**: PySide6 application entry point
   - Sets multiprocessing method for macOS
   - Enables high DPI scaling
   - Launches `MainWindow` from `ui/main_window.py`
@@ -482,7 +485,7 @@ class SimulationWorker(QThread):
 ## Dependencies to Respect
 - **Numba**: Required for performance; do not remove parallel flags
 - **VTK**: Specific version (>=9.2.6) for macOS compatibility; use memory-mapped arrays for compatibility
-- **PyQt5**: Use `Fusion` style for consistent cross-platform appearance
+- **Qt**: Use `Fusion` style for consistent cross-platform appearance
 - **Trimesh**: Primary mesh library; use `trimesh_obj` attribute consistently
 - **NumPy/SciPy**: Use `np.` functions directly, not deprecated aliases
 - **scikit-learn**: Optional, only needed for training ML mesh recommender
@@ -495,7 +498,7 @@ class SimulationWorker(QThread):
 - ❌ Don't add threading without QThread for GUI operations
 - ❌ Don't modify unit conversions - keep everything in inches
 - ❌ Don't bypass `hardware_config.py` for thread/core allocation
-- ❌ Don't enable GPU acceleration without testing PyQt5 stability
+- ❌ Don't enable GPU acceleration without testing Qt stability
 - ❌ Don't create large arrays without using `create_managed_array()`
 - ❌ Don't hardcode material properties - use `get_alloy(name)`
 - ❌ Don't ignore memory warnings from `memory_limits.py`

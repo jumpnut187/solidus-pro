@@ -11,7 +11,7 @@ from unittest.mock import patch, MagicMock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication, QLabel
 
 from ui.main_window import MainWindow, PerformanceDialog
 from core.gpu_compute import GPUBackend

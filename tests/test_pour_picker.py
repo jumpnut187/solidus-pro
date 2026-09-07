@@ -3,12 +3,12 @@
 Two testing strategies are combined here, matching what each layer needs:
 
 * The real-Qt tests (``AnalysisOptionsDialog`` gating, ``MainWindow`` gate
-  wiring) instantiate genuine PyQt5 widgets under ``QT_QPA_PLATFORM=offscreen``
+  wiring) instantiate genuine PySide6 widgets under ``QT_QPA_PLATFORM=offscreen``
   -- the same approach ``tests/test_performance_summary_label.py`` uses for
   ``PerformanceDialog``. These imports happen at module scope, before any
-  vtk/PyQt5 stubbing below, so they keep using the real Qt classes even after
+  vtk/Qt stubbing below, so they keep using the real Qt classes even after
   the stub swap happens.
-* The ``CastingVisualizer`` pick-mode/marker tests stub ``vtk`` and ``PyQt5``
+* The ``CastingVisualizer`` pick-mode/marker tests stub ``vtk`` and the Qt binding
   exactly the way ``tests/test_visualizer_inspector.py`` does, so they run
   without a display or real VTK render window.
 """
@@ -24,9 +24,11 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-# Real PyQt5 + the modules under test, imported now so they are fully
-# resolved (and cached in sys.modules) before the vtk/PyQt5 stub swap below.
-from PyQt5.QtWidgets import QApplication, QLabel, QPushButton  # noqa: E402
+# Real Qt + the modules under test, imported now so they are fully resolved
+# (and cached in sys.modules) before the vtk/Qt stub swap below. Tests that
+# instantiate real widgets name the binding directly; production code goes
+# through ui.qt instead.
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton  # noqa: E402
 
 from core.pour_location import PourLocation  # noqa: E402
 from ui.dialogs.analysis_options_dialog import AnalysisOptionsDialog  # noqa: E402
@@ -34,12 +36,14 @@ from ui.main_window import MainWindow  # noqa: E402
 
 from tests.helpers.module_stubs import (  # noqa: E402
     install_stub_modules,
+    make_qt_stub_modules,
+    make_vtk_qt_stub_modules,
     restore_modules,
     snapshot_modules,
 )
 
 # Captured before any stub is installed, so tearDownModule can hand the real
-# vtk/PyQt5 modules back to whatever runs next in this process.
+# vtk/Qt modules back to whatever runs next in this process.
 _MODULE_SNAPSHOT = snapshot_modules()
 
 
@@ -195,28 +199,12 @@ def _install_vtk_stubs() -> None:
     numpy_support_module.numpy_to_vtk = lambda *args, **kwargs: _DummyVTKClass()
     vtk_util_module.numpy_support = numpy_support_module
 
-    vtk_qt_module = types.ModuleType("vtk.qt")
-    qvtk_module = types.ModuleType("vtk.qt.QVTKRenderWindowInteractor")
-    qvtk_module.QVTKRenderWindowInteractor = _DummyVTKClass
-    vtk_qt_module.QVTKRenderWindowInteractor = qvtk_module
-
-    pyqt5_module = types.ModuleType("PyQt5")
-    qtwidgets_module = types.ModuleType("PyQt5.QtWidgets")
-    qtwidgets_module.QWidget = _DummyVTKClass
-    qtwidgets_module.QVBoxLayout = _DummyVTKClass
-    qtcore_module = types.ModuleType("PyQt5.QtCore")
-    qtcore_module.QTimer = _DummyVTKClass
-    qtcore_module.pyqtSignal = lambda *args, **kwargs: _DummySignal()
-
     install_stub_modules({
         "vtk": vtk_module,
         "vtk.util": vtk_util_module,
         "vtk.util.numpy_support": numpy_support_module,
-        "vtk.qt": vtk_qt_module,
-        "vtk.qt.QVTKRenderWindowInteractor": qvtk_module,
-        "PyQt5": pyqt5_module,
-        "PyQt5.QtWidgets": qtwidgets_module,
-        "PyQt5.QtCore": qtcore_module,
+        **make_vtk_qt_stub_modules(_DummyVTKClass),
+        **make_qt_stub_modules(_DummyVTKClass, lambda *args, **kwargs: _DummySignal()),
     })
 
 
@@ -240,7 +228,7 @@ class _DummyVTKClass:
 
 
 class _DummySignal:
-    """Stand-in for a bound pyqtSignal; records nothing unless replaced."""
+    """Stand-in for a bound Signal; records nothing unless replaced."""
 
     def emit(self, *args, **kwargs) -> None:
         return None

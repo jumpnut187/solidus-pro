@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from PyQt5.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication
 
 from core.simulation_pipeline import SimulationCancelledError
 from ui.workers import SimulationWorker

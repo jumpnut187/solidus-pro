@@ -1,6 +1,13 @@
-from PyQt5.QtWidgets import QSlider, QStyle, QStyleOptionSlider
-from PyQt5.QtCore import Qt, QRect
-from PyQt5.QtGui import QPainter, QColor, QPen
+from ui.qt import (
+    QColor,
+    QPainter,
+    QPen,
+    QRect,
+    QSlider,
+    QStyle,
+    QStyleOptionSlider,
+    Qt,
+)
 
 class MarkedSlider(QSlider):
     def __init__(self, orientation=Qt.Horizontal, parent=None):
