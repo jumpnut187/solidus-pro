@@ -12,9 +12,25 @@ Enhanced Features:
 - Measurement tools (distance, volume)
 """
 
+import importlib
 import numpy as np
 import vtk
 from vtk.util import numpy_support
+# Qt 6 makes every NSView layer-backed. VTK's default widget base, QWidget,
+# hands vtkCocoaRenderWindow a raw native window handle instead -- the Qt 5
+# model -- and under Qt 6 that leaves the process spinning inside
+# CA::Layer::display_if_needed: the first Core Animation transaction never
+# commits, so the window never paints and no Qt timer is ever dispatched. The
+# app starts, prints its banner, and shows nothing.
+#
+# QOpenGLWidget is the base VTK supports for PySide6/PyQt6 (its own
+# compatibility check in QVTKRenderWindowInteractor pairs them explicitly); it
+# renders through Qt's GL context rather than taking over the view. This has to
+# be set before QVTKRenderWindowInteractor is imported, and this module is the
+# only importer of it. import_module rather than `import vtkmodules.qt` so it
+# also works when the visualizer tests pre-load a stub under that name.
+importlib.import_module("vtkmodules.qt").QVTKRWIBase = "QOpenGLWidget"
+
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 from ui.qt import (
     QTimer,
