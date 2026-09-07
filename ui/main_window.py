@@ -3068,7 +3068,7 @@ class MainWindow(QMainWindow):
         self.analysis_summary_label.setStyleSheet("font-size: 10px; color: #888; margin-left: 10px;")
         settings_layout.addWidget(self.analysis_summary_label)
 
-        # Pour Location button (MAGMASOFT-style ingate placement). The Mold
+        # Pour Location button (industry-standard ingate placement). The Mold
         # Filling analysis toggle in Analysis Options stays disabled until
         # this is set -- see _on_pour_location_changed.
         self.set_pour_location_btn = QPushButton("🎯 Set Pour Location...")

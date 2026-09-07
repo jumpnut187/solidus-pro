@@ -84,7 +84,7 @@ FILL_TIME_MISRUN_COLOR = (0.55, 0.55, 0.55)
 #: core/filling_stage.py) trails a long tail of near-zero numerical noise
 #: behind the true front; a bare `> 0` threshold would fog the advancing
 #: front with a haze of barely-visible cubes instead of the clean wavefront
-#: a MagmaSoft-style fill plot shows.
+#: an industry-standard fill plot shows.
 FILL_ANIMATION_WETTED_THRESHOLD = 0.05
 
 
@@ -133,7 +133,7 @@ COLOR_MAPS = {
         'name': 'Feed Modulus',
         'colors': [(0.0, (0, 210, 230)), (0.25, (0, 70, 230)), (0.50, (210, 0, 120)),
                    (0.68, (255, 45, 0)), (0.84, (255, 210, 0)), (1.0, (246, 242, 208))],
-        'description': 'MAGMA-style feed modulus scale in inches'
+        'description': 'industry-standard feed modulus scale in inches'
     }
 }
 
@@ -1040,7 +1040,7 @@ class CastingVisualizer(QWidget):
         self.feed_modulus_leader = None
         self._feed_modulus_leader_enabled = False
 
-        # Pour (metal-entry) location picking -- MAGMASOFT-style ingate
+        # Pour (metal-entry) location picking -- industry-standard ingate
         # placement. See the "Pour Location Picking" section below.
         self._pour_pick_enabled = False
         self._pour_location: Optional[PourLocation] = None
@@ -1633,7 +1633,7 @@ class CastingVisualizer(QWidget):
 
     # ==================== Pour Location Picking ====================
     #
-    # MAGMASOFT-style ingate placement: the user clicks a point on the 3D
+    # industry-standard ingate placement: the user clicks a point on the 3D
     # assembly and that point becomes the metal-entry location the
     # mold-filling stage uses as its inlet. Reuses the same cell-picker /
     # world-picker fallback pattern as MeasurementTool.pick_point above,
@@ -3191,7 +3191,7 @@ class CastingVisualizer(QWidget):
           view altogether -- a chill is not a misrun, and colouring it grey
           would report a defect that does not exist.
         - Blue -> red ramp = arrival time, early to late. This is the
-          conventional "flow front" palette (see e.g. MAGMASOFT/ProCAST fill
+          conventional "flow front" palette (see e.g. commercial fill
           plots): dark blue fills first, red fills last, so the eye reads
           the sweep as a wavefront moving through the casting.
 
@@ -3282,7 +3282,7 @@ class CastingVisualizer(QWidget):
         Load and display the Fill Animation visualization.
 
         Plays back the mold-filling solver's own transient state -- a
-        MagmaSoft-style advancing free surface -- rather than sweeping a
+        industry-standard advancing free surface -- rather than sweeping a
         threshold over a single precomputed arrival-time scalar the way Fill
         Time does. Each call renders one playback frame.
 

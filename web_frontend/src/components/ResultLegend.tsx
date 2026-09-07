@@ -1,5 +1,5 @@
 import { MODE_CONTROL } from '../lib/uiPrefs';
-import { gradientCssForMode } from '../lib/colorMaps';
+import { gradientCssForMode } from '../lib/colormaps';
 import type { ResultFieldsPayload } from '../lib/api';
 
 type Props = {

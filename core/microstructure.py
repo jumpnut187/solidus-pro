@@ -2,7 +2,7 @@
 Microstructure Prediction Module
 Predicts secondary dendrite arm spacing (SDAS) and grain structure from cooling rate.
 
-MAGMASOFT-style capability:
+industry-standard capability:
 - Predict SDAS from local cooling rate
 - Correlate microstructure with mechanical properties
 - Visualize microstructure distribution

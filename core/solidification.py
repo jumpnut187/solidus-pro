@@ -122,7 +122,7 @@ class AnalysisOptions:
     hot_tear: bool = False          # Hot tear susceptibility analysis
     sand_burn_in: bool = False      # Sand burn-in / metal penetration analysis
     fraction_liquid: bool = False
-    feeding_path: bool = False      # Feeding path analysis (MAGMASOFT-style)
+    feeding_path: bool = False      # Feeding path analysis (industry-standard)
     stress_analysis: bool = False   # Thermal stress and distortion analysis
     microstructure: bool = False    # SDAS and mechanical property prediction
     gas_porosity: bool = False      # Gas porosity analysis (binder gas + entrapment)
@@ -337,7 +337,7 @@ class SolidificationEngine:
         self.gas_porosity_risk = None       # Combined R_gas field (0-1)
         self.gas_porosity_hotspots = None   # Boolean mask (risk > 0.65)
         
-        # Feeding Path analysis results (MAGMASOFT-style)
+        # Feeding Path analysis results (industry-standard)
         self.feeding_path_result = None    # FeedingPathResult object
         self.feeding_quality = None        # 0-1 feeding quality score
         self.feeding_blocked = None        # Boolean mask of blocked voxels
@@ -712,7 +712,7 @@ class SolidificationEngine:
         max_modulus = np.max(self.mesh.voxel_moduli)  # inches
 
         # Mold constant B for sand casting (seconds per inch²)
-        # Calibrated to match MAGMASOFT-scale simulations
+        # Calibrated to match commercial-simulator-scale simulations
         # Steel in green sand: ~200-300 s/in²
         # Steel in dry sand/no-bake: ~250-350 s/in²
         tp = self.analysis_options.solidification_params.timing
@@ -5500,7 +5500,7 @@ class SolidificationEngine:
         """
         Calculate feeding paths from risers to casting voxels.
         
-        MAGMASOFT-style analysis that traces liquid metal flow paths
+        industry-standard analysis that traces liquid metal flow paths
         and identifies blocked regions that cannot be fed.
         """
         n_voxels = len(self.mesh.voxel_centers)

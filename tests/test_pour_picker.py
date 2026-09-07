@@ -1,4 +1,4 @@
-"""Tests for the MAGMASOFT-style pour (metal-entry) location picker.
+"""Tests for the industry-standard pour (metal-entry) location picker.
 
 Two testing strategies are combined here, matching what each layer needs:
 

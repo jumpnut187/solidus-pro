@@ -2,7 +2,7 @@
 Stress and Distortion Analysis Module
 Predicts residual stresses and distortion from differential thermal contraction.
 
-MAGMASOFT-style capabilities:
+industry-standard capabilities:
 - Thermal strain from cooling
 - Constraint strain between regions cooling at different rates
 - Distortion vectors

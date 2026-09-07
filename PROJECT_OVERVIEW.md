@@ -3,7 +3,7 @@
 
 ### 🎯 What This Simulator Does
 
-This is a professional-grade casting solidification simulator that predicts **shrinkage** and **porosity** defects in metal castings. It's based on the same principles as commercial software like SolidCast and Magmasoft, but optimized specifically for your **M3 MacBook Air**.
+This is a professional-grade casting solidification simulator that predicts **shrinkage** and **porosity** defects in metal castings. It's based on the same principles as commercial software like SolidCast, but optimized specifically for your **M3 MacBook Air**.
 
 ### 🚀 Key Features
 
@@ -411,7 +411,7 @@ For issues:
 
 ### 🏆 Credits
 
-**Physics Models:** Based on SolidCast and Magmasoft principles
+**Physics Models:** Based on SolidCast principles
 **Optimization:** Leverages Apple M3 architecture
 **Development:** Modern Python scientific stack
 
@@ -441,11 +441,11 @@ python3 run.py
 
 ---
 
-## MAGMASOFT-Style Advanced Features (New!)
+## Industry-Standard Advanced Features (New!)
 
 ### 🔬 Advanced Analysis Modules
 
-The simulator now includes MAGMASOFT-style advanced analysis capabilities:
+The simulator now includes industry-standard advanced analysis capabilities:
 
 #### 1. **Feeding Path Analysis** (`core/feeding_path.py`)
 - Traces liquid metal flow paths from risers to casting voxels
@@ -472,7 +472,7 @@ The simulator now includes MAGMASOFT-style advanced analysis capabilities:
 - Riser size optimization
 - Riser position optimization
 - Multi-objective optimization (shrinkage, yield, coverage)
-- MAGMASOFT "Autonomous Engineering" style iteration
+- Commercial autonomous-engineering style iteration
 
 #### 5. **Results Comparison** (`core/results_manager.py`)
 - Save/load simulation results
@@ -530,9 +530,9 @@ data/
 └── results/            # Saved simulation results
 ```
 
-### 🔄 Comparison with MAGMASOFT
+### 🔄 Comparison with Commercial Simulators
 
-| Feature | MAGMASOFT | This Simulator |
+| Feature | Commercial Simulator | This Simulator |
 |---------|-----------|----------------|
 | Shrinkage/Porosity | ✅ | ✅ |
 | Hot Spot Detection | ✅ | ✅ |

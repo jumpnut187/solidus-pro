@@ -846,7 +846,7 @@ function boundsFromActiveVoxels(activeSet: ActiveVoxelSet) {
   };
 }
 
-/** Magenta MAGMASOFT-style pin marking the user-chosen pour (ingate) point.
+/** Magenta industry-standard pin marking the user-chosen pour (ingate) point.
  *
  * Distinct from every part color and result-mode color in this file (see
  * `partColors` / `resultColors` above) so it always reads as "this is the

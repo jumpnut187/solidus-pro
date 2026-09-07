@@ -18,7 +18,7 @@ numbersections: true
 
 ## Background and Motivation
 
-Metal casting is one of the oldest manufacturing processes, yet the physics governing solidification remain challenging to predict analytically. Defects such as shrinkage porosity, hot tears, and microstructural inhomogeneity arise from the complex interplay of heat transfer, fluid flow, phase transformations, and mechanical stress. Industrial casting simulation packages such as MAGMASOFT and ProCAST have addressed these challenges for decades, but their cost, complexity, and closed-source nature create barriers for small foundries, engineering educators, and independent practitioners.
+Metal casting is one of the oldest manufacturing processes, yet the physics governing solidification remain challenging to predict analytically. Defects such as shrinkage porosity, hot tears, and microstructural inhomogeneity arise from the complex interplay of heat transfer, fluid flow, phase transformations, and mechanical stress. Industrial casting simulation packages such as commercial casting simulators and ProCAST have addressed these challenges for decades, but their cost, complexity, and closed-source nature create barriers for small foundries, engineering educators, and independent practitioners.
 
 Solidus Pro addresses this gap as a fully open desktop application combining physically grounded solidification simulation with GPU-accelerated computation, machine-learning-assisted mesh configuration, and an interactive 3D visualization environment. The platform is designed to run on consumer hardware—from laptops with integrated graphics to workstations with discrete NVIDIA GPUs—while producing results comparable in scope to commercial alternatives.
 
@@ -1059,7 +1059,7 @@ Thirteen analysis overlay modes are available:
 | Mode | Data Source | Units | Description |
 |------|-------------|-------|-------------|
 | Shrinkage/Porosity | `shrinkage_probability` | probability (0-1) | Predicted shrinkage defect probability |
-| Feed Modulus | `local_modulus` | inches | MAGMA-style feed modulus |
+| Feed Modulus | `local_modulus` | inches | industry-standard feed modulus |
 | Hot Spots | `hotspot_intensity` | 0-1 | Hot spot intensity |
 | Niyama Criterion | `niyama_values` | $K^{1/2} \cdot s^{1/2} \cdot cm^{-1}$ | Niyama criterion values |
 | Niyama Risk | `niyama_risk` | 0-1 | Normalized Niyama porosity risk |
@@ -1086,7 +1086,7 @@ Eight configurable colormaps are defined:
 | **hot_cold** | Blue → cyan → green → yellow → red | Temperature-style |
 | **defect_industry** | Green → yellow → orange → red | Industry standard defect scale |
 | **niyama** | Blue → cyan → yellow → red | Niyama-specific gradient |
-| **feedmod** | Cyan → blue → magenta → red → yellow | MAGMA-style feed modulus |
+| **feedmod** | Cyan → blue → magenta → red → yellow | industry-standard feed modulus |
 
 Custom color scale bounds (min/max) provide fine-grained control over the visualization range.
 

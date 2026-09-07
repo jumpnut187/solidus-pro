@@ -11,6 +11,8 @@ from flask_cors import CORS
 from web.services.simulation_queue import QueueConfig, SimulationQueueManager, default_queue_config
 from web import repository as repo
 from web.routes import api_bp
+from web.routes_fields import fields_bp
+from web.routes_tools import tools_bp
 
 
 def create_app() -> Flask:
@@ -52,6 +54,8 @@ def create_app() -> Flask:
         return jsonify({"error": "Internal server error"}), 500
 
     app.register_blueprint(api_bp)
+    app.register_blueprint(fields_bp)
+    app.register_blueprint(tools_bp)
 
     @app.route("/")
     def index():

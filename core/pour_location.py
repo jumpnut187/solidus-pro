@@ -1,7 +1,7 @@
 """Pure data model for a user-selected pour (metal-entry) location.
 
 A pour location is the point where the user tells the simulation metal
-enters the mold -- clicked on the 3D assembly, the way MAGMASOFT lets an
+enters the mold -- clicked on the 3D assembly, the way commercial simulators let an
 operator place an ingate. The mold-filling stage only runs once such a
 location exists; everything upstream of it (part loading, voxelization) is
 unaffected by whether one has been chosen yet.

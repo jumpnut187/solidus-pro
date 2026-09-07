@@ -13,7 +13,7 @@ Physics:
     2. The path permeability is sufficient (Darcy's Law)
     3. Ferrostatic pressure > pressure drop along path
 
-MAGMASOFT-style enhancement:
+industry-standard enhancement:
     - Niyama alone doesn't account for feed path availability
     - A voxel with acceptable Niyama but blocked path = DEFECT
     - A voxel with low Niyama but good feed path = OK
@@ -361,7 +361,7 @@ class FeedingPathAnalyzer:
     - Permeability-based path quality
     - Identifies truly blocked regions vs low-Niyama but fed regions
     
-    This is a MAGMASOFT-style enhancement that distinguishes:
+    This is an industry-standard enhancement that distinguishes:
     - Voxels with acceptable Niyama but blocked path → DEFECT
     - Voxels with low Niyama but good feed path → OK
     """

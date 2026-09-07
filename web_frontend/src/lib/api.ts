@@ -65,7 +65,7 @@ export type ProjectSettings = {
   performance_options: Record<string, boolean | number | string>;
   solidification_params: Record<string, Record<string, number | Record<string, number>>>;
   ui_state?: Record<string, unknown>;
-  // The MAGMASOFT-style pour point clicked on the 3D assembly, or null when
+  // The industry-standard pour point clicked on the 3D assembly, or null when
   // none has been set yet. The mold-filling analysis is gated on this being
   // non-null -- see AnalysisDrawer. Persisted server-side inside the
   // project's existing `ui_state` JSON blob (see web/repository.py).
