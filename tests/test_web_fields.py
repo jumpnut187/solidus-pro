@@ -15,15 +15,17 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
 from flask import Flask
 
+from core.simulation_pipeline import _add_summary_statistics
 from web import fields
 from web import repository as repo
 from web.payloads import write_artifact
-from web.routes_fields import fields_bp
+from web.routes_fields import clear_envelope_cache, fields_bp
 from web.services.simulation_queue import SimulationQueueManager
 
 
@@ -32,6 +34,7 @@ ORIGIN = (-1.25, 2.5, 0.75)
 SPACING = 0.25
 FRAME_COUNT = 3
 FRAME_TIMES = [0.0, 4.5, 9.0]
+FILL_TIMES = [0.0, 0.75, 1.5]
 
 #: Cells left empty inside the bounding box, so the lattice is not a solid
 #: brick and the nearest-inside fill has something to do.
@@ -81,6 +84,12 @@ def _synthetic_artifact() -> Dict[str, Any]:
         remaining = 1.0 - frame_index / (FRAME_COUNT - 1)
         history.append([float(np.clip(remaining, 0.0, 1.0))] * len(cells))
 
+    fill_history: List[List[float]] = []
+    for frame_index in range(FRAME_COUNT):
+        # A rising metal front: everything at or below this height is full.
+        level = (frame_index / (FRAME_COUNT - 1)) * (DIMS[2] - 1)
+        fill_history.append([1.0 if iz <= level else 0.0 for (_, _, iz) in cells])
+
     return {
         "summary": {
             "voxel_count": len(cells),
@@ -96,6 +105,8 @@ def _synthetic_artifact() -> Dict[str, Any]:
             "solidification_times": solidification,
             "fraction_liquid_history": history,
             "fraction_liquid_times": FRAME_TIMES,
+            "fill_animation_history": fill_history,
+            "fill_animation_times": FILL_TIMES,
         },
     }
 
@@ -524,6 +535,409 @@ class GridEndpointTests(unittest.TestCase):
         self.assertTrue(response.get_json()["ok"])
 
 
+class FillAnimationTests(unittest.TestCase):
+    """
+    The fill-animation path, on synthetic frames.
+
+    No run in the seed data has a filling stage, so without this the whole
+    route from ``engine._fill_frames`` through the sidecar to the frames
+    endpoint would ship untested. The fixture stands in for the real thing: a
+    metal front that rises one lattice layer at a time.
+    """
+
+    def setUp(self) -> None:
+        fields.clear_cache()
+        self.artifact = _synthetic_artifact()
+        self.grids = fields.build_field_grids(
+            self.artifact["visualization"], self.artifact["summary"]
+        )
+
+    def tearDown(self) -> None:
+        fields.clear_cache()
+
+    def test_fill_frames_become_their_own_stack(self) -> None:
+        stack = self.grids.stacks["fill_animation"]
+        self.assertEqual(stack.count, FRAME_COUNT)
+        self.assertEqual([float(t) for t in stack.times_s], FILL_TIMES)
+        # Distinct from the solidification stack, not an alias of it.
+        self.assertIsNot(stack, self.grids.stacks["fraction_liquid"])
+
+    def test_fill_front_rises_with_the_frame(self) -> None:
+        stack = self.grids.stacks["fill_animation"]
+        filled_per_frame = []
+        for frame_index in range(stack.count):
+            frame = stack.frames[frame_index]
+            filled_per_frame.append(
+                sum(1 for cell in _occupied_cells() if frame[_flat_index(*cell)] > 127)
+            )
+        self.assertLess(filled_per_frame[0], filled_per_frame[1])
+        self.assertLess(filled_per_frame[1], filled_per_frame[2])
+        self.assertEqual(filled_per_frame[2], len(_occupied_cells()))
+
+    def test_metadata_reports_the_fill_stack_under_its_own_key(self) -> None:
+        meta = fields.build_grid_metadata(self.grids)
+        self.assertIn("fill_animation", meta["modes"])
+        self.assertEqual(meta["frames"]["fill"]["count"], FRAME_COUNT)
+        self.assertEqual(meta["frames"]["fill"]["times_s"], FILL_TIMES)
+        self.assertEqual(meta["units"]["fill_animation"], "s")
+
+    def test_envelope_of_a_fill_frame_grows_over_time(self) -> None:
+        early = fields.build_envelope(self.grids, "fill_animation", 0.5, frame_index=0)
+        late = fields.build_envelope(self.grids, "fill_animation", 0.5, frame_index=2)
+        assert early is not None and late is not None
+        self.assertGreater(late.vertex_count, 0)
+        # The last frame encloses the whole casting, the first only its floor.
+        self.assertGreater(_bounding_height(late), _bounding_height(early))
+
+
+def _bounding_height(envelope: fields.Envelope) -> float:
+    if envelope.vertex_count == 0:
+        return 0.0
+    return float(np.max(envelope.positions[:, 2]) - np.min(envelope.positions[:, 2]))
+
+
+def _bounding_volume(envelope: fields.Envelope) -> float:
+    """Bounding-box volume; enough to compare two thresholds of one field."""
+    if envelope.vertex_count == 0:
+        return 0.0
+    span = np.max(envelope.positions, axis=0) - np.min(envelope.positions, axis=0)
+    return float(np.prod(span))
+
+
+class EnvelopeTests(unittest.TestCase):
+    """Isosurface extraction and the binary body that carries it."""
+
+    def setUp(self) -> None:
+        fields.clear_cache()
+        clear_envelope_cache()
+        self.artifact = _synthetic_artifact()
+        self.grids = fields.build_field_grids(
+            self.artifact["visualization"], self.artifact["summary"]
+        )
+        self.grid = self.grids.scalars["shrinkage"]
+
+    def tearDown(self) -> None:
+        fields.clear_cache()
+        clear_envelope_cache()
+
+    def _at(self, fraction: float) -> float:
+        return self.grid.minimum + fraction * (self.grid.maximum - self.grid.minimum)
+
+    def test_a_higher_threshold_encloses_less(self) -> None:
+        loose = fields.build_envelope(self.grids, "shrinkage", self._at(0.2))
+        tight = fields.build_envelope(self.grids, "shrinkage", self._at(0.8))
+        assert loose is not None and tight is not None
+        self.assertGreater(loose.vertex_count, 0)
+        self.assertGreater(tight.vertex_count, 0)
+        self.assertGreater(_bounding_volume(loose), _bounding_volume(tight))
+
+    def test_envelope_stays_inside_the_metal(self) -> None:
+        """
+        The grids are hole-filled so surface painting does not fade at the
+        boundary, which means every cell in the box carries a plausible value.
+        Contouring that unmasked would grow the envelope out through the mold.
+        """
+        envelope = fields.build_envelope(self.grids, "shrinkage", self._at(0.1))
+        assert envelope is not None
+        nx, ny, nz = DIMS
+        for x, y, z in envelope.positions:
+            ix = round((x - ORIGIN[0]) / SPACING)
+            iy = round((y - ORIGIN[1]) / SPACING)
+            iz = round((z - ORIGIN[2]) / SPACING)
+            # One cell of slack: a contour vertex legitimately sits on the
+            # boundary between an inside cell and an outside one.
+            self.assertTrue(-1 <= ix <= nx, msg=f"x {x}")
+            self.assertTrue(-1 <= iy <= ny, msg=f"y {y}")
+            self.assertTrue(-1 <= iz <= nz, msg=f"z {z}")
+
+    def test_cast_only_drops_the_riser(self) -> None:
+        threshold = self._at(0.05)
+        everything = fields.build_envelope(self.grids, "shrinkage", threshold)
+        cast_only = fields.build_envelope(self.grids, "shrinkage", threshold, cast_only=True)
+        assert everything is not None and cast_only is not None
+        self.assertGreater(cast_only.vertex_count, 0)
+        # Cast bodies are the lower half of the fixture, so the cast-only
+        # envelope cannot reach as high.
+        self.assertLess(
+            float(np.max(cast_only.positions[:, 2])),
+            float(np.max(everything.positions[:, 2])),
+        )
+
+    def test_vertex_scalars_track_the_threshold(self) -> None:
+        """
+        Vertices carry the value the field has where they sit.
+
+        An isosurface is a level set, so they cluster around the threshold --
+        but not exactly on it, and deliberately so: the field is smoothed
+        before contouring, which shifts the surface by a fraction of a cell,
+        and the scalar is then sampled from the *unsmoothed* field. Reporting
+        the value that is really there beats reporting the value the surface
+        was nominally drawn at. On this fixture the field climbs by 100 per
+        cell in z, so a fraction of a cell is a large number; the median is
+        what says the surface is in the right place.
+        """
+        threshold = self._at(0.5)
+        envelope = fields.build_envelope(self.grids, "shrinkage", threshold)
+        assert envelope is not None and envelope.scalars is not None
+        span = self.grid.maximum - self.grid.minimum
+        deviation = np.abs(envelope.scalars - threshold) / span
+        self.assertLess(float(np.median(deviation)), 0.2)
+
+    def test_binary_layout(self) -> None:
+        envelope = fields.build_envelope(self.grids, "shrinkage", self._at(0.3))
+        assert envelope is not None and envelope.scalars is not None
+        body = fields.envelope_bytes(envelope)
+
+        vertices = envelope.vertex_count
+        indices = int(envelope.indices.size)
+        self.assertEqual(len(body), vertices * 7 * 4 + indices * 4)
+
+        offset = 0
+        positions = np.frombuffer(body, dtype="<f4", count=vertices * 3, offset=offset)
+        offset += vertices * 3 * 4
+        normals = np.frombuffer(body, dtype="<f4", count=vertices * 3, offset=offset)
+        offset += vertices * 3 * 4
+        parsed_indices = np.frombuffer(body, dtype="<u4", count=indices, offset=offset)
+        offset += indices * 4
+        scalars = np.frombuffer(body, dtype="<f4", count=vertices, offset=offset)
+
+        np.testing.assert_allclose(positions, envelope.positions.reshape(-1), rtol=1e-6)
+        np.testing.assert_allclose(normals, envelope.normals.reshape(-1), rtol=1e-6)
+        np.testing.assert_array_equal(parsed_indices, envelope.indices)
+        np.testing.assert_allclose(scalars, envelope.scalars, rtol=1e-6)
+        # Every index addresses a real vertex.
+        self.assertLess(int(parsed_indices.max()), vertices)
+
+    def test_scalars_can_be_skipped(self) -> None:
+        envelope = fields.build_envelope(
+            self.grids, "shrinkage", self._at(0.3), with_scalars=False
+        )
+        assert envelope is not None
+        self.assertIsNone(envelope.scalars)
+        expected = envelope.vertex_count * 6 * 4 + int(envelope.indices.size) * 4
+        self.assertEqual(len(fields.envelope_bytes(envelope)), expected)
+
+
+class EnvelopeEndpointTests(unittest.TestCase):
+    def setUp(self) -> None:
+        fields.clear_cache()
+        clear_envelope_cache()
+        self.temp_dir = tempfile.TemporaryDirectory()
+        root = Path(self.temp_dir.name)
+        self.database_path = root / "simulations.db"
+        self.temp_folder = root / "temp"
+        self.temp_folder.mkdir()
+        repo.init_db(self.database_path)
+
+        app = Flask(__name__)
+        app.config["DATABASE"] = self.database_path
+        app.config["TEMP_FOLDER"] = self.temp_folder
+        app.extensions["simulation_queue_manager"] = SimulationQueueManager()
+        app.register_blueprint(fields_bp)
+        self.client = app.test_client()
+
+        self.artifact = _synthetic_artifact()
+        self.project_id = repo.create_project(self.database_path, {"name": "Envelopes"})
+        artifact_path = self.temp_folder / f"{self.project_id}.json"
+        write_artifact(artifact_path, self.artifact)
+        repo.mark_project_completed(
+            self.database_path, self.project_id, self.artifact["summary"], str(artifact_path)
+        )
+
+    def tearDown(self) -> None:
+        fields.clear_cache()
+        clear_envelope_cache()
+        self.temp_dir.cleanup()
+
+    def _body(self, response: Any) -> bytes:
+        if response.headers.get("Content-Encoding") == "gzip":
+            return gzip.decompress(response.data)
+        return bytes(response.data)
+
+    def test_isosurface_endpoint_returns_a_parsable_block(self) -> None:
+        response = self.client.get(
+            f"/api/projects/{self.project_id}/grid/shrinkage/isosurface?threshold=30"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "application/octet-stream")
+        self.assertEqual(response.headers["X-Has-Scalar"], "1")
+
+        vertices = int(response.headers["X-Vertex-Count"])
+        indices = int(response.headers["X-Index-Count"])
+        self.assertGreater(vertices, 0)
+        self.assertEqual(indices % 3, 0)
+
+        body = self._body(response)
+        self.assertEqual(len(body), vertices * 7 * 4 + indices * 4)
+        positions = np.frombuffer(body, dtype="<f4", count=vertices * 3)
+        self.assertTrue(np.all(np.isfinite(positions)))
+
+    def test_isosurface_threshold_is_in_field_units(self) -> None:
+        meta = self.client.get(f"/api/projects/{self.project_id}/grid").get_json()
+        span = meta["ranges"]["shrinkage"]["max"] - meta["ranges"]["shrinkage"]["min"]
+        low = meta["ranges"]["shrinkage"]["min"] + 0.1 * span
+        response = self.client.get(
+            f"/api/projects/{self.project_id}/grid/shrinkage/isosurface?threshold={low}"
+        )
+        self.assertAlmostEqual(float(response.headers["X-Threshold"]), low, places=6)
+        self.assertGreater(int(response.headers["X-Vertex-Count"]), 0)
+
+    def test_isosurface_without_scalars(self) -> None:
+        response = self.client.get(
+            f"/api/projects/{self.project_id}/grid/shrinkage/isosurface?threshold=30&scalars=0"
+        )
+        self.assertEqual(response.headers["X-Has-Scalar"], "0")
+        vertices = int(response.headers["X-Vertex-Count"])
+        indices = int(response.headers["X-Index-Count"])
+        self.assertEqual(len(self._body(response)), vertices * 6 * 4 + indices * 4)
+
+    def test_isosurface_of_a_frame(self) -> None:
+        response = self.client.get(
+            f"/api/projects/{self.project_id}/grid/fill_animation/isosurface?threshold=0.5&frame=2"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertGreater(int(response.headers["X-Vertex-Count"]), 0)
+
+    def test_isosurface_rejects_bad_input(self) -> None:
+        base = f"/api/projects/{self.project_id}/grid"
+        self.assertEqual(self.client.get(f"{base}/nope/isosurface?threshold=1").status_code, 404)
+        self.assertEqual(
+            self.client.get(f"{base}/shrinkage/isosurface?threshold=abc").status_code, 400
+        )
+        self.assertEqual(
+            self.client.get(f"{base}/shrinkage/isosurface?threshold=1&frame=x").status_code, 400
+        )
+        self.assertEqual(
+            self.client.get("/api/projects/nope/grid/shrinkage/isosurface").status_code, 404
+        )
+
+    def test_repeated_requests_are_served_from_the_cache(self) -> None:
+        url = f"/api/projects/{self.project_id}/grid/shrinkage/isosurface?threshold=30"
+        first = self.client.get(url)
+        second = self.client.get(url)
+        self.assertEqual(first.headers["X-Vertex-Count"], second.headers["X-Vertex-Count"])
+        self.assertEqual(self._body(first), self._body(second))
+
+
+class SummaryStatisticsTests(unittest.TestCase):
+    """
+    The statistics the shell's panel reads.
+
+    They come off the engine, which no test here can run, so the engine is
+    stood in for by an object carrying the same attributes. What is being
+    checked is the contract: flat scalars, stable names, units in the name,
+    and -- the part that matters most for a panel -- a statistic the run did
+    not produce being *absent* rather than zero.
+    """
+
+    def _collect(self, **attributes: Any) -> Dict[str, Any]:
+        engine = SimpleNamespace(
+            alloy=SimpleNamespace(name="WCB"),
+            time=612.5,
+            **attributes,
+        )
+        result_data: Dict[str, Any] = {"voxel_count": 1000}
+        _add_summary_statistics(result_data, engine)
+        return result_data
+
+    def test_scalars_are_flat_and_named_with_their_units(self) -> None:
+        stats = self._collect(
+            chvorinov_time=np.array([10.0, 20.0, 30.0]),
+            total_shrinkage_volume=1.25,
+            affected_voxel_count=250,
+            hotspot_count=17,
+            niyama_defect_count=3,
+            max_stress_mpa=182.5,
+            avg_sdas_um=48.0,
+            feeding_blocked_count=9,
+            feeding_path_result=SimpleNamespace(fed_fraction=0.87),
+        )
+
+        self.assertEqual(stats["alloy"], "WCB")
+        self.assertAlmostEqual(stats["simulation_time_s"], 612.5)
+        self.assertAlmostEqual(stats["chvorinov_time_max_s"], 30.0)
+        self.assertAlmostEqual(stats["chvorinov_time_mean_s"], 20.0)
+        self.assertAlmostEqual(stats["shrinkage_volume_in3"], 1.25)
+        self.assertEqual(stats["shrinkage_voxel_count"], 250)
+        self.assertAlmostEqual(stats["shrinkage_percentage"], 25.0)
+        self.assertEqual(stats["hotspot_voxel_count"], 17)
+        self.assertEqual(stats["niyama_defect_count"], 3)
+        self.assertAlmostEqual(stats["max_stress_mpa"], 182.5)
+        self.assertAlmostEqual(stats["avg_sdas_um"], 48.0)
+        self.assertEqual(stats["feeding_blocked_count"], 9)
+        self.assertAlmostEqual(stats["fed_fraction"], 0.87)
+
+        # Every value the panel receives has to be a scalar it can print.
+        for key, value in stats.items():
+            self.assertIsInstance(value, (int, float, str), msg=key)
+
+    def test_defect_volume_comes_from_the_engine(self) -> None:
+        stats = self._collect(
+            get_defect_volume_estimate=lambda: {
+                "total_volume_in3": 2.5,
+                "max_volume_in3": 4.0,
+                "defect_count": 42,
+                "casting_volume_in3": 300.0,
+                "defect_percentage": 0.83,
+                "threshold_used": 0.3,
+            }
+        )
+        self.assertAlmostEqual(stats["defect_volume_in3"], 2.5)
+        self.assertAlmostEqual(stats["defect_volume_max_in3"], 4.0)
+        self.assertEqual(stats["defect_voxel_count"], 42)
+        self.assertAlmostEqual(stats["casting_volume_in3"], 300.0)
+        self.assertAlmostEqual(stats["defect_threshold"], 0.3)
+
+    def test_an_analysis_that_did_not_run_is_absent_not_zero(self) -> None:
+        """
+        Zero hot tears and "hot tearing was not analysed" are different
+        answers, and a panel that shows 0 for the second one is lying.
+        """
+        stats = self._collect(hotspot_count=5)
+        self.assertIn("hotspot_voxel_count", stats)
+        for absent in [
+            "hot_tear_voxel_count",
+            "sand_burn_in_voxel_count",
+            "gas_porosity_voxel_count",
+            "max_stress_mpa",
+            "avg_sdas_um",
+            "defect_volume_in3",
+        ]:
+            self.assertNotIn(absent, stats)
+
+    def test_fill_statistics_are_promoted_out_of_their_nested_dict(self) -> None:
+        engine = SimpleNamespace(alloy=SimpleNamespace(name="WCB"), time=1.0)
+        result_data: Dict[str, Any] = {
+            "voxel_count": 10,
+            "fill_time_stats": {
+                "max_fill_time_s": 3.4,
+                "filled_voxels": 9,
+                "unfilled_voxels": 1,
+            },
+        }
+        _add_summary_statistics(result_data, engine)
+        self.assertAlmostEqual(result_data["fill_max_time_s"], 3.4)
+        self.assertEqual(result_data["fill_filled_voxel_count"], 9)
+        self.assertEqual(result_data["fill_unfilled_voxel_count"], 1)
+
+    def test_a_broken_statistic_never_fails_the_run(self) -> None:
+        def explode() -> Dict[str, Any]:
+            raise RuntimeError("no mesh")
+
+        stats = self._collect(get_defect_volume_estimate=explode, hotspot_count=1)
+        self.assertNotIn("defect_volume_in3", stats)
+        self.assertEqual(stats["hotspot_voxel_count"], 1)
+
+    def test_the_flattener_carries_them_through_to_grid_metadata(self) -> None:
+        artifact = _synthetic_artifact()
+        artifact["summary"]["defect_volume_in3"] = 2.5
+        artifact["summary"]["hotspot_voxel_count"] = 17
+        grids = fields.build_field_grids(artifact["visualization"], artifact["summary"])
+        meta = fields.build_grid_metadata(grids)
+        self.assertAlmostEqual(meta["stats"]["defect_volume_in3"], 2.5)
+        self.assertEqual(meta["stats"]["hotspot_voxel_count"], 17)
+
+
 @unittest.skipUnless(
     REAL_ARTIFACT.exists(),
     f"Seeded run artifact not present at {REAL_ARTIFACT}",
@@ -567,6 +981,40 @@ class RealArtifactTests(unittest.TestCase):
         # niyama came back identically zero on this run; it must not be
         # offered as something to look at.
         self.assertNotIn("niyama", meta["modes"])
+
+    def test_envelope_vertices_sit_on_the_threshold(self) -> None:
+        grids = self.grids
+        assert grids is not None
+        grid = grids.scalars["solidification_time"]
+        threshold = grid.minimum + 0.5 * (grid.maximum - grid.minimum)
+        envelope = fields.build_envelope(grids, "solidification_time", threshold)
+        assert envelope is not None and envelope.scalars is not None
+        self.assertGreater(envelope.vertex_count, 0)
+        span = grid.maximum - grid.minimum
+        deviation = np.abs(envelope.scalars - threshold) / span
+        # Measured on this run: median 5.9 percent of the span, 90th
+        # percentile 16 percent, worst vertex 22 percent. The tail is where
+        # the field climbs fastest -- the riser neck -- and a half-cell shift
+        # there is a large number of seconds. The median is the statement
+        # that the surface is on its level.
+        self.assertLess(float(np.median(deviation)), 0.1)
+        self.assertLess(float(np.percentile(deviation, 90)), 0.25)
+
+    def test_envelope_is_cheap_enough_to_serve_per_request(self) -> None:
+        import time
+
+        grids = self.grids
+        assert grids is not None
+        grid = grids.scalars["solidification_time"]
+        threshold = grid.minimum + 0.5 * (grid.maximum - grid.minimum)
+        started = time.perf_counter()
+        envelope = fields.build_envelope(grids, "solidification_time", threshold)
+        elapsed = time.perf_counter() - started
+        assert envelope is not None
+        self.assertGreater(envelope.triangle_count, 0)
+        # Generous, because CI machines vary; the point is that this is
+        # milliseconds rather than the seconds a JSON round trip would cost.
+        self.assertLess(elapsed, 2.0)
 
     def test_no_scalar_grid_bleeds_below_its_own_minimum(self) -> None:
         grids = self.grids

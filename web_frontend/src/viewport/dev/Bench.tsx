@@ -22,8 +22,12 @@ import {
   type ColormapId,
   type GridMeta,
   type ResultModeId,
+  type ResultStyle,
   type ResultViewState,
-  type ViewportHandle
+  type MeasureResult,
+  type ProbeReading,
+  type ViewportHandle,
+  type ViewportTool
 } from '../../lib/viewState';
 import { ColorBar } from '../ColorBar';
 import { ResultsViewport } from '../ResultsViewport';
@@ -45,6 +49,27 @@ function initialView(): ResultViewState {
   if (colormap) view.colormap = colormap as ColormapId;
   const opacity = params.get('opacity');
   if (opacity) view.modelOpacity = Number.parseFloat(opacity);
+  const style = params.get('style');
+  if (style) view.style = style as ResultStyle;
+  const threshold = params.get('threshold');
+  if (threshold) view.threshold = Number.parseFloat(threshold);
+  if (params.get('castOnly') === '1') view.castOnly = true;
+  // section=<axis>:<position>[:flip], e.g. section=y:50 or section=x:35:flip
+  const section = params.get('section');
+  if (section) {
+    const [axis, position, flag] = section.split(':');
+    if (axis === 'x' || axis === 'y' || axis === 'z') {
+      view.section = {
+        ...view.section,
+        [axis]: {
+          enabled: true,
+          position: position ? Number.parseFloat(position) : 50,
+          flip: flag === 'flip'
+        }
+      };
+    }
+  }
+  if (params.get('caps') === '0') view.section = { ...view.section, caps: false };
   return view;
 }
 
@@ -80,6 +105,9 @@ export function Bench() {
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<ResultViewState>(initialView);
   const [ortho, setOrtho] = useState(false);
+  const [tool, setTool] = useState<ViewportTool>((params.get('tool') as ViewportTool) ?? 'select');
+  const [probe, setProbe] = useState<ProbeReading | null>(null);
+  const [measure, setMeasure] = useState<MeasureResult | null>(null);
   const handleRef = useRef<ViewportHandle | null>(null);
 
   useEffect(() => {
@@ -155,6 +183,28 @@ export function Bench() {
             ))}
           </select>
 
+          {(['surface', 'envelope', 'both'] as ResultStyle[]).map((style) => (
+            <button
+              key={style}
+              type="button"
+              className={view.style === style ? 'bench-active' : undefined}
+              onClick={() => patchView({ style })}
+            >
+              {style}
+            </button>
+          ))}
+
+          <label>
+            Threshold {Math.round(view.threshold)}%
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={view.threshold}
+              onChange={(event) => patchView({ threshold: Number(event.target.value) })}
+            />
+          </label>
+
           <label>
             Opacity {Math.round(view.modelOpacity)}%
             <input
@@ -214,6 +264,17 @@ export function Bench() {
             />
             cast only
           </label>
+          {(['select', 'probe', 'measure', 'pour'] as ViewportTool[]).map((id) => (
+            <button
+              key={id}
+              type="button"
+              className={tool === id ? 'bench-active' : undefined}
+              onClick={() => setTool(id)}
+            >
+              {id}
+            </button>
+          ))}
+
           <label className="bench-check">
             <input
               type="checkbox"
@@ -237,9 +298,9 @@ export function Bench() {
           view={view}
           onViewChange={patchView}
           ortho={ortho}
-          tool="select"
-          onProbe={() => undefined}
-          onMeasure={() => undefined}
+          tool={tool}
+          onProbe={setProbe}
+          onMeasure={setMeasure}
           pourLocation={null}
           onPourPicked={() => undefined}
           onGridMeta={setMeta}
@@ -266,6 +327,17 @@ export function Bench() {
         ) : (
           <span hidden data-bench-status="idle" />
         )}
+        {probe ? (
+          <p className="bench-readout">
+            probe: {probe.value === null ? 'no data' : probe.value.toFixed(4)} {probe.unit} (
+            {probe.partType ?? 'no part'})
+          </p>
+        ) : null}
+        {measure ? (
+          <p className="bench-readout bench-readout-second">
+            measure: {measure.distanceIn.toFixed(3)} in
+          </p>
+        ) : null}
         {error ? <p className="bench-error">{error}</p> : null}
       </main>
     </div>

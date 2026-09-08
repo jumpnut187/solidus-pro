@@ -13,6 +13,7 @@ which is a WebGL 3D texture of width ``nx`` with no shuffling on arrival.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, cast
 import gzip
@@ -154,9 +155,134 @@ def grid_frames(project_id: str, mode: str):
     )
 
 
+@fields_bp.route("/projects/<project_id>/grid/<mode>/isosurface")
+def grid_isosurface(project_id: str, mode: str):
+    """
+    The threshold isosurface for a mode, as one binary block.
+
+    ``threshold`` is in **field units**, not percent: the client already knows
+    the range from the metadata and converting there keeps one definition of
+    "30 percent" rather than two that can drift apart.
+
+    The body is little-endian and laid out as positions, normals, indices and
+    optionally per-vertex scalars, with counts in the headers. A hundred
+    thousand triangle envelope is about 2 MB this way against 7 MB of JSON,
+    and it arrives as typed arrays the renderer can hand straight to a vertex
+    buffer.
+
+    Query parameters:
+      ``threshold``  field units (required in practice; defaults to 0.3)
+      ``cast_only``  1 to contour only cast bodies
+      ``scalars``    0 to skip the per-vertex sampling pass
+      ``frame``      frame index, for the animated modes
+    """
+    grids = _load_grids(project_id)
+    if grids is None:
+        return jsonify({"error": "Results not found"}), 404
+
+    known = mode in grids.scalars or mode in grids.stacks
+    if not known:
+        return jsonify({"error": f"Mode '{mode}' has no data for this run"}), 404
+
+    try:
+        threshold = float(request.args.get("threshold", "0.3"))
+    except ValueError:
+        return jsonify({"error": "threshold must be a number"}), 400
+    frame_arg = request.args.get("frame")
+    try:
+        frame_index = int(frame_arg) if frame_arg is not None else None
+    except ValueError:
+        return jsonify({"error": "frame must be an integer"}), 400
+
+    cast_only = request.args.get("cast_only") in {"1", "true", "True"}
+    with_scalars = request.args.get("scalars", "1") not in {"0", "false", "False"}
+
+    envelope = _cached_envelope(
+        project_id,
+        grids,
+        mode,
+        threshold,
+        cast_only=cast_only,
+        with_scalars=with_scalars,
+        frame_index=frame_index,
+    )
+    if envelope is None:
+        return jsonify({"error": f"Mode '{mode}' cannot be contoured for this run"}), 404
+
+    return _binary_response(
+        fields.envelope_bytes(envelope),
+        {
+            "X-Vertex-Count": str(envelope.vertex_count),
+            "X-Index-Count": str(int(envelope.indices.size)),
+            "X-Has-Scalar": "1" if envelope.scalars is not None else "0",
+            "X-Field-Mode": mode,
+            "X-Field-Min": repr(float(envelope.minimum)),
+            "X-Field-Max": repr(float(envelope.maximum)),
+            "X-Field-Unit": fields.MODE_UNITS.get(mode, ""),
+            "X-Threshold": repr(float(envelope.threshold)),
+        },
+    )
+
+
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
+
+
+#: Contoured envelopes, keyed by everything that changes the geometry.
+#:
+#: Dragging a threshold slider asks for a new isosurface several times a
+#: second; the client debounces, but a user sweeping back and forth still
+#: revisits the same thresholds. Contouring the reference run takes tens of
+#: milliseconds, so a handful of cached results turns a repeat into a lookup.
+_ENVELOPE_CACHE: "OrderedDict[Tuple[Any, ...], fields.Envelope]" = OrderedDict()
+_ENVELOPE_CACHE_MAX = 12
+
+
+def _cached_envelope(
+    project_id: str,
+    grids: fields.FieldGrids,
+    mode: str,
+    threshold: float,
+    *,
+    cast_only: bool,
+    with_scalars: bool,
+    frame_index: Optional[int],
+) -> Optional[fields.Envelope]:
+    key = (
+        project_id,
+        id(grids),
+        mode,
+        round(float(threshold), 6),
+        cast_only,
+        with_scalars,
+        frame_index,
+    )
+    cached = _ENVELOPE_CACHE.get(key)
+    if cached is not None:
+        _ENVELOPE_CACHE.move_to_end(key)
+        return cached
+
+    envelope = fields.build_envelope(
+        grids,
+        mode,
+        threshold,
+        cast_only=cast_only,
+        with_scalars=with_scalars,
+        frame_index=frame_index,
+    )
+    if envelope is None:
+        return None
+
+    _ENVELOPE_CACHE[key] = envelope
+    while len(_ENVELOPE_CACHE) > _ENVELOPE_CACHE_MAX:
+        _ENVELOPE_CACHE.popitem(last=False)
+    return envelope
+
+
+def clear_envelope_cache() -> None:
+    """Drop every cached envelope. Used by tests."""
+    _ENVELOPE_CACHE.clear()
 
 
 def _dims_header(grids: fields.FieldGrids) -> str:

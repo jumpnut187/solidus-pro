@@ -91,3 +91,24 @@ body,
   color: #ff9b93;
   border-color: rgba(255, 120, 110, 0.45);
 }
+
+.bench-bar button.bench-active {
+  background: #2f6fe0;
+  border-color: #4f8bff;
+}
+
+.bench-readout {
+  position: absolute;
+  left: 14px;
+  top: 14px;
+  margin: 0;
+  padding: 5px 9px;
+  border-radius: 6px;
+  background: rgba(10, 14, 20, 0.85);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  font-variant-numeric: tabular-nums;
+}
+
+.bench-readout-second {
+  top: 48px;
+}

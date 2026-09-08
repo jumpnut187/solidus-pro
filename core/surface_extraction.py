@@ -62,6 +62,42 @@ class SurfaceRequest:
     time_percent: float = 0.0
 
 
+@dataclass(frozen=True)
+class SurfaceArrays:
+    """
+    An isosurface as raw arrays, before any serialization decision.
+
+    The JSON payload builds from this; so does the binary body the viewport
+    actually fetches. Keeping the arrays as the primary product means the
+    binary path never pays for a round trip through Python lists -- a 100,000
+    triangle envelope is 7 MB of JSON and about 2 MB of Float32.
+    """
+
+    positions: np.ndarray  # (V, 3) float32, world inches
+    normals: np.ndarray  # (V, 3) float32, unit
+    indices: np.ndarray  # (T * 3,) uint32
+
+    @staticmethod
+    def empty_surface() -> "SurfaceArrays":
+        return SurfaceArrays(
+            positions=np.empty((0, 3), dtype=np.float32),
+            normals=np.empty((0, 3), dtype=np.float32),
+            indices=np.empty((0,), dtype=np.uint32),
+        )
+
+    @property
+    def vertex_count(self) -> int:
+        return int(self.positions.shape[0])
+
+    @property
+    def triangle_count(self) -> int:
+        return int(self.indices.size // 3)
+
+    @property
+    def empty(self) -> bool:
+        return self.indices.size == 0
+
+
 def normalize_surface_request(mode: str, threshold: float, time_percent: float = 0.0) -> SurfaceRequest:
     """
     Validate user-facing surface request parameters.
@@ -162,7 +198,7 @@ def build_surface_payload(
     if float(np.max(volume)) < request.threshold:
         return _empty_payload(request, active_count=active_count, reason="below threshold after gridding")
 
-    mesh = _extract_with_vtk(volume, origin, spacing, request.threshold)
+    mesh = _arrays_to_payload(_extract_with_vtk(volume, origin, spacing, request.threshold))
     mesh.update(
         {
             "mode": request.mode,
@@ -173,6 +209,55 @@ def build_surface_payload(
         }
     )
     return mesh
+
+
+def contour_dense_grid(
+    volume: np.ndarray,
+    origin: Iterable[float],
+    spacing: float,
+    threshold: float,
+    *,
+    smooth_sigma: float = 0.75,
+) -> SurfaceArrays:
+    """
+    Contour an already-dense scalar grid.
+
+    This is the path the viewport's envelope takes, and it differs from
+    :func:`build_surface_payload` in where the field comes from: that one
+    rebuilds a lattice out of sparse voxel centers every request, while this
+    one is handed the grid the sidecar already holds. Same geometry, no JSON
+    parse, and -- crucially -- the caller has already masked the grid to the
+    metal, so the contour cannot leak into the hole-filled values outside the
+    casting.
+
+    ``volume`` is indexed ``[ix, iy, iz]``; ``origin`` is the world position of
+    the center of cell ``(0, 0, 0)``. A one-cell ring of background is added on
+    every side so the surface closes where the casting reaches the edge of its
+    own bounding box instead of being sliced open by it.
+    """
+    if volume.ndim != 3 or volume.size == 0:
+        return SurfaceArrays.empty_surface()
+
+    background = float(np.min(volume))
+    if background >= threshold:
+        # Every cell is above the threshold, so a closed surface needs a
+        # background strictly below it to contour against.
+        background = threshold - max(abs(threshold), 1.0) * 1e-3
+
+    padded = np.full(tuple(size + 2 for size in volume.shape), background, dtype=np.float32)
+    padded[1:-1, 1:-1, 1:-1] = volume.astype(np.float32, copy=False)
+
+    if smooth_sigma > 0.0 and min(padded.shape) >= 4:
+        smoothed = ndimage.gaussian_filter(padded, sigma=smooth_sigma)
+        if float(np.max(smoothed)) >= threshold:
+            padded = smoothed
+
+    if float(np.max(padded)) < threshold:
+        return SurfaceArrays.empty_surface()
+
+    origin_arr = np.asarray(list(origin), dtype=np.float32) - float(spacing)
+    spacing_arr = np.full(3, float(spacing), dtype=np.float32)
+    return _extract_with_vtk(padded, origin_arr, spacing_arr, float(threshold))
 
 
 def _values_for_request(visualization_data: Dict[str, Any], request: SurfaceRequest) -> Optional[np.ndarray]:
@@ -354,7 +439,7 @@ def _build_scalar_volume(centers: np.ndarray, values: np.ndarray) -> tuple[np.nd
     return volume, origin, spacing
 
 
-def _extract_with_vtk(volume: np.ndarray, origin: np.ndarray, spacing: np.ndarray, threshold: float) -> Dict[str, Any]:
+def _extract_with_vtk(volume: np.ndarray, origin: np.ndarray, spacing: np.ndarray, threshold: float) -> SurfaceArrays:
     try:
         import vtk
         from vtk.util import numpy_support
@@ -398,14 +483,12 @@ def _extract_with_vtk(volume: np.ndarray, origin: np.ndarray, spacing: np.ndarra
     normals.Update()
 
     polydata = normals.GetOutput()
-    return _polydata_to_payload(polydata)
+    return _polydata_to_arrays(polydata)
 
 
-def _polydata_to_payload(polydata: Any) -> Dict[str, Any]:
-    from vtk.util import numpy_support
-
-    points = polydata.GetPoints()
-    if points is None or points.GetNumberOfPoints() == 0:
+def _arrays_to_payload(surface: SurfaceArrays) -> Dict[str, Any]:
+    """The JSON shape the legacy client still expects."""
+    if surface.empty:
         return {
             "positions": [],
             "indices": [],
@@ -414,54 +497,86 @@ def _polydata_to_payload(polydata: Any) -> Dict[str, Any]:
             "triangle_count": 0,
             "empty": True,
         }
+    return {
+        "positions": surface.positions.reshape(-1).round(6).tolist(),
+        "indices": surface.indices.astype(np.int64).tolist(),
+        "normals": surface.normals.reshape(-1).round(6).tolist(),
+        "vertex_count": int(surface.vertex_count),
+        "triangle_count": int(surface.triangle_count),
+        "empty": False,
+    }
 
-    positions = numpy_support.vtk_to_numpy(points.GetData()).astype(np.float32)
+
+def _polydata_to_arrays(polydata: Any) -> SurfaceArrays:
+    """
+    Pull positions, normals and triangles out of a vtkPolyData as numpy arrays.
+
+    Vectorized rather than looped. The previous version walked the cell array
+    in Python and appended to a list, which is fine for the few thousand
+    triangles a risk-field envelope produces and quadratically unpleasant for
+    the hundred thousand a fine solidification-time isosurface does.
+    """
+    from vtk.util import numpy_support
+
+    points = polydata.GetPoints()
+    if points is None or points.GetNumberOfPoints() == 0:
+        return SurfaceArrays.empty_surface()
+
+    positions = numpy_support.vtk_to_numpy(points.GetData()).astype(np.float32, copy=False)
     normal_data = polydata.GetPointData().GetNormals()
     normals = (
-        numpy_support.vtk_to_numpy(normal_data).astype(np.float32)
+        numpy_support.vtk_to_numpy(normal_data).astype(np.float32, copy=False)
         if normal_data is not None
         else np.zeros_like(positions, dtype=np.float32)
     )
 
     polys = polydata.GetPolys()
-    triangles: list[int] = []
-    if polys is not None and polys.GetNumberOfCells() > 0:
-        offsets_data = polys.GetOffsetsArray()
-        connectivity_data = polys.GetConnectivityArray()
-        offsets = (
-            numpy_support.vtk_to_numpy(offsets_data).astype(np.int64)
-            if offsets_data is not None
-            else np.array([], dtype=np.int64)
-        )
-        connectivity = (
-            numpy_support.vtk_to_numpy(connectivity_data).astype(np.int64)
-            if connectivity_data is not None
-            else np.array([], dtype=np.int64)
-        )
+    if polys is None or polys.GetNumberOfCells() == 0:
+        return SurfaceArrays.empty_surface()
+
+    offsets_data = polys.GetOffsetsArray()
+    connectivity_data = polys.GetConnectivityArray()
+    if offsets_data is None or connectivity_data is None:
+        return SurfaceArrays.empty_surface()
+    offsets = numpy_support.vtk_to_numpy(offsets_data).astype(np.int64, copy=False)
+    connectivity = numpy_support.vtk_to_numpy(connectivity_data).astype(np.int64, copy=False)
+    if offsets.size < 2:
+        return SurfaceArrays.empty_surface()
+
+    sizes = np.diff(offsets)
+    if np.all(sizes == 3):
+        # The fast path, and the only one a contour filter ever takes.
+        triangles = connectivity.reshape(-1, 3)
     else:
-        offsets = np.array([], dtype=np.int64)
-        connectivity = np.array([], dtype=np.int64)
+        triangles = _fan_triangulate(offsets, connectivity, sizes)
 
-    for cell_index in range(max(0, len(offsets) - 1)):
-        start = int(offsets[cell_index])
-        end = int(offsets[cell_index + 1])
-        cell = connectivity[start:end]
-        count = len(cell)
-        if count == 3:
-            triangles.extend(int(v) for v in cell)
-        elif count > 3:
-            first = int(cell[0])
-            for idx in range(1, count - 1):
-                triangles.extend([first, int(cell[idx]), int(cell[idx + 1])])
+    if triangles.size == 0:
+        return SurfaceArrays.empty_surface()
 
-    return {
-        "positions": positions.reshape(-1).round(6).tolist(),
-        "indices": triangles,
-        "normals": normals.reshape(-1).round(6).tolist(),
-        "vertex_count": int(len(positions)),
-        "triangle_count": int(len(triangles) // 3),
-        "empty": len(triangles) == 0,
-    }
+    return SurfaceArrays(
+        positions=np.ascontiguousarray(positions, dtype=np.float32).reshape(-1, 3),
+        normals=np.ascontiguousarray(normals, dtype=np.float32).reshape(-1, 3),
+        indices=np.ascontiguousarray(triangles.reshape(-1), dtype=np.uint32),
+    )
+
+
+def _fan_triangulate(offsets: np.ndarray, connectivity: np.ndarray, sizes: np.ndarray) -> np.ndarray:
+    """Fan-triangulate any polygon with more than three corners."""
+    fans: list[np.ndarray] = []
+    triples = sizes == 3
+    if np.any(triples):
+        starts = offsets[:-1][triples]
+        fans.append(connectivity[(starts[:, None] + np.arange(3)[None, :]).reshape(-1)].reshape(-1, 3))
+    for index in np.nonzero(sizes > 3)[0]:
+        cell = connectivity[int(offsets[index]) : int(offsets[index + 1])]
+        first = cell[0]
+        fans.append(
+            np.stack(
+                [np.full(len(cell) - 2, first, dtype=np.int64), cell[1:-1], cell[2:]],
+                axis=1,
+            )
+        )
+    return np.concatenate(fans, axis=0) if fans else np.empty((0, 3), dtype=np.int64)
 
 
 def _as_float_array(value: Any, *, expected_columns: int) -> np.ndarray:

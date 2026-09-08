@@ -795,3 +795,183 @@ def frame_bytes(stack: FrameStack, start: int, count: int) -> Tuple[bytes, int, 
         return b"", begin, 0
     block = stack.frames[begin : begin + length]
     return np.ascontiguousarray(block, dtype=np.uint8).tobytes(), begin, length
+
+
+# --------------------------------------------------------------------------
+# Isosurface envelopes
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class Envelope:
+    """A threshold isosurface plus the values sampled along it."""
+
+    positions: np.ndarray  # (V, 3) float32
+    normals: np.ndarray  # (V, 3) float32
+    indices: np.ndarray  # (T * 3,) uint32
+    #: Per-vertex field value in field units, or None when not requested.
+    scalars: Optional[np.ndarray]
+    threshold: float
+    minimum: float
+    maximum: float
+
+    @property
+    def vertex_count(self) -> int:
+        return int(self.positions.shape[0])
+
+    @property
+    def triangle_count(self) -> int:
+        return int(self.indices.size // 3)
+
+
+def masked_field_volume(
+    grids: FieldGrids,
+    mode: str,
+    *,
+    cast_only: bool = False,
+    frame_index: Optional[int] = None,
+) -> Optional[Tuple[np.ndarray, float, float]]:
+    """
+    The dense field as a 3D array indexed ``[ix, iy, iz]``, blanked outside the metal.
+
+    Blanking matters. The stored grid is hole-filled so that trilinear
+    sampling on the *surface* never fades toward zero, which means every cell
+    in the bounding box carries a plausible-looking value. Contouring that
+    directly would grow the envelope out through the mold. Here the cells that
+    are not metal -- or, with ``cast_only``, not cast metal -- are pushed below
+    the field minimum, so the contour closes at the metal boundary instead.
+    """
+    nx, ny, nz = grids.lattice.dims
+    if frame_index is not None:
+        stack = grids.stacks.get(mode)
+        if stack is None:
+            return None
+        index = int(np.clip(frame_index, 0, stack.count - 1))
+        dense = stack.frames[index].astype(np.float32) / _QUANT_MAX
+        minimum, maximum = 0.0, 1.0
+    else:
+        grid = grids.scalars.get(mode)
+        if grid is None:
+            return None
+        dense = grid.dequantize()
+        minimum, maximum = grid.minimum, grid.maximum
+
+    keep = grids.mask != 0
+    if cast_only:
+        keep &= grids.mask == PART_TYPE_CAST + 1
+    if not np.any(keep):
+        return None
+
+    span = max(maximum - minimum, 1e-6)
+    outside = minimum - span
+    blanked = np.where(keep, dense, outside).astype(np.float32)
+    return blanked.reshape((nz, ny, nx)).transpose(2, 1, 0), minimum, maximum
+
+
+def sample_field_at(
+    grids: FieldGrids,
+    mode: str,
+    points: np.ndarray,
+    *,
+    frame_index: Optional[int] = None,
+) -> Optional[np.ndarray]:
+    """
+    Trilinearly sample a field at arbitrary world points.
+
+    Used to colour envelope vertices by the value the field actually has
+    there. Without it every vertex carries the threshold, and a "both" view
+    shows a flat-coloured blob inside a graded surface -- which reads as a
+    rendering bug rather than as an isosurface.
+    """
+    nx, ny, nz = grids.lattice.dims
+    if frame_index is not None:
+        stack = grids.stacks.get(mode)
+        if stack is None:
+            return None
+        index = int(np.clip(frame_index, 0, stack.count - 1))
+        dense = stack.frames[index].astype(np.float32) / _QUANT_MAX
+    else:
+        grid = grids.scalars.get(mode)
+        if grid is None:
+            return None
+        dense = grid.dequantize()
+
+    volume = dense.reshape((nz, ny, nx))
+    origin = grids.lattice.origin
+    spacing = grids.lattice.spacing if grids.lattice.spacing > 0 else 1.0
+    # map_coordinates indexes in array order, which for this reshape is z, y, x.
+    coords = np.vstack(
+        [
+            (points[:, 2] - origin[2]) / spacing,
+            (points[:, 1] - origin[1]) / spacing,
+            (points[:, 0] - origin[0]) / spacing,
+        ]
+    )
+    sampled = ndimage.map_coordinates(volume, coords, order=1, mode="nearest")
+    return np.asarray(sampled, dtype=np.float32)
+
+
+def build_envelope(
+    grids: FieldGrids,
+    mode: str,
+    threshold: float,
+    *,
+    cast_only: bool = False,
+    with_scalars: bool = True,
+    frame_index: Optional[int] = None,
+    smooth_sigma: float = 0.75,
+) -> Optional[Envelope]:
+    """Contour ``mode`` at ``threshold`` (field units) and sample values along it."""
+    from core.surface_extraction import contour_dense_grid
+
+    prepared = masked_field_volume(grids, mode, cast_only=cast_only, frame_index=frame_index)
+    if prepared is None:
+        return None
+    volume, minimum, maximum = prepared
+
+    surface = contour_dense_grid(
+        volume,
+        grids.lattice.origin,
+        grids.lattice.spacing,
+        threshold,
+        smooth_sigma=smooth_sigma,
+    )
+
+    scalars: Optional[np.ndarray] = None
+    if with_scalars and surface.vertex_count:
+        scalars = sample_field_at(grids, mode, surface.positions, frame_index=frame_index)
+
+    return Envelope(
+        positions=surface.positions,
+        normals=surface.normals,
+        indices=surface.indices,
+        scalars=scalars,
+        threshold=float(threshold),
+        minimum=float(minimum),
+        maximum=float(maximum),
+    )
+
+
+def envelope_bytes(envelope: Envelope) -> bytes:
+    """
+    Serialize an envelope as one little-endian block.
+
+    Layout, in order, with the counts carried in response headers:
+
+        positions  Float32[3 * V]
+        normals    Float32[3 * V]
+        indices    Uint32[3 * T]
+        scalars    Float32[V]      (only when X-Has-Scalar is 1)
+
+    Every section is a whole number of 4-byte words, so each one starts
+    aligned and the client can wrap the buffer in typed-array views without
+    copying it.
+    """
+    parts = [
+        np.ascontiguousarray(envelope.positions, dtype="<f4").tobytes(),
+        np.ascontiguousarray(envelope.normals, dtype="<f4").tobytes(),
+        np.ascontiguousarray(envelope.indices, dtype="<u4").tobytes(),
+    ]
+    if envelope.scalars is not None:
+        parts.append(np.ascontiguousarray(envelope.scalars, dtype="<f4").tobytes())
+    return b"".join(parts)
