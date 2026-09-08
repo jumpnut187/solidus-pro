@@ -97,7 +97,12 @@ export function ColorBar({ view, meta, orientation = 'vertical', onScaleChange }
   const vertical = orientation !== 'horizontal';
   const mode = view.mode;
   const range = meta?.ranges[mode];
-  const unit = meta?.units?.[mode] ?? RESULT_MODE_UNITS[mode] ?? '';
+  // The server's unit table wins outright when it is present, including when
+  // it says a mode has *no* unit. `RESULT_MODE_UNITS` is a static fallback for
+  // before a run has loaded, and it still lists a unit for fill animation,
+  // whose values are a 0..1 fraction and not the seconds its frames are
+  // stamped with.
+  const unit = meta?.units ? (meta.units[mode] ?? '') : (RESULT_MODE_UNITS[mode] ?? '');
 
   const autoMin = range?.min ?? 0;
   const autoMax = range?.max ?? 1;
@@ -177,7 +182,17 @@ export function ColorBar({ view, meta, orientation = 'vertical', onScaleChange }
 
 /** Seconds at the current scrubber position, for the time modes. */
 function TimeReadout({ view, meta }: Pick<ColorBarProps, 'view'> & { meta: NonNullable<ColorBarProps['meta']> }) {
-  const frames = view.mode === 'fraction_liquid' ? meta.frames.fraction_liquid : meta.frames.fill;
+  // Only the modes that really are a stack of frames get a clock. Fill time
+  // is listed as a time mode because the shell's transport bar owns it, but
+  // it is one static map whose *colour* is the time; borrowing the fill
+  // animation's clock for it put a running second count next to a picture
+  // that never changes.
+  const frames =
+    view.mode === 'fraction_liquid'
+      ? meta.frames.fraction_liquid
+      : view.mode === 'fill_animation'
+        ? meta.frames.fill
+        : undefined;
   const times = frames?.times_s ?? [];
   if (times.length < 2) return null;
   const seconds = times[0] + (view.timePercent / 100) * (times[times.length - 1] - times[0]);

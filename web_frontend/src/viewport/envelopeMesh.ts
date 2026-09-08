@@ -67,6 +67,13 @@ export class EnvelopeMesh {
     // multiplies the albedo by it -- so the albedo has to be white for the
     // colour buffer to survive unaltered.
     this._material.albedoColor = Color3.White();
+    // A level set of a filled region lands exactly on the metal boundary --
+    // which is where the casting's own surface is. Two surfaces at the same
+    // depth z-fight into stripes, and the one that should win is the one the
+    // user asked to see, so the isosurface is biased a hair toward the
+    // camera. A depth bias rather than moved geometry: the surface stays
+    // where the field says it is.
+    this._material.zOffset = -2;
     this._mesh.useVertexColors = true;
     this._mesh.material = this._material;
   }

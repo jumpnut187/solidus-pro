@@ -626,7 +626,10 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       selectedPartId,
       opacity: Math.min(requested, cap),
       showModel: view.showModel,
-      assemblySize: boundsRef.current?.size ?? 1
+      assemblySize: boundsRef.current?.size ?? 1,
+      // A ghost shell must not claim the depth buffer ahead of the envelope
+      // it is supposed to be showing.
+      depthPrePass: !wantsEnvelope(style)
     });
     paint();
   }, [parts, selectedPartId, view.modelOpacity, view.showModel, view.style, paint]);
@@ -1023,14 +1026,14 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
         className="viewport-canvas"
         style={{ width: '100%', height: '100%', display: 'block', outline: 'none', touchAction: 'none' }}
       />
-      <canvas
-        ref={gizmoRef}
-        className="viewport-gizmo"
-        width={96}
-        height={96}
-        aria-hidden="true"
-        style={{ position: 'absolute', right: 12, bottom: 12, width: 96, height: 96, pointerEvents: 'none' }}
-      />
+      {/*
+        Placement is the host's, not this component's. The shell puts the
+        gizmo above its log strip so the drawer never covers it; hard-coding
+        `right`/`bottom` here overrode that and dropped it underneath. The
+        class is the hook; `bench.css` positions it in the standalone bench
+        and `shell.css` in the application.
+      */}
+      <canvas ref={gizmoRef} className="viewport-gizmo" width={96} height={96} aria-hidden="true" />
     </div>
   );
 });

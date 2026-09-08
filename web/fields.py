@@ -33,10 +33,13 @@ world point maps to a texture coordinate as
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 import json
+import os
+import tempfile
 import threading
 
 import numpy as np
@@ -84,7 +87,6 @@ MODE_UNITS: Dict[str, str] = {
     "feed_modulus": "in",
     "solidification_time": "s",
     "fill_time": "s",
-    "fill_animation": "s",
     "thermal_stress": "MPa",
     "distortion": "in",
     "sdas": "µm",
@@ -93,6 +95,12 @@ MODE_UNITS: Dict[str, str] = {
 }
 
 #: Modes animated by the time scrubber rather than a threshold.
+#:
+#: Neither carries a unit. Their *frames* are stamped with a time in seconds,
+#: but the values in them are fractions: fraction liquid is 0..1 solid to
+#: liquid, and a fill-animation frame is the fraction of a cell the metal has
+#: reached. Labelling the colour bar "s" put seconds on an axis that never
+#: held any.
 TIME_MODES = ("fraction_liquid", "fill_animation")
 
 #: Modes whose per-voxel values are only meaningful where the fill reached, or
@@ -102,6 +110,38 @@ TIME_MODES = ("fraction_liquid", "fill_animation")
 _NON_NEGATIVE_ONLY_MODES = frozenset({"fill_time"})
 
 _QUANT_MAX = 255.0
+
+#: Largest lattice this module will build, in cells.
+#:
+#: The lattice is derived from the extent of the voxel centers, so a run whose
+#: voxels lie on a long diagonal at a fine voxel size implies a box far larger
+#: than the metal in it: 4,000 voxels along the diagonal of a 15 inch envelope
+#: at 0.05 inch is 27 million cells and roughly 330 MB just for the Euclidean
+#: distance transform's index arrays. Unbounded, the first grid request for
+#: such a run takes the process down and every retry does it again.
+#:
+#: 64 million cells is about 64 MB for the mask and 256 MB of transient EDT
+#: indices -- comfortably past any real casting on this hardware, and short of
+#: the runs that cannot work at all.
+MAX_LATTICE_CELLS = 64_000_000
+
+
+class LatticeTooLargeError(ValueError):
+    """The derived lattice is larger than this module will build.
+
+    Carries the numbers the message needs so the web layer can turn it into
+    something a user can act on, rather than a stack trace.
+    """
+
+    def __init__(self, dims: Tuple[int, int, int], spacing: float) -> None:
+        self.dims = dims
+        self.spacing = spacing
+        self.cell_count = int(dims[0]) * int(dims[1]) * int(dims[2])
+        super().__init__(
+            f"Result lattice would be {dims[0]} x {dims[1]} x {dims[2]} "
+            f"({self.cell_count:,} cells) at {spacing:g} in; "
+            f"the limit is {MAX_LATTICE_CELLS:,}."
+        )
 
 
 # --------------------------------------------------------------------------
@@ -131,7 +171,13 @@ class ScalarGrid:
     minimum: float
     maximum: float
     mean: float
-    #: True when the source array carried no signal at all (constant zero).
+    #: True when the field never varies. A constant field is still a result --
+    #: "every voxel solidified at 42 s" is an answer -- so it stays selectable
+    #: and the legend degenerates to a single value.
+    constant: bool = False
+    #: True only when the field is constant *and* zero, which is what "this
+    #: analysis produced nothing" looks like. Reporting a constant non-zero
+    #: field as empty hid real answers.
     empty: bool = False
 
     def dequantize(self) -> np.ndarray:
@@ -168,6 +214,10 @@ class FieldGrids:
     total_volume_in3: float = 0.0
     stats: Dict[str, Any] = dataclass_field(default_factory=dict)
     part_type_counts: Dict[int, int] = dataclass_field(default_factory=dict)
+    #: True when this grid was built from a strided visualization payload
+    #: rather than from the full mesh, so the mask has holes the casting does
+    #: not. The shell warns rather than pretending the sieve is the part.
+    downsampled: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -178,6 +228,11 @@ class FieldGrids:
 def derive_lattice(centers: np.ndarray, sizes: Optional[np.ndarray] = None) -> Lattice:
     """
     Recover the uniform lattice the sparse centers were sampled from.
+
+    Raises :class:`LatticeTooLargeError` when the extent and the voxel size
+    imply more than :data:`MAX_LATTICE_CELLS`. The check is on the cell count
+    computed from the dimensions, before anything is allocated, because the
+    failure this guards against is an allocation.
 
     Follows the pattern in ``core.surface_extraction._build_scalar_volume``:
     the unique coordinate values along each axis are the lattice planes. The
@@ -216,8 +271,12 @@ def derive_lattice(centers: np.ndarray, sizes: Optional[np.ndarray] = None) -> L
         origin.append(low)
         dims.append(int(round((high - low) / spacing)) + 1)
 
+    shape = (dims[0], dims[1], dims[2])
+    if dims[0] * dims[1] * dims[2] > MAX_LATTICE_CELLS:
+        raise LatticeTooLargeError(shape, float(spacing))
+
     return Lattice(
-        dims=(dims[0], dims[1], dims[2]),
+        dims=shape,
         origin=(origin[0], origin[1], origin[2]),
         spacing=float(spacing),
     )
@@ -301,17 +360,32 @@ def _scatter_and_fill(
     return np.asarray(dense[mode_nearest], dtype=np.float32)
 
 
-def build_field_grids(visualization: Dict[str, Any], summary: Optional[Dict[str, Any]] = None) -> FieldGrids:
-    """Build every dense grid for one run from its visualization payload."""
+def build_field_grids(
+    visualization: Dict[str, Any],
+    summary: Optional[Dict[str, Any]] = None,
+    *,
+    downsampled: Optional[bool] = None,
+) -> FieldGrids:
+    """
+    Build every dense grid for one run from a visualization payload.
+
+    ``downsampled`` says whether the payload is the strided one the JSON
+    carries rather than the full mesh. Left as ``None`` it is inferred by
+    comparing the number of centers against the run's own voxel count, which
+    is the only signal a lazily-rebuilt grid has.
+    """
     summary = summary or {}
-    centers = np.asarray(visualization.get("centers") or [], dtype=np.float64)
+    # `value or []` would raise on a numpy array -- "the truth value of an
+    # array with more than one element is ambiguous" -- and the full-resolution
+    # grid source hands these in as arrays rather than lists.
+    centers = _as_array(visualization.get("centers"))
     if centers.size == 0:
         empty_lattice = Lattice(dims=(1, 1, 1), origin=(0.0, 0.0, 0.0), spacing=1.0)
         return FieldGrids(lattice=empty_lattice, mask=np.zeros(1, dtype=np.uint8))
     centers = centers.reshape((-1, 3))
     n_voxels = int(centers.shape[0])
 
-    sizes = np.asarray(visualization.get("sizes") or [], dtype=np.float64)
+    sizes = _as_array(visualization.get("sizes"))
     lattice = derive_lattice(centers, sizes if sizes.size == n_voxels else None)
     cell_count = lattice.cell_count
     cell_indices = _flat_indices(centers, lattice)
@@ -330,9 +404,17 @@ def build_field_grids(visualization: Dict[str, Any], summary: Optional[Dict[str,
 
     nearest = _nearest_known_map(mask != 0, lattice)
 
+    reported = summary.get("voxel_count")
+    strided = downsampled
+    if strided is None:
+        # A payload with fewer centers than the run had voxels was strided on
+        # the way out; every voxel it dropped is a hole in the mask.
+        strided = bool(isinstance(reported, (int, float)) and int(reported) > n_voxels)
+
     grids = FieldGrids(
         lattice=lattice,
         mask=mask,
+        downsampled=bool(strided),
         voxel_count=n_voxels,
         cast_voxel_count=int(np.sum(part_types == PART_TYPE_CAST)),
         total_volume_in3=float(summary.get("total_volume", 0.0) or 0.0),
@@ -361,12 +443,14 @@ def build_field_grids(visualization: Dict[str, Any], summary: Optional[Dict[str,
             nearest,
             lattice,
         )
+        constant = bool(maximum <= minimum)
         grids.scalars[mode] = ScalarGrid(
             values=_quantize(dense, minimum, maximum),
             minimum=minimum,
             maximum=maximum,
             mean=mean,
-            empty=bool(maximum <= minimum),
+            constant=constant,
+            empty=bool(constant and abs(maximum) < 1e-12),
         )
 
     fraction_liquid = _build_frame_stack(
@@ -392,6 +476,13 @@ def build_field_grids(visualization: Dict[str, Any], summary: Optional[Dict[str,
         grids.stacks["fill_animation"] = fill
 
     return grids
+
+
+def _as_array(value: Any) -> np.ndarray:
+    """Coerce a payload entry to float64, accepting lists, arrays or nothing."""
+    if value is None:
+        return np.empty(0, dtype=np.float64)
+    return np.asarray(value, dtype=np.float64)
 
 
 def _first_present(
@@ -480,15 +571,21 @@ def build_grid_metadata(grids: FieldGrids) -> Dict[str, Any]:
     """The JSON body of ``GET /api/projects/<id>/grid``."""
     modes: List[str] = []
     empty_modes: List[str] = []
+    constant_modes: List[str] = []
     ranges: Dict[str, Dict[str, float]] = {}
     units: Dict[str, str] = {}
     for mode, grid in grids.scalars.items():
         ranges[mode] = {"min": grid.minimum, "max": grid.maximum, "mean": grid.mean}
         if mode in MODE_UNITS:
             units[mode] = MODE_UNITS[mode]
+        if grid.constant:
+            constant_modes.append(mode)
         if grid.empty:
+            # Constant and zero: the analysis ran and found nothing.
             empty_modes.append(mode)
         else:
+            # Everything else is selectable, including a field that is the
+            # same value everywhere -- that is a result, not an absence.
             modes.append(mode)
 
     frames: Dict[str, Dict[str, Any]] = {}
@@ -500,7 +597,6 @@ def build_grid_metadata(grids: FieldGrids) -> Dict[str, Any]:
         stack = grids.stacks["fill_animation"]
         frames["fill"] = {"count": stack.count, "times_s": [float(t) for t in stack.times_s]}
         modes.append("fill_animation")
-        units["fill_animation"] = MODE_UNITS["fill_animation"]
 
     nx, ny, nz = grids.lattice.dims
     return {
@@ -509,6 +605,7 @@ def build_grid_metadata(grids: FieldGrids) -> Dict[str, Any]:
         "spacing": float(grids.lattice.spacing),
         "modes": sorted(set(modes)),
         "emptyModes": sorted(set(empty_modes)),
+        "constantModes": sorted(set(constant_modes)),
         "ranges": ranges,
         "units": units,
         "frames": frames,
@@ -516,6 +613,7 @@ def build_grid_metadata(grids: FieldGrids) -> Dict[str, Any]:
         "castVoxelCount": int(grids.cast_voxel_count),
         "cellCount": int(grids.lattice.cell_count),
         "totalVolumeIn3": float(grids.total_volume_in3),
+        "downsampled": bool(grids.downsampled),
         "partTypes": _part_type_table(grids.part_type_counts),
         "stats": grids.stats,
         "quantization": {"dtype": "uint8", "levels": int(_QUANT_MAX) + 1},
@@ -563,7 +661,8 @@ def save_sidecar(path: Path, grids: FieldGrids) -> None:
         "spacing": np.asarray([grids.lattice.spacing], dtype=np.float64),
         "mask": grids.mask,
         "counts": np.asarray(
-            [grids.voxel_count, grids.cast_voxel_count], dtype=np.int64
+            [grids.voxel_count, grids.cast_voxel_count, 1 if grids.downsampled else 0],
+            dtype=np.int64,
         ),
         "total_volume": np.asarray([grids.total_volume_in3], dtype=np.float64),
         "meta_json": np.frombuffer(
@@ -579,21 +678,52 @@ def save_sidecar(path: Path, grids: FieldGrids) -> None:
     for mode, grid in grids.scalars.items():
         payload[f"scalar__{mode}"] = grid.values
         payload[f"scalar_range__{mode}"] = np.asarray(
-            [grid.minimum, grid.maximum, grid.mean, 1.0 if grid.empty else 0.0], dtype=np.float64
+            [
+                grid.minimum,
+                grid.maximum,
+                grid.mean,
+                1.0 if grid.empty else 0.0,
+                1.0 if grid.constant else 0.0,
+            ],
+            dtype=np.float64,
         )
     for key, stack in grids.stacks.items():
         payload[f"stack__{key}"] = stack.frames
         payload[f"stack_times__{key}"] = stack.times_s
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    with temporary.open("wb") as handle:
-        np.savez_compressed(handle, **payload)  # type: ignore[arg-type]
-    temporary.replace(path)
+    # A unique temp name per writer, not a fixed one. Two processes writing
+    # the same sidecar at once -- a re-run racing a lazy rebuild, say -- both
+    # opened `<id>.grid.npz.tmp`, interleaved their writes and published the
+    # splice, which then fails to load forever.
+    handle_fd, temporary_name = tempfile.mkstemp(
+        prefix=path.name + ".", suffix=".tmp", dir=str(path.parent)
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(handle_fd, "wb") as handle:
+            np.savez_compressed(handle, **payload)  # type: ignore[arg-type]
+        # Atomic within a directory, so a reader sees the old file or the new
+        # one and never a half-written one.
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def load_sidecar(path: Path) -> Optional[FieldGrids]:
-    """Read a sidecar back, or ``None`` when it is absent or from an older build."""
+    """
+    Read a sidecar back, or ``None`` when it cannot be used.
+
+    Every failure is a `None`, deliberately. The previous version listed the
+    exception types it expected, and a truncated file raises
+    `zipfile.BadZipFile`, which is not among them: one interrupted write left
+    every grid request for that project returning 500 for good, because the
+    rebuild path was never reached. A sidecar is a cache, and the only correct
+    response to a cache entry that cannot be read is to throw it away and
+    build it again -- so a bad file is also unlinked on the way out, or the
+    next request would find the same corpse.
+    """
     try:
         with np.load(path, allow_pickle=False) as data:
             if int(data["version"][0]) != SIDECAR_VERSION:
@@ -611,6 +741,7 @@ def load_sidecar(path: Path) -> Optional[FieldGrids]:
                 mask=np.asarray(data["mask"], dtype=np.uint8),
                 voxel_count=int(counts[0]),
                 cast_voxel_count=int(counts[1]),
+                downsampled=bool(counts[2]) if len(counts) > 2 else False,
                 total_volume_in3=float(data["total_volume"][0]),
                 stats=dict(meta.get("stats", {})),
                 part_type_counts={int(k): int(v) for k, v in meta.get("part_type_counts", {}).items()},
@@ -625,6 +756,11 @@ def load_sidecar(path: Path) -> Optional[FieldGrids]:
                         maximum=float(rng[1]),
                         mean=float(rng[2]),
                         empty=bool(rng[3] > 0.5),
+                        # Older sidecars have four entries and no constant
+                        # flag; derive it from the range they do carry.
+                        constant=bool(rng[4] > 0.5)
+                        if len(rng) > 4
+                        else bool(float(rng[1]) <= float(rng[0])),
                     )
                 elif key.startswith("stack__"):
                     stack_key = key.split("__", 1)[1]
@@ -633,20 +769,40 @@ def load_sidecar(path: Path) -> Optional[FieldGrids]:
                         times_s=np.asarray(data[f"stack_times__{stack_key}"], dtype=np.float32),
                     )
             return grids
-    except (OSError, KeyError, ValueError, EOFError):
+    except Exception:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:  # pragma: no cover - read-only artifact directory
+            pass
         return None
 
 
-def write_sidecar_for_artifact(artifact_path: Path | str, artifact: Dict[str, Any]) -> Optional[Path]:
+def write_sidecar_for_artifact(
+    artifact_path: Path | str,
+    artifact: Dict[str, Any],
+    *,
+    grid_source: Optional[Dict[str, Any]] = None,
+) -> Optional[Path]:
     """
     Build and persist the sidecar for an artifact that is being written.
+
+    ``grid_source`` is the full-resolution arrays straight off the mesh, when
+    the caller has them. Preferring it over ``artifact["visualization"]`` is
+    the whole point: the visualization payload is strided once a run exceeds
+    ``max_voxels_for_visualization``, and a mask built from every second voxel
+    describes a casting with half its metal missing. The JSON stays
+    downsampled -- it is a fallback and a debugging aid -- while the grid the
+    viewport actually renders is complete.
 
     Failures are swallowed on purpose: a run whose results are otherwise good
     must not be lost because the render sidecar could not be produced. The
     lazy path in :func:`load_grids` rebuilds it on first request.
     """
     try:
-        grids = build_field_grids(artifact.get("visualization", {}), artifact.get("summary", {}))
+        if grid_source:
+            grids = build_field_grids(grid_source, artifact.get("summary", {}), downsampled=False)
+        else:
+            grids = build_field_grids(artifact.get("visualization", {}), artifact.get("summary", {}))
         if grids.voxel_count == 0:
             return None
         path = sidecar_path(artifact_path)
@@ -661,43 +817,70 @@ def write_sidecar_for_artifact(artifact_path: Path | str, artifact: Dict[str, An
 # --------------------------------------------------------------------------
 
 
+def grids_nbytes(grids: FieldGrids) -> int:
+    """Roughly what a cached run costs in memory."""
+    total = int(grids.mask.nbytes)
+    for grid in grids.scalars.values():
+        total += int(grid.values.nbytes)
+    for stack in grids.stacks.values():
+        total += int(stack.frames.nbytes) + int(stack.times_s.nbytes)
+    return total
+
+
 class _GridCache:
     """
-    Tiny LRU over ``FieldGrids``, keyed by project and artifact mtime.
+    LRU over ``FieldGrids``, bounded by bytes rather than by entry count.
 
-    A dense grid for a million-voxel run is tens of megabytes, so the cache is
-    deliberately shallow. The mtime is part of the key so a re-run of the same
-    project invalidates the entry rather than serving the previous run's field.
+    Counting entries was the wrong unit. Three entries is nothing for the
+    reference run's 1.6 MB of grids and a third of a gigabyte for three
+    million-voxel runs with long frame stacks, which is how a cache meant to
+    save work becomes the reason a process runs out of memory. The mtime is
+    part of the key, so a re-run of the same project invalidates its entry
+    rather than serving the previous run's field.
+
+    A single run larger than the whole budget is still returned to the caller;
+    it simply is not kept.
     """
 
-    def __init__(self, max_entries: int = 3) -> None:
-        self._max = max_entries
-        self._entries: Dict[Tuple[str, int, int], FieldGrids] = {}
-        self._order: List[Tuple[str, int, int]] = []
+    def __init__(self, max_bytes: int = 256 * 1024 * 1024) -> None:
+        self._max_bytes = max_bytes
+        self._entries: "OrderedDict[Tuple[str, int, int], Tuple[FieldGrids, int]]" = OrderedDict()
+        self._bytes = 0
         self._lock = threading.Lock()
+
+    @property
+    def nbytes(self) -> int:
+        with self._lock:
+            return self._bytes
 
     def get(self, key: Tuple[str, int, int]) -> Optional[FieldGrids]:
         with self._lock:
-            grids = self._entries.get(key)
-            if grids is not None:
-                self._order.remove(key)
-                self._order.append(key)
-            return grids
+            entry = self._entries.get(key)
+            if entry is None:
+                return None
+            self._entries.move_to_end(key)
+            return entry[0]
 
     def put(self, key: Tuple[str, int, int], grids: FieldGrids) -> None:
+        size = grids_nbytes(grids)
         with self._lock:
-            if key in self._entries:
-                self._order.remove(key)
-            self._entries[key] = grids
-            self._order.append(key)
-            while len(self._order) > self._max:
-                evicted = self._order.pop(0)
-                self._entries.pop(evicted, None)
+            existing = self._entries.pop(key, None)
+            if existing is not None:
+                self._bytes -= existing[1]
+            if size > self._max_bytes:
+                # Too big to keep; the caller still gets it, it just does not
+                # evict everything else on the way past.
+                return
+            self._entries[key] = (grids, size)
+            self._bytes += size
+            while self._bytes > self._max_bytes and self._entries:
+                _, (_, evicted) = self._entries.popitem(last=False)
+                self._bytes -= evicted
 
     def clear(self) -> None:
         with self._lock:
             self._entries.clear()
-            self._order.clear()
+            self._bytes = 0
 
 
 _CACHE = _GridCache()
@@ -744,8 +927,15 @@ def load_grids(
         if source is None:
             if not path.exists():
                 return None
-            with path.open("r", encoding="utf-8") as handle:
-                source = json.load(handle)
+            try:
+                with path.open("r", encoding="utf-8") as handle:
+                    source = json.load(handle)
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+                # A run being rewritten, or an artifact that never finished
+                # being written. Neither is a server fault, and neither is
+                # permanent -- "results are not available" is the honest
+                # answer, and the next request will find a whole file.
+                return None
         grids = build_field_grids(source.get("visualization", {}), source.get("summary", {}))
         if grids.voxel_count == 0:
             return None

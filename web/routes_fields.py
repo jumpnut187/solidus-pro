@@ -17,6 +17,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, cast
 import gzip
+import threading
 
 from flask import Blueprint, Response, current_app, jsonify, request
 
@@ -57,9 +58,13 @@ def grid_metadata(project_id: str):
     part-type code table behind the mask, voxel counts, total volume, and the
     run's summary statistics flattened to scalars.
     """
-    grids = _load_grids(project_id)
-    if grids is None:
-        return jsonify({"error": "Results not found"}), 404
+    grids, failure = _grids_or_error(project_id)
+    if failure is not None:
+        return failure
+    assert grids is not None
+    # Someone looking at a run's metadata is a few seconds away from asking
+    # for an isosurface; get the contouring library on its feet now.
+    _warm_contouring()
     return jsonify(fields.build_grid_metadata(grids))
 
 
@@ -71,9 +76,10 @@ def grid_mask(project_id: str):
     ``+ 1`` because 0 has to mean "no metal here"; the code table in the
     metadata maps the stored byte back to a part type.
     """
-    grids = _load_grids(project_id)
-    if grids is None:
-        return jsonify({"error": "Results not found"}), 404
+    grids, failure = _grids_or_error(project_id)
+    if failure is not None:
+        return failure
+    assert grids is not None
     return _binary_response(
         fields.mask_bytes(grids),
         {
@@ -92,9 +98,10 @@ def grid_field(project_id: str, mode: str):
     ``X-Field-Max`` headers (also present in the metadata) inside the shader.
     ``?dtype=f32`` returns little-endian float32 in field units instead.
     """
-    grids = _load_grids(project_id)
-    if grids is None:
-        return jsonify({"error": "Results not found"}), 404
+    grids, failure = _grids_or_error(project_id)
+    if failure is not None:
+        return failure
+    assert grids is not None
     grid = grids.scalars.get(mode)
     if grid is None:
         return jsonify({"error": f"Mode '{mode}' has no data for this run"}), 404
@@ -126,9 +133,10 @@ def grid_frames(project_id: str, mode: str):
     lossy choice, and the client can upload two adjacent frames and lerp
     between them in the shader.
     """
-    grids = _load_grids(project_id)
-    if grids is None:
-        return jsonify({"error": "Results not found"}), 404
+    grids, failure = _grids_or_error(project_id)
+    if failure is not None:
+        return failure
+    assert grids is not None
     stack = grids.stacks.get(mode)
     if stack is None:
         return jsonify({"error": f"Mode '{mode}' has no frames for this run"}), 404
@@ -176,9 +184,10 @@ def grid_isosurface(project_id: str, mode: str):
       ``scalars``    0 to skip the per-vertex sampling pass
       ``frame``      frame index, for the animated modes
     """
-    grids = _load_grids(project_id)
-    if grids is None:
-        return jsonify({"error": "Results not found"}), 404
+    grids, failure = _grids_or_error(project_id)
+    if failure is not None:
+        return failure
+    assert grids is not None
 
     known = mode in grids.scalars or mode in grids.stacks
     if not known:
@@ -285,6 +294,39 @@ def clear_envelope_cache() -> None:
     _ENVELOPE_CACHE.clear()
 
 
+#: Guards the one-shot contouring warm-up.
+_WARMED = threading.Event()
+
+
+def _warm_contouring() -> None:
+    """
+    Import VTK on a background thread, once.
+
+    Contouring a million-cell grid takes about 12 ms; the *first* call takes
+    about 950 ms, because that is when `import vtk` happens. The import is
+    deliberately lazy in :mod:`core.surface_extraction` so the module can be
+    used where VTK is absent, which leaves the cost falling on whoever asks
+    for the first envelope -- and they asked by dragging a threshold slider,
+    which is the worst possible moment to spend a second.
+
+    Doing it here, off the request thread, means the cost lands while the
+    user is still looking at the painted surface. Failures are ignored: this
+    is a warm-up, and the real call reports properly if VTK is genuinely
+    unavailable.
+    """
+    if _WARMED.is_set():
+        return
+    _WARMED.set()
+
+    def load() -> None:
+        try:
+            import vtk  # noqa: F401
+        except Exception:  # pragma: no cover - environments without VTK
+            pass
+
+    threading.Thread(target=load, name="castsim-vtk-warmup", daemon=True).start()
+
+
 def _dims_header(grids: fields.FieldGrids) -> str:
     nx, ny, nz = grids.lattice.dims
     return f"{int(nx)},{int(ny)},{int(nz)}"
@@ -320,36 +362,87 @@ def _queue_manager() -> Optional[SimulationQueueManager]:
     return cast(SimulationQueueManager, manager)
 
 
-def _resolve_artifact(project_id: str) -> Tuple[Optional[Path], Optional[Dict[str, Any]]]:
+def _grids_or_error(project_id: str) -> Tuple[Optional[fields.FieldGrids], Optional[Response]]:
     """
-    Find a run's results as a path, an in-memory artifact, or both.
+    Load a run's grids, or the response explaining why not.
 
-    A run that just finished lives in the queue manager before it is on disk;
-    an older run is only a path. The path is preferred when it exists because
-    it is what makes the sidecar and the mtime-keyed cache work -- an
-    in-memory artifact has no mtime to key on.
+    The one failure worth spelling out is a lattice too large to build: it is
+    not a bug and not a missing file, it is a run meshed too finely across too
+    wide an envelope, and the only thing that fixes it is a coarser voxel
+    size. Letting that escape as an unhandled exception gave a 500 with a
+    stack trace, on every retry, forever.
     """
+    try:
+        grids = _load_grids(project_id)
+    except fields.LatticeTooLargeError as exc:
+        response = jsonify(
+            {
+                "error": (
+                    "This run's result lattice is too large to display "
+                    f"({exc.cell_count:,} cells at {exc.spacing:g} in). "
+                    "Re-run it at a coarser voxel size."
+                ),
+                "code": "lattice_too_large",
+                "dims": list(exc.dims),
+                "cellCount": exc.cell_count,
+                "spacing": exc.spacing,
+                "maxCellCount": fields.MAX_LATTICE_CELLS,
+            }
+        )
+        response.status_code = 413
+        return None, response
+    if grids is None:
+        response = jsonify({"error": "Results not found"})
+        response.status_code = 404
+        return None, response
+    return grids, None
+
+
+def _artifact_path(project_id: str) -> Optional[Path]:
+    """The recorded artifact file for a run, if it exists on disk."""
     artifact_path = repo.get_artifact_path(_database_path(), project_id)
-    path = Path(artifact_path) if artifact_path else None
-    if path is not None and not path.exists():
-        path = None
+    if not artifact_path:
+        return None
+    path = Path(artifact_path)
+    return path if path.exists() else None
 
+
+def _in_memory_artifact(project_id: str) -> Optional[Dict[str, Any]]:
+    """
+    The just-finished run still held by the simulation queue.
+
+    Reaching for this is expensive and is therefore the *last* resort. The
+    queue manager lives in another process, so every call pickles the whole
+    artifact -- 50 to 180 MB of result arrays -- across a socket, allocates it
+    again on this side, and holds the queue's lock while it does, which is the
+    same lock the worker needs to report progress. Doing that on every grid
+    request cost 0.12 to 0.15 s and a 50 MB allocation per request and stalled
+    the running simulation's progress updates.
+
+    On disk, the artifact and its sidecar answer the same question for free.
+    """
     manager = _queue_manager()
-    artifact = manager.get_result(project_id) if manager is not None else None
-    if path is None and artifact is None:
-        return None, None
-    return path, artifact
+    if manager is None:
+        return None
+    return manager.get_result(project_id)
 
 
 def _load_grids(project_id: str) -> Optional[fields.FieldGrids]:
-    path, artifact = _resolve_artifact(project_id)
-    if path is None and artifact is None:
+    """
+    The dense grids for a run.
+
+    Ordered by cost: the mtime-keyed in-process cache and the on-disk sidecar
+    first, and only if the run has no artifact on disk at all does this go
+    asking the simulation queue for the in-memory copy.
+    """
+    path = _artifact_path(project_id)
+    if path is not None:
+        return fields.load_grids(project_id, path)
+
+    artifact = _in_memory_artifact(project_id)
+    if artifact is None:
         return None
-    if path is None:
-        # No file yet: build straight from the in-memory result. Nothing to
-        # key a cache on, so this rebuilds per request until the run's
-        # artifact lands on disk.
-        assert artifact is not None
-        grids = fields.build_field_grids(artifact.get("visualization", {}), artifact.get("summary", {}))
-        return grids if grids.voxel_count else None
-    return fields.load_grids(project_id, path, artifact=artifact)
+    # No file yet: build straight from the in-memory result. There is no mtime
+    # to key a cache on, so this rebuilds per request until the artifact lands.
+    grids = fields.build_field_grids(artifact.get("visualization", {}), artifact.get("summary", {}))
+    return grids if grids.voxel_count else None
