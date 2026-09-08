@@ -13,10 +13,11 @@ import gzip
 import json
 import struct
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from flask import Flask
@@ -24,7 +25,7 @@ from flask import Flask
 from core.simulation_pipeline import _add_summary_statistics
 from web import fields
 from web import repository as repo
-from web.payloads import write_artifact
+from web.payloads import GRID_SOURCE_KEY, write_artifact
 from web.routes_fields import clear_envelope_cache, fields_bp
 from web.services.simulation_queue import SimulationQueueManager
 
@@ -579,7 +580,22 @@ class FillAnimationTests(unittest.TestCase):
         self.assertIn("fill_animation", meta["modes"])
         self.assertEqual(meta["frames"]["fill"]["count"], FRAME_COUNT)
         self.assertEqual(meta["frames"]["fill"]["times_s"], FILL_TIMES)
-        self.assertEqual(meta["units"]["fill_animation"], "s")
+
+    def test_the_animated_modes_carry_no_unit(self) -> None:
+        """
+        L2. Their frame *times* are seconds; their *values* are fractions.
+
+        Labelling fill animation "s" put seconds on a colour bar whose axis
+        runs 0 to 1 -- an empty cell to a full one -- and read as though the
+        colours were arrival times.
+        """
+        meta = fields.build_grid_metadata(self.grids)
+        self.assertNotIn("fill_animation", meta["units"])
+        self.assertNotIn("fraction_liquid", meta["units"])
+        # The times themselves are still seconds, and still reported.
+        self.assertEqual(meta["frames"]["fill"]["times_s"], FILL_TIMES)
+        # A field that really is a time keeps its unit.
+        self.assertEqual(meta["units"]["solidification_time"], "s")
 
     def test_envelope_of_a_fill_frame_grows_over_time(self) -> None:
         early = fields.build_envelope(self.grids, "fill_animation", 0.5, frame_index=0)
@@ -936,6 +952,522 @@ class SummaryStatisticsTests(unittest.TestCase):
         meta = fields.build_grid_metadata(grids)
         self.assertAlmostEqual(meta["stats"]["defect_volume_in3"], 2.5)
         self.assertEqual(meta["stats"]["hotspot_voxel_count"], 17)
+
+
+class LatticeBudgetTests(unittest.TestCase):
+    """
+    H3. A lattice too large to build is refused before anything is allocated.
+
+    The dimensions come from the *extent* of the voxel centers, so a handful
+    of voxels strung along a diagonal at a fine voxel size implies an enormous
+    box: 4,000 of them across a 15 inch envelope at 0.05 inch is 27 million
+    cells, and the distance transform alone wants hundreds of megabytes. The
+    lazy rebuild runs inside a Flask request, so unbounded it took the process
+    down and every retry did it again.
+    """
+
+    def _diagonal_centers(self, count: int, spacing: float) -> np.ndarray:
+        steps = np.arange(count, dtype=np.float64) * spacing
+        return np.stack([steps, steps, steps], axis=1)
+
+    def test_a_huge_lattice_is_refused_by_the_derivation(self) -> None:
+        centers = self._diagonal_centers(4000, 0.05)
+        with self.assertRaises(fields.LatticeTooLargeError) as caught:
+            fields.derive_lattice(centers, np.full(len(centers), 0.05))
+        error = caught.exception
+        self.assertEqual(error.dims, (4000, 4000, 4000))
+        self.assertGreater(error.cell_count, fields.MAX_LATTICE_CELLS)
+        self.assertAlmostEqual(error.spacing, 0.05)
+
+    def test_a_lattice_inside_the_budget_still_builds(self) -> None:
+        centers = self._diagonal_centers(200, 0.05)
+        lattice = fields.derive_lattice(centers, np.full(len(centers), 0.05))
+        self.assertEqual(lattice.dims, (200, 200, 200))
+        self.assertLessEqual(lattice.cell_count, fields.MAX_LATTICE_CELLS)
+
+    def test_build_field_grids_propagates_the_refusal(self) -> None:
+        centers = self._diagonal_centers(4000, 0.05)
+        visualization = {
+            "centers": centers.tolist(),
+            "sizes": [0.05] * len(centers),
+            "shrinkage": [0.5] * len(centers),
+        }
+        with self.assertRaises(fields.LatticeTooLargeError):
+            fields.build_field_grids(visualization, {})
+
+
+class GridCacheTests(unittest.TestCase):
+    """H3. The cache is bounded by bytes, not by a count of entries."""
+
+    def _grids(self, cells: int) -> fields.FieldGrids:
+        lattice = fields.Lattice(dims=(cells, 1, 1), origin=(0.0, 0.0, 0.0), spacing=1.0)
+        return fields.FieldGrids(lattice=lattice, mask=np.ones(cells, dtype=np.uint8))
+
+    def test_a_large_run_evicts_earlier_ones_rather_than_accumulating(self) -> None:
+        cache = fields._GridCache(max_bytes=1000)
+        for index in range(4):
+            cache.put(("p", index, 0), self._grids(400))
+        # Four 400-byte runs cannot all be held under a 1,000-byte budget.
+        self.assertLessEqual(cache.nbytes, 1000)
+        self.assertIsNone(cache.get(("p", 0, 0)))
+        self.assertIsNotNone(cache.get(("p", 3, 0)))
+
+    def test_a_run_larger_than_the_budget_is_simply_not_kept(self) -> None:
+        cache = fields._GridCache(max_bytes=1000)
+        cache.put(("p", 0, 0), self._grids(100))
+        cache.put(("p", 1, 0), self._grids(5000))
+        # The oversized entry neither stays nor evicts what came before it.
+        self.assertIsNone(cache.get(("p", 1, 0)))
+        self.assertIsNotNone(cache.get(("p", 0, 0)))
+
+    def test_recently_used_entries_survive(self) -> None:
+        cache = fields._GridCache(max_bytes=1000)
+        cache.put(("p", 0, 0), self._grids(400))
+        cache.put(("p", 1, 0), self._grids(400))
+        self.assertIsNotNone(cache.get(("p", 0, 0)))  # refreshes its recency
+        cache.put(("p", 2, 0), self._grids(400))
+        self.assertIsNotNone(cache.get(("p", 0, 0)))
+        self.assertIsNone(cache.get(("p", 1, 0)))
+
+
+class StridedArtifactTests(unittest.TestCase):
+    """
+    H4. The sidecar is built from the full mesh, not from the strided JSON.
+
+    Once a run exceeds ``max_voxels_for_visualization`` the visualization
+    payload keeps every step-th voxel. That is fine for a downsampled JSON and
+    ruinous for an occupancy grid: the voxels in between are marked "not
+    metal", so the casting renders as a sieve and the counts under-report.
+    """
+
+    def setUp(self) -> None:
+        fields.clear_cache()
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.full = _synthetic_artifact()
+
+    def tearDown(self) -> None:
+        fields.clear_cache()
+        self.temp_dir.cleanup()
+
+    def _strided(self, step: int = 2) -> Dict[str, Any]:
+        """The artifact as the pipeline would write it with striding on."""
+        full_viz = self.full["visualization"]
+        total = len(full_viz["centers"])
+        keep = list(range(0, total, step))
+        strided = {
+            key: [value[index] for index in keep]
+            for key, value in full_viz.items()
+            if isinstance(value, list) and len(value) == total
+        }
+        strided["fraction_liquid_history"] = [
+            [frame[index] for index in keep] for frame in full_viz["fraction_liquid_history"]
+        ]
+        strided["fraction_liquid_times"] = full_viz["fraction_liquid_times"]
+        summary = dict(self.full["summary"])
+        # The summary always reports the real voxel count.
+        summary["voxel_count"] = total
+        return {"summary": summary, "visualization": strided}
+
+    def test_a_strided_payload_alone_produces_a_sieve(self) -> None:
+        """The failure being fixed, stated so the fix cannot silently regress."""
+        artifact = self._strided()
+        grids = fields.build_field_grids(artifact["visualization"], artifact["summary"])
+        occupied = len(_occupied_cells())
+        self.assertLess(int(np.count_nonzero(grids.mask)), occupied)
+        self.assertTrue(grids.downsampled)
+
+    def _numpy_grid_source(self) -> Dict[str, Any]:
+        """
+        The grid source as the worker really builds it: numpy arrays.
+
+        `build_fork_artifact` hands over references to the engine's own
+        arrays rather than converting a third of a million floats to Python
+        lists, so the tests have to exercise arrays. A list-only fixture hid
+        a `value or []` in the grid builder, which raises on any array with
+        more than one element.
+        """
+        full_viz = self.full["visualization"]
+        source: Dict[str, Any] = {
+            "centers": np.asarray(full_viz["centers"], dtype=np.float32),
+            "sizes": np.asarray(full_viz["sizes"], dtype=np.float32),
+            "part_types": np.asarray(full_viz["part_types"], dtype=np.float32),
+            "shrinkage": np.asarray(full_viz["shrinkage"], dtype=np.float32),
+            "solidification_times": np.asarray(full_viz["solidification_times"], dtype=np.float32),
+            "fraction_liquid_history": [
+                np.asarray(frame, dtype=np.float32)
+                for frame in full_viz["fraction_liquid_history"]
+            ],
+            "fraction_liquid_times": list(full_viz["fraction_liquid_times"]),
+        }
+        return source
+
+    def test_the_sidecar_uses_the_full_grid_source(self) -> None:
+        artifact = self._strided()
+        artifact_path = self.root / "run.json"
+        write_artifact(
+            artifact_path,
+            {**artifact, GRID_SOURCE_KEY: self._numpy_grid_source()},
+        )
+
+        restored = fields.load_sidecar(fields.sidecar_path(artifact_path))
+        assert restored is not None
+        occupied = len(_occupied_cells())
+        # Every metal voxel is marked, not every second one.
+        self.assertEqual(int(np.count_nonzero(restored.mask)), occupied)
+        self.assertEqual(restored.voxel_count, occupied)
+        self.assertEqual(
+            restored.cast_voxel_count, sum(1 for cell in _occupied_cells() if cell[2] < 2)
+        )
+        self.assertFalse(restored.downsampled)
+
+    def test_the_json_on_disk_stays_downsampled_and_carries_no_private_key(self) -> None:
+        artifact = self._strided()
+        artifact_path = self.root / "run.json"
+        write_artifact(
+            artifact_path,
+            {**artifact, GRID_SOURCE_KEY: self._numpy_grid_source()},
+        )
+        on_disk = json.loads(artifact_path.read_text())
+        self.assertNotIn(GRID_SOURCE_KEY, on_disk)
+        self.assertLess(
+            len(on_disk["visualization"]["centers"]), len(self.full["visualization"]["centers"])
+        )
+
+    def test_downsampling_is_inferred_when_only_the_json_survives(self) -> None:
+        """A lazily rebuilt grid has nothing but the JSON, and says so."""
+        artifact = self._strided()
+        artifact_path = self.root / "lazy.json"
+        artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
+        grids = fields.load_grids("proj", artifact_path)
+        assert grids is not None
+        self.assertTrue(grids.downsampled)
+        self.assertTrue(fields.build_grid_metadata(grids)["downsampled"])
+
+    def test_grids_build_from_numpy_arrays_as_well_as_lists(self) -> None:
+        """`x or []` raises on an array; the worker only ever passes arrays."""
+        grids = fields.build_field_grids(self._numpy_grid_source(), self.full["summary"])
+        self.assertEqual(grids.lattice.dims, DIMS)
+        self.assertEqual(int(np.count_nonzero(grids.mask)), len(_occupied_cells()))
+        self.assertIn("shrinkage", grids.scalars)
+        self.assertIn("solidification_time", grids.scalars)
+        self.assertIn("fraction_liquid", grids.stacks)
+
+    def test_a_full_payload_is_not_flagged(self) -> None:
+        grids = fields.build_field_grids(
+            self.full["visualization"], self.full["summary"]
+        )
+        self.assertFalse(grids.downsampled)
+        self.assertFalse(fields.build_grid_metadata(grids)["downsampled"])
+
+
+class SidecarRobustnessTests(unittest.TestCase):
+    """H5, M1 and M2: a cache that cannot be read is rebuilt, not fatal."""
+
+    def setUp(self) -> None:
+        fields.clear_cache()
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.artifact = _synthetic_artifact()
+
+    def tearDown(self) -> None:
+        fields.clear_cache()
+        self.temp_dir.cleanup()
+
+    def test_a_truncated_sidecar_is_discarded_rather_than_raising(self) -> None:
+        """
+        H5. `zipfile.BadZipFile` is not an OSError, so a half-written .npz
+        used to escape the loader and 500 every grid endpoint forever.
+        """
+        artifact_path = self.root / "run.json"
+        write_artifact(artifact_path, self.artifact)
+        sidecar = fields.sidecar_path(artifact_path)
+        whole = sidecar.read_bytes()
+        sidecar.write_bytes(whole[: len(whole) // 2])
+
+        self.assertIsNone(fields.load_sidecar(sidecar))
+        # And it removes the corpse, so the next request does not find it.
+        self.assertFalse(sidecar.exists())
+
+    def test_a_truncated_sidecar_is_rebuilt_on_the_next_request(self) -> None:
+        artifact_path = self.root / "run.json"
+        write_artifact(artifact_path, self.artifact)
+        sidecar = fields.sidecar_path(artifact_path)
+        sidecar.write_bytes(b"not a zip file at all")
+
+        grids = fields.load_grids("proj", artifact_path)
+        self.assertIsNotNone(grids)
+        assert grids is not None
+        self.assertEqual(grids.voxel_count, len(_occupied_cells()))
+        # Rebuilt and republished.
+        self.assertTrue(sidecar.exists())
+        self.assertIsNotNone(fields.load_sidecar(sidecar))
+
+    def test_garbage_of_every_shape_is_survivable(self) -> None:
+        sidecar = self.root / "junk.grid.npz"
+        for payload in [b"", b"\x00" * 64, b"PK\x03\x04 truncated"]:
+            sidecar.write_bytes(payload)
+            self.assertIsNone(fields.load_sidecar(sidecar))
+
+    def test_a_half_written_artifact_is_not_a_server_error(self) -> None:
+        """
+        M1. A re-run rewrites the artifact; a reader that arrives mid-write
+        must get "no results", not a 500 from a JSONDecodeError.
+        """
+        artifact_path = self.root / "partial.json"
+        artifact_path.write_text('{"summary": {}, "visual', encoding="utf-8")
+        self.assertIsNone(fields.load_grids("proj", artifact_path))
+
+    def test_write_artifact_never_publishes_a_partial_file(self) -> None:
+        """M1. The JSON is renamed into place, so a reader sees all or none."""
+        artifact_path = self.root / "atomic.json"
+        write_artifact(artifact_path, self.artifact)
+        first = json.loads(artifact_path.read_text())
+
+        # A second write of different content leaves a whole document either
+        # way -- never a truncated one.
+        changed = _synthetic_artifact()
+        changed["summary"]["voxel_count"] = 4242
+        write_artifact(artifact_path, changed)
+        second = json.loads(artifact_path.read_text())
+
+        self.assertEqual(first["summary"]["voxel_count"], len(_occupied_cells()))
+        self.assertEqual(second["summary"]["voxel_count"], 4242)
+        # No temp files left behind.
+        self.assertEqual(sorted(q.suffix for q in self.root.iterdir()), [".json", ".npz"])
+
+    def test_concurrent_sidecar_writers_publish_a_loadable_file(self) -> None:
+        """
+        M2. A fixed `<id>.grid.npz.tmp` let two writers interleave and publish
+        a splice, which then failed to load for good.
+        """
+        grids = fields.build_field_grids(
+            self.artifact["visualization"], self.artifact["summary"]
+        )
+        sidecar = self.root / "concurrent.grid.npz"
+        errors: List[BaseException] = []
+
+        def write() -> None:
+            try:
+                for _ in range(4):
+                    fields.save_sidecar(sidecar, grids)
+            except BaseException as exc:  # pragma: no cover - reported below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=write) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        restored = fields.load_sidecar(sidecar)
+        self.assertIsNotNone(restored)
+        assert restored is not None
+        np.testing.assert_array_equal(restored.mask, grids.mask)
+        # Every temp file cleaned up.
+        self.assertEqual([q.name for q in self.root.iterdir()], ["concurrent.grid.npz"])
+
+
+class ConstantFieldTests(unittest.TestCase):
+    """
+    M5. A field that is the same value everywhere is a result, not an absence.
+
+    "Every voxel solidified at 42 s" and "hot tearing was not analysed" are
+    different answers; reporting both as empty hid the first one.
+    """
+
+    def _grids_for(self, values: List[float]) -> fields.FieldGrids:
+        artifact = _synthetic_artifact()
+        artifact["visualization"]["hotspot"] = values
+        return fields.build_field_grids(artifact["visualization"], artifact["summary"])
+
+    def test_a_constant_non_zero_field_stays_selectable(self) -> None:
+        grids = self._grids_for([0.42] * len(_occupied_cells()))
+        grid = grids.scalars["hotspot"]
+        self.assertTrue(grid.constant)
+        self.assertFalse(grid.empty)
+
+        meta = fields.build_grid_metadata(grids)
+        self.assertIn("hotspot", meta["modes"])
+        self.assertIn("hotspot", meta["constantModes"])
+        self.assertNotIn("hotspot", meta["emptyModes"])
+        self.assertAlmostEqual(meta["ranges"]["hotspot"]["min"], 0.42, places=6)
+        self.assertAlmostEqual(meta["ranges"]["hotspot"]["max"], 0.42, places=6)
+
+    def test_a_constant_zero_field_is_still_empty(self) -> None:
+        grids = self._grids_for([0.0] * len(_occupied_cells()))
+        grid = grids.scalars["hotspot"]
+        self.assertTrue(grid.constant)
+        self.assertTrue(grid.empty)
+
+        meta = fields.build_grid_metadata(grids)
+        self.assertNotIn("hotspot", meta["modes"])
+        self.assertIn("hotspot", meta["emptyModes"])
+
+    def test_a_varying_field_is_neither(self) -> None:
+        grids = self._grids_for([i / len(_occupied_cells()) for i in range(len(_occupied_cells()))])
+        grid = grids.scalars["hotspot"]
+        self.assertFalse(grid.constant)
+        self.assertFalse(grid.empty)
+        meta = fields.build_grid_metadata(grids)
+        self.assertIn("hotspot", meta["modes"])
+        self.assertNotIn("hotspot", meta["constantModes"])
+
+    def test_a_constant_field_survives_the_sidecar(self) -> None:
+        grids = self._grids_for([0.42] * len(_occupied_cells()))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "constant.grid.npz"
+            fields.save_sidecar(path, grids)
+            restored = fields.load_sidecar(path)
+        assert restored is not None
+        self.assertTrue(restored.scalars["hotspot"].constant)
+        self.assertFalse(restored.scalars["hotspot"].empty)
+
+
+class _SpyQueueManager:
+    """Records whether anything reached across to the simulation queue."""
+
+    def __init__(self, result: Optional[Dict[str, Any]] = None) -> None:
+        self.result = result
+        self.calls = 0
+
+    def get_result(self, project_id: str) -> Optional[Dict[str, Any]]:
+        self.calls += 1
+        return self.result
+
+
+class ArtifactResolutionTests(unittest.TestCase):
+    """
+    H2. The queue manager is the last resort, not the first.
+
+    It lives in another process, so every `get_result` pickles the whole
+    50-180 MB artifact across a socket and holds the queue lock -- the same
+    lock the running worker needs to report progress -- while it does. Doing
+    that before consulting the mtime cache and the sidecar cost 0.12 to 0.15 s
+    and a 50 MB allocation on every grid request.
+    """
+
+    def setUp(self) -> None:
+        fields.clear_cache()
+        self.temp_dir = tempfile.TemporaryDirectory()
+        root = Path(self.temp_dir.name)
+        self.database_path = root / "simulations.db"
+        self.temp_folder = root / "temp"
+        self.temp_folder.mkdir()
+        repo.init_db(self.database_path)
+
+        self.artifact = _synthetic_artifact()
+        self.spy = _SpyQueueManager()
+
+        app = Flask(__name__)
+        app.config["DATABASE"] = self.database_path
+        app.config["TEMP_FOLDER"] = self.temp_folder
+        app.extensions["simulation_queue_manager"] = self.spy
+        app.register_blueprint(fields_bp)
+        self.client = app.test_client()
+
+    def tearDown(self) -> None:
+        fields.clear_cache()
+        self.temp_dir.cleanup()
+
+    def _completed_project(self) -> str:
+        project_id = repo.create_project(self.database_path, {"name": "On disk"})
+        artifact_path = self.temp_folder / f"{project_id}.json"
+        write_artifact(artifact_path, self.artifact)
+        repo.mark_project_completed(
+            self.database_path, project_id, self.artifact["summary"], str(artifact_path)
+        )
+        return project_id
+
+    def test_a_run_on_disk_never_touches_the_queue_manager(self) -> None:
+        project_id = self._completed_project()
+        for path in ["grid", "grid/mask", "grid/shrinkage", "grid/fraction_liquid/frames"]:
+            response = self.client.get(f"/api/projects/{project_id}/{path}")
+            self.assertEqual(response.status_code, 200, msg=path)
+        self.assertEqual(self.spy.calls, 0)
+
+    def test_repeated_requests_still_never_touch_it(self) -> None:
+        project_id = self._completed_project()
+        for _ in range(5):
+            self.client.get(f"/api/projects/{project_id}/grid")
+        self.assertEqual(self.spy.calls, 0)
+
+    def test_a_run_with_no_artifact_on_disk_falls_back_to_the_queue(self) -> None:
+        project_id = repo.create_project(self.database_path, {"name": "In flight"})
+        self.spy.result = self.artifact
+        response = self.client.get(f"/api/projects/{project_id}/grid")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["dims"], list(DIMS))
+        self.assertGreaterEqual(self.spy.calls, 1)
+
+    def test_a_missing_artifact_file_is_a_404(self) -> None:
+        project_id = repo.create_project(self.database_path, {"name": "Gone"})
+        repo.mark_project_completed(
+            self.database_path,
+            project_id,
+            self.artifact["summary"],
+            str(self.temp_folder / "does-not-exist.json"),
+        )
+        response = self.client.get(f"/api/projects/{project_id}/grid")
+        self.assertEqual(response.status_code, 404)
+
+
+class LatticeBudgetEndpointTests(unittest.TestCase):
+    """H3. Over-budget runs answer with something the shell can show."""
+
+    def setUp(self) -> None:
+        fields.clear_cache()
+        self.temp_dir = tempfile.TemporaryDirectory()
+        root = Path(self.temp_dir.name)
+        self.database_path = root / "simulations.db"
+        self.temp_folder = root / "temp"
+        self.temp_folder.mkdir()
+        repo.init_db(self.database_path)
+
+        app = Flask(__name__)
+        app.config["DATABASE"] = self.database_path
+        app.config["TEMP_FOLDER"] = self.temp_folder
+        app.extensions["simulation_queue_manager"] = _SpyQueueManager()
+        app.register_blueprint(fields_bp)
+        self.client = app.test_client()
+
+        steps = np.arange(4000, dtype=np.float64) * 0.05
+        centers = np.stack([steps, steps, steps], axis=1)
+        artifact = {
+            "summary": {"voxel_count": len(centers), "total_volume": 1.0},
+            "visualization": {
+                "centers": centers.tolist(),
+                "sizes": [0.05] * len(centers),
+                "shrinkage": [0.5] * len(centers),
+            },
+        }
+        self.project_id = repo.create_project(self.database_path, {"name": "Too fine"})
+        artifact_path = self.temp_folder / f"{self.project_id}.json"
+        artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
+        repo.mark_project_completed(
+            self.database_path, self.project_id, artifact["summary"], str(artifact_path)
+        )
+
+    def tearDown(self) -> None:
+        fields.clear_cache()
+        self.temp_dir.cleanup()
+
+    def test_the_endpoint_explains_itself_instead_of_crashing(self) -> None:
+        response = self.client.get(f"/api/projects/{self.project_id}/grid")
+        self.assertEqual(response.status_code, 413)
+        body = response.get_json()
+        self.assertEqual(body["code"], "lattice_too_large")
+        self.assertEqual(body["dims"], [4000, 4000, 4000])
+        self.assertGreater(body["cellCount"], body["maxCellCount"])
+        # The message has to tell the user what to do about it.
+        self.assertIn("coarser voxel size", body["error"])
+
+    def test_every_grid_endpoint_answers_the_same_way(self) -> None:
+        for path in ["grid/mask", "grid/shrinkage", "grid/shrinkage/isosurface?threshold=1"]:
+            response = self.client.get(f"/api/projects/{self.project_id}/{path}")
+            self.assertEqual(response.status_code, 413, msg=path)
+            self.assertEqual(response.get_json()["code"], "lattice_too_large", msg=path)
 
 
 @unittest.skipUnless(

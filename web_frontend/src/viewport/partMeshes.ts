@@ -134,6 +134,18 @@ export type PartAppearance = {
   showModel: boolean;
   /** Longest edge of the assembly, used to scale the selection outline. */
   assemblySize: number;
+  /**
+   * Whether a translucent shell may write depth before anything else draws.
+   *
+   * It normally should: without a pre-pass a see-through casting blends with
+   * its own back faces and reads as a bag of triangles. But the pre-pass
+   * writes depth for the *whole* shell, so anything drawn afterwards and
+   * further away is rejected -- and when the shell is a ghost with an
+   * isosurface inside it, that is precisely the thing the user is looking
+   * at. The fill front came out shot through with holes where the shell had
+   * claimed the depth buffer first.
+   */
+  depthPrePass: boolean;
 };
 
 export function applyPartAppearance(
@@ -159,9 +171,10 @@ export function applyPartAppearance(
       material.transparencyMode = PBRMaterial.PBRMATERIAL_ALPHABLEND;
       // Without a depth pre-pass a translucent casting shows its own back
       // faces through its front ones and reads as a bag of triangles rather
-      // than as a solid seen through.
-      material.needDepthPrePass = true;
-      material.separateCullingPass = true;
+      // than as a solid seen through -- but see `depthPrePass` above for when
+      // that is the wrong trade.
+      material.needDepthPrePass = appearance.depthPrePass;
+      material.separateCullingPass = appearance.depthPrePass;
     } else {
       material.transparencyMode = PBRMaterial.PBRMATERIAL_OPAQUE;
       material.needDepthPrePass = false;

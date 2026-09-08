@@ -59,6 +59,11 @@ type State = {
   cellCount: number;
   /** Scratch field, rebuilt per request. */
   field: Float32Array;
+  /** Scratch buffers for the masked blur; allocated once, reused per request. */
+  blurValue: Float32Array;
+  blurWeight: Float32Array;
+  blurValueSwap: Float32Array;
+  blurWeightSwap: Float32Array;
 };
 
 let state: State | null = null;
@@ -83,13 +88,18 @@ self.onmessage = (event: MessageEvent<ContourMessage>) => {
 
 function initialize(message: ContourInit): State {
   const [nx, ny, nz] = message.dims;
+  const cells = nx * ny * nz;
   return {
     dims: message.dims,
     origin: message.origin,
     spacing: message.spacing,
     mask: message.mask,
-    cellCount: nx * ny * nz,
-    field: new Float32Array(nx * ny * nz)
+    cellCount: cells,
+    field: new Float32Array(cells),
+    blurValue: new Float32Array(cells),
+    blurWeight: new Float32Array(cells),
+    blurValueSwap: new Float32Array(cells),
+    blurWeightSwap: new Float32Array(cells)
   };
 }
 
@@ -102,23 +112,84 @@ function initialize(message: ContourInit): State {
  * unmasked would grow the liquid pool out through the mold.
  */
 function buildField(current: State, request: ContourRequest): void {
-  const { cellCount, mask, field } = current;
+  const { cellCount, mask, field, blurValue, blurWeight } = current;
   const a = request.frameA;
   const b = request.frameB;
   const blend = Math.min(Math.max(request.blend, 0), 1);
   const castCode = 1;
 
-  // Cells outside the metal are pushed clear of any iso level so the surface
-  // closes against them rather than passing through.
-  const outside = request.invert ? 2 : -1;
-
   for (let index = 0; index < cellCount; index += 1) {
     const code = mask[index];
-    if (code === 0 || (request.castOnly && code !== castCode)) {
-      field[index] = outside;
+    const usable = code !== 0 && (!request.castOnly || code === castCode);
+    blurWeight[index] = usable ? 1 : 0;
+    blurValue[index] = usable ? (a[index] * (1 - blend) + b[index] * blend) / 255 : 0;
+  }
+
+  blurInsideMask(current);
+
+  // Cells outside the metal are pushed clear of any iso level so the surface
+  // closes against them rather than passing through. This happens *after* the
+  // blur, so the front still ends exactly at the metal boundary.
+  const outside = request.invert ? 2 : -1;
+  for (let index = 0; index < cellCount; index += 1) {
+    const code = mask[index];
+    const usable = code !== 0 && (!request.castOnly || code === castCode);
+    field[index] = usable ? blurValue[index] : outside;
+  }
+}
+
+/**
+ * A 1-2-1 blur that only ever averages cells inside the metal.
+ *
+ * A mold-filling frame is not a smooth field: it is close to 1 in filled
+ * metal and close to 0 ahead of the front, and individual cells dip below
+ * half for entirely physical reasons -- a cell straddling the free surface,
+ * residual from the lattice solve, the pore fraction inside a filter.
+ * Contouring that raw at 0.5 turns every one of them into a hole, and the
+ * filled region comes out looking shot through rather than solid.
+ *
+ * The blur is normalized: value and weight are blurred separately and then
+ * divided, so a cell at the wall averages only with the metal beside it. A
+ * plain blur would mix in the zeros of the mold and pull the front back off
+ * every wall, eroding exactly the surface being drawn.
+ */
+function blurInsideMask(current: State): void {
+  const [nx, ny, nz] = current.dims;
+  let value = current.blurValue;
+  let weight = current.blurWeight;
+  let valueOut = current.blurValueSwap;
+  let weightOut = current.blurWeightSwap;
+
+  const strides = [1, nx, nx * ny];
+  const limits = [nx, ny, nz];
+
+  for (let axis = 0; axis < 3; axis += 1) {
+    const stride = strides[axis];
+    const limit = limits[axis];
+    if (limit < 3) {
+      // Nothing to average along an axis one or two cells deep.
       continue;
     }
-    field[index] = (a[index] * (1 - blend) + b[index] * blend) / 255;
+    for (let iz = 0; iz < nz; iz += 1) {
+      for (let iy = 0; iy < ny; iy += 1) {
+        for (let ix = 0; ix < nx; ix += 1) {
+          const index = ix + nx * (iy + ny * iz);
+          const position = axis === 0 ? ix : axis === 1 ? iy : iz;
+          const low = position > 0 ? index - stride : index;
+          const high = position < limit - 1 ? index + stride : index;
+          valueOut[index] = value[low] + 2 * value[index] + value[high];
+          weightOut[index] = weight[low] + 2 * weight[index] + weight[high];
+        }
+      }
+    }
+    [value, valueOut] = [valueOut, value];
+    [weight, weightOut] = [weightOut, weight];
+  }
+
+  const cellCount = current.cellCount;
+  for (let index = 0; index < cellCount; index += 1) {
+    const total = weight[index];
+    current.blurValue[index] = total > 0 ? value[index] / total : 0;
   }
 }
 

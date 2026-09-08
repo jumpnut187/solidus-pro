@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, cast
 import json
 import os
 import re
+import tempfile
 
 import numpy as np
 import trimesh
@@ -377,7 +378,112 @@ def build_fork_artifact(result: PipelineResult) -> Dict[str, Any]:
     return {
         "summary": summary,
         "visualization": visualization,
+        # Full-resolution arrays for the dense grid sidecar, keyed privately
+        # so nothing mistakes them for part of the artifact. `visualization`
+        # above is *strided* when a run has more voxels than
+        # ``max_voxels_for_visualization``: it keeps every step-th voxel, which
+        # is fine for a downsampled JSON but ruinous for an occupancy grid,
+        # because the cells in between are then marked as "not metal" and the
+        # casting renders as a sieve. These are references to the arrays the
+        # engine and mesh already hold, not copies, so carrying them costs
+        # nothing until the sidecar is built from them.
+        GRID_SOURCE_KEY: _full_grid_source(engine, mesh, source_centers),
     }
+
+
+#: Private key on the in-memory artifact carrying full-resolution grid data.
+#: Stripped before the JSON is written; never present in a file on disk.
+GRID_SOURCE_KEY = "_grid_source"
+
+
+def _full_grid_source(engine: Any, mesh: Any, source_centers: np.ndarray) -> Dict[str, Any]:
+    """
+    The unstrided arrays the dense grid needs, straight off the engine.
+
+    Mirrors the keys :mod:`web.fields` reads, at full mesh resolution. Values
+    stay as numpy arrays: this dictionary never reaches JSON, and converting a
+    third of a million floats to Python lists for something that is about to
+    be quantized to bytes would be the most expensive thing in the pipeline.
+    """
+    count = int(len(source_centers))
+    source: Dict[str, Any] = {
+        "centers": source_centers,
+        "sizes": _full_array(getattr(mesh, "voxel_sizes", None), count),
+        "part_types": _full_array(getattr(mesh, "voxel_part_types", None), count),
+    }
+
+    for key, attribute in (
+        ("shrinkage", "shrinkage_probability"),
+        ("porosity", "porosity_probability"),
+        ("feed_modulus", "local_modulus"),
+        ("hotspot", "hotspot_intensity"),
+        ("solidification_times", "solidification_times"),
+        ("niyama_raw", "niyama_values"),
+        ("niyama_risk", "niyama_risk"),
+        ("combined_feed_risk", "combined_feed_risk"),
+        ("hot_tear", "hot_tear_risk"),
+        ("sand_burn_in", "sand_burn_in_risk"),
+        ("gas_generation", "gas_generation"),
+        ("gas_entrapment", "gas_entrapment"),
+        ("gas_porosity_risk", "gas_porosity_risk"),
+        ("crack_susceptibility", "crack_susceptibility"),
+        ("feeding_blocked", "feeding_blocked"),
+        ("feeding_path_lengths", "feeding_path_lengths"),
+        ("feeding_open_fraction", "feeding_open_fraction"),
+        ("fill_time", "_fill_arrival_times"),
+    ):
+        values = _full_array(getattr(engine, attribute, None), count)
+        if values is not None:
+            source[key] = values
+
+    # These three are derived rather than read straight off an attribute.
+    feeding_quality = _invert(getattr(engine, "feeding_quality", None))
+    if _full_array(feeding_quality, count) is not None:
+        source["feeding_quality"] = np.asarray(feeding_quality, dtype=np.float32)
+    for key, attribute in (("thermal_stress", "effective_stress"), ("distortion", "distortion_magnitude")):
+        normalized = _normalize(getattr(engine, attribute, None))
+        if _full_array(normalized, count) is not None:
+            source[key] = np.asarray(normalized, dtype=np.float32)
+    sdas = _normalize(getattr(engine, "sdas", None))
+    if _full_array(sdas, count) is not None:
+        source["sdas"] = np.asarray(sdas, dtype=np.float32)
+    predicted_uts = _invert(_normalize(getattr(engine, "predicted_uts", None)))
+    if _full_array(predicted_uts, count) is not None:
+        source["predicted_uts"] = np.asarray(predicted_uts, dtype=np.float32)
+
+    history = getattr(engine, "fraction_liquid_history", None)
+    if history:
+        frames = [np.asarray(1.0 - np.asarray(snapshot), dtype=np.float32) for snapshot in history]
+        if all(frame.size == count for frame in frames):
+            mask_liquid = getattr(engine, "_mask_non_cast_fraction_liquid", None)
+            if callable(mask_liquid):
+                frames = [np.asarray(mask_liquid(frame), dtype=np.float32) for frame in frames]
+            source["fraction_liquid_history"] = frames
+            source["fraction_liquid_times"] = list(getattr(engine, "fraction_liquid_times", None) or [])
+
+    fill_frames = getattr(engine, "_fill_frames", None)
+    if fill_frames:
+        fractions = []
+        times = []
+        for frame in fill_frames:
+            values = _full_array(getattr(frame, "fill_fraction", None), count)
+            if values is None:
+                continue
+            fractions.append(np.clip(values, 0.0, 1.0).astype(np.float32))
+            times.append(float(getattr(frame, "time_s", 0.0)))
+        if fractions:
+            source["fill_animation_history"] = fractions
+            source["fill_animation_times"] = times
+
+    return source
+
+
+def _full_array(values: Any, count: int) -> Optional[np.ndarray]:
+    """The array, as float32, only if it really covers every voxel."""
+    if values is None:
+        return None
+    arr = np.asarray(values, dtype=np.float32).reshape(-1)
+    return arr if arr.size == count else None
 
 
 def read_artifact(path: str) -> Dict[str, Any]:
@@ -393,15 +499,37 @@ def write_artifact(path: Path, artifact: Dict[str, Any]) -> None:
     already in memory. Building it lazily on first request works (see
     ``web.fields.load_grids``) but means the first person to open a finished
     run waits out a 50-100 MB JSON parse.
+
+    The JSON goes to a temporary file and is then renamed over the target.
+    Truncating the real path and streaming a hundred megabytes into it leaves
+    a window -- seconds, on a large run -- in which any reader gets a partial
+    document; re-running a project while its results were open did exactly
+    that. A rename within a directory is atomic, so a reader sees the previous
+    run's artifact or this one, never half of either.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(artifact, handle)
+    # The full-resolution grid source never goes to JSON; it exists only to
+    # build the sidecar from the whole mesh rather than from the strided
+    # payload the JSON carries.
+    grid_source = artifact.pop(GRID_SOURCE_KEY, None)
+
+    handle_fd, temporary_name = tempfile.mkstemp(
+        prefix=path.name + ".", suffix=".tmp", dir=str(path.parent)
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(handle_fd, "w", encoding="utf-8") as handle:
+            json.dump(artifact, handle)
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
     # Imported here rather than at module scope: web.fields pulls in scipy,
     # and this module is imported by paths that only need the CAD helpers.
     from web.fields import write_sidecar_for_artifact
 
-    write_sidecar_for_artifact(path, artifact)
+    write_sidecar_for_artifact(path, artifact, grid_source=grid_source)
 
 
 def build_result_fields_payload(

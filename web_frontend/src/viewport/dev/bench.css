@@ -112,3 +112,14 @@ body,
 .bench-readout-second {
   top: 48px;
 }
+
+/* The bench positions the orientation gizmo; the application shell has its
+   own placement for the same element, above its log strip. */
+.viewport-gizmo {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  width: 96px;
+  height: 96px;
+  pointer-events: none;
+}
