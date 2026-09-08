@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState, type MutableRefObject, type ReactNode } from 'react';
 
-import { DropVeil, EmptyState, ProbeReadout, StatsChip, Toasts } from './CanvasOverlays';
+import {
+  DownsampledBanner,
+  DropVeil,
+  EmptyState,
+  ProbeReadout,
+  StatsChip,
+  Toasts
+} from './CanvasOverlays';
 import { ViewportToolbar } from './ViewportToolbar';
 import { ColorBar } from '../viewport/ColorBar';
 import { ResultsViewport } from '../viewport/ResultsViewport';
@@ -50,6 +57,9 @@ export type CanvasStageProps = {
   measurement: MeasureResult | null;
   toasts: Toast[];
   onDismissToast: (id: number) => void;
+  /** The loaded run was stored strided; warn until the user dismisses it. */
+  showDownsampledWarning: boolean;
+  onDismissDownsampledWarning: () => void;
   onRequestAddParts: () => void;
   /** Hands the shell a way to open this stage's file picker from a shortcut. */
   registerAddParts: (open: () => void) => void;
@@ -97,6 +107,8 @@ export function CanvasStage(props: CanvasStageProps) {
     measurement,
     toasts,
     onDismissToast,
+    showDownsampledWarning,
+    onDismissDownsampledWarning,
     onRequestAddParts,
     registerAddParts,
     log
@@ -131,7 +143,9 @@ export function CanvasStage(props: CanvasStageProps) {
       {/* The canvas and everything painted over it. The log drawer sits
           outside this box so opening it shortens the canvas instead of
           covering the stats chip and the orientation gizmo. */}
-      <div className="stage-main">
+      {/* `has-stats` tells the stylesheet that the bottom-centre band is taken
+          by the stats chip, so the toast column lifts clear of it. */}
+      <div className={gridMeta && resultsAvailable ? 'stage-main has-stats' : 'stage-main'}>
       <div className="stage-canvas">
         <ResultsViewport
           ref={viewportRef}
@@ -154,6 +168,21 @@ export function CanvasStage(props: CanvasStageProps) {
           onError={onError}
         />
       </div>
+
+      {/* One column for everything that appears under the toolbar, so the
+          banner and the loading pill stack instead of landing on each other or
+          on the toolbar. It stops short of the ColorBar's gutter on the right;
+          see `.stage-top-stack`. */}
+      {showDownsampledWarning || status ? (
+        <div className="stage-top-stack">
+          {showDownsampledWarning ? <DownsampledBanner onDismiss={onDismissDownsampledWarning} /> : null}
+          {status ? (
+            <div className="stage-status" aria-live="polite">
+              {status}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       {parts.length === 0 && !busy ? <EmptyState onAddParts={onRequestAddParts} /> : null}
       {dragDepth > 0 ? <DropVeil /> : null}
@@ -185,12 +214,6 @@ export function CanvasStage(props: CanvasStageProps) {
         />
       ) : null}
       {gridMeta && resultsAvailable ? <StatsChip meta={gridMeta} /> : null}
-
-      {status ? (
-        <div className="stage-status" aria-live="polite">
-          {status}
-        </div>
-      ) : null}
 
       <Toasts toasts={toasts} onDismiss={onDismissToast} />
       </div>

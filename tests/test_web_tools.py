@@ -571,7 +571,13 @@ class RiserDesignRouteTests(WebToolsTestCase):
             response = self.client.post(f"/api/projects/{project_id}/riser-design", json={})
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("downsampled", response.get_json()["error"])
+        message = response.get_json()["error"]
+        # The refusal has to name both ways out, not just say "re-run".
+        self.assertIn("over-estimate every modulus", message)
+        self.assertIn("Voxels kept in the stored result", message)
+        self.assertIn("coarser voxel size", message)
+        # And the actual numbers, so the size of the problem is visible.
+        self.assertIn("5,000", message)
 
     def test_riser_design_refuses_a_grid_beyond_the_inline_limit(self) -> None:
         from unittest.mock import patch

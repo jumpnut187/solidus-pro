@@ -92,6 +92,9 @@ export function ResultsPanel(props: ResultsPanelProps) {
 
   const available = new Set(meta?.modes ?? []);
   const emptyModes = new Set(meta?.emptyModes ?? []);
+  // A constant field is a result, not an absence: the mode stays selectable
+  // and says so, rather than being greyed out as if the analysis had not run.
+  const constantModes = new Set(meta?.constantModes ?? []);
   const range = meta?.ranges[view.mode];
   const unit = meta?.units?.[view.mode] ?? RESULT_MODE_UNITS[view.mode] ?? '';
   const timeMode = isTimeMode(view.mode);
@@ -152,13 +155,26 @@ export function ResultsPanel(props: ResultsPanelProps) {
                       {group.modes.map((mode) => (
                         <option key={mode} value={mode} disabled={!available.has(mode)}>
                           {RESULT_MODE_LABELS[mode]}
-                          {available.has(mode) ? '' : emptyModes.has(mode) ? ' — no signal' : ' — not in this run'}
+                          {available.has(mode)
+                            ? constantModes.has(mode)
+                              ? ' — one value everywhere'
+                              : ''
+                            : emptyModes.has(mode)
+                              ? ' — no signal'
+                              : ' — not in this run'}
                         </option>
                       ))}
                     </optgroup>
                   ))}
                 </select>
               </label>
+
+              {available.has(view.mode) && constantModes.has(view.mode) ? (
+                <p className="status-note status-note-info">
+                  This field is the same value everywhere in the casting, so it paints one flat colour and
+                  the envelope is all-or-nothing. The analysis ran; it simply found no variation.
+                </p>
+              ) : null}
 
               <div className="colormap-row">
                 <span

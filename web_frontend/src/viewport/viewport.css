@@ -65,6 +65,12 @@
   color: var(--vp-fg-dim);
 }
 
+/* A constant field prints one tick instead of six identical ones;
+ * `space-between` would pin that lone tick to the top of the ramp. */
+.vp-colorbar-ticks-single {
+  justify-content: center;
+}
+
 .vp-colorbar-tick {
   display: flex;
   align-items: center;

@@ -601,13 +601,11 @@
   box-shadow: var(--shadow-chip);
 }
 
-/* Transient loading text from the viewport, out of the way of both chips. */
+/* Transient loading text from the viewport. It is a child of
+ * `.stage-top-stack`, which does the positioning; on its own it used to sit at
+ * `top: var(--sp-4)` and cover the floating toolbar. */
 .stage-status {
-  position: absolute;
-  left: 50%;
-  top: var(--sp-4);
-  transform: translateX(-50%);
-  z-index: var(--z-overlay);
+  max-width: 100%;
   padding: var(--sp-2) var(--sp-4);
   border: 1px solid var(--accent-border);
   border-radius: 999px;
@@ -617,6 +615,8 @@
   color: var(--text-dim);
   font-size: var(--fs-base);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .stat {
@@ -672,6 +672,94 @@
   font-family: var(--font-mono);
   font-size: var(--fs-sm);
   text-align: right;
+}
+
+/* --- The column under the toolbar --------------------------------------- */
+
+/* Everything that speaks about the whole view — the reduced-resolution banner
+ * and the viewport's own loading pill — lives in one column under the floating
+ * toolbar, so they stack instead of landing on each other. Before this they
+ * both used `top: var(--sp-4)`, which put the pill squarely on the toolbar.
+ *
+ * The two constants are measured, not guessed, and the overlay audit in
+ * `scratchpad/uitest/audit_banner.mjs` re-checks them by comparing bounding
+ * boxes at 1920x1200 and 1366x768:
+ *   --toolbar-height   a 30px `.vtool` plus `--sp-1` padding and a 1px border
+ *                      on each side, which measures 40px.
+ *   --colorbar-gutter  the widest ColorBar (111px) plus its own `--sp-4` inset
+ *                      and a gap, so the column can never run underneath it.
+ * The column is inset by the gutter on the right only: the left of the canvas
+ * carries nothing at this height except the probe readout, which appears only
+ * while a probe reading is being held. */
+.stage-top-stack {
+  --toolbar-height: calc(30px + var(--sp-1) * 2 + 2px);
+  --colorbar-gutter: 135px;
+  position: absolute;
+  top: calc(var(--sp-4) + var(--toolbar-height) + var(--sp-3));
+  left: var(--sp-4);
+  right: calc(var(--sp-4) + var(--colorbar-gutter));
+  z-index: var(--z-overlay);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-3);
+  /* The column is a layout box, not a surface: only its children take the
+   * pointer, so the canvas can still be orbited around them. */
+  pointer-events: none;
+}
+
+.stage-top-stack > * {
+  pointer-events: auto;
+}
+
+/* --- Canvas banner ------------------------------------------------------ */
+
+.canvas-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  /* The column's insets already keep it clear of both edges, so this is only
+   * the comfortable reading measure. */
+  max-width: 560px;
+  padding: var(--sp-3) var(--sp-3) var(--sp-3) var(--sp-4);
+  border: 1px solid rgba(245, 184, 61, 0.45);
+  border-radius: var(--radius);
+  background: rgba(38, 30, 14, 0.94);
+  backdrop-filter: blur(8px);
+  box-shadow: var(--shadow-chip);
+  color: var(--warning);
+}
+
+/* Keep the glyph on the first line of the text rather than letting it stretch
+ * with the flex row. */
+.canvas-banner-icon {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.canvas-banner-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: #f6e4bd;
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+
+.canvas-banner-text b {
+  color: var(--warning);
+  font-weight: 600;
+}
+
+/* The dismiss button inherits the panel button colours, which are tuned for a
+ * neutral surface; on the amber ground it needs the banner's own palette. */
+.canvas-banner .btn-icon {
+  flex: 0 0 auto;
+  color: var(--warning);
+}
+
+.canvas-banner .btn-icon:hover {
+  background: rgba(245, 184, 61, 0.16);
+  color: #f6e4bd;
 }
 
 /* --- Empty state ------------------------------------------------------- */
@@ -903,6 +991,14 @@
   gap: var(--sp-3);
   max-width: 380px;
   pointer-events: none;
+}
+
+/* The stats chip is centred on the same bottom edge, and at 1366px it is wide
+ * enough to reach into the toast column — measured at 147px of overlap. When
+ * the chip is on screen the toasts sit one band higher; 54px is the chip's
+ * measured height and the audit script re-checks the two boxes. */
+.stage-main.has-stats .toasts {
+  bottom: calc(var(--sp-5) + 54px + var(--sp-3));
 }
 
 .toast {

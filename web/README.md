@@ -144,6 +144,10 @@ client read them; a request for one now 404s.
 - **Artifacts are big.** Do not hold one in the queue Manager or read one per
   request; `routes_tools._read_artifact_cached` keeps a two-entry LRU keyed by
   path, mtime and size. Prefer the summary on the project row where it will do.
+- **Riser design should move to the sidecar.** It reads the strided JSON
+  artifact and refuses a downsampled run, because a thinned surface set inflates
+  every modulus. The intended follow-up is to read the full-resolution binary
+  sidecar instead, which removes the refusal and the voxel cap that causes it.
 - **The job worker is a separate process** started with `spawn`, so it shares
   nothing implicitly. Anything it needs to report has to travel through a
   Manager proxy passed in its argument list — including the recursive call at

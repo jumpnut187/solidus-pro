@@ -107,6 +107,13 @@ export function App() {
   const [probe, setProbe] = useState<ProbeReading | null>(null);
   const [measurement, setMeasurement] = useState<MeasureResult | null>(null);
   const [defectVolume, setDefectVolume] = useState<number | null>(null);
+  /**
+   * Whether the "stored at reduced resolution" warning has been dismissed for
+   * the run currently loaded. Keyed by resultsVersion rather than a boolean, so
+   * dismissing it once does not silence it for every later run: a new run bumps
+   * the version and the banner is due again.
+   */
+  const [downsampledDismissedFor, setDownsampledDismissedFor] = useState<number | null>(null);
 
   const [modal, setModal] = useState<ModalId>(null);
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
@@ -1219,6 +1226,10 @@ export function App() {
           measurement={measurement}
           toasts={toasts.toasts}
           onDismissToast={toasts.dismiss}
+          showDownsampledWarning={
+            resultsAvailable && Boolean(gridMeta?.downsampled) && downsampledDismissedFor !== resultsVersion
+          }
+          onDismissDownsampledWarning={() => setDownsampledDismissedFor(resultsVersion)}
           onRequestAddParts={() => {
             patchShell({ activePanel: 'parts' });
             window.setTimeout(() => addPartsRef.current(), 0);

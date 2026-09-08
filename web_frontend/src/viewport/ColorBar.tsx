@@ -114,11 +114,16 @@ export function ColorBar({ view, meta, orientation = 'vertical', onScaleChange }
   const timeMode = isTimeMode(mode);
 
   // Ticks are listed low to high and reversed for the vertical bar, so the
-  // top of the ramp is the top of the list either way.
-  const ticks = Array.from({ length: TICK_COUNT }, (_, index) => {
-    const fraction = index / (TICK_COUNT - 1);
-    return { fraction, value: min + span * fraction };
-  });
+  // top of the ramp is the top of the list either way. A constant field has no
+  // span to divide, and six identical numbers down the side of a ramp read as
+  // a broken legend rather than as "this value, everywhere", so it gets one.
+  const ticks =
+    span > 0
+      ? Array.from({ length: TICK_COUNT }, (_, index) => {
+          const fraction = index / (TICK_COUNT - 1);
+          return { fraction, value: min + span * fraction };
+        })
+      : [{ fraction: 0.5, value: min }];
   const ordered = vertical ? [...ticks].reverse() : ticks;
 
   return (
@@ -134,7 +139,7 @@ export function ColorBar({ view, meta, orientation = 'vertical', onScaleChange }
           className="vp-colorbar-ramp"
           style={{ background: gradientCss(view.colormap, vertical ? 'to top' : 'to right') }}
         />
-        <ol className="vp-colorbar-ticks">
+        <ol className={ticks.length === 1 ? 'vp-colorbar-ticks vp-colorbar-ticks-single' : 'vp-colorbar-ticks'}>
           {ordered.map((tick) => (
             <li key={tick.fraction} className="vp-colorbar-tick">
               <span className="vp-colorbar-tick-mark" aria-hidden="true" />

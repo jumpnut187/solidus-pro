@@ -232,10 +232,15 @@ def _riser_inputs(artifact: Dict[str, Any]) -> Tuple[Any, float, Any]:
 
     stored_count = artifact.get("summary", {}).get("voxel_count")
     if isinstance(stored_count, (int, float)) and int(stored_count) > centers.shape[0]:
+        # Refusing beats answering wrongly: a strided result punches holes in
+        # the surface set, so distance-to-surface -- which *is* the modulus --
+        # comes out too large and every riser is over-sized. Name both ways out,
+        # because "re-run" alone does not say what to change first.
         raise ValueError(
-            "This run's stored geometry was downsampled for display, so riser design would "
-            "over-estimate every modulus. Raise 'Max voxels sent to the viewport' in "
-            "Performance and re-run."
+            f"This run stored {int(stored_count):,} voxels as {centers.shape[0]:,}, so riser design "
+            "would over-estimate every modulus and propose over-sized risers. Either raise "
+            "'Voxels kept in the stored result' in the Performance panel and run again, or run again "
+            "at a coarser voxel size so the whole result fits under the cap."
         )
 
     sizes = np.asarray(visualization.get("sizes", []), dtype=np.float64)

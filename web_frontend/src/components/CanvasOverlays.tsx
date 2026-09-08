@@ -1,4 +1,4 @@
-import { Upload, X } from 'lucide-react';
+import { AlertTriangle, Upload, X } from 'lucide-react';
 
 import { formatCount, formatNumber } from '../lib/format';
 import { RESULT_MODE_LABELS, type GridMeta, type MeasureResult, type ProbeReading } from '../lib/viewState';
@@ -100,6 +100,44 @@ export function ProbeReadout({
           </>
         ) : null}
       </dl>
+    </div>
+  );
+}
+
+/**
+ * Warning that the results on screen came from a thinned lattice.
+ *
+ * A run past the stored-result voxel cap keeps only every step-th voxel in the
+ * JSON, and this run has no full-resolution sidecar to fall back on, so the
+ * grid was rebuilt from the thinned copy: the field the viewport paints and
+ * every count derived from it under-report. That is not an error and must not
+ * stop anyone working, but it is exactly the kind of thing a person quotes off
+ * a screenshot without knowing — so it says so on the canvas, once per run,
+ * and gets out of the way when dismissed.
+ *
+ * Re-running is the fix on its own: a completed run writes the full-resolution
+ * grid beside its artifact regardless of the cap. Raising the cap is worth
+ * mentioning second because it is what keeps the stored result itself whole,
+ * which is what riser design reads.
+ */
+export function DownsampledBanner({ onDismiss }: { onDismiss: () => void }) {
+  return (
+    <div className="canvas-banner" role="status">
+      <AlertTriangle size={14} aria-hidden="true" className="canvas-banner-icon" />
+      <span className="canvas-banner-text">
+        This result was stored thinned, so the painted field and the voxel counts below come from a reduced
+        lattice rather than the whole casting. Re-running this project writes a full-resolution result;
+        raising <b>Voxels kept in the stored result</b> in Performance first also keeps the stored copy whole.
+      </span>
+      <button
+        type="button"
+        className="btn btn-ghost btn-icon"
+        onClick={onDismiss}
+        aria-label="Dismiss the reduced-resolution warning"
+        title="Dismiss"
+      >
+        <X size={12} />
+      </button>
     </div>
   );
 }
