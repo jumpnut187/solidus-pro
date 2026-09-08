@@ -70,7 +70,6 @@ export const RESULT_MODE_UNITS: Partial<Record<ResultModeId, string>> = {
   feed_modulus: 'in',
   solidification_time: 's',
   fill_time: 's',
-  fill_animation: 's',
   thermal_stress: 'MPa',
   distortion: 'in',
   sdas: 'µm',
@@ -269,6 +268,10 @@ export type GridMeta = {
   totalVolumeIn3: number;
   /** Summary statistics passthrough (defect volume, hotspot count, Chvorinov time, ...). */
   stats: Record<string, number | string>;
+  /** True when the grids had to be built from a strided (downsampled) result, so counts under-report. */
+  downsampled?: boolean;
+  /** Modes whose field is a single non-zero value everywhere; selectable, with a degenerate legend. */
+  constantModes?: ResultModeId[];
 
   // --- Added by the viewport; optional so the shell can ignore them. ---
 
