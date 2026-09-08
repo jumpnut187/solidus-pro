@@ -1,7 +1,7 @@
 import { Pause, Play, Repeat, SkipBack, SkipForward } from 'lucide-react';
 
 import { formatSeconds } from '../lib/format';
-import { isTimeMode, type GridMeta, type ResultViewState } from '../lib/viewState';
+import { isSweepMode, isTimeMode, type GridMeta, type ResultViewState } from '../lib/viewState';
 
 export type TransportBarProps = {
   view: ResultViewState;
@@ -15,11 +15,31 @@ export type TransportBarProps = {
 
 const SPEEDS = [0.5, 1, 2, 4];
 
+/**
+ * How far one press of step moves a sweep.
+ *
+ * A frame mode steps one stored frame. A sweep has no frames -- it is a
+ * continuous cut-off on a static field -- so it gets a hundred even steps,
+ * which on a ten-minute solidification is about six seconds a press.
+ */
+const SWEEP_STEP_PERCENT = 1;
+
 /** Frame timings for whichever time series the current mode plays back. */
 function frameTimes(meta: GridMeta | null, view: ResultViewState): number[] {
   if (!meta) return [];
   if (view.mode === 'fraction_liquid') return meta.frames.fraction_liquid?.times_s ?? [];
   return meta.frames.fill?.times_s ?? meta.frames.fraction_liquid?.times_s ?? [];
+}
+
+/**
+ * The end of a sweep's timeline, in seconds.
+ *
+ * From the field's own range, not from `GridMeta.frames`: a sweep mode has no
+ * frames entry at all, and its values *are* the seconds. The last cell to
+ * freeze is the end of the sequence.
+ */
+function sweepMaxSeconds(meta: GridMeta | null, view: ResultViewState): number {
+  return meta?.ranges[view.mode]?.max ?? 0;
 }
 
 /**
@@ -38,15 +58,16 @@ export function TransportBar({
   loop,
   onLoopChange
 }: TransportBarProps) {
-  if (!resultsAvailable || !isTimeMode(view.mode)) return null;
+  const sweep = isSweepMode(view.mode);
+  if (!resultsAvailable || (!isTimeMode(view.mode) && !sweep)) return null;
 
-  const times = frameTimes(meta, view);
+  const times = sweep ? [] : frameTimes(meta, view);
   const frameCount = times.length;
-  const maxTime = frameCount ? times[frameCount - 1] : 0;
+  const maxTime = sweep ? sweepMaxSeconds(meta, view) : frameCount ? times[frameCount - 1] : 0;
   const percent = Math.min(100, Math.max(0, view.timePercent));
   const currentSeconds = maxTime * (percent / 100);
   const frameIndex = frameCount ? Math.min(frameCount - 1, Math.round((percent / 100) * (frameCount - 1))) : 0;
-  const stepPercent = frameCount > 1 ? 100 / (frameCount - 1) : 5;
+  const stepPercent = sweep ? SWEEP_STEP_PERCENT : frameCount > 1 ? 100 / (frameCount - 1) : 5;
 
   const step = (direction: -1 | 1) => {
     const next = percent + direction * stepPercent;
@@ -99,10 +120,17 @@ export function TransportBar({
       </div>
 
       <span className="transport-time">
-        {frameCount ? `${formatSeconds(currentSeconds)} / ${formatSeconds(maxTime)}` : `${percent.toFixed(0)}%`}
+        {maxTime > 0 ? `${formatSeconds(currentSeconds)} / ${formatSeconds(maxTime)}` : `${percent.toFixed(0)}%`}
       </span>
 
-      <span className="chip" title="Frame index within the stored time series">
+      <span
+        className="chip"
+        title={
+          sweep
+            ? 'Position in the solidification sweep; this mode is one field, not a stored series'
+            : 'Frame index within the stored time series'
+        }
+      >
         {frameCount ? `Frame ${frameIndex + 1} / ${frameCount}` : `${percent.toFixed(0)}%`}
       </span>
 

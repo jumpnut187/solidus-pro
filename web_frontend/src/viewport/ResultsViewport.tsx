@@ -33,10 +33,12 @@ import {
 import { Color3, PointerEventTypes, Plane, Tools, Vector3 } from '@babylonjs/core';
 import type { Mesh, PBRMaterial } from '@babylonjs/core';
 
+import { sampleColormap } from '../lib/colormaps';
 import { fetchEnvelope, isAbortError, type EnvelopeData } from '../lib/gridApi';
 import {
   RESULT_MODE_IDS,
   RESULT_MODE_UNITS,
+  isSweepMode,
   isTimeMode,
   type GridMeta,
   type ResultModeId,
@@ -106,6 +108,20 @@ const TIME_ENVELOPE_SHELL_OPACITY = 0.35;
  * there to show.
  */
 const MOLTEN_GLOW = 0.62;
+
+/**
+ * Colour for metal the sweep has not reached, in linear space.
+ *
+ * The liquid end of the molten ramp, converted the same way the envelope's
+ * vertex colours are, so a still-liquid cell on the painted casting and the
+ * front that bounds it are the same shade of hot.
+ */
+const LIQUID_COLOR: [number, number, number] = (() => {
+  const [r, g, b] = sampleColormap('molten', 1);
+  const toLinear = (channel: number) =>
+    channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+  return [toLinear(r / 255), toLinear(g / 255), toLinear(b / 255)];
+})();
 
 /** Sustained frame rate a machine must hold before it is offered SSAO. */
 const AO_MINIMUM_FPS = 55;
@@ -295,6 +311,14 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     const planes = sectionPlanes(state.section, boundsRef.current);
     const showEnvelope = wantsEnvelope(state.style) && state.showResults;
 
+    // A sweep mode reads its own values as times. `sweepTime` is the cut-off
+    // the shader compares each cell against, taken from 0 rather than from the
+    // field's minimum so that t = 0 is "nothing has frozen yet" rather than
+    // "the first cell is about to". At 100 percent it sits on the maximum, so
+    // every cell is at or below it and the view is the static map exactly.
+    const sweeping = isSweepMode(mode) && ready;
+    const sweepTime = sweeping ? (state.timePercent / 100) * quantMax : null;
+
     // In 'envelope' the shell is a ghost: it locates the defect in the part
     // but carries no colour of its own, so nothing competes with the surface
     // that does. In 'both' the shell keeps its paint and steps back.
@@ -307,7 +331,7 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     // fraction-liquid value the whole time. So a front gets a painted shell to
     // sit inside, not an empty one.
     const paintSurface =
-      state.showResults && (state.style !== 'envelope' || isFrameMode(state.mode));
+      state.showResults && (state.style !== 'envelope' || isFrameMode(state.mode) || sweeping);
 
     const applyPaint = (plugin: FieldPaintPluginMaterial, strength: number) => {
       if (resources && ready) {
@@ -322,12 +346,16 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
         plugin.state.frameBlend = blend;
         plugin.state.castOnly = state.castOnly;
         plugin.state.strength = strength;
+        plugin.state.sweepTime = sweepTime;
+        plugin.state.liquidColor = LIQUID_COLOR;
+        plugin.state.liquidGlow = MOLTEN_GLOW;
         plugin.fieldTextureA = stack ? stack.textureA : (field?.texture ?? null);
         plugin.fieldTextureB = stack ? stack.textureB : (field?.texture ?? null);
         plugin.maskTexture = resources.maskTexture;
         plugin.lutTexture = resources.lut(state.colormap);
       } else {
         plugin.state.strength = 0;
+        plugin.state.sweepTime = null;
       }
     };
 
@@ -360,13 +388,27 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     // itself, and metal at pouring temperature emits light rather than
     // reflecting it -- a reflective front borrows the environment map and
     // comes out looking like polished steel whatever colour it is painted.
-    const molten = isFrameMode(mode);
+    //
+    // A frame mode's front is the liquid pool; a sweep mode's is the region
+    // that has not frozen yet. Same surface, same material.
+    const molten = isFrameMode(mode) || sweeping;
+
+    // The front is a level set of the metal, so it is discarded wherever the
+    // occupancy grid says there is no metal to be a front of. See
+    // `EnvelopeMesh.clip`: the contourer stopped walling the metal off with a
+    // sentinel value, which is what removed the false shell at t = 0, and this
+    // is what keeps the surface it does produce inside the casting.
+    applyPaint(refs.envelope.clip, 0);
+    refs.envelope.clip.state.discardOutside = molten;
+    refs.envelope.clip.state.discardUnpaintable = molten && state.castOnly;
     refs.envelope.setStyle({
-      colormap: state.colormap,
-      // A front is contoured out of a normalized 0..1 frame stack, so its
-      // per-vertex scalars are in those units and must be ramped over them,
-      // not over whatever the legend has been clamped to. This is why the
-      // pool keeps its full molten range even when the scale is pinned.
+      // A molten front is coloured by the metal it encloses, so it takes the
+      // molten map whatever the casting around it is painted with.
+      colormap: molten ? 'molten' : state.colormap,
+      // A front is contoured out of a normalized 0..1 grid, so its per-vertex
+      // scalars are in those units and must be ramped over them, not over
+      // whatever the legend has been clamped to. This is why the pool keeps
+      // its full molten range even when the scale is pinned.
       scaleMin: molten ? 0 : scaleMin,
       scaleMax: molten ? 1 : scaleMax,
       // Only reached when a surface arrives without per-vertex scalars.
@@ -416,7 +458,7 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     const makePlugin = (material: PBRMaterial) =>
       new FieldPaintPluginMaterial(material, placeholderVolume, placeholderLut);
     const caps = new SectionCaps(viewport.scene, makePlugin);
-    const envelope = new EnvelopeMesh(viewport.scene, 'result-envelope');
+    const envelope = new EnvelopeMesh(viewport.scene, 'result-envelope', makePlugin);
     const annotations = new Annotations(viewport.scene, 10);
     sceneRef.current = {
       viewport,
@@ -836,8 +878,11 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
   // Envelopes
   // ---------------------------------------------------------------------
 
+  // A sweep mode is excluded alongside the frame modes: its envelope is the
+  // still-liquid region at the scrubber's position, which the worker contours
+  // per position, not a fixed threshold the server can build once.
   const staticEnvelopeKey =
-    !isTimeMode(view.mode) && wantsEnvelope(view.style)
+    !isTimeMode(view.mode) && !isSweepMode(view.mode) && wantsEnvelope(view.style)
       ? `${projectId}|${view.mode}|${view.threshold}|${view.castOnly}|${resourcesEpoch}`
       : null;
 
@@ -940,6 +985,42 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     };
   }, [view.mode, view.style, view.timePercent, view.castOnly, resourcesEpoch]);
 
+  // The sweep modes contour the same way, from one static grid instead of a
+  // pair of frames: the still-liquid region at time t is simply the part of
+  // the solidification-time field that lies above t. Passing the one grid as
+  // both frames with a zero blend reuses the whole path -- masked blur,
+  // nearest-inside extension, surface nets, per-vertex colour -- for free.
+  useEffect(() => {
+    const refs = sceneRef.current;
+    const resources = resourcesRef.current;
+    const contour = contourRef.current;
+    if (!refs || !resources || !contour) return;
+    if (!isSweepMode(view.mode) || !wantsEnvelope(view.style)) return;
+
+    const field = resources.field(view.mode);
+    if (!field) return;
+
+    const span = field.max - field.min;
+    const sweepTime = (view.timePercent / 100) * field.max;
+    // The grid's bytes decode as `min + byte / 255 * (max - min)`, so the iso
+    // in those units is where the cut-off sits within the field's own range.
+    // Clamped at zero because a cut-off below the field's minimum would put
+    // the iso underneath the extended background as well, and the contourer
+    // would enclose the bounding box rather than the casting.
+    const iso = span > 1e-9 ? Math.min(1, Math.max(0, (sweepTime - field.min) / span)) : 0;
+
+    contour.request({
+      frameA: field.data,
+      frameB: field.data,
+      blend: 0,
+      iso,
+      castOnly: view.castOnly,
+      // Still liquid means "has not solidified yet", which is where the
+      // solidification time is *above* the cut-off.
+      invert: false
+    });
+  }, [view.mode, view.style, view.timePercent, view.castOnly, resourcesEpoch]);
+
   // Clear a stale front when the style or mode stops wanting one.
   useEffect(() => {
     const refs = sceneRef.current;
@@ -948,8 +1029,8 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       refs.envelope.setVisible(false);
       return;
     }
-    if (isTimeMode(view.mode)) {
-      // The worker effect above owns the geometry from here.
+    if (isTimeMode(view.mode) || isSweepMode(view.mode)) {
+      // The worker effects above own the geometry from here.
       envelopeKeyRef.current = null;
     }
   }, [view.style, view.mode]);

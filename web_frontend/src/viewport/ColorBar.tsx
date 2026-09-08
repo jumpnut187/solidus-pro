@@ -21,6 +21,7 @@ import { formatFieldValue } from './formatValue';
 import {
   RESULT_MODE_LABELS,
   RESULT_MODE_UNITS,
+  isSweepMode,
   isTimeMode,
   type ColorBarProps,
   type ResultModeId
@@ -111,7 +112,7 @@ export function ColorBar({ view, meta, orientation = 'vertical', onScaleChange }
   const span = max - min;
 
   const semantic = SEMANTIC_ENDS[mode];
-  const timeMode = isTimeMode(mode);
+  const timeMode = isTimeMode(mode) || isSweepMode(mode);
 
   // Ticks are listed low to high and reversed for the vertical bar, so the
   // top of the ramp is the top of the list either way. A constant field has no
@@ -192,18 +193,32 @@ function TimeReadout({ view, meta }: Pick<ColorBarProps, 'view'> & { meta: NonNu
   // it is one static map whose *colour* is the time; borrowing the fill
   // animation's clock for it put a running second count next to a picture
   // that never changes.
-  const frames =
-    view.mode === 'fraction_liquid'
-      ? meta.frames.fraction_liquid
-      : view.mode === 'fill_animation'
-        ? meta.frames.fill
-        : undefined;
-  const times = frames?.times_s ?? [];
-  if (times.length < 2) return null;
-  const seconds = times[0] + (view.timePercent / 100) * (times[times.length - 1] - times[0]);
+  //
+  // A sweep mode has no frames entry at all: its own values are the seconds,
+  // so its clock runs from zero to the last cell to freeze.
+  let start: number;
+  let end: number;
+  if (isSweepMode(view.mode)) {
+    const range = meta.ranges[view.mode];
+    if (!range || !(range.max > 0)) return null;
+    start = 0;
+    end = range.max;
+  } else {
+    const frames =
+      view.mode === 'fraction_liquid'
+        ? meta.frames.fraction_liquid
+        : view.mode === 'fill_animation'
+          ? meta.frames.fill
+          : undefined;
+    const times = frames?.times_s ?? [];
+    if (times.length < 2) return null;
+    start = times[0];
+    end = times[times.length - 1];
+  }
+  const seconds = start + (view.timePercent / 100) * (end - start);
   return (
     <p className="vp-colorbar-time">
-      {formatFieldValue(seconds)} s <span className="vp-colorbar-time-total">of {formatFieldValue(times[times.length - 1])} s</span>
+      {formatFieldValue(seconds)} s <span className="vp-colorbar-time-total">of {formatFieldValue(end)} s</span>
     </p>
   );
 }

@@ -79,6 +79,28 @@ export const RESULT_MODE_UNITS: Partial<Record<ResultModeId, string>> = {
 /** Modes driven by the time scrubber instead of a threshold slider. */
 export const TIME_MODES: readonly ResultModeId[] = ['fraction_liquid', 'fill_time', 'fill_animation'];
 
+/**
+ * Modes that carry a static value *and* a time axis derived from it.
+ *
+ * A frame mode (fraction liquid, fill animation) stores one grid per instant,
+ * so its time axis comes from the server. A sweep mode stores a single grid
+ * whose values *are* times: solidification time says, per cell, the second at
+ * which that cell finished freezing. That one grid answers "what does the
+ * casting look like at t?" for every t at once -- a cell is solid when its
+ * value is at or below t -- so the sweep is a threshold on the field the
+ * client already holds, with no frames to fetch and nothing extra stored.
+ *
+ * The distinction matters at exactly two places: the shell shows the transport
+ * bar and hides the threshold slider for these as well as for the frame modes,
+ * and their seconds readout comes from the field's own range rather than from
+ * `GridMeta.frames`, which has no entry for them.
+ */
+export const SWEEP_MODES: readonly ResultModeId[] = ['solidification_time'];
+
+export function isSweepMode(mode: ResultModeId): boolean {
+  return SWEEP_MODES.includes(mode);
+}
+
 export function isTimeMode(mode: ResultModeId): boolean {
   return TIME_MODES.includes(mode);
 }

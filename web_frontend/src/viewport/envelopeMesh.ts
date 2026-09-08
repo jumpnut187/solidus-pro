@@ -18,6 +18,7 @@ import { Color3, Mesh, PBRMaterial, VertexBuffer, VertexData } from '@babylonjs/
 import type { Scene } from '@babylonjs/core';
 
 import { sampleColormap } from '../lib/colormaps';
+import { FieldPaintPluginMaterial } from './fieldPaintPlugin';
 import { MoltenGlowPluginMaterial } from './moltenGlowPlugin';
 import type { ColormapId } from '../lib/viewState';
 
@@ -60,10 +61,25 @@ export class EnvelopeMesh {
   private readonly _mesh: Mesh;
   private readonly _material: PBRMaterial;
   private readonly _glow: MoltenGlowPluginMaterial;
+  /**
+   * The occupancy mask, used only to throw fragments away.
+   *
+   * The contourer no longer walls the metal off with a sentinel value -- that
+   * is what made a fully liquid casting produce a second copy of its own
+   * surface -- so the field it contours now extends past the casting, and a
+   * level set can too. Painting is off (`strength` 0); this exists purely so
+   * that whatever the extension produces outside the metal never reaches the
+   * screen.
+   */
+  private readonly _clip: FieldPaintPluginMaterial;
   private _scalars: Float32Array | null = null;
   private _vertexCount = 0;
 
-  constructor(scene: Scene, name: string) {
+  constructor(
+    scene: Scene,
+    name: string,
+    createClip: (material: PBRMaterial) => FieldPaintPluginMaterial
+  ) {
     this._mesh = new Mesh(name, scene);
     this._mesh.isPickable = false;
     this._mesh.setEnabled(false);
@@ -85,8 +101,15 @@ export class EnvelopeMesh {
     // where the field says it is.
     this._material.zOffset = -2;
     this._glow = new MoltenGlowPluginMaterial(this._material);
+    this._clip = createClip(this._material);
+    this._clip.state.strength = 0;
     this._mesh.useVertexColors = true;
     this._mesh.material = this._material;
+  }
+
+  /** The mask-clipping plugin, so the viewport can bind the run's grid to it. */
+  get clip(): FieldPaintPluginMaterial {
+    return this._clip;
   }
 
   get mesh(): Mesh {

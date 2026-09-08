@@ -34,6 +34,9 @@ import type { AbstractEngine, Material, Scene, SubMesh, UniformBuffer } from '@b
 /** Mask byte for cast metal: the engine's CAST code (0) plus one. */
 export const CAST_MASK_CODE = 1;
 
+/** Sweep cut-off standing for "not sweeping"; see `FieldPaintState.sweepTime`. */
+const NO_SWEEP = 3.0e30;
+
 const FIELD_SAMPLERS = ['fieldSamplerA', 'fieldSamplerB', 'fieldMaskSampler', 'fieldLutSampler'];
 
 const FIELD_UNIFORMS = [
@@ -44,7 +47,11 @@ const FIELD_UNIFORMS = [
   'fieldBlend',
   'fieldStrength',
   'fieldCastOnly',
-  'fieldDiscardOutside'
+  'fieldDiscardOutside',
+  'fieldDiscardUnpaintable',
+  'fieldSweepTime',
+  'fieldLiquidColor',
+  'fieldLiquidGlow'
 ];
 
 export type FieldPaintState = {
@@ -75,6 +82,30 @@ export type FieldPaintState = {
    * metal, and the occupancy grid is the only thing that knows where that is.
    */
   discardOutside: boolean;
+  /**
+   * Also discard fragments on metal the current view does not paint.
+   *
+   * `discardOutside` alone keeps a section cap honest: with `castOnly` the
+   * riser still has metal in the cut, so the cap shows it in the part's own
+   * colour rather than punching a hole. The contoured front is the opposite
+   * case -- it is a surface derived from a field that was masked to cast
+   * bodies, so any of it that lands on a riser is extrapolation and must go.
+   */
+  discardUnpaintable: boolean;
+  /**
+   * Sweep cut-off in field units, or null for no sweep.
+   *
+   * Set only for the sweep modes, where the field's values are themselves
+   * times: a cell whose value is at or below this has already happened and is
+   * painted normally, and a cell above it has not happened yet and is drawn as
+   * liquid metal. One uniform turns a static map of solidification time into a
+   * playable freezing sequence, with no second grid and no fetch.
+   */
+  sweepTime: number | null;
+  /** Colour for cells the sweep has not reached, in linear space. */
+  liquidColor: [number, number, number];
+  /** How much of that colour those cells emit, matching the front's glow. */
+  liquidGlow: number;
 };
 
 export const defaultFieldPaintState = (): FieldPaintState => ({
@@ -88,7 +119,11 @@ export const defaultFieldPaintState = (): FieldPaintState => ({
   frameBlend: 0,
   strength: 0,
   castOnly: false,
-  discardOutside: false
+  discardOutside: false,
+  discardUnpaintable: false,
+  sweepTime: null,
+  liquidColor: [1, 0.6, 0.15],
+  liquidGlow: 0
 });
 
 /**
@@ -204,18 +239,32 @@ uniform float fieldBlend;
 uniform float fieldStrength;
 uniform float fieldCastOnly;
 uniform float fieldDiscardOutside;
+uniform float fieldDiscardUnpaintable;
+// "No sweep" is carried as a cut-off above every possible field value rather
+// than as a second enable uniform: the test below is value > fieldSweepTime,
+// so a huge cut-off leaves every cell painted exactly as it was.
+uniform float fieldSweepTime;
+uniform vec3 fieldLiquidColor;
+uniform float fieldLiquidGlow;
 `,
       // Runs after `vec3 surfaceAlbedo` and `float alpha` exist and before
       // any lighting, so the painted color is shaded like a real surface
       // rather than pasted on top of one.
       CUSTOM_FRAGMENT_UPDATE_ALPHA: `
-  if (fieldStrength > 0.0 || fieldDiscardOutside > 0.5) {
+  // Declared outside the branch so the emissive injection further down the
+  // shader can still see it; both markers sit in the same main().
+  float castSimLiquid = 0.0;
+  if (fieldStrength > 0.0 || fieldDiscardOutside > 0.5 || fieldDiscardUnpaintable > 0.5) {
     vec3 fieldUvw = vPositionW * fieldTexelStep + fieldTexelBias;
     float maskCode = texture(fieldMaskSampler, fieldUvw).r * 255.0;
     bool insideMetal = maskCode > 0.5;
     bool paintable = insideMetal && (fieldCastOnly < 0.5 || abs(maskCode - 1.0) < 0.5);
-    // A cap only exists where the plane actually crosses metal.
+    // A cap only exists where the plane actually crosses metal, and a
+    // contoured front only exists over metal the field was built from.
     if (fieldDiscardOutside > 0.5 && !insideMetal) {
+      discard;
+    }
+    if (fieldDiscardUnpaintable > 0.5 && !paintable) {
       discard;
     }
     if (paintable) {
@@ -225,12 +274,29 @@ uniform float fieldDiscardOutside;
         fieldBlend
       );
       float value = fieldQuant.x + normalized * (fieldQuant.y - fieldQuant.x);
-      float span = fieldScale.y - fieldScale.x;
-      float t = span > 1e-9 ? clamp((value - fieldScale.x) / span, 0.0, 1.0) : 0.0;
-      vec3 painted = texture(fieldLutSampler, vec2(t, 0.5)).rgb;
+      vec3 painted;
+      if (value > fieldSweepTime) {
+        // This cell has not reached its own time yet. In a solidification
+        // sweep that means it is still liquid, so it is drawn as metal rather
+        // than as a value: one colour for the whole molten region, whatever
+        // colormap the rest of the casting is using.
+        painted = fieldLiquidColor;
+        castSimLiquid = fieldStrength;
+      } else {
+        float span = fieldScale.y - fieldScale.x;
+        float t = span > 1e-9 ? clamp((value - fieldScale.x) / span, 0.0, 1.0) : 0.0;
+        painted = texture(fieldLutSampler, vec2(t, 0.5)).rgb;
+      }
       surfaceAlbedo = mix(surfaceAlbedo, painted, fieldStrength);
     }
   }
+`,
+      // Liquid metal emits; solid metal reflects. Without this the not-yet-
+      // frozen region is the right colour but the wrong material, and the
+      // casting reads as painted rather than as hot. Matches the glow the
+      // contoured front carries, so the two agree where they meet.
+      CUSTOM_FRAGMENT_BEFORE_FINALCOLORCOMPOSITION: `
+  finalEmissive += fieldLiquidColor * (fieldLiquidGlow * castSimLiquid);
 `
     };
   }
@@ -274,6 +340,12 @@ uniform float fieldDiscardOutside;
     effect.setFloat('fieldStrength', state.strength);
     effect.setFloat('fieldCastOnly', state.castOnly ? 1 : 0);
     effect.setFloat('fieldDiscardOutside', state.discardOutside ? 1 : 0);
+    effect.setFloat('fieldDiscardUnpaintable', state.discardUnpaintable ? 1 : 0);
+    // NO_SWEEP is above any field value the engine produces, so the shader's
+    // `value > fieldSweepTime` is false everywhere and the paint is unchanged.
+    effect.setFloat('fieldSweepTime', state.sweepTime ?? NO_SWEEP);
+    effect.setFloat3('fieldLiquidColor', state.liquidColor[0], state.liquidColor[1], state.liquidColor[2]);
+    effect.setFloat('fieldLiquidGlow', state.liquidGlow);
 
     effect.setTexture('fieldSamplerA', this.fieldTextureA ?? this._placeholderVolume);
     effect.setTexture('fieldSamplerB', this.fieldTextureB ?? this.fieldTextureA ?? this._placeholderVolume);

@@ -9,6 +9,7 @@ import {
   DEFAULT_THRESHOLD,
   RESULT_MODE_LABELS,
   RESULT_MODE_UNITS,
+  isSweepMode,
   isTimeMode,
   type ColormapId,
   type GridMeta,
@@ -97,7 +98,9 @@ export function ResultsPanel(props: ResultsPanelProps) {
   const constantModes = new Set(meta?.constantModes ?? []);
   const range = meta?.ranges[view.mode];
   const unit = meta?.units?.[view.mode] ?? RESULT_MODE_UNITS[view.mode] ?? '';
-  const timeMode = isTimeMode(view.mode);
+  // A sweep has a time axis but no threshold: the scrubber *is* the cut-off,
+  // so the envelope slider would be a second control fighting the first.
+  const timeMode = isTimeMode(view.mode) || isSweepMode(view.mode);
   const autoScale = view.scaleMin === null && view.scaleMax === null;
   const enabledAxes = (['x', 'y', 'z'] as const).filter((axis) => view.section[axis].enabled);
   const section = (id: ResultSectionId) => ({

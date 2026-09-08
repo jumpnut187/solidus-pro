@@ -54,6 +54,7 @@ import {
   type ShellPrefs
 } from './lib/uiPrefs';
 import {
+  isSweepMode,
   isTimeMode,
   type GridMeta,
   type MeasureResult,
@@ -248,7 +249,7 @@ export function App() {
 
   // --- Playback ------------------------------------------------------------
   useEffect(() => {
-    if (!view.playing || !isTimeMode(view.mode) || !resultsAvailable) return;
+    if (!view.playing || !(isTimeMode(view.mode) || isSweepMode(view.mode)) || !resultsAvailable) return;
     const timer = window.setInterval(() => {
       setShell((current) => {
         const next = current.view.timePercent + PLAYBACK_STEP_PERCENT * current.view.speed;
@@ -891,7 +892,9 @@ export function App() {
     shortcuts: () => setModal('shortcuts'),
     escape: closeTopLayer,
     togglePlayback: () => {
-      if (isTimeMode(view.mode) && resultsAvailable) patchView({ playing: !view.playing });
+      if ((isTimeMode(view.mode) || isSweepMode(view.mode)) && resultsAvailable) {
+        patchView({ playing: !view.playing });
+      }
     }
   });
 
@@ -1328,7 +1331,13 @@ export function App() {
           busy={animationBusy}
           progress={animationProgress}
           error={animationError}
-          frameCount={gridMeta?.frames.fraction_liquid?.count ?? gridMeta?.frames.fill?.count ?? 0}
+          // A sweep has no stored frames to match, so the recorder is left to
+          // its own default rather than being told a count that does not exist.
+          frameCount={
+            isSweepMode(view.mode)
+              ? 0
+              : (gridMeta?.frames.fraction_liquid?.count ?? gridMeta?.frames.fill?.count ?? 0)
+          }
           onRecord={(options) => void recordAnimationExport(options)}
           onCancel={() => {
             animationAbort.current?.abort();

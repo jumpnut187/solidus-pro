@@ -74,6 +74,12 @@ type State = {
   blurWeight: Float32Array;
   blurValueSwap: Float32Array;
   blurWeightSwap: Float32Array;
+  /**
+   * For every cell, the nearest cell that is usable metal. Built once per run
+   * from the mask, which does not change; keyed by whether the caller is
+   * restricting to cast bodies, because that changes what "usable" means.
+   */
+  nearest: Map<string, Int32Array>;
 };
 
 let state: State | null = null;
@@ -110,43 +116,131 @@ function initialize(message: ContourInit): State {
     blurValue: new Float32Array(cells),
     blurWeight: new Float32Array(cells),
     blurValueSwap: new Float32Array(cells),
-    blurWeightSwap: new Float32Array(cells)
+    blurWeightSwap: new Float32Array(cells),
+    nearest: new Map()
   };
 }
 
 /**
- * Build the scalar field for this request: two frames blended, then masked.
+ * Nearest usable metal cell for every cell in the lattice.
  *
- * Masking is not optional. The stored grids are hole-filled so that painting
- * the casting's *surface* never fades to zero at the boundary, which means
- * every cell in the bounding box carries a plausible value. Contouring that
- * unmasked would grow the liquid pool out through the mold.
+ * Multi-source breadth-first search out of the metal, six-connected, so the
+ * result is exact in the lattice's own step metric and costs one pass over the
+ * grid. It is built once per run because the mask never changes -- doing it
+ * per request would put a full grid traversal in the middle of playback.
+ *
+ * The map exists so that the field handed to the contourer has no artificial
+ * background; see `buildField`.
  */
-function buildField(current: State, request: ContourRequest): void {
+function nearestUsableMap(current: State, castOnly: boolean): Int32Array | null {
+  const key = castOnly ? 'cast' : 'all';
+  const cached = current.nearest.get(key);
+  if (cached) return cached;
+
+  const [nx, ny, nz] = current.dims;
+  const { mask, cellCount } = current;
+  const nearest = new Int32Array(cellCount).fill(-1);
+  const queue = new Int32Array(cellCount);
+  let head = 0;
+  let tail = 0;
+
+  for (let index = 0; index < cellCount; index += 1) {
+    const code = mask[index];
+    if (code !== 0 && (!castOnly || code === CAST_CODE)) {
+      nearest[index] = index;
+      queue[tail] = index;
+      tail += 1;
+    }
+  }
+  // A run with no cast bodies at all under `castOnly`: there is nothing to
+  // spread, and the caller falls back to leaving the field empty.
+  if (tail === 0) return null;
+
+  const strideY = nx;
+  const strideZ = nx * ny;
+  while (head < tail) {
+    const index = queue[head];
+    head += 1;
+    const ix = index % nx;
+    const iy = ((index / nx) | 0) % ny;
+    const iz = (index / strideZ) | 0;
+    const source = nearest[index];
+
+    if (ix > 0) tail = visit(nearest, queue, tail, index - 1, source);
+    if (ix < nx - 1) tail = visit(nearest, queue, tail, index + 1, source);
+    if (iy > 0) tail = visit(nearest, queue, tail, index - strideY, source);
+    if (iy < ny - 1) tail = visit(nearest, queue, tail, index + strideY, source);
+    if (iz > 0) tail = visit(nearest, queue, tail, index - strideZ, source);
+    if (iz < nz - 1) tail = visit(nearest, queue, tail, index + strideZ, source);
+  }
+
+  current.nearest.set(key, nearest);
+  return nearest;
+}
+
+function visit(
+  nearest: Int32Array,
+  queue: Int32Array,
+  tail: number,
+  neighbour: number,
+  source: number
+): number {
+  if (nearest[neighbour] !== -1) return tail;
+  nearest[neighbour] = source;
+  queue[tail] = neighbour;
+  return tail + 1;
+}
+
+/** Mask byte for cast metal: the engine's CAST code (0) plus one. */
+const CAST_CODE = 1;
+
+/**
+ * Build the scalar field for this request: two frames blended, then extended.
+ *
+ * The mask still decides which cells carry real data -- the stored grids are
+ * hole-filled so that painting the casting's *surface* never fades to zero at
+ * the boundary, so every cell in the bounding box carries a plausible value
+ * and contouring that unmasked would grow the pool out through the mold.
+ *
+ * What the mask must *not* do is put a wall of some sentinel value around the
+ * metal. That is what this used to do, and it is what made the front look like
+ * a shell. With the mold pinned below the iso, fully liquid metal put the 0.5
+ * level set exactly on the metal boundary -- so at t = 0 the contourer
+ * faithfully produced a second copy of the casting's own surface, sitting a
+ * depth-bias away from the painted shell and z-fighting into stripes along the
+ * riser wall, with a sawtooth rim wherever the lattice cut the plate at an
+ * angle. Every vertex of it also sampled its colour out in the mold, which is
+ * where the stray yellow and blue came from.
+ *
+ * Instead, cells outside the metal take the value of the nearest cell inside
+ * it. The field is then continuous across the boundary, so there is no
+ * crossing there and no surface: the front exists only where liquid meets
+ * solid *within* the metal, which is the only place a front physically is.
+ * Where liquid runs to the mold wall the surface simply ends, which is why the
+ * envelope material is two-sided. Anything the extension does produce out
+ * beyond the casting is discarded per fragment against the same mask.
+ */
+function buildField(current: State, request: ContourRequest): boolean {
   const { cellCount, mask, field, blurValue, blurWeight } = current;
   const a = request.frameA;
   const b = request.frameB;
   const blend = Math.min(Math.max(request.blend, 0), 1);
-  const castCode = 1;
 
   for (let index = 0; index < cellCount; index += 1) {
     const code = mask[index];
-    const usable = code !== 0 && (!request.castOnly || code === castCode);
+    const usable = code !== 0 && (!request.castOnly || code === CAST_CODE);
     blurWeight[index] = usable ? 1 : 0;
     blurValue[index] = usable ? (a[index] * (1 - blend) + b[index] * blend) / 255 : 0;
   }
 
   blurInsideMask(current);
 
-  // Cells outside the metal are pushed clear of any iso level so the surface
-  // closes against them rather than passing through. This happens *after* the
-  // blur, so the front still ends exactly at the metal boundary.
-  const outside = request.invert ? 2 : -1;
+  const nearest = nearestUsableMap(current, request.castOnly);
+  if (!nearest) return false;
   for (let index = 0; index < cellCount; index += 1) {
-    const code = mask[index];
-    const usable = code !== 0 && (!request.castOnly || code === castCode);
-    field[index] = usable ? blurValue[index] : outside;
+    field[index] = blurValue[nearest[index]];
   }
+  return true;
 }
 
 /**
@@ -204,11 +298,25 @@ function blurInsideMask(current: State): void {
   }
 }
 
+function emptyResult(id: number, started: number): ContourResult {
+  return {
+    kind: 'contour',
+    id,
+    positions: new Float32Array(0),
+    normals: new Float32Array(0),
+    indices: new Uint32Array(0),
+    scalars: new Float32Array(0),
+    vertexCount: 0,
+    triangleCount: 0,
+    elapsedMs: performance.now() - started
+  };
+}
+
 function contour(request: ContourRequest): ContourResult | null {
   const current = state;
   if (!current) return null;
   const started = performance.now();
-  buildField(current, request);
+  if (!buildField(current, request)) return emptyResult(request.id, started);
 
   const [nx, ny, nz] = current.dims;
   const { field, spacing, origin } = current;
@@ -225,14 +333,16 @@ function contour(request: ContourRequest): ContourResult | null {
   const normals: number[] = [];
   const scalars: number[] = [];
 
-  /**
-   * Trilinear sample in lattice coordinates, clamped at the border.
-   *
-   * Clamping rather than returning the outside sentinel matters: a vertex on
-   * the wall of the casting steps inward into cells that are still metal, and
-   * folding the -1 background in there would paint every wall of the pool
-   * black.
-   */
+  const usableAt = (fx: number, fy: number, fz: number): boolean => {
+    const ix = Math.round(fx);
+    const iy = Math.round(fy);
+    const iz = Math.round(fz);
+    if (ix < 0 || iy < 0 || iz < 0 || ix >= nx || iy >= ny || iz >= nz) return false;
+    const code = current.mask[ix + nx * (iy + ny * iz)];
+    return code !== 0 && (!request.castOnly || code === CAST_CODE);
+  };
+
+  /** Trilinear sample in lattice coordinates, clamped at the border. */
   const sampleLattice = (fx: number, fy: number, fz: number): number => {
     const cx = Math.min(Math.max(fx, 0), nx - 1);
     const cy = Math.min(Math.max(fy, 0), ny - 1);
@@ -323,14 +433,28 @@ function contour(request: ContourRequest): ContourResult | null {
         const nzv = (gz * scale) / length;
         normals.push(nxv, nyv, nzv);
 
-        // Step back along the outward normal -- i.e. into the region the
-        // surface encloses -- and record what the field is there. See
+        // Step back along the outward normal -- into the region the surface
+        // encloses -- and record what the field is there. See
         // `ContourResult.scalars`.
+        //
+        // The step is shortened until it lands in metal. A front that runs
+        // along the wall of the casting has an inward normal pointing straight
+        // out of the part, so a fixed two-cell step walks into the mold and
+        // reads the extended field there; that is what put stray colours on
+        // the vertices at the rim. Falling back through one cell to none keeps
+        // every sample on a value the metal actually holds.
+        let depth = INSIDE_SAMPLE_CELLS;
+        while (
+          depth > 0 &&
+          !usableAt(ix + localX - nxv * depth, iy + localY - nyv * depth, iz + localZ - nzv * depth)
+        ) {
+          depth -= 0.5;
+        }
         scalars.push(
           sampleLattice(
-            ix + localX - nxv * INSIDE_SAMPLE_CELLS,
-            iy + localY - nyv * INSIDE_SAMPLE_CELLS,
-            iz + localZ - nzv * INSIDE_SAMPLE_CELLS
+            ix + localX - nxv * depth,
+            iy + localY - nyv * depth,
+            iz + localZ - nzv * depth
           )
         );
       }
