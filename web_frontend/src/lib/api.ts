@@ -133,88 +133,11 @@ export type ProjectRecord = ProjectSettings & {
 /** A part as the server stores it — `mesh_data` only when it was requested. */
 type StoredPart = Omit<ProjectPart, 'meshData'> & { mesh_data?: MeshData };
 
-export type ResultPayload = {
-  data: {
-    voxel_count?: number;
-    total_volume?: number;
-    available_modes?: string[];
-    shrinkage_stats?: { max: number; mean: number; affected_count: number };
-    hotspot_stats?: { max: number; mean: number; count: number };
-    raw_ranges?: Record<string, { min: number; max: number; mean: number }>;
-  };
-  visualization?: unknown;
-};
-
 export type JobStatus = {
   status: string;
   progress: number;
   message?: string;
   queue_position?: number;
-};
-
-export type SurfacePayload = {
-  mode: string;
-  empty: boolean;
-  positions: number[];
-  normals?: number[];
-  indices: number[];
-  active_count: number;
-  vertex_count: number;
-  triangle_count: number;
-  reason?: string;
-};
-
-export type VolumePayload = {
-  mode: string;
-  empty: boolean;
-  centers: number[];
-  sizes: number[];
-  values: number[];
-  source_count?: number;
-  sample_count?: number;
-};
-
-export type ResultField = {
-  values: number[];
-  empty: boolean;
-  min: number;
-  max: number;
-  mean: number;
-};
-
-export type ResultFieldsPayload = {
-  version: number;
-  empty: boolean;
-  centers: number[];
-  sizes: number[];
-  modes: string[];
-  fields: Record<string, ResultField>;
-  solidification: {
-    normalized_times: number[];
-    min_time: number;
-    max_time: number;
-    front_width: number;
-  };
-  fraction_liquid?: {
-    frames: number[][];
-    frame_percents: number[];
-  };
-  /**
-   * Fill Time sweep field: values are pre-transformed to
-   * `max_finite_time_s - arrival_time` so the shared "value >= cutoff"
-   * active-voxel filter sweeps later arrivals in as the slider advances.
-   * `misrun[i]` flags a voxel the fill never reached -- always rendered,
-   * regardless of the sweep position. Null/absent when no filling stage ran.
-   */
-  fill_time?: {
-    values: number[];
-    misrun: boolean[];
-    max_finite_time_s: number;
-    filled_voxels: number;
-    unfilled_voxels: number;
-  } | null;
-  source_count: number;
-  sample_count: number;
 };
 
 export type MeshPreview = {
@@ -461,23 +384,11 @@ export const api = {
   cancelProject: (projectId: string) =>
     requestJson<{ status: string }>(`/api/projects/${projectId}/cancel`, { method: 'POST' }),
   status: (projectId: string) => requestJson<JobStatus>(`/api/jobs/${projectId}/status`),
-  results: (projectId: string) => requestJson<ResultPayload>(`/api/projects/${projectId}/results?summary_only=1`),
-  resultFields: (projectId: string, options?: { maxPoints?: number }) => {
-    const params = new URLSearchParams({ max_points: String(options?.maxPoints ?? 120000) });
-    return requestJson<ResultFieldsPayload>(`/api/projects/${projectId}/result-fields?${params.toString()}`);
-  },
-  surface: (projectId: string, mode: string, threshold: number, timePercent: number) => {
-    const params = new URLSearchParams({
-      mode,
-      threshold: threshold.toFixed(4),
-      time_percent: timePercent.toFixed(1)
-    });
-    return requestJson<SurfacePayload>(`/api/projects/${projectId}/surface?${params.toString()}`);
-  },
-  volume: (projectId: string, mode: string, timePercent: number) => {
-    const params = new URLSearchParams({ mode, time_percent: timePercent.toFixed(1) });
-    return requestJson<VolumePayload>(`/api/projects/${projectId}/volume?${params.toString()}`);
-  },
+
+  // The legacy `/results`, `/result-fields`, `/surface` and `/volume` fetchers
+  // are gone: the viewport reads dense grids from the binary sidecar through
+  // `lib/gridApi.ts`, and the statistics panel reads `GridMeta.stats`. The
+  // server routes stay for now and the integration lead retires them.
 
   /** Progress lines for a run; `since` returns only what is new. */
   projectLog: (projectId: string, since = 0) =>

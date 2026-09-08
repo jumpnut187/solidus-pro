@@ -93,8 +93,6 @@
    * canvas at 1366px wide, and 48 + 44 of bars leaves 676px at 768 tall.
    */
   --rail-w: 60px;
-  /* Height of the collapsed job-log strip; canvas overlays sit above it. */
-  --log-strip-h: 26px;
   --setup-w: 380px;
   --results-w: 320px;
   --topbar-h: 48px;

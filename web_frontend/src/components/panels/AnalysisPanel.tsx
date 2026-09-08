@@ -145,6 +145,7 @@ export function AnalysisPanel({
             max={1}
             step={0.05}
             value={restraint}
+            aria-label="Sand restraint index"
             onChange={(event) => onNumber('sand_restraint_index', Number(event.target.value))}
           />
           <span className="field-hint">

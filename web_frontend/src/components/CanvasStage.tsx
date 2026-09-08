@@ -128,6 +128,10 @@ export function CanvasStage(props: CanvasStageProps) {
         onAddFiles(Array.from(event.dataTransfer.files));
       }}
     >
+      {/* The canvas and everything painted over it. The log drawer sits
+          outside this box so opening it shortens the canvas instead of
+          covering the stats chip and the orientation gizmo. */}
+      <div className="stage-main">
       <div className="stage-canvas">
         <ResultsViewport
           ref={viewportRef}
@@ -189,6 +193,8 @@ export function CanvasStage(props: CanvasStageProps) {
       ) : null}
 
       <Toasts toasts={toasts} onDismiss={onDismissToast} />
+      </div>
+
       {log}
 
       <input

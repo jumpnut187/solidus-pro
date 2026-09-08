@@ -1,12 +1,18 @@
 /**
  * Presentation for `GridMeta.stats`.
  *
- * The server flattens whatever the run produced into a bag of scalars, and
- * which keys appear depends on which analyses were enabled — so this cannot be
- * a fixed list. Known keys get a real label, a unit and a sensible precision;
- * anything else is humanised rather than dropped, because a statistic the
- * engine bothered to compute should never vanish just because this table has
- * not caught up with it.
+ * Which keys appear depends on which analyses a run enabled, and a statistic
+ * the run did not produce is *absent* rather than zero -- "no hot tears" and
+ * "hot tearing was not analysed" are different answers, and the panel must not
+ * flatten them into the same 0.
+ *
+ * So this cannot be a fixed list. The server names statistics to a convention
+ * (`core/simulation_pipeline._add_summary_statistics`): flat scalars, a unit
+ * suffix wherever the unit is not implied (`_s`, `_in3`, `_in`, `_mpa`, `_um`,
+ * `_percentage`), `_count` for whole voxels and `_fraction` for 0..1. Units and
+ * precision are derived from that suffix, so a statistic added upstream shows
+ * up correctly without this file being touched. The table below only overrides
+ * the handful whose derived wording reads badly, or that deserve a tooltip.
  */
 import { formatCount, formatNumber } from './format';
 
@@ -18,39 +24,76 @@ export type StatDisplay = {
   hint?: string;
 };
 
-type StatSpec = {
-  label: string;
-  unit?: string;
-  decimals?: number;
-  /** Render as a whole number with thousands separators. */
-  count?: boolean;
-  hint?: string;
-};
+type Unit = { suffix: string; unit: string; decimals: number };
 
-/** Explicit presentation for the keys the engine is known to emit. */
-const SPECS: Record<string, StatSpec> = {
-  voxel_count: { label: 'Voxels', count: true, hint: 'Total metal and mold voxels in the solved mesh.' },
-  total_volume: { label: 'Total volume', unit: 'in³', decimals: 1 },
-  chvorinov_time: { label: 'Chvorinov time', unit: 's', decimals: 1, hint: 't = B x M², the bulk solidification estimate.' },
-  fraction_liquid_snapshots: { label: 'Liquid-fraction frames', count: true },
-  shrink_scalar: { label: 'Shrink scalar', decimals: 2, hint: 'Global shrinkage calibration applied to the displayed risk.' },
-  shrink_scalar_formula: { label: 'Shrink scalar formula' },
+/** Longest suffix first: `_max_in3` must not be read as `_in`. */
+const UNIT_SUFFIXES: Unit[] = [
+  { suffix: '_in3', unit: 'in³', decimals: 3 },
+  { suffix: '_mpa', unit: 'MPa', decimals: 1 },
+  { suffix: '_um', unit: 'µm', decimals: 1 },
+  { suffix: '_percentage', unit: '%', decimals: 2 },
+  { suffix: '_fraction', unit: '', decimals: 3 },
+  { suffix: '_in', unit: 'in', decimals: 3 },
+  { suffix: '_s', unit: 's', decimals: 1 }
+];
 
-  shrinkage_max: { label: 'Max risk', decimals: 3 },
-  shrinkage_mean: { label: 'Mean risk', decimals: 3 },
-  shrinkage_affected_count: { label: 'Voxels at risk', count: true },
-  shrinkage_volume: { label: 'Shrinkage volume', unit: 'in³', decimals: 3 },
-  shrinkage_percentage: { label: 'Shrinkage', unit: '%', decimals: 2 },
-  defect_volume_estimate: { label: 'Estimated defect volume', unit: 'in³', decimals: 3 },
+const COUNT_SUFFIXES = ['_count', '_voxel_count', '_snapshots'];
 
-  hotspot_max: { label: 'Max intensity', decimals: 3 },
-  hotspot_mean: { label: 'Mean intensity', decimals: 3 },
-  hotspot_count: { label: 'Hot spot voxels', count: true },
-
-  niyama_max_risk: { label: 'Max risk', decimals: 3 },
-  niyama_mean_risk: { label: 'Mean risk', decimals: 3 },
-  niyama_affected_count: { label: 'Voxels at risk', count: true },
-  niyama_defect_count: { label: 'Defect voxels', count: true },
+/** Overrides for names whose derived label or precision is not good enough. */
+const OVERRIDES: Record<string, { label?: string; hint?: string; decimals?: number }> = {
+  alloy: { label: 'Alloy' },
+  voxel_count: { label: 'Voxels', hint: 'Total metal and mold voxels in the solved mesh.' },
+  total_volume: { label: 'Total volume' },
+  simulation_time_s: { label: 'Simulated time' },
+  chvorinov_time_max_s: {
+    label: 'Chvorinov time (max)',
+    hint: 't = B x M²: the bulk solidification estimate for the slowest section.'
+  },
+  chvorinov_time_mean_s: { label: 'Chvorinov time (mean)' },
+  defect_volume_in3: {
+    label: 'Defect volume',
+    hint: "At the engine's own default threshold, so there is a number before you pick one."
+  },
+  defect_volume_max_in3: { label: 'Largest defect pocket' },
+  // Not "Defect volume" again: the in³ figure above already owns that label,
+  // and two rows with the same name and different numbers read as a bug.
+  defect_volume_percentage: { label: 'Defect share of casting' },
+  defect_voxel_count: { label: 'Defect voxels' },
+  defect_threshold: { label: 'Threshold used', decimals: 2 },
+  casting_volume_in3: { label: 'Casting volume' },
+  shrinkage_volume_in3: { label: 'Shrinkage volume' },
+  // Two counts arrive for shrinkage, for hot spots and for Niyama, and they
+  // differ by an order of magnitude because they are counted against different
+  // thresholds: one on the displayed field, one by the solver itself. Labelling
+  // both "voxels at risk" would put two contradictory numbers side by side.
+  shrinkage_voxel_count: {
+    label: 'Voxels flagged by the solver',
+    hint: "The solver's own shrinkage threshold, which is stricter than the display one."
+  },
+  shrinkage_percentage: { label: 'Share of voxels flagged' },
+  shrinkage_max: { label: 'Max risk' },
+  shrinkage_mean: { label: 'Mean risk' },
+  shrinkage_affected_count: {
+    label: 'Voxels showing any risk',
+    hint: 'Every voxel with a non-trivial shrinkage value in the displayed field.'
+  },
+  hotspot_voxel_count: {
+    label: 'Voxels flagged by the solver',
+    hint: "The solver's own hot spot threshold."
+  },
+  hotspot_count: {
+    label: 'Voxels above display intensity',
+    hint: 'Counted on the displayed hot spot field, at a higher bar than the solver uses.'
+  },
+  hotspot_max: { label: 'Max intensity' },
+  hotspot_mean: { label: 'Mean intensity' },
+  niyama_defect_count: {
+    label: 'Defect voxels',
+    hint: "Below the alloy's Niyama threshold, as the solver counts them."
+  },
+  niyama_affected_count: { label: 'Voxels showing any risk' },
+  niyama_max_risk: { label: 'Max risk' },
+  niyama_mean_risk: { label: 'Mean risk' },
   niyama_metadata_threshold: { label: 'Threshold', decimals: 2 },
   niyama_metadata_threshold_status: { label: 'Threshold source' },
   niyama_metadata_source: { label: 'Computed from' },
@@ -58,24 +101,27 @@ const SPECS: Record<string, StatSpec> = {
   niyama_metadata_gradient_units: { label: 'Gradient units' },
   niyama_metadata_cooling_rate_units: { label: 'Cooling-rate units' },
   niyama_metadata_eval_fraction_solid: { label: 'Evaluated at fraction solid', decimals: 2 },
-  niyama_metadata_eval_temperature_c: { label: 'Evaluated at', unit: '°C', decimals: 1 },
-
-  feed_modulus_min_in: { label: 'Min modulus', unit: 'in', decimals: 3 },
-  feed_modulus_max_in: { label: 'Max modulus', unit: 'in', decimals: 3 },
-  feed_modulus_mean_in: { label: 'Mean modulus', unit: 'in', decimals: 3 },
-  fed_fraction: { label: 'Fed fraction', decimals: 3 },
-  feeding_blocked_count: { label: 'Blocked voxels', count: true },
-
-  hot_tear_count: { label: 'Hot tear voxels', count: true },
-  sand_burn_in_count: { label: 'Sand burn-in voxels', count: true },
-  gas_porosity_count: { label: 'Gas porosity voxels', count: true },
-
-  max_stress_mpa: { label: 'Max stress', unit: 'MPa', decimals: 1 },
-  avg_sdas_um: { label: 'Mean SDAS', unit: 'µm', decimals: 1 },
-
-  misrun_count: { label: 'Misrun voxels', count: true },
-  filled_voxels: { label: 'Filled voxels', count: true },
-  unfilled_voxels: { label: 'Unfilled voxels', count: true }
+  niyama_metadata_eval_temperature_c: { label: 'Evaluated at', decimals: 1 },
+  hot_tear_voxel_count: { label: 'Hot tear voxels' },
+  sand_burn_in_voxel_count: { label: 'Sand burn-in voxels' },
+  gas_porosity_voxel_count: { label: 'Gas porosity voxels' },
+  feeding_blocked_count: { label: 'Blocked voxels' },
+  fed_fraction: { label: 'Fed fraction', hint: 'Share of the casting a riser can still reach.' },
+  feed_modulus_min_in: { label: 'Min modulus' },
+  feed_modulus_max_in: { label: 'Max modulus' },
+  feed_modulus_mean_in: { label: 'Mean modulus' },
+  max_stress_mpa: { label: 'Max stress' },
+  avg_sdas_um: { label: 'Mean SDAS' },
+  fill_max_time_s: { label: 'Fill time' },
+  fill_filled_voxel_count: { label: 'Filled voxels' },
+  fill_unfilled_voxel_count: { label: 'Unfilled voxels' },
+  fraction_liquid_snapshots: { label: 'Liquid-fraction frames' },
+  shrink_scalar: {
+    label: 'Shrink scalar',
+    decimals: 2,
+    hint: 'Global calibration applied to the displayed shrinkage risk.'
+  },
+  shrink_scalar_formula: { label: 'Shrink scalar formula' }
 };
 
 /** Section headings, matched against the start of a key, longest prefix first. */
@@ -84,7 +130,8 @@ const GROUPS: { prefix: string; label: string }[] = [
   { prefix: 'niyama_', label: 'Niyama' },
   { prefix: 'shrinkage_', label: 'Shrinkage' },
   { prefix: 'shrink_scalar', label: 'Shrinkage' },
-  { prefix: 'defect_volume', label: 'Shrinkage' },
+  { prefix: 'defect_', label: 'Shrinkage' },
+  { prefix: 'casting_volume', label: 'Overview' },
   { prefix: 'hotspot_', label: 'Hot spots' },
   { prefix: 'hot_tear', label: 'Hot tear' },
   { prefix: 'feed_modulus_', label: 'Feeding' },
@@ -99,11 +146,12 @@ const GROUPS: { prefix: string; label: string }[] = [
   { prefix: 'sdas', label: 'Microstructure' },
   { prefix: 'avg_sdas', label: 'Microstructure' },
   { prefix: 'predicted_uts', label: 'Microstructure' },
-  { prefix: 'fill', label: 'Filling' },
+  { prefix: 'fill_', label: 'Filling' },
   { prefix: 'misrun', label: 'Filling' },
   { prefix: 'cold_shut', label: 'Filling' },
   { prefix: 'fraction_liquid', label: 'Solidification' },
-  { prefix: 'chvorinov', label: 'Solidification' }
+  { prefix: 'chvorinov', label: 'Solidification' },
+  { prefix: 'simulation_time', label: 'Solidification' }
 ];
 
 const GROUP_ORDER = [
@@ -128,18 +176,39 @@ function humanize(key: string): string {
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
+/** Strip the unit suffix from a key so the label is not "Fill max time s". */
+function describe(key: string): { label: string; unit: string; decimals: number; count: boolean } {
+  const override = OVERRIDES[key];
+  const count = COUNT_SUFFIXES.some((suffix) => key.endsWith(suffix));
+  if (count) {
+    return {
+      label: override?.label ?? humanize(key.replace(/_(voxel_)?count$/, '').replace(/_snapshots$/, '')),
+      unit: '',
+      decimals: 0,
+      count: true
+    };
+  }
+  const match = UNIT_SUFFIXES.find((entry) => key.endsWith(entry.suffix));
+  const stem = match ? key.slice(0, -match.suffix.length) : key;
+  return {
+    label: override?.label ?? humanize(stem),
+    unit: match?.unit ?? '',
+    decimals: override?.decimals ?? match?.decimals ?? 3,
+    count: false
+  };
+}
+
+function renderValue(value: number | string, spec: ReturnType<typeof describe>): string {
+  if (typeof value === 'string') return value;
+  if (!Number.isFinite(value)) return '--';
+  if (spec.count) return formatCount(value);
+  const text = formatNumber(value, spec.decimals);
+  return spec.unit ? `${text} ${spec.unit}` : text;
+}
+
 function groupFor(key: string): string {
   const match = GROUPS.find((group) => key.startsWith(group.prefix));
   return match ? match.label : 'Overview';
-}
-
-function renderValue(value: number | string, spec: StatSpec | undefined): string {
-  if (typeof value === 'string') return value;
-  if (!Number.isFinite(value)) return '--';
-  if (spec?.count) return formatCount(value);
-  const decimals = spec?.decimals ?? (Number.isInteger(value) && Math.abs(value) >= 1000 ? 0 : 3);
-  const text = spec?.count ? formatCount(value) : formatNumber(value, decimals);
-  return spec?.unit ? `${text} ${spec.unit}` : text;
 }
 
 export type StatGroup = { label: string; rows: StatDisplay[] };
@@ -148,9 +217,10 @@ export type StatGroup = { label: string; rows: StatDisplay[] };
  * Turn the raw stats bag into labelled, grouped, ordered rows.
  *
  * `voxelCount`, `castVoxelCount` and `totalVolumeIn3` come from `GridMeta`
- * itself rather than from `stats`, so they are folded in here — a statistics
+ * itself rather than from `stats`, so they are folded in here -- a statistics
  * panel that omitted the cast voxel count would be missing the number people
- * check first.
+ * check first. Each is included only when the viewport actually reported it;
+ * none of them is defaulted to zero.
  */
 export function buildStatGroups(
   stats: Record<string, number | string>,
@@ -192,12 +262,12 @@ export function buildStatGroups(
   for (const [key, value] of Object.entries(stats)) {
     // Already shown from GridMeta's own fields, in better units.
     if (key === 'voxel_count' || key === 'total_volume') continue;
-    const spec = SPECS[key];
+    const spec = describe(key);
     push(groupFor(key), {
       key,
-      label: spec?.label ?? humanize(key),
+      label: spec.label,
       value: renderValue(value, spec),
-      hint: spec?.hint
+      hint: OVERRIDES[key]?.hint
     });
   }
 

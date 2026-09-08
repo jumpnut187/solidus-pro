@@ -49,6 +49,7 @@ export function MeshPanel({
             max={meshDefaults.voxelSizeMax}
             step={meshDefaults.voxelSizeStep}
             value={settings.voxel_size}
+            aria-label="Base voxel size"
             onChange={(event) => onPatch({ voxel_size: Number(event.target.value) })}
           />
           <span className="field-hint">
@@ -69,6 +70,7 @@ export function MeshPanel({
             max={meshDefaults.refinementMax}
             step={1}
             value={settings.refinement_level}
+            aria-label="Refinement level"
             onChange={(event) => onPatch({ refinement_level: Number(event.target.value) })}
           />
           <span className="field-hint">How aggressively the mesh subdivides around surfaces and thin walls.</span>

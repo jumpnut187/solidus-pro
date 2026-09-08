@@ -435,11 +435,22 @@
  * ----------------------------------------------------------------------- */
 
 .stage {
-  position: relative;
+  display: flex;
+  flex-direction: column;
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
   background: var(--bg-0);
+  overflow: hidden;
+}
+
+/* The canvas and its overlays. Everything absolutely positioned over the 3D
+ * view is positioned against this box, not against the whole well, so the log
+ * drawer below can never sit on top of the stats chip or the gizmo. */
+.stage-main {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -462,7 +473,7 @@
 .viewport-gizmo {
   position: absolute;
   left: var(--sp-4);
-  bottom: calc(var(--log-strip-h) + var(--sp-2));
+  bottom: var(--sp-4);
   width: 96px;
   height: 96px;
   z-index: 5;
@@ -572,12 +583,12 @@
   box-shadow: var(--shadow-panel);
 }
 
-/* Bottom-centre, clear of the renderer's orientation gizmo in the corner, of
- * the toast stack, and of the collapsed job-log strip along the bottom edge. */
+/* Bottom-centre, clear of the renderer's orientation gizmo in the corner and
+ * of the toast stack at the bottom right. */
 .stats-chip {
   position: absolute;
   left: 50%;
-  bottom: calc(var(--log-strip-h) + var(--sp-3));
+  bottom: var(--sp-4);
   transform: translateX(-50%);
   z-index: var(--z-overlay);
   display: flex;
@@ -769,14 +780,11 @@
  * Job log drawer
  * ----------------------------------------------------------------------- */
 
-/* Anchored to the foot of the canvas, not the window: it must never cover the
- * transport bar or reach across the panels. */
+/* A sibling of the canvas rather than an overlay on it: opening the drawer
+ * shortens the 3D view, the same rule the setup panels follow, so it cannot
+ * cover the stats chip or the renderer's orientation gizmo. */
 .log-drawer {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: calc(var(--z-overlay) + 2);
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   max-height: 45%;
@@ -888,7 +896,7 @@
 .toasts {
   position: absolute;
   right: var(--sp-5);
-  bottom: calc(var(--log-strip-h) + var(--sp-4));
+  bottom: var(--sp-5);
   z-index: var(--z-toast);
   display: flex;
   flex-direction: column;

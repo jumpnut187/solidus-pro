@@ -116,10 +116,10 @@ export function PerformancePanel({ options, hardware, onSet, onReset, onClose }:
         </div>
       </Group>
 
-      <Group title="Visualization">
+      <Group title="Stored result detail">
         <label className="field">
           <span className="field-label">
-            Max voxels sent to the viewport
+            Voxels kept in the stored result
             <span className="field-unit">{formatCount(maxVoxels)}</span>
           </span>
           <input
@@ -129,11 +129,13 @@ export function PerformancePanel({ options, hardware, onSet, onReset, onClose }:
             max={500000}
             step={10000}
             value={maxVoxels}
+            aria-label="Voxels kept in the stored result"
             onChange={(event) => onSet('max_voxels_for_visualization', Number(event.target.value))}
           />
           <span className="field-hint">
-            Caps the result payload. Raising it sharpens the field on very large models at the cost of load
-            time and browser memory.
+            A run with more voxels than this is stored strided down to it. The 3D view is not affected — it
+            reads the full-resolution grid — but riser design works from the stored result and refuses a
+            downsampled one, so raise this before a run you intend to design risers from.
           </span>
         </label>
       </Group>

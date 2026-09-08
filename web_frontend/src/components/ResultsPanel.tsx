@@ -224,6 +224,9 @@ export function ResultsPanel(props: ResultsPanelProps) {
                   </div>
                   <span className="field-hint">
                     Recommended for {RESULT_MODE_LABELS[view.mode]}: {DEFAULT_THRESHOLD[view.mode]}%.
+                    {view.style === 'surface'
+                      ? ' In Surface style it sets the defect volume below; switch to Envelope or Both to see it as a shape.'
+                      : ' The envelope encloses everything at or above this value.'}
                   </span>
                 </div>
 
@@ -363,6 +366,7 @@ export function ResultsPanel(props: ResultsPanelProps) {
               max={100}
               step={1}
               value={view.modelOpacity}
+              aria-label="Model opacity"
               onChange={(event) => onViewChange({ modelOpacity: Number(event.target.value) })}
             />
           </label>
