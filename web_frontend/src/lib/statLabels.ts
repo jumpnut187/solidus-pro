@@ -51,11 +51,14 @@ const OVERRIDES: Record<string, { label?: string; hint?: string; decimals?: numb
   },
   chvorinov_time_mean_s: { label: 'Chvorinov time (mean)' },
   defect_volume_in3: {
-    label: 'Defect volume',
-    hint: "At the engine's own default threshold, so there is a number before you pick one."
+    label: 'Defect volume (probability-weighted)',
+    hint: "Each voxel above the engine's default threshold counts its volume times its defect probability."
   },
-  defect_volume_max_in3: { label: 'Largest defect pocket' },
-  // Not "Defect volume" again: the in³ figure above already owns that label,
+  defect_volume_max_in3: {
+    label: 'Defect volume (upper bound)',
+    hint: 'The same voxels counted at full volume, as if every one were entirely defective.'
+  },
+  // Not "Defect volume" again: the in³ figures above already own that label,
   // and two rows with the same name and different numbers read as a bug.
   defect_volume_percentage: { label: 'Defect share of casting' },
   defect_voxel_count: { label: 'Defect voxels' },
