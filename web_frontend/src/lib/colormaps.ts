@@ -1,4 +1,4 @@
-import type { ColormapId } from './viewState';
+import type { ColormapId, ResultModeId } from './viewState';
 
 export type ColormapStop = [position: number, rgb: [number, number, number]];
 
@@ -24,6 +24,35 @@ export const COLORMAPS: Record<ColormapId, ColormapDef> = {
       [0.8, [255, 200, 0]],
       [0.9, [255, 90, 0]],
       [1.0, [190, 0, 0]]
+    ]
+  },
+  molten: {
+    id: 'molten',
+    name: 'Molten Metal',
+    description: 'Dark maroon through red and orange to white-hot yellow',
+    // Read bottom to top as a cooling curve: metal that has gone solid is the
+    // dark maroon of a casting off the line, the mushy zone is red, the
+    // free-flowing pool is orange, and metal at pouring temperature is the
+    // yellow a foundry sees down a ladle.
+    //
+    // The top stop stays a saturated yellow rather than the near-white it
+    // wants to be. These values are an *albedo*: the painted casting is a lit
+    // PBR surface, so the renderer multiplies them by the environment and
+    // pushes them through an ACES curve, and a stop that already sits near
+    // 255 in all three channels arrives on screen as cream. At the start of a
+    // run every voxel is fully liquid, so the whole casting sits on this one
+    // stop -- a white-ish tip there gives back exactly the silver casting this
+    // map exists to get rid of. White heat is delivered where it belongs, by
+    // the emissive front and its bloom, not by the ramp.
+    stops: [
+      [0.0, [34, 5, 7]],
+      [0.13, [92, 11, 9]],
+      [0.3, [166, 26, 8]],
+      [0.47, [212, 64, 8]],
+      [0.63, [240, 114, 8]],
+      [0.78, [251, 158, 14]],
+      [0.9, [255, 188, 38]],
+      [1.0, [255, 214, 70]]
     ]
   },
   red_gradient: {
@@ -118,6 +147,37 @@ export const COLORMAPS: Record<ColormapId, ColormapDef> = {
     ]
   }
 };
+
+/**
+ * The map a mode opens with.
+ *
+ * Rainbow is the convention for every field where the number is what matters,
+ * and it stays the default and stays selectable everywhere. The three modes
+ * below are the exception: their number *is* a temperature-like state, and a
+ * blue-through-green ramp on a pool of liquid steel reads as water. Nobody
+ * looking at a filling run wants to translate cyan into "still molten".
+ */
+const MODE_COLORMAPS: Partial<Record<ResultModeId, ColormapId>> = {
+  fraction_liquid: 'molten',
+  fill_time: 'molten',
+  fill_animation: 'molten'
+};
+
+export function defaultColormapForMode(mode: ResultModeId | string): ColormapId {
+  return MODE_COLORMAPS[mode as ResultModeId] ?? 'rainbow';
+}
+
+/**
+ * Whether a colormap is one the user chose rather than one a mode handed them.
+ *
+ * Switching modes should follow the new mode's default, but only while the
+ * colormap on screen is still whatever the *last* mode defaulted to. Once
+ * someone has picked viridis on purpose, moving to another field must not
+ * silently throw that away.
+ */
+export function isDefaultColormapFor(mode: ResultModeId | string, colormap: ColormapId): boolean {
+  return colormap === defaultColormapForMode(mode);
+}
 
 export function colormapDef(id: ColormapId | string): ColormapDef {
   return COLORMAPS[id as ColormapId] ?? COLORMAPS.rainbow;

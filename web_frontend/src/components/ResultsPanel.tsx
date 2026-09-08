@@ -1,7 +1,7 @@
 import { ChevronLeft, ChevronRight, FlipHorizontal, Maximize2, Ruler } from 'lucide-react';
 
 import { CollapsibleGroup, Group } from './SetupPanel';
-import { COLORMAPS, gradientCss } from '../lib/colormaps';
+import { COLORMAPS, defaultColormapForMode, gradientCss, isDefaultColormapFor } from '../lib/colormaps';
 import { formatCount, formatNumber } from '../lib/format';
 import { buildStatGroups } from '../lib/statLabels';
 import {
@@ -146,7 +146,13 @@ export function ResultsPanel(props: ResultsPanelProps) {
                       scaleMin: null,
                       scaleMax: null,
                       playing: false,
-                      timePercent: 0
+                      timePercent: 0,
+                      // Follow the new mode's default map, but only while the
+                      // one on screen is still the old mode's default. A map
+                      // the user picked on purpose survives the switch.
+                      colormap: isDefaultColormapFor(view.mode, view.colormap)
+                        ? defaultColormapForMode(mode)
+                        : view.colormap
                     });
                   }}
                 >

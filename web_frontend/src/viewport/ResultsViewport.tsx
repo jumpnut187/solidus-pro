@@ -82,9 +82,30 @@ const PLAYBACK_PERCENT_PER_SECOND = 12;
  */
 const ENVELOPE_DEBOUNCE_MS = 150;
 
-/** Opacity the casting drops to so an envelope inside it can be seen. */
+/**
+ * Opacity the casting drops to so an envelope inside it can be seen.
+ *
+ * A defect envelope is a small blob somewhere inside the metal, so the shell
+ * has to get out of its way almost entirely. A liquid front is not: it fills
+ * the casting, and at 0.22 with no paint on it the shell disappeared -- which
+ * is what "no results in the riser" was. A riser is mostly *outside* the front
+ * for most of a run, so with the shell ghosted there was nothing there to see
+ * at all. For the time modes the shell stays at the same 0.35 that 'both' uses
+ * and keeps its paint, so the riser still carries the field.
+ */
 const ENVELOPE_SHELL_OPACITY = 0.22;
 const BOTH_SHELL_OPACITY = 0.35;
+const TIME_ENVELOPE_SHELL_OPACITY = 0.35;
+
+/**
+ * How much of its own colour the liquid front emits.
+ *
+ * Measured by eye against the tone-mapped scene rather than derived: below
+ * about 0.4 the front still reads as lit metal, and past about 0.9 the ACES
+ * curve clips the yellow end to white and the pool loses the shape the ramp is
+ * there to show.
+ */
+const MOLTEN_GLOW = 0.62;
 
 /** Sustained frame rate a machine must hold before it is offered SSAO. */
 const AO_MINIMUM_FPS = 55;
@@ -277,7 +298,16 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     // In 'envelope' the shell is a ghost: it locates the defect in the part
     // but carries no colour of its own, so nothing competes with the surface
     // that does. In 'both' the shell keeps its paint and steps back.
-    const paintSurface = state.showResults && state.style !== 'envelope';
+    //
+    // The time modes are the exception, and the reason is the riser. A front
+    // is not a small marker inside the metal, it is a boundary that sweeps
+    // through it, and a riser spends most of a run on the far side of that
+    // boundary. Stripping the paint there left the riser blank -- reported as
+    // "no results in the riser" -- when in fact it had a perfectly good
+    // fraction-liquid value the whole time. So a front gets a painted shell to
+    // sit inside, not an empty one.
+    const paintSurface =
+      state.showResults && (state.style !== 'envelope' || isFrameMode(state.mode));
 
     const applyPaint = (plugin: FieldPaintPluginMaterial, strength: number) => {
       if (resources && ready) {
@@ -324,17 +354,33 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     refs.envelope.material.clipPlane = planes.x;
     refs.envelope.material.clipPlane2 = planes.y;
     refs.envelope.material.clipPlane3 = planes.z;
+    // A liquid front and a defect envelope are the same geometry with opposite
+    // jobs. The envelope marks a region and should look like a marker, so it
+    // stays an ordinary lit surface. The front is a picture of the metal
+    // itself, and metal at pouring temperature emits light rather than
+    // reflecting it -- a reflective front borrows the environment map and
+    // comes out looking like polished steel whatever colour it is painted.
+    const molten = isFrameMode(mode);
     refs.envelope.setStyle({
       colormap: state.colormap,
-      scaleMin,
-      scaleMax,
-      // A front has no per-vertex scalar, so it takes the colour of the
-      // metal it is: molten in a solidification run, poured in a fill.
+      // A front is contoured out of a normalized 0..1 frame stack, so its
+      // per-vertex scalars are in those units and must be ramped over them,
+      // not over whatever the legend has been clamped to. This is why the
+      // pool keeps its full molten range even when the scale is pinned.
+      scaleMin: molten ? 0 : scaleMin,
+      scaleMax: molten ? 1 : scaleMax,
+      // Only reached when a surface arrives without per-vertex scalars.
       flatColor: METAL_COLOR,
       alpha: 1,
-      metallic: isFrameMode(mode) ? 0.85 : 0.35,
-      roughness: isFrameMode(mode) ? 0.18 : 0.5
+      metallic: molten ? 0.1 : 0.35,
+      roughness: molten ? 0.55 : 0.5,
+      glow: molten ? MOLTEN_GLOW : 0
     });
+    // Bloom is what carries the glow past the edge of the mesh into the
+    // surrounding air. It is switched with the front rather than left on: on
+    // every other mode there is nothing on screen bright enough to want it,
+    // and it would only cost a blur pass.
+    refs.viewport.pipeline.bloomEnabled = molten && showEnvelope;
     refs.envelope.setVisible(showEnvelope);
   }, []);
 
@@ -619,9 +665,17 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     if (!sceneRef.current) return;
     const style = view.style;
     const requested = Math.min(Math.max(view.modelOpacity, 0), 100) / 100;
-    // An envelope has to be visible through the casting that contains it.
+    // An envelope has to be visible through the casting that contains it --
+    // but a liquid front only has to be visible *through* it, not instead of
+    // it. See ENVELOPE_SHELL_OPACITY.
     const cap =
-      style === 'envelope' ? ENVELOPE_SHELL_OPACITY : style === 'both' ? BOTH_SHELL_OPACITY : 1;
+      style === 'envelope'
+        ? isFrameMode(view.mode)
+          ? TIME_ENVELOPE_SHELL_OPACITY
+          : ENVELOPE_SHELL_OPACITY
+        : style === 'both'
+          ? BOTH_SHELL_OPACITY
+          : 1;
     applyPartAppearance(parts, partEntriesRef.current, {
       selectedPartId,
       opacity: Math.min(requested, cap),
@@ -632,7 +686,9 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       depthPrePass: !wantsEnvelope(style)
     });
     paint();
-  }, [parts, selectedPartId, view.modelOpacity, view.showModel, view.style, paint]);
+    // `view.mode` is a dependency because the opacity cap now depends on it:
+    // a time mode keeps a readable shell where a defect mode ghosts it.
+  }, [parts, selectedPartId, view.modelOpacity, view.showModel, view.style, view.mode, paint]);
 
   // Markers belong to the tool that made them.
   useEffect(() => {
@@ -705,7 +761,10 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
             positions: geometry.positions,
             normals: geometry.normals,
             indices: geometry.indices,
-            scalars: null
+            // Not the value *on* the front -- that is the iso everywhere -- but
+            // the value just behind it, which is what makes the pool read hot
+            // in its body and cooling at its rim.
+            scalars: geometry.scalars
           });
           paint();
         });

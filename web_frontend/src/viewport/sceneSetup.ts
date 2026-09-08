@@ -106,6 +106,18 @@ export function createViewportScene(canvas: HTMLCanvasElement): ViewportScene {
   pipeline.samples = 4;
   pipeline.imageProcessingEnabled = true;
 
+  // Bloom is configured here but left switched off; the viewport turns it on
+  // only while a molten front is on screen. The threshold is high on purpose:
+  // it should catch the emitting front and nothing else, so a painted casting
+  // and the floor grid are untouched no matter which colormap is chosen. The
+  // weight is small for the same reason -- this is heat haze around a pool of
+  // metal, not a lens flare.
+  pipeline.bloomEnabled = false;
+  pipeline.bloomThreshold = 0.82;
+  pipeline.bloomWeight = 0.35;
+  pipeline.bloomKernel = 48;
+  pipeline.bloomScale = 0.5;
+
   let floor: Mesh | null = null;
   const layoutFloor = (center: Vector3, extent: number, floorZ: number) => {
     floor?.dispose();

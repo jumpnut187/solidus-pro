@@ -41,6 +41,18 @@ export type ContourResult = {
   positions: Float32Array;
   normals: Float32Array;
   indices: Uint32Array;
+  /**
+   * Per-vertex field value sampled a short way *inside* the surface.
+   *
+   * Sampling on the surface itself is useless for colour: a level set sits at
+   * the iso value by construction, so every vertex would come back 0.5 and the
+   * front would be one flat tone. A step inward reports how deep the liquid
+   * runs behind that point -- near 1 where the vertex caps a real pool, barely
+   * over the iso where it caps a sliver about to freeze -- which is what makes
+   * the pool read yellow in its body and orange-red around the solidifying
+   * rim.
+   */
+  scalars: Float32Array;
   vertexCount: number;
   triangleCount: number;
   /** Milliseconds spent contouring, for the performance budget. */

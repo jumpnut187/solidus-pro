@@ -8,6 +8,7 @@
  * working on.
  */
 import { defaultResultViewState, type ResultViewState, type ViewportTool } from './viewState';
+import { defaultColormapForMode } from './colormaps';
 import { deepMerge } from './defaults';
 
 export type PanelId =
@@ -34,7 +35,16 @@ export type ShellPrefs = {
   /** The job log drawer at the foot of the canvas. */
   logOpen: boolean;
   view: ResultViewState;
+  /**
+   * Which one-time preference migrations have run against this browser's
+   * stored prefs. Bumped only when a *default* changes in a way that a stored
+   * value would otherwise mask forever; see `loadShellPrefs`.
+   */
+  prefsVersion: number;
 };
+
+/** Current migration level. See `PREFS_MIGRATIONS` in `loadShellPrefs`. */
+const PREFS_VERSION = 1;
 
 export const defaultShellPrefs: ShellPrefs = {
   activePanel: 'parts',
@@ -52,7 +62,8 @@ export const defaultShellPrefs: ShellPrefs = {
   ortho: true,
   tool: 'select',
   logOpen: false,
-  view: defaultResultViewState
+  view: { ...defaultResultViewState, colormap: defaultColormapForMode(defaultResultViewState.mode) },
+  prefsVersion: PREFS_VERSION
 };
 
 const SHELL_STORAGE_KEY = 'solidus.shell.v1';
@@ -63,10 +74,29 @@ export function loadShellPrefs(): ShellPrefs {
   try {
     const raw = window.localStorage.getItem(SHELL_STORAGE_KEY);
     if (!raw) return defaultShellPrefs;
-    const merged = deepMerge(defaultShellPrefs, JSON.parse(raw) as unknown);
+    const stored = JSON.parse(raw) as unknown;
+    // Read the stored level *before* merging: the merge fills the field in
+    // from the defaults, which would make every old blob look current.
+    const storedVersion =
+      typeof stored === 'object' && stored !== null && typeof (stored as ShellPrefs).prefsVersion === 'number'
+        ? (stored as ShellPrefs).prefsVersion
+        : 0;
+    const merged = deepMerge(defaultShellPrefs, stored);
     // Playback never survives a reload: coming back to a page that is quietly
     // animating is disorienting, and the frames are not loaded yet anyway.
-    return { ...merged, view: { ...merged.view, playing: false } };
+    const view = { ...merged.view, playing: false };
+
+    // Migration 1: the time modes gained their own default colormap. Anyone
+    // who used the app before that has `rainbow` stored against them, and a
+    // stored value beats a default forever -- so the fix would never reach the
+    // people who reported it. `rainbow` was the only value those modes could
+    // have had, so it cannot stand for a deliberate preference *over* molten;
+    // every other stored map is left exactly as it is.
+    if (storedVersion < 1 && view.colormap === 'rainbow') {
+      view.colormap = defaultColormapForMode(view.mode);
+    }
+
+    return { ...merged, view, prefsVersion: PREFS_VERSION };
   } catch {
     return defaultShellPrefs;
   }

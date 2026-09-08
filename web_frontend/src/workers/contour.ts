@@ -23,6 +23,16 @@
  */
 import type { ContourInit, ContourMessage, ContourRequest, ContourResult } from './contourTypes';
 
+/**
+ * How far inside the surface the colour scalar is sampled, in lattice cells.
+ *
+ * Under about one cell the sample is still on the iso and the front comes back
+ * flat. Much over three and a thin pool samples clean through itself and out
+ * the far side, which paints its middle cold. Two is a fair reading of "just
+ * behind this surface" at every lattice this renderer sees.
+ */
+const INSIDE_SAMPLE_CELLS = 2;
+
 /** Corner offsets of a cell, in the canonical order used by the edge table. */
 const CORNERS: ReadonlyArray<readonly [number, number, number]> = [
   [0, 0, 0],
@@ -80,7 +90,8 @@ self.onmessage = (event: MessageEvent<ContourMessage>) => {
       (self as unknown as Worker).postMessage(result, [
         result.positions.buffer,
         result.normals.buffer,
-        result.indices.buffer
+        result.indices.buffer,
+        result.scalars.buffer
       ]);
     }
   }
@@ -212,6 +223,38 @@ function contour(request: ContourRequest): ContourResult | null {
   const cellVertex = new Int32Array((nx - 1) * (ny - 1) * (nz - 1)).fill(-1);
   const positions: number[] = [];
   const normals: number[] = [];
+  const scalars: number[] = [];
+
+  /**
+   * Trilinear sample in lattice coordinates, clamped at the border.
+   *
+   * Clamping rather than returning the outside sentinel matters: a vertex on
+   * the wall of the casting steps inward into cells that are still metal, and
+   * folding the -1 background in there would paint every wall of the pool
+   * black.
+   */
+  const sampleLattice = (fx: number, fy: number, fz: number): number => {
+    const cx = Math.min(Math.max(fx, 0), nx - 1);
+    const cy = Math.min(Math.max(fy, 0), ny - 1);
+    const cz = Math.min(Math.max(fz, 0), nz - 1);
+    const x0 = Math.floor(cx);
+    const y0 = Math.floor(cy);
+    const z0 = Math.floor(cz);
+    const x1 = Math.min(x0 + 1, nx - 1);
+    const y1 = Math.min(y0 + 1, ny - 1);
+    const z1 = Math.min(z0 + 1, nz - 1);
+    const tx = cx - x0;
+    const ty = cy - y0;
+    const tz = cz - z0;
+    const at = (ix: number, iy: number, iz: number) => field[ix + nx * (iy + ny * iz)];
+    const c00 = at(x0, y0, z0) + (at(x1, y0, z0) - at(x0, y0, z0)) * tx;
+    const c10 = at(x0, y1, z0) + (at(x1, y1, z0) - at(x0, y1, z0)) * tx;
+    const c01 = at(x0, y0, z1) + (at(x1, y0, z1) - at(x0, y0, z1)) * tx;
+    const c11 = at(x0, y1, z1) + (at(x1, y1, z1) - at(x0, y1, z1)) * tx;
+    const c0 = c00 + (c10 - c00) * ty;
+    const c1 = c01 + (c11 - c01) * ty;
+    return c0 + (c1 - c0) * tz;
+  };
 
   const cellIndex = (ix: number, iy: number, iz: number): number =>
     ix + (nx - 1) * (iy + (ny - 1) * iz);
@@ -275,7 +318,21 @@ function contour(request: ContourRequest): ContourResult | null {
         // field and the gradient itself for an inverted one.
         const scale = -sign;
         const length = Math.hypot(gx, gy, gz) || 1;
-        normals.push((gx * scale) / length, (gy * scale) / length, (gz * scale) / length);
+        const nxv = (gx * scale) / length;
+        const nyv = (gy * scale) / length;
+        const nzv = (gz * scale) / length;
+        normals.push(nxv, nyv, nzv);
+
+        // Step back along the outward normal -- i.e. into the region the
+        // surface encloses -- and record what the field is there. See
+        // `ContourResult.scalars`.
+        scalars.push(
+          sampleLattice(
+            ix + localX - nxv * INSIDE_SAMPLE_CELLS,
+            iy + localY - nyv * INSIDE_SAMPLE_CELLS,
+            iz + localZ - nzv * INSIDE_SAMPLE_CELLS
+          )
+        );
       }
     }
   }
@@ -333,6 +390,7 @@ function contour(request: ContourRequest): ContourResult | null {
     positions: new Float32Array(positions),
     normals: new Float32Array(normals),
     indices: new Uint32Array(indices),
+    scalars: new Float32Array(scalars),
     vertexCount: positions.length / 3,
     triangleCount: indices.length / 3,
     elapsedMs: performance.now() - started

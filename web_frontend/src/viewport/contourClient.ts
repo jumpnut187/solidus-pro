@@ -14,6 +14,8 @@ export type ContourGeometry = {
   positions: Float32Array;
   normals: Float32Array;
   indices: Uint32Array;
+  /** Field value a short way inside the surface; see `ContourResult.scalars`. */
+  scalars: Float32Array;
   vertexCount: number;
   triangleCount: number;
   elapsedMs: number;
@@ -59,6 +61,7 @@ export class ContourClient {
           positions: message.positions,
           normals: message.normals,
           indices: message.indices,
+          scalars: message.scalars,
           vertexCount: message.vertexCount,
           triangleCount: message.triangleCount,
           elapsedMs: message.elapsedMs

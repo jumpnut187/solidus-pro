@@ -115,6 +115,7 @@ export const DEFAULT_THRESHOLD: Record<ResultModeId, number> = {
 
 export const COLORMAP_IDS = [
   'rainbow',
+  'molten',
   'red_gradient',
   'viridis',
   'plasma',

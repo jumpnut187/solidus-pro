@@ -18,6 +18,7 @@ import { Color3, Mesh, PBRMaterial, VertexBuffer, VertexData } from '@babylonjs/
 import type { Scene } from '@babylonjs/core';
 
 import { sampleColormap } from '../lib/colormaps';
+import { MoltenGlowPluginMaterial } from './moltenGlowPlugin';
 import type { ColormapId } from '../lib/viewState';
 
 export type EnvelopeGeometry = {
@@ -38,6 +39,14 @@ export type EnvelopeStyle = {
   alpha: number;
   metallic: number;
   roughness: number;
+  /**
+   * How much of the surface's own colour it emits rather than reflects.
+   *
+   * 0 is an ordinary lit surface, which is what a defect envelope is. Above 0
+   * the surface glows in its own colour -- see `MoltenGlowPluginMaterial` --
+   * which is what turns a liquid front from polished metal into hot metal.
+   */
+  glow: number;
 };
 
 /**
@@ -50,6 +59,7 @@ export type EnvelopeStyle = {
 export class EnvelopeMesh {
   private readonly _mesh: Mesh;
   private readonly _material: PBRMaterial;
+  private readonly _glow: MoltenGlowPluginMaterial;
   private _scalars: Float32Array | null = null;
   private _vertexCount = 0;
 
@@ -74,6 +84,7 @@ export class EnvelopeMesh {
     // camera. A depth bias rather than moved geometry: the surface stays
     // where the field says it is.
     this._material.zOffset = -2;
+    this._glow = new MoltenGlowPluginMaterial(this._material);
     this._mesh.useVertexColors = true;
     this._mesh.material = this._material;
   }
@@ -120,6 +131,7 @@ export class EnvelopeMesh {
     this._material.needDepthPrePass = style.alpha < 0.999;
     this._material.metallic = style.metallic;
     this._material.roughness = style.roughness;
+    this._glow.glowStrength = style.glow;
 
     if (this._vertexCount === 0) return;
 
