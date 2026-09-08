@@ -111,54 +111,6 @@ def _resolve_numba_threads() -> tuple[int, int, int, int]:
     return target, logical, physical
 
 
-def _lan_address() -> str | None:
-    """
-    This machine's address on the local network, or None if it has none.
-
-    Found by asking the routing table which local interface would be used to
-    reach an off-link address, which is the only way to pick the right one on a
-    host with several interfaces (Wi-Fi, Ethernet, VPN tunnels, Docker bridges)
-    without guessing at interface names. The socket is UDP and never sent on,
-    so nothing leaves the machine and the target host need not exist -- it is
-    203.0.113.1, reserved by RFC 5737 for documentation precisely so that it
-    can never be a real destination.
-
-    Loopback is reported as None: a server bound only to loopback is not on the
-    network, and printing 127.0.0.1 as the "network" address would be a lie.
-    """
-    import socket
-
-    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        probe.connect(("203.0.113.1", 1))
-        address = probe.getsockname()[0]
-    except OSError:
-        # No route to anywhere: the machine is off the network entirely.
-        return None
-    finally:
-        probe.close()
-    if not address or address.startswith("127."):
-        return None
-    return str(address)
-
-
-def _print_addresses(port: int) -> None:
-    """
-    Where to reach the app, on this machine and from another device.
-
-    Both servers bind 0.0.0.0, so the app has always been reachable across the
-    local network -- but the banner only ever printed localhost, which reads as
-    "this machine only" and is the wrong address to type into a phone. The
-    second line is the one to hand to another device.
-    """
-    print(f"  Local:   http://localhost:{port}/")
-    lan = _lan_address()
-    if lan:
-        print(f"  Network: http://{lan}:{port}/")
-    else:
-        print("  Network: unavailable (no local network address)")
-
-
 def _print_startup_banner(port: int, app_module: str, worker_count: int, thread_count: int) -> None:
     """Print the startup banner with resolved hardware and thread info."""
     numba_target, logical, physical = _resolve_numba_threads()
@@ -182,7 +134,6 @@ def _print_startup_banner(port: int, app_module: str, worker_count: int, thread_
 
     print("=" * 60)
     print("  SOLIDUS REACT/BABYLON WEB APPLICATION")
-    _print_addresses(port)
     print(f"  API:     http://localhost:{port}/api/health")
     print("=" * 60)
     print(f"  Server             : gunicorn (production)")
@@ -285,7 +236,6 @@ def _run_dev_server(port: int, project_dir: Path) -> None:
 
     print("=" * 60)
     print("  SOLIDUS REACT/BABYLON WEB APPLICATION")
-    _print_addresses(port)
     print(f"  API:     http://localhost:{port}/api/health")
     print(f"  Database: {app.config['DATABASE']}")
     print(f"  Uploads: {app.config['UPLOAD_FOLDER']}")
