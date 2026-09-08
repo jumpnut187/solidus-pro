@@ -794,8 +794,8 @@ def _section_future(styles, story):
         "fields the corresponding analyses need, or report them as disabled with a "
         "manifest flag.",
         "<b>Web preview endpoint.</b> A <font face=\"Courier\">/surrogate-preview</font> "
-        "route for instant in-browser previews (web payload builder already supports "
-        "custom surface modes via <font face=\"Courier\">SURFACE_MODES</font>).",
+        "route for instant in-browser previews (the dense-grid endpoints under "
+        "<font face=\"Courier\">/api/projects/&lt;id&gt;/grid</font> already serve any scalar mode).",
         "<b>Uncertainty estimation.</b> Monte-Carlo dropout or ensemble weights to "
         "produce a per-voxel confidence field for visualisation.",
     ]:
