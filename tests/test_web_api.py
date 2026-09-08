@@ -15,7 +15,6 @@ from flask import Flask
 from core.simulation_pipeline import build_visualization_payload
 from web.services.simulation_queue import SimulationQueueManager
 from web import repository as repo
-from web.payloads import build_fork_surface_payload, build_result_fields_payload, build_volume_payload
 from web.routes import api_bp
 
 
@@ -45,83 +44,6 @@ def _synthetic_visualization() -> dict:
 
 
 class WebApiPayloadTests(unittest.TestCase):
-    def test_advanced_surface_mode_builds_babylon_geometry(self) -> None:
-        payload = build_fork_surface_payload(_synthetic_visualization(), "hot_tear", 0.5, 0)
-
-        self.assertFalse(payload["empty"])
-        self.assertEqual(payload["active_count"], 2)
-        self.assertGreater(payload["vertex_count"], 0)
-        self.assertEqual(len(payload["positions"]) % 3, 0)
-        self.assertEqual(len(payload["indices"]) % 3, 0)
-
-    def test_volume_payload_samples_fraction_liquid_history(self) -> None:
-        visualization = _synthetic_visualization()
-        visualization.pop("solidification_times")
-        payload = build_volume_payload(visualization, "fraction_liquid", 100)
-
-        self.assertFalse(payload["empty"])
-        self.assertEqual(payload["sample_count"], 64)
-        self.assertAlmostEqual(max(payload["values"]), 0.5)
-
-    def test_rejects_unknown_surface_mode(self) -> None:
-        with self.assertRaises(ValueError):
-            build_fork_surface_payload(_synthetic_visualization(), "unknown", 0.5, 0)
-
-    def test_result_fields_payload_preloads_modes_and_solidification(self) -> None:
-        payload = build_result_fields_payload(_synthetic_visualization(), max_points=1000)
-
-        self.assertFalse(payload["empty"])
-        self.assertEqual(payload["sample_count"], 64)
-        self.assertIn("hotspot", payload["fields"])
-        self.assertIn("hot_tear", payload["fields"])
-        self.assertIn("fraction_liquid", payload["modes"])
-        self.assertEqual(len(payload["centers"]), 64 * 3)
-        self.assertEqual(len(payload["solidification"]["normalized_times"]), 64)
-        self.assertEqual(len(payload["fraction_liquid"]["frames"]), 2)
-        self.assertEqual(len(payload["fraction_liquid"]["frames"][0]), 64)
-
-    def test_synthetic_fraction_liquid_only_when_history_empty(self) -> None:
-        """Synthetic fraction_liquid front is only returned when no history exists.
-
-        When fraction_liquid_history is present, the actual interpolated frame
-        from history is returned instead of the synthetic smooth front.
-        """
-        from web.payloads import _solidification_path_values
-
-        # Case 1: Both history and solidification_times present - synthetic NOT returned.
-        vis_with_history = {
-            "centers": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
-            "sizes": [1.0, 1.0, 1.0],
-            "solidification_times": [0.0, 50.0, 100.0],
-            "fraction_liquid_history": [
-                [1.0, 1.0, 1.0],  # fully liquid at t=0
-                [0.5, 0.5, 0.5],  # half solid at t=mid
-                [0.0, 0.0, 0.0],  # fully solid at t=end
-            ],
-        }
-        result_with_history = _solidification_path_values(vis_with_history, 50.0)
-        # Should return None because history is non-empty.
-        self.assertIsNone(
-            result_with_history,
-            "Synthetic field should be None when history is present",
-        )
-
-        # Case 2: Only solidification_times (no history) - synthetic IS returned.
-        vis_no_history = {
-            "centers": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
-            "sizes": [1.0, 1.0, 1.0],
-            "solidification_times": [0.0, 50.0, 100.0],
-            "fraction_liquid_history": [],
-        }
-        result_no_history = _solidification_path_values(vis_no_history, 50.0)
-        self.assertIsNotNone(
-            result_no_history,
-            "Synthetic field should be returned when history is empty",
-        )
-        # At 50% progress, the front is at the middle (normalized=0.5).
-        # The synthetic front is a smooth gradient, so values should vary.
-        self.assertEqual(len(result_no_history), 3)
-
     def test_shrinkage_mode_uses_combined_adjusted_risk(self) -> None:
         shrinkage = np.array([0.1, 0.8, 0.0], dtype=np.float32)
         porosity = np.array([0.7, 0.2, 0.4], dtype=np.float32)
@@ -155,10 +77,8 @@ class WebApiPayloadTests(unittest.TestCase):
             bounds=np.array([[0.0, 2.0], [0.0, 0.0], [0.0, 0.0]], dtype=np.float32),
             max_voxels=10,
         )
-        fields = build_result_fields_payload(visualization, max_points=10)
 
         np.testing.assert_allclose(visualization["shrinkage"], [0.7, 0.8, 0.4])
-        np.testing.assert_allclose(fields["fields"]["shrinkage"]["values"], [0.7, 0.8, 0.4])
         self.assertEqual(summary["shrink_scalar"], 2.0)
         self.assertEqual(summary["shrinkage_stats"]["affected_count"], 3)
 
@@ -249,11 +169,8 @@ class WebApiPayloadTests(unittest.TestCase):
             bounds=np.array([[0.0, 2.0], [0.0, 0.0], [0.0, 0.0]], dtype=np.float32),
             max_voxels=10,
         )
-        fields = build_result_fields_payload(visualization, max_points=10)
 
         np.testing.assert_allclose(visualization["feed_modulus"], [0.25, 0.5, 1.0])
-        np.testing.assert_allclose(fields["fields"]["feed_modulus"]["values"], [0.25, 0.5, 1.0])
-        self.assertIn("feed_modulus", fields["modes"])
         self.assertAlmostEqual(summary["feed_modulus_stats"]["max_in"], 1.0, places=5)
 
     def test_feed_modulus_excludes_chill_voxels(self) -> None:
@@ -286,11 +203,9 @@ class WebApiPayloadTests(unittest.TestCase):
             bounds=np.array([[0.0, 2.0], [0.0, 0.0], [0.0, 0.0]], dtype=np.float32),
             max_voxels=10,
         )
-        fields = build_result_fields_payload(visualization, max_points=10)
 
         # Chill voxel (index 1) must report 0.0 feed modulus.
         np.testing.assert_allclose(visualization["feed_modulus"], [0.25, 0.0, 1.0])
-        np.testing.assert_allclose(fields["fields"]["feed_modulus"]["values"], [0.25, 0.0, 1.0])
         # Stats should only reflect non-chill voxels.
         self.assertAlmostEqual(summary["feed_modulus_stats"]["min_in"], 0.25, places=5)
         self.assertAlmostEqual(summary["feed_modulus_stats"]["max_in"], 1.0, places=5)
@@ -435,12 +350,12 @@ class WebApiTests(unittest.TestCase):
         self.assertIn("reason", payload)
         self.assertIsInstance(payload["used_model"], bool)
 
-    def test_results_and_surface_read_saved_artifact(self) -> None:
+    def test_results_reads_saved_artifact(self) -> None:
         project_id = repo.create_project(self.database_path, {"name": "Artifact Test"})
         artifact_path = self.temp_folder / "artifacts" / f"{project_id}.json"
         artifact_path.parent.mkdir(parents=True)
         artifact = {
-            "summary": {"voxel_count": 64, "total_volume": 64.0, "available_modes": ["hot_tear"]},
+            "summary": {"voxel_count": 64, "total_volume": 64.0},
             "visualization": _synthetic_visualization(),
         }
         artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
@@ -449,20 +364,33 @@ class WebApiTests(unittest.TestCase):
         result_response = self.client.get(f"/api/projects/{project_id}/results")
         self.assertEqual(result_response.status_code, 200)
         self.assertEqual(result_response.get_json()["data"]["voxel_count"], 64)
+        self.assertIn("hot_tear", result_response.get_json()["visualization"])
 
         summary_response = self.client.get(f"/api/projects/{project_id}/results?summary_only=1")
         self.assertEqual(summary_response.status_code, 200)
         self.assertNotIn("visualization", summary_response.get_json())
 
-        surface_response = self.client.get(f"/api/projects/{project_id}/surface?mode=hot_tear&threshold=0.5")
-        self.assertEqual(surface_response.status_code, 200)
-        self.assertFalse(surface_response.get_json()["empty"])
+    def test_retired_json_result_routes_are_gone(self) -> None:
+        """The sampled-field, surface and volume routes no longer exist.
 
-        fields_response = self.client.get(f"/api/projects/{project_id}/result-fields")
-        self.assertEqual(fields_response.status_code, 200)
-        fields_payload = fields_response.get_json()
-        self.assertEqual(fields_payload["sample_count"], 64)
-        self.assertIn("hot_tear", fields_payload["fields"])
+        Everything the viewport draws now comes from the dense grid endpoints
+        in ``web/routes_fields.py``. A 404 here is the whole point: a stale
+        client asking for the old shapes must fail loudly rather than get a
+        half-maintained payload.
+        """
+        project_id = repo.create_project(self.database_path, {"name": "Retired Routes"})
+        artifact_path = self.temp_folder / "artifacts" / f"{project_id}.json"
+        artifact_path.parent.mkdir(parents=True)
+        summary = {"voxel_count": 64, "total_volume": 64.0}
+        artifact_path.write_text(
+            json.dumps({"summary": summary, "visualization": _synthetic_visualization()}),
+            encoding="utf-8",
+        )
+        repo.mark_project_completed(self.database_path, project_id, summary, str(artifact_path))
+
+        for path in ("result-fields", "surface?mode=hot_tear&threshold=0.5", "volume"):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.get(f"/api/projects/{project_id}/{path}").status_code, 404)
 
 
 class BuildPipelineInputsTests(unittest.TestCase):

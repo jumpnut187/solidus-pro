@@ -1,224 +1,125 @@
+"""Unit tests for the one contouring path that survives: dense-grid isosurfaces.
+
+The sparse ``/surface`` JSON endpoint and its lattice-rebuilding payload
+builder are gone; everything now contours the dense grid the sidecar already
+holds. The HTTP surface of that path lives in ``tests/test_web_fields.py``
+(``/api/projects/<id>/grid/<mode>/isosurface``); this file covers the geometry
+kernel underneath it.
+"""
+
 from __future__ import annotations
 
-import json
-import tempfile
 import unittest
-from pathlib import Path
 
 import numpy as np
-from flask import Flask
 
-from core.surface_extraction import build_surface_payload, normalize_surface_request
-from web import repository as repo
-from web.routes import api_bp
-from web.services.simulation_queue import SimulationQueueManager
+from core.surface_extraction import SurfaceArrays, contour_dense_grid
 
 
-def _synthetic_visualization() -> dict:
-    centers = []
-    shrinkage = []
-    fraction_history = []
-    frame_a = []
-    frame_b = []
-
-    for x in range(7):
-        for y in range(7):
-            for z in range(7):
-                centers.append([float(x), float(y), float(z)])
-                distance = np.linalg.norm(np.array([x, y, z], dtype=np.float32) - 3.0)
-                value = max(0.0, 1.0 - float(distance) / 3.3)
-                shrinkage.append(value)
-                frame_a.append(value)
-                frame_b.append(value * 0.5)
-
-    fraction_history.extend([frame_a, frame_b])
-    return {
-        "centers": centers,
-        "sizes": [1.0] * len(centers),
-        "shrinkage": shrinkage,
-        "hotspot": shrinkage,
-        "niyama": shrinkage,
-        "fraction_liquid_history": fraction_history,
-        "fraction_liquid_times": [0.0, 10.0],
-    }
+def _sphere_grid(size: int = 24, radius: float = 7.0) -> np.ndarray:
+    """A smooth blob centred in the grid, 1.0 at the middle falling to 0.0."""
+    axis = np.arange(size, dtype=np.float32) - (size - 1) / 2.0
+    gx, gy, gz = np.meshgrid(axis, axis, axis, indexing="ij")
+    distance = np.sqrt(gx**2 + gy**2 + gz**2)
+    return np.clip(1.0 - distance / radius, 0.0, 1.0).astype(np.float32)
 
 
-def _shell_visualization(*, include_surface_mask: bool = True, interior_value: float = 1.0) -> dict:
-    centers = []
-    shrinkage = []
-    fraction = []
-    surface_voxels = []
+class SurfaceArraysTests(unittest.TestCase):
+    def test_empty_surface_reports_itself_as_empty(self) -> None:
+        surface = SurfaceArrays.empty_surface()
+        self.assertTrue(surface.empty)
+        self.assertEqual(surface.vertex_count, 0)
+        self.assertEqual(surface.triangle_count, 0)
 
-    for x in range(5):
-        for y in range(5):
-            for z in range(5):
-                is_surface = x in (0, 4) or y in (0, 4) or z in (0, 4)
-                centers.append([float(x), float(y), float(z)])
-                surface_voxels.append(is_surface)
-                shrinkage.append(1.0)
-                fraction.append(1.0 if is_surface else interior_value)
-
-    payload = {
-        "centers": centers,
-        "sizes": [1.0] * len(centers),
-        "shrinkage": shrinkage,
-        "fraction_liquid_history": [fraction],
-        "fraction_liquid_times": [0.0],
-    }
-    if include_surface_mask:
-        payload["surface_voxels"] = surface_voxels
-    return payload
-
-
-class SurfaceExtractionTests(unittest.TestCase):
-    def test_extracts_non_empty_surface_from_scalar_field(self) -> None:
-        request = normalize_surface_request("shrinkage", 0.35, 0)
-        payload = build_surface_payload(_synthetic_visualization(), request)
-
-        self.assertFalse(payload["empty"])
-        self.assertGreater(payload["vertex_count"], 0)
-        self.assertGreater(payload["triangle_count"], 0)
-        self.assertEqual(len(payload["positions"]) % 3, 0)
-        self.assertEqual(len(payload["indices"]) % 3, 0)
-
-    def test_fraction_liquid_history_time_changes_active_count(self) -> None:
-        early = build_surface_payload(
-            _synthetic_visualization(),
-            normalize_surface_request("fraction_liquid", 0.35, 0),
+    def test_counts_derive_from_the_arrays(self) -> None:
+        surface = SurfaceArrays(
+            positions=np.zeros((4, 3), dtype=np.float32),
+            normals=np.zeros((4, 3), dtype=np.float32),
+            indices=np.array([0, 1, 2, 0, 2, 3], dtype=np.uint32),
         )
-        late = build_surface_payload(
-            _synthetic_visualization(),
-            normalize_surface_request("fraction_liquid", 0.35, 100),
+        self.assertFalse(surface.empty)
+        self.assertEqual(surface.vertex_count, 4)
+        self.assertEqual(surface.triangle_count, 2)
+
+
+class ContourDenseGridTests(unittest.TestCase):
+    def test_contours_a_blob(self) -> None:
+        surface = contour_dense_grid(_sphere_grid(), origin=(0.0, 0.0, 0.0), spacing=0.5, threshold=0.5)
+        self.assertFalse(surface.empty)
+        self.assertGreater(surface.triangle_count, 100)
+        self.assertEqual(surface.positions.shape[1], 3)
+        self.assertEqual(surface.normals.shape, surface.positions.shape)
+        self.assertEqual(surface.indices.size % 3, 0)
+        self.assertLess(int(surface.indices.max()), surface.vertex_count)
+
+    def test_normals_are_unit_length(self) -> None:
+        surface = contour_dense_grid(_sphere_grid(), origin=(0.0, 0.0, 0.0), spacing=0.5, threshold=0.5)
+        lengths = np.linalg.norm(surface.normals, axis=1)
+        self.assertTrue(np.allclose(lengths, 1.0, atol=1e-3))
+
+    def test_origin_and_spacing_place_the_surface_in_world_space(self) -> None:
+        volume = _sphere_grid()
+        origin = (2.0, -3.0, 10.0)
+        spacing = 0.25
+        surface = contour_dense_grid(volume, origin=origin, spacing=spacing, threshold=0.5)
+
+        # The blob is centred in the grid, so its contour must straddle the
+        # world position of the grid centre on every axis.
+        centre = np.asarray(origin, dtype=np.float64) + (np.asarray(volume.shape) - 1) / 2.0 * spacing
+        self.assertTrue(np.all(surface.positions.min(axis=0) < centre))
+        self.assertTrue(np.all(surface.positions.max(axis=0) > centre))
+
+    def test_a_higher_threshold_encloses_less(self) -> None:
+        volume = _sphere_grid()
+        low = contour_dense_grid(volume, origin=(0.0, 0.0, 0.0), spacing=1.0, threshold=0.2)
+        high = contour_dense_grid(volume, origin=(0.0, 0.0, 0.0), spacing=1.0, threshold=0.8)
+        low_extent = float(np.ptp(low.positions, axis=0).max())
+        high_extent = float(np.ptp(high.positions, axis=0).max())
+        self.assertGreater(low_extent, high_extent)
+
+    def test_threshold_above_the_field_is_empty(self) -> None:
+        surface = contour_dense_grid(_sphere_grid(), origin=(0.0, 0.0, 0.0), spacing=1.0, threshold=5.0)
+        self.assertTrue(surface.empty)
+
+    def test_degenerate_input_is_empty_rather_than_an_error(self) -> None:
+        self.assertTrue(
+            contour_dense_grid(
+                np.empty((0, 0, 0), dtype=np.float32), origin=(0.0, 0.0, 0.0), spacing=1.0, threshold=0.5
+            ).empty
+        )
+        self.assertTrue(
+            contour_dense_grid(
+                np.zeros((4, 4), dtype=np.float32), origin=(0.0, 0.0, 0.0), spacing=1.0, threshold=0.5
+            ).empty
         )
 
-        self.assertGreater(early["active_count"], late["active_count"])
+    def test_a_saturated_grid_still_closes(self) -> None:
+        """Every cell above the threshold must still yield a closed surface.
 
-    def test_fraction_liquid_excludes_explicit_surface_shell_voxels(self) -> None:
-        payload = build_surface_payload(
-            _shell_visualization(),
-            normalize_surface_request("fraction_liquid", 0.5, 0),
-        )
-
-        self.assertFalse(payload["empty"])
-        self.assertEqual(payload["active_count"], 1)
-        self.assertEqual(payload["source_count"], 1)
-
-    def test_fraction_liquid_returns_empty_when_only_shell_is_liquid(self) -> None:
-        payload = build_surface_payload(
-            _shell_visualization(interior_value=0.0),
-            normalize_surface_request("fraction_liquid", 0.5, 0),
-        )
-
-        self.assertTrue(payload["empty"])
-        self.assertEqual(payload["active_count"], 0)
-
-    def test_fraction_liquid_falls_back_to_one_layer_interior_for_late_core(self) -> None:
-        vis = _shell_visualization(interior_value=0.0)
-        centers = vis["centers"]
-        fraction = [0.0] * len(centers)
-        for index, center in enumerate(centers):
-            if center == [2.0, 2.0, 2.0]:
-                fraction[index] = 1.0
-        vis["fraction_liquid_history"] = [fraction]
-
-        payload = build_surface_payload(
-            vis,
-            normalize_surface_request("fraction_liquid", 0.5, 0),
-        )
-
-        self.assertFalse(payload["empty"])
-        self.assertEqual(payload["active_count"], 1)
-
-    def test_fraction_liquid_infers_boundary_shell_for_old_artifacts(self) -> None:
-        payload = build_surface_payload(
-            _shell_visualization(include_surface_mask=False),
-            normalize_surface_request("fraction_liquid", 0.5, 0),
-        )
-
-        self.assertFalse(payload["empty"])
-        self.assertEqual(payload["active_count"], 1)
-        self.assertEqual(payload["source_count"], 1)
-
-    def test_shrinkage_keeps_surface_shell_voxels(self) -> None:
-        payload = build_surface_payload(
-            _shell_visualization(),
-            normalize_surface_request("shrinkage", 0.5, 0),
-        )
-
-        self.assertFalse(payload["empty"])
-        self.assertEqual(payload["active_count"], 125)
-
-
-class SurfaceApiTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
-        root = Path(self.temp_dir.name)
-        self.database_path = root / "simulations.db"
-        self.temp_folder = root / "temp"
-        self.upload_folder = root / "uploads"
-        self.temp_folder.mkdir()
-        self.upload_folder.mkdir()
-        repo.init_db(self.database_path)
-
-        app = Flask(__name__)
-        app.config["DATABASE"] = self.database_path
-        app.config["TEMP_FOLDER"] = self.temp_folder
-        app.config["UPLOAD_FOLDER"] = self.upload_folder
-        app.extensions["simulation_queue_manager"] = SimulationQueueManager()
-        app.register_blueprint(api_bp)
-        self.client = app.test_client()
-
-    def tearDown(self) -> None:
-        self.temp_dir.cleanup()
-
-    def _create_completed_project(self, name: str = "Surface API") -> str:
-        """Create a project with a saved visualization artifact and return its id.
-
-        The surface endpoint loads the artifact before validating query
-        parameters, so any test that needs to reach parameter validation must
-        go through a project that actually has results.
+        The padding ring is what makes this work: the grid is lowered to a
+        background strictly below the threshold so there is something to
+        contour against. Smoothing is off here because a Gaussian over a
+        one-cell ring that sits a thousandth below the threshold pulls it back
+        above, which would leave nothing to cross.
         """
-        sim_id = repo.create_project(
-            self.database_path,
-            {
-                "name": name,
-                "alloy": "WCB",
-                "voxel_size": 1.0,
-                "refinement_level": 1,
-            },
+        volume = np.ones((10, 10, 10), dtype=np.float32)
+        surface = contour_dense_grid(
+            volume, origin=(0.0, 0.0, 0.0), spacing=1.0, threshold=0.5, smooth_sigma=0.0
         )
-        summary = {"voxel_count": 125, "total_volume": 125.0}
-        artifact_path = Path(self.temp_dir.name) / f"surface-artifact-{sim_id}.json"
-        artifact_path.write_text(
-            json.dumps({"data": summary, "visualization": _synthetic_visualization()}),
-            encoding="utf-8",
+        self.assertFalse(surface.empty)
+        self.assertGreater(surface.triangle_count, 0)
+        # The surface wraps the whole grid, so it spans every cell.
+        extent = np.ptp(surface.positions, axis=0)
+        self.assertTrue(np.all(extent >= 9.0))
+
+    def test_smoothing_can_be_disabled(self) -> None:
+        volume = _sphere_grid()
+        rough = contour_dense_grid(
+            volume, origin=(0.0, 0.0, 0.0), spacing=1.0, threshold=0.5, smooth_sigma=0.0
         )
-        repo.mark_project_completed(
-            self.database_path, sim_id, summary, str(artifact_path)
-        )
-        return sim_id
-
-    def test_surface_endpoint_reads_saved_visualization_artifact(self) -> None:
-        sim_id = self._create_completed_project()
-
-        response = self.client.get(f"/api/projects/{sim_id}/surface?mode=shrinkage&threshold=0.35")
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.get_json()
-        self.assertIsNotNone(payload)
-        self.assertFalse(payload["empty"])
-
-    def test_surface_endpoint_rejects_invalid_mode(self) -> None:
-        sim_id = self._create_completed_project("Invalid mode")
-
-        response = self.client.get(f"/api/projects/{sim_id}/surface?mode=unknown")
-
-        self.assertEqual(response.status_code, 400)
-
-    def test_surface_endpoint_returns_404_for_unknown_project(self) -> None:
-        response = self.client.get("/api/projects/example/surface?mode=shrinkage")
-
-        self.assertEqual(response.status_code, 404)
+        smooth = contour_dense_grid(volume, origin=(0.0, 0.0, 0.0), spacing=1.0, threshold=0.5)
+        self.assertFalse(rough.empty)
+        self.assertFalse(smooth.empty)
 
 
 if __name__ == "__main__":

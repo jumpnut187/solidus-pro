@@ -14,10 +14,7 @@ from core.stl_loader import STLLoader
 from web.services.simulation_queue import SimulationQueueManager
 from web import repository as repo
 from web.payloads import (
-    build_fork_surface_payload,
     build_part_manager,
-    build_result_fields_payload,
-    build_volume_payload,
     load_part_mesh_data,
     read_artifact,
     upload_cad_file,
@@ -327,45 +324,6 @@ def results(project_id: str):
     if request.args.get("summary_only") in {"1", "true", "True"}:
         return jsonify({"data": artifact.get("summary", {})})
     return jsonify({"data": artifact.get("summary", {}), "visualization": artifact.get("visualization", {})})
-
-
-@api_bp.route("/projects/<project_id>/result-fields")
-def result_fields(project_id: str):
-    artifact = _load_artifact(project_id)
-    if artifact is None:
-        return jsonify({"error": "Results not found"}), 404
-    max_points = int(request.args.get("max_points", "120000"))
-    return jsonify(build_result_fields_payload(artifact.get("visualization", {}), max_points=max_points))
-
-
-@api_bp.route("/projects/<project_id>/surface")
-def surface(project_id: str):
-    artifact = _load_artifact(project_id)
-    if artifact is None:
-        return jsonify({"error": "Results not found"}), 404
-    try:
-        payload = build_fork_surface_payload(
-            artifact.get("visualization", {}),
-            str(request.args.get("mode", "shrinkage")),
-            float(request.args.get("threshold", "0.3")),
-            float(request.args.get("time_percent", "0")),
-        )
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    return jsonify(payload)
-
-
-@api_bp.route("/projects/<project_id>/volume")
-def volume(project_id: str):
-    artifact = _load_artifact(project_id)
-    if artifact is None:
-        return jsonify({"error": "Results not found"}), 404
-    payload = build_volume_payload(
-        artifact.get("visualization", {}),
-        str(request.args.get("mode", "fraction_liquid")),
-        float(request.args.get("time_percent", "0")),
-    )
-    return jsonify(payload)
 
 
 @api_bp.route("/uploads/<path:filename>")

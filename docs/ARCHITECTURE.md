@@ -201,8 +201,7 @@ finished simulation, and filling runs *before* solidification.
 - `ui/main_window.py` is ~6,400 lines and mixes ten dialog classes with the
   window.
 - Adding one result field touches the engine, `build_visualization_payload`,
-  `web/payloads.py`'s `field_specs` and `SURFACE_MODES`,
-  `core/surface_extraction.py`'s `VALID_SURFACE_MODES`, and four frontend
-  tables. Failures are silent.
+  `web/payloads.py`'s `field_specs`, `web/fields.py`'s `SCALAR_MODE_SOURCES`
+  and `MODE_UNITS`, and the frontend mode tables. Failures are silent.
 - `web/services/simulation_queue.py` keeps job state in a `Manager()` dict, so
   gunicorn `--workers 1` is required.

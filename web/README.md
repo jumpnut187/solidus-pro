@@ -111,10 +111,12 @@ All routes are under `/api`.
 | GET | `/projects/<id>/grid/mask` | binary part-type mask |
 | GET | `/projects/<id>/grid/<mode>` | binary dense field |
 | GET | `/projects/<id>/grid/<mode>/frames` | consecutive time frames |
+| GET | `/projects/<id>/grid/<mode>/isosurface` | contoured geometry as a binary block |
 | GET | `/projects/<id>/results` | summary statistics |
-| GET | `/projects/<id>/result-fields` | legacy sampled fields |
-| GET | `/projects/<id>/surface` | isosurface geometry |
-| GET | `/projects/<id>/volume` | sampled voxel payload |
+
+Everything the viewport draws comes from `/grid`. The sampled-field, surface
+and volume JSON routes that preceded it were removed once nothing in the
+client read them; a request for one now 404s.
 
 ### Tools
 | Method | Path | Purpose |

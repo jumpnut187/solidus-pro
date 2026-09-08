@@ -385,10 +385,10 @@ export const api = {
     requestJson<{ status: string }>(`/api/projects/${projectId}/cancel`, { method: 'POST' }),
   status: (projectId: string) => requestJson<JobStatus>(`/api/jobs/${projectId}/status`),
 
-  // The legacy `/results`, `/result-fields`, `/surface` and `/volume` fetchers
-  // are gone: the viewport reads dense grids from the binary sidecar through
-  // `lib/gridApi.ts`, and the statistics panel reads `GridMeta.stats`. The
-  // server routes stay for now and the integration lead retires them.
+  // There is no results fetcher here: the viewport reads dense grids from the
+  // binary sidecar through `lib/gridApi.ts`, and the statistics panel reads
+  // `GridMeta.stats`. The sampled-field, surface and volume routes that these
+  // used to call have been removed from the server as well.
 
   /** Progress lines for a run; `since` returns only what is new. */
   projectLog: (projectId: string, since = 0) =>

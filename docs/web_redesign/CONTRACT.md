@@ -28,14 +28,14 @@ is the feature-parity source of truth.
 5. Never edit `web/simulations.db` or anything under `web/static/` in the main checkout.
 6. Commit on your own worktree branch at the end of each milestone with a clear message.
    Do not push. Do not merge. The integration lead merges into `feature/web-redesign`.
-7. Do not delete the legacy `web/routes.py` endpoints; the old client contract stays until
-   the lead removes it after integration.
+7. The legacy JSON result endpoints (`/result-fields`, `/surface`, `/volume`) were retired in
+   Milestone 4 once nothing in the client read them. `/results` stays, as the summary endpoint.
 
 ## Ownership
 
 | Area | Workstream A: rendering and data pipeline | Workstream B: shell, UX, parity |
 |---|---|---|
-| Python | `web/fields.py` (new), `web/routes_fields.py`, `core/surface_extraction.py`, `core/simulation_pipeline.py` (only `build_visualization_payload` and artifact writing), `web/payloads.py` (only `build_fork_artifact`, `write_artifact`, `read_artifact` and the field/glyph builders), `tests/test_web_fields.py` | `web/routes_tools.py`, `web/routes.py`, `web/repository.py`, `web/services/**`, `core/report_generator.py`, `core/riser_design.py` (wrapper functions only), `tests/test_web_tools.py`, `tests/test_web_api.py` |
+| Python | `web/fields.py` (new), `web/routes_fields.py`, `core/surface_extraction.py`, `core/simulation_pipeline.py` (only `build_visualization_payload` and artifact writing), `web/payloads.py` (only `build_fork_artifact`, `write_artifact`, `read_artifact` and the sidecar grid source), `tests/test_web_fields.py`, `tests/test_surface_extraction.py` | `web/routes_tools.py`, `web/routes.py`, `web/repository.py`, `web/services/**`, `core/report_generator.py`, `core/riser_design.py` (wrapper functions only), `tests/test_web_tools.py`, `tests/test_web_api.py` |
 | Frontend | `web_frontend/src/viewport/**`, `web_frontend/src/lib/colormaps.ts`, `web_frontend/src/lib/gridApi.ts` (new), `web_frontend/src/workers/**` (new), `web_frontend/public/**` | `web_frontend/src/App.tsx`, `main.tsx`, `src/components/**`, `src/lib/api.ts`, `src/lib/defaults.ts`, `src/lib/uiPrefs.ts`, `src/lib/projectFile.ts` (new), `src/hooks/**` (new), `src/styles/**`, `src/styles.css`, `index.html`, `package.json` |
 | Shared, lead-owned | `web_frontend/src/lib/viewState.ts` (A may add fields additively; B consumes), `web/app_factory.py`, `web_frontend/vite.config.ts`, `docs/web_redesign/**` |
 | Legacy to retire | A deletes `src/components/BabylonViewport.tsx` when the new viewport no longer needs it | B deletes `src/components/ResultLegend.tsx`, `ConfigDrawer.tsx`, `Sidebar.tsx`, `drawers/**` as they are replaced |
@@ -75,8 +75,8 @@ JSON artifact and serve dense grids from it:
 | `GET /api/projects/<id>/grid` | JSON: dims, origin, spacing, available modes with ranges and units, frame counts and times, part-type code table, statistics |
 | `GET /api/projects/<id>/grid/mask` | binary Uint8 grid, 0 = outside, otherwise part-type code |
 | `GET /api/projects/<id>/grid/<mode>` | binary Float32 (or normalized Uint8/Uint16 with a scale header) dense grid, outside cells filled with the nearest inside value so trilinear sampling does not bleed |
-| `GET /api/projects/<id>/grid/<mode>/frames?start=&count=` | consecutive time frames for `fraction_liquid` and `fill_animation`, quantized to Uint8 |
-| `GET /api/projects/<id>/surface?...` | existing isosurface endpoint, extended to every scalar mode, binary payload allowed |
+| `GET /api/projects/<id>/grid/<mode>/frames?start=&count=` | consecutive time frames for `fraction_liquid` and `fill_animation`, quantized to Uint8, frame-major |
+| `GET /api/projects/<id>/grid/<mode>/isosurface?threshold=&cast_only=&scalars=&frame=` | one binary block: `positions Float32[3V]`, `normals Float32[3V]`, `indices Uint32[3T]`, then `scalars Float32[V]` unless `scalars=0`. Counts and the field range travel in `X-*` headers. Contoured from the dense grid, masked to the metal, so a surface cannot leak through the mold |
 
 Grid order is x fastest: `index = ix + nx * (iy + ny * iz)`, matching a WebGL 3D texture whose
 width is `nx`. Responses are gzip-encoded when the client accepts it. Artifacts are cached in
