@@ -43,7 +43,8 @@ const FIELD_UNIFORMS = [
   'fieldScale',
   'fieldBlend',
   'fieldStrength',
-  'fieldCastOnly'
+  'fieldCastOnly',
+  'fieldDiscardOutside'
 ];
 
 export type FieldPaintState = {
@@ -65,6 +66,15 @@ export type FieldPaintState = {
   strength: number;
   /** Restrict painting to cast bodies. */
   castOnly: boolean;
+  /**
+   * Discard fragments that fall outside the metal instead of leaving them
+   * the part's own colour.
+   *
+   * This is what turns a plain quad into a section cap: the cut face is not a
+   * shape anyone modelled, it is wherever the plane happens to intersect the
+   * metal, and the occupancy grid is the only thing that knows where that is.
+   */
+  discardOutside: boolean;
 };
 
 export const defaultFieldPaintState = (): FieldPaintState => ({
@@ -77,7 +87,8 @@ export const defaultFieldPaintState = (): FieldPaintState => ({
   scaleMax: 1,
   frameBlend: 0,
   strength: 0,
-  castOnly: false
+  castOnly: false,
+  discardOutside: false
 });
 
 /**
@@ -192,16 +203,21 @@ uniform vec2 fieldScale;
 uniform float fieldBlend;
 uniform float fieldStrength;
 uniform float fieldCastOnly;
+uniform float fieldDiscardOutside;
 `,
       // Runs after `vec3 surfaceAlbedo` and `float alpha` exist and before
       // any lighting, so the painted color is shaded like a real surface
       // rather than pasted on top of one.
       CUSTOM_FRAGMENT_UPDATE_ALPHA: `
-  if (fieldStrength > 0.0) {
+  if (fieldStrength > 0.0 || fieldDiscardOutside > 0.5) {
     vec3 fieldUvw = vPositionW * fieldTexelStep + fieldTexelBias;
     float maskCode = texture(fieldMaskSampler, fieldUvw).r * 255.0;
     bool insideMetal = maskCode > 0.5;
     bool paintable = insideMetal && (fieldCastOnly < 0.5 || abs(maskCode - 1.0) < 0.5);
+    // A cap only exists where the plane actually crosses metal.
+    if (fieldDiscardOutside > 0.5 && !insideMetal) {
+      discard;
+    }
     if (paintable) {
       float normalized = mix(
         texture(fieldSamplerA, fieldUvw).r,
@@ -257,6 +273,7 @@ uniform float fieldCastOnly;
     effect.setFloat('fieldBlend', state.frameBlend);
     effect.setFloat('fieldStrength', state.strength);
     effect.setFloat('fieldCastOnly', state.castOnly ? 1 : 0);
+    effect.setFloat('fieldDiscardOutside', state.discardOutside ? 1 : 0);
 
     effect.setTexture('fieldSamplerA', this.fieldTextureA ?? this._placeholderVolume);
     effect.setTexture('fieldSamplerB', this.fieldTextureB ?? this.fieldTextureA ?? this._placeholderVolume);

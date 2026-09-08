@@ -433,7 +433,109 @@ def build_visualization_payload(
             visualization_data["fill_animation_times"] = fill_times
             result_data["fill_animation_frames"] = len(fill_history)
 
+    _add_summary_statistics(result_data, engine)
+
     return result_data, visualization_data
+
+
+def _add_summary_statistics(result_data: Dict[str, Any], engine: SolidificationEngine) -> None:
+    """
+    Add the run's scalar statistics under flat, final names.
+
+    The engine's own ``export_results`` carries roughly twenty-five of these,
+    but it never reached the web layer: the artifact summary was assembled
+    separately and only picked up a handful of nested ``*_stats`` dicts. The
+    browser now shows a statistics panel, so the numbers have to arrive, and
+    they have to arrive under names that do not change shape from run to run.
+
+    Naming rules, applied here so the panel never has to guess:
+      * flat scalars only, no nesting -- ``GridMeta.stats`` is a flat map
+      * a unit suffix wherever the unit is not implied: ``_s``, ``_in3``,
+        ``_mpa``, ``_um``, ``_percentage``
+      * ``_count`` for whole voxels, ``_fraction`` for 0..1
+    A statistic the run did not produce is absent rather than zero: zero
+    hot tears and "hot tearing was not analysed" are different answers.
+    """
+
+    def put(name: str, value: Any) -> None:
+        if value is None:
+            return
+        if isinstance(value, (int, float)) and not np.isfinite(float(value)):
+            return
+        result_data[name] = value
+
+    put("alloy", getattr(getattr(engine, "alloy", None), "name", None))
+    put("simulation_time_s", _optional_float(getattr(engine, "time", None)))
+
+    # Chvorinov is a per-voxel field; the panel wants the scalars off it.
+    chvorinov = getattr(engine, "chvorinov_time", None)
+    if chvorinov is not None:
+        values = np.asarray(chvorinov, dtype=np.float64)
+        finite = values[np.isfinite(values)]
+        if finite.size:
+            put("chvorinov_time_max_s", float(np.max(finite)))
+            put("chvorinov_time_mean_s", float(np.mean(finite)))
+
+    # The defect volume the desktop's "Calculate Defect Volume" reports, at
+    # its own default threshold, so the panel has a number without the user
+    # having to pick one first.
+    estimate = getattr(engine, "get_defect_volume_estimate", None)
+    if callable(estimate):
+        try:
+            defect = estimate()
+        except Exception:  # pragma: no cover - a statistic must never fail a run
+            defect = None
+        if isinstance(defect, dict):
+            put("defect_volume_in3", _optional_float(defect.get("total_volume_in3")))
+            put("defect_volume_max_in3", _optional_float(defect.get("max_volume_in3")))
+            put("defect_volume_percentage", _optional_float(defect.get("defect_percentage")))
+            put("defect_voxel_count", _optional_int(defect.get("defect_count")))
+            put("defect_threshold", _optional_float(defect.get("threshold_used")))
+            put("casting_volume_in3", _optional_float(defect.get("casting_volume_in3")))
+
+    put("shrinkage_volume_in3", _optional_float(getattr(engine, "total_shrinkage_volume", None)))
+    affected = _optional_int(getattr(engine, "affected_voxel_count", None))
+    if affected is not None:
+        put("shrinkage_voxel_count", affected)
+        voxel_count = _optional_int(result_data.get("voxel_count"))
+        if voxel_count:
+            put("shrinkage_percentage", 100.0 * affected / voxel_count)
+
+    put("hotspot_voxel_count", _optional_int(getattr(engine, "hotspot_count", None)))
+    put("niyama_defect_count", _optional_int(getattr(engine, "niyama_defect_count", None)))
+    put("hot_tear_voxel_count", _optional_int(getattr(engine, "hot_tear_count", None)))
+    put("sand_burn_in_voxel_count", _optional_int(getattr(engine, "sand_burn_in_count", None)))
+    put("gas_porosity_voxel_count", _optional_int(getattr(engine, "gas_porosity_count", None)))
+    put("feeding_blocked_count", _optional_int(getattr(engine, "feeding_blocked_count", None)))
+
+    feeding = getattr(engine, "feeding_path_result", None)
+    put("fed_fraction", _optional_float(getattr(feeding, "fed_fraction", None)))
+
+    put("max_stress_mpa", _optional_float(getattr(engine, "max_stress_mpa", None)))
+    put("avg_sdas_um", _optional_float(getattr(engine, "avg_sdas_um", None)))
+
+    # Mold filling, promoted out of the nested dict so the names read the same
+    # way as everything else here.
+    fill_stats = result_data.get("fill_time_stats")
+    if isinstance(fill_stats, dict):
+        put("fill_max_time_s", _optional_float(fill_stats.get("max_fill_time_s")))
+        put("fill_filled_voxel_count", _optional_int(fill_stats.get("filled_voxels")))
+        put("fill_unfilled_voxel_count", _optional_int(fill_stats.get("unfilled_voxels")))
+
+
+def _optional_float(value: Any) -> Optional[float]:
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return number if np.isfinite(number) else None
+
+
+def _optional_int(value: Any) -> Optional[int]:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 def prepare_mesh_and_geometry(

@@ -13,7 +13,24 @@ import type { RawTexture, RawTexture3D, Scene } from '@babylonjs/core';
 import { fetchFieldGrid, fetchFrames, fetchGridMeta, fetchMaskGrid } from '../lib/gridApi';
 import type { ColormapId, GridMeta, ResultModeId } from '../lib/viewState';
 import { createColormapTexture, createFieldVolume, createMaskVolume, FrameStackTextures } from './fieldTextures';
-import type { Dims } from './fieldTextures';
+import type { Dims, FrameSource } from './fieldTextures';
+
+/**
+ * How much of a frame stack may sit in memory at once.
+ *
+ * Below this the whole stack is fetched in one request and held; above it,
+ * windows are streamed and the least recently used ones dropped. 32 MB is
+ * roughly a 300-frame run of the reference lattice, or a 30-frame run of a
+ * million-cell one -- past that the browser tab starts paying for memory it
+ * looks at two frames at a time.
+ */
+const FRAME_MEMORY_BUDGET_BYTES = 32 * 1024 * 1024;
+
+/** Frames per streamed window. Large enough that playback rarely waits. */
+const FRAME_WINDOW = 16;
+
+/** Windows kept resident, so scrubbing back a little never refetches. */
+const FRAME_WINDOW_CACHE = 4;
 
 /** Modes served as a stack of time frames rather than as one static grid. */
 export const FRAME_MODES: readonly ResultModeId[] = ['fraction_liquid', 'fill_animation'];
@@ -50,6 +67,8 @@ export class RunResources {
   private readonly _pending = new Map<ResultModeId, Promise<void>>();
   private _lut: { id: ColormapId; texture: RawTexture } | null = null;
   private _disposed = false;
+  /** Called when a streamed window arrives, so the view can repaint with it. */
+  private _onFramesLoaded: () => void = () => undefined;
 
   private constructor(
     scene: Scene,
@@ -76,6 +95,11 @@ export class RunResources {
     const dims: Dims = [meta.dims[0], meta.dims[1], meta.dims[2]];
     const maskTexture = createMaskVolume(scene, mask.data, dims);
     return new RunResources(scene, projectId, meta, mask.data, maskTexture);
+  }
+
+  /** Register the repaint hook for streamed frame arrivals. */
+  onFramesLoaded(callback: () => void): void {
+    this._onFramesLoaded = callback;
   }
 
   get disposed(): boolean {
@@ -118,12 +142,28 @@ export class RunResources {
       const key = frameKey(mode);
       const info = key ? this.meta.frames[key] : undefined;
       if (!info || info.count <= 0) return;
-      const frames = await fetchFrames(this.projectId, mode, { signal });
-      if (this._disposed || frames.count <= 0) return;
-      this._stacks.set(
-        mode,
-        new FrameStackTextures(this._scene, frames.data, this.dims, frames.count, info.times_s)
-      );
+      const cellCount = this.dims[0] * this.dims[1] * this.dims[2];
+      const totalBytes = cellCount * info.count;
+
+      let source: FrameSource;
+      if (totalBytes <= FRAME_MEMORY_BUDGET_BYTES) {
+        const frames = await fetchFrames(this.projectId, mode, { signal });
+        if (this._disposed || frames.count <= 0) return;
+        source = new EagerFrameSource(frames.data, frames.count, info.times_s, cellCount);
+      } else {
+        source = new StreamingFrameSource(
+          this.projectId,
+          mode,
+          info.count,
+          info.times_s,
+          cellCount,
+          () => this._onFramesLoaded()
+        );
+        // Block only on the first window, so the first painted frame is real.
+        await (source as StreamingFrameSource).ensure(0, signal);
+        if (this._disposed) return;
+      }
+      this._stacks.set(mode, new FrameStackTextures(this._scene, source, this.dims));
       return;
     }
 
@@ -168,5 +208,129 @@ export class RunResources {
     this._stacks.clear();
     this._lut?.texture.dispose();
     this._lut = null;
+  }
+}
+
+/** The whole stack in memory: one request, every frame instantly available. */
+class EagerFrameSource implements FrameSource {
+  constructor(
+    private readonly _data: Uint8Array,
+    readonly count: number,
+    readonly timesS: number[],
+    private readonly _cellCount: number
+  ) {}
+
+  frame(index: number): Uint8Array | null {
+    if (index < 0 || index >= this.count) return null;
+    const start = index * this._cellCount;
+    return this._data.subarray(start, start + this._cellCount);
+  }
+
+  prefetch(): void {
+    // Everything is already here.
+  }
+
+  whenResident(index: number): Promise<boolean> {
+    return Promise.resolve(index >= 0 && index < this.count);
+  }
+}
+
+/**
+ * Windows of the stack, fetched as the scrubber reaches them.
+ *
+ * For a million-cell lattice a single frame is a megabyte and a hundred of
+ * them will not sit in a tab alongside the grids and the geometry. The
+ * endpoint already slices by `start` and `count`, so the client keeps a few
+ * windows and drops the least recently used -- which for a scrubber that
+ * mostly moves forwards means the window behind it.
+ *
+ * A frame that is not resident is reported as null rather than awaited: the
+ * renderer keeps showing the last frame it had while the fetch lands, which
+ * is a moment of staleness instead of a stall.
+ */
+class StreamingFrameSource implements FrameSource {
+  private readonly _windows = new Map<number, Uint8Array>();
+  /** In-flight fetches, so a second caller awaits the first rather than racing it. */
+  private readonly _inFlight = new Map<number, Promise<void>>();
+
+  constructor(
+    private readonly _projectId: string,
+    private readonly _mode: ResultModeId,
+    readonly count: number,
+    readonly timesS: number[],
+    private readonly _cellCount: number,
+    /** Called after a window lands, so the view can repaint with it. */
+    private readonly _onWindow: () => void = () => undefined
+  ) {}
+
+  private _windowOf(index: number): number {
+    return Math.floor(index / FRAME_WINDOW);
+  }
+
+  frame(index: number): Uint8Array | null {
+    if (index < 0 || index >= this.count) return null;
+    const windowIndex = this._windowOf(index);
+    const window = this._windows.get(windowIndex);
+    if (!window) {
+      this.prefetch(index);
+      return null;
+    }
+    // Refresh recency: a Map preserves insertion order, so re-inserting is
+    // what makes this an LRU.
+    this._windows.delete(windowIndex);
+    this._windows.set(windowIndex, window);
+
+    const offset = (index - windowIndex * FRAME_WINDOW) * this._cellCount;
+    if (offset + this._cellCount > window.length) return null;
+    return window.subarray(offset, offset + this._cellCount);
+  }
+
+  prefetch(index: number): void {
+    if (index < 0 || index >= this.count) return;
+    void this.ensure(index);
+  }
+
+  async whenResident(index: number): Promise<boolean> {
+    if (index < 0 || index >= this.count) return false;
+    if (this._windows.has(this._windowOf(index))) return true;
+    // Awaits the in-flight fetch when there is one, rather than reporting
+    // "not here" and leaving the caller with nothing to wait for.
+    await this.ensure(index);
+    return this._windows.has(this._windowOf(index));
+  }
+
+  ensure(index: number, signal?: AbortSignal): Promise<void> {
+    const windowIndex = this._windowOf(index);
+    if (this._windows.has(windowIndex)) return Promise.resolve();
+    const existing = this._inFlight.get(windowIndex);
+    if (existing) return existing;
+
+    const load = this._fetchWindow(windowIndex, signal).finally(() => {
+      this._inFlight.delete(windowIndex);
+    });
+    this._inFlight.set(windowIndex, load);
+    return load;
+  }
+
+  private async _fetchWindow(windowIndex: number, signal?: AbortSignal): Promise<void> {
+    try {
+      const start = windowIndex * FRAME_WINDOW;
+      const result = await fetchFrames(this._projectId, this._mode, {
+        start,
+        count: Math.min(FRAME_WINDOW, this.count - start),
+        signal
+      });
+      if (result.count > 0) {
+        this._windows.set(windowIndex, result.data);
+        while (this._windows.size > FRAME_WINDOW_CACHE) {
+          const oldest = this._windows.keys().next().value;
+          if (oldest === undefined) break;
+          this._windows.delete(oldest);
+        }
+        this._onWindow();
+      }
+    } catch {
+      // A failed window is retried the next time the scrubber asks for it.
+    }
   }
 }

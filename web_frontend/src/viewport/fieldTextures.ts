@@ -70,40 +70,62 @@ export function createColormapTexture(scene: Scene, colormap: ColormapId): RawTe
 }
 
 /**
- * A frame stack held on the CPU, with individual frames uploaded on demand.
+ * Where a frame's bytes come from.
  *
- * The whole stack arrives in one response (93 frames of a 41,000-voxel run is
- * about 1.7 MB gzipped), but only the two frames bracketing the current time
- * are ever on the GPU. Uploading all 93 would be 10 MB of VRAM for data the
- * shader looks at two frames at a time, and re-fetching per frame would make
- * playback hostage to the network.
+ * A small run keeps its whole stack in memory; a large one keeps a few
+ * windows and fetches the rest as the scrubber reaches them. Both answer the
+ * same question -- "give me frame n, if you have it" -- so nothing above here
+ * has to know which kind it is holding.
+ */
+export type FrameSource = {
+  readonly count: number;
+  readonly timesS: number[];
+  /** The frame's bytes, or null when it is not resident yet. */
+  frame(index: number): Uint8Array | null;
+  /** Ask for a frame to be made resident; safe to call every scrubber tick. */
+  prefetch(index: number): void;
+  /**
+   * Resolve once the frame is resident, or false if it never will be.
+   *
+   * The contouring path needs the actual bytes rather than "not yet": a front
+   * that silently skips the frames it does not have simply never appears on a
+   * streamed stack.
+   */
+  whenResident(index: number): Promise<boolean>;
+};
+
+/**
+ * A frame stack on the GPU, two frames at a time.
+ *
+ * The whole stack never goes to the GPU: the shader looks at exactly two
+ * frames -- the ones the current time sits between -- and uploading ninety
+ * more would be tens of megabytes of VRAM for data nothing reads. Re-fetching
+ * per frame instead would make playback hostage to the network, which is why
+ * the *source* owns the bytes and this owns only the two textures.
  */
 export class FrameStackTextures {
-  private readonly _data: Uint8Array;
-  private readonly _cellCount: number;
+  private readonly _source: FrameSource;
   private readonly _textureA: RawTexture3D;
   private readonly _textureB: RawTexture3D;
   private _indexA = -1;
   private _indexB = -1;
 
-  readonly count: number;
-  readonly timesS: number[];
-
-  constructor(scene: Scene, data: Uint8Array, dims: Dims, count: number, timesS: number[]) {
-    this._data = data;
-    this._cellCount = dims[0] * dims[1] * dims[2];
-    this.count = count;
-    this.timesS = timesS;
-    this._textureA = createFieldVolume(scene, this._frame(0), dims, 'frame-a');
-    this._textureB = createFieldVolume(scene, this._frame(0), dims, 'frame-b');
-    this._indexA = 0;
-    this._indexB = 0;
+  constructor(scene: Scene, source: FrameSource, dims: Dims) {
+    this._source = source;
+    const blank = new Uint8Array(dims[0] * dims[1] * dims[2]);
+    const first = source.frame(0);
+    this._textureA = createFieldVolume(scene, first ?? blank, dims, 'frame-a');
+    this._textureB = createFieldVolume(scene, first ?? blank, dims, 'frame-b');
+    this._indexA = first ? 0 : -1;
+    this._indexB = this._indexA;
   }
 
-  private _frame(index: number): Uint8Array {
-    const clamped = Math.min(Math.max(index, 0), Math.max(this.count - 1, 0));
-    const start = clamped * this._cellCount;
-    return this._data.subarray(start, start + this._cellCount);
+  get count(): number {
+    return this._source.count;
+  }
+
+  get timesS(): number[] {
+    return this._source.timesS;
   }
 
   get textureA(): RawTexture3D {
@@ -112,6 +134,11 @@ export class FrameStackTextures {
 
   get textureB(): RawTexture3D {
     return this._textureB;
+  }
+
+  /** The two frame indices currently on the GPU. */
+  get boundFrames(): [number, number] {
+    return [this._indexA, this._indexB];
   }
 
   /**
@@ -124,42 +151,67 @@ export class FrameStackTextures {
    * scrubber's seconds readout agree with what is on screen.
    */
   seek(t: number): number {
-    if (this.count <= 1) {
+    const count = this.count;
+    if (count <= 1) {
       this._bind(0, 0);
       return 0;
     }
     const times = this.timesS;
-    const usable = times.length === this.count && times[times.length - 1] > times[0];
+    const usable = times.length === count && times[times.length - 1] > times[0];
     const progress = Math.min(Math.max(t, 0), 1);
 
     if (!usable) {
-      const position = progress * (this.count - 1);
-      const lower = Math.min(Math.floor(position), this.count - 2);
+      const position = progress * (count - 1);
+      const lower = Math.min(Math.floor(position), count - 2);
       this._bind(lower, lower + 1);
       return position - lower;
     }
 
     const target = times[0] + progress * (times[times.length - 1] - times[0]);
     let upper = 1;
-    while (upper < this.count - 1 && times[upper] < target) upper += 1;
+    while (upper < count - 1 && times[upper] < target) upper += 1;
     const lower = upper - 1;
     const span = times[upper] - times[lower];
     this._bind(lower, upper);
     return span > 1e-9 ? Math.min(Math.max((target - times[lower]) / span, 0), 1) : 0;
   }
 
-  /** The frame index nearest a 0..1 position, for reading values on the CPU. */
-  nearestIndex(t: number): number {
-    if (this.count <= 1) return 0;
+  /** The frame indices bracketing a 0..1 position, and the weight between them. */
+  bracket(t: number): { lower: number; upper: number; blend: number } {
+    const count = this.count;
+    if (count <= 1) return { lower: 0, upper: 0, blend: 0 };
     const times = this.timesS;
     const progress = Math.min(Math.max(t, 0), 1);
-    if (times.length !== this.count || times[times.length - 1] <= times[0]) {
-      return Math.round(progress * (this.count - 1));
+    if (times.length !== count || times[times.length - 1] <= times[0]) {
+      const position = progress * (count - 1);
+      const lower = Math.min(Math.floor(position), count - 2);
+      return { lower, upper: lower + 1, blend: position - lower };
+    }
+    const target = times[0] + progress * (times[times.length - 1] - times[0]);
+    let upper = 1;
+    while (upper < count - 1 && times[upper] < target) upper += 1;
+    const lower = upper - 1;
+    const span = times[upper] - times[lower];
+    return {
+      lower,
+      upper,
+      blend: span > 1e-9 ? Math.min(Math.max((target - times[lower]) / span, 0), 1) : 0
+    };
+  }
+
+  /** The frame index nearest a 0..1 position, for reading values on the CPU. */
+  nearestIndex(t: number): number {
+    const count = this.count;
+    if (count <= 1) return 0;
+    const times = this.timesS;
+    const progress = Math.min(Math.max(t, 0), 1);
+    if (times.length !== count || times[times.length - 1] <= times[0]) {
+      return Math.round(progress * (count - 1));
     }
     const target = times[0] + progress * (times[times.length - 1] - times[0]);
     let best = 0;
     let bestDistance = Infinity;
-    for (let index = 0; index < this.count; index += 1) {
+    for (let index = 0; index < count; index += 1) {
       const distance = Math.abs(times[index] - target);
       if (distance < bestDistance) {
         bestDistance = distance;
@@ -171,8 +223,18 @@ export class FrameStackTextures {
 
   /** Raw byte for one cell in one frame, without a GPU readback. */
   sample(frameIndex: number, cellIndex: number): number {
-    const clampedFrame = Math.min(Math.max(frameIndex, 0), Math.max(this.count - 1, 0));
-    return this._data[clampedFrame * this._cellCount + cellIndex] ?? 0;
+    const frame = this._source.frame(frameIndex);
+    return frame ? (frame[cellIndex] ?? 0) : 0;
+  }
+
+  /** The bytes of a frame, for the contouring worker. */
+  frameData(frameIndex: number): Uint8Array | null {
+    return this._source.frame(frameIndex);
+  }
+
+  /** Resolve once a frame's bytes are in memory. */
+  whenResident(frameIndex: number): Promise<boolean> {
+    return this._source.whenResident(frameIndex);
   }
 
   /** Seconds at a 0..1 scrubber position. */
@@ -184,14 +246,29 @@ export class FrameStackTextures {
   }
 
   private _bind(indexA: number, indexB: number): void {
+    // A frame that is not resident yet leaves the previous one on the GPU.
+    // Showing the last known state for a moment is what "without stalls" has
+    // to mean while bytes are still in flight; the alternative is a hole.
     if (indexA !== this._indexA) {
-      this._textureA.update(this._frame(indexA));
-      this._indexA = indexA;
+      const frame = this._source.frame(indexA);
+      if (frame) {
+        this._textureA.update(frame);
+        this._indexA = indexA;
+      } else {
+        this._source.prefetch(indexA);
+      }
     }
     if (indexB !== this._indexB) {
-      this._textureB.update(this._frame(indexB));
-      this._indexB = indexB;
+      const frame = this._source.frame(indexB);
+      if (frame) {
+        this._textureB.update(frame);
+        this._indexB = indexB;
+      } else {
+        this._source.prefetch(indexB);
+      }
     }
+    // One step ahead, so playback does not stall at a window boundary.
+    this._source.prefetch(Math.min(indexB + 1, this.count - 1));
   }
 
   dispose(): void {
@@ -199,3 +276,4 @@ export class FrameStackTextures {
     this._textureB.dispose();
   }
 }
+

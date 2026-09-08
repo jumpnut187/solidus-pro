@@ -20,10 +20,12 @@ import {
   DefaultRenderingPipeline,
   DirectionalLight,
   Engine,
+  HemisphericLight,
   ImageProcessingConfiguration,
   Mesh,
   MeshBuilder,
   Scene,
+  SSAO2RenderingPipeline,
   Vector3
 } from '@babylonjs/core';
 
@@ -40,6 +42,11 @@ export type ViewportScene = {
 };
 
 const BACKGROUND = new Color4(0.055, 0.062, 0.074, 1);
+
+/** How far past the model the floor reaches, as a multiple of its longest edge. */
+const FLOOR_EXTENT_FACTOR = 1.25;
+const FLOOR_MAJOR_ALPHA = 0.3;
+const FLOOR_MINOR_ALPHA = 0.14;
 
 export function createViewportScene(canvas: HTMLCanvasElement): ViewportScene {
   const engine = new Engine(canvas, true, {
@@ -59,12 +66,25 @@ export function createViewportScene(canvas: HTMLCanvasElement): ViewportScene {
   scene.imageProcessingConfiguration.exposure = 1.15;
   scene.imageProcessingConfiguration.contrast = 1.1;
 
-  const environment = CubeTexture.CreateFromPrefilteredData(ENVIRONMENT_URL, scene);
-  environment.name = 'studio-environment';
   // The environment is a light source, not scenery: it lights the casting but
   // the background stays the flat dark ground the UI is designed against.
+  const environment = CubeTexture.CreateFromPrefilteredData(ENVIRONMENT_URL, scene);
+  environment.name = 'studio-environment';
   scene.environmentTexture = environment;
   scene.environmentIntensity = 1.0;
+
+  // Analytic lights as well as the environment, and not only for taste.
+  // A metallic PBR surface has almost no diffuse term, so with the
+  // environment missing it renders *black* -- and the environment can go
+  // missing for entirely ordinary reasons: a slow connection, a 404 on the
+  // asset, or the RGBD decode losing its scene to a fast unmount. A casting
+  // that disappears while a 200 KB file loads is not an acceptable failure
+  // mode for the one view the whole application exists to show, so the fill
+  // below guarantees a lit object and the environment refines it.
+  const fill = new HemisphericLight('fill', new Vector3(0.15, -0.3, 1), scene);
+  fill.intensity = 0.65;
+  fill.diffuse = new Color3(0.95, 0.96, 1);
+  fill.groundColor = new Color3(0.28, 0.3, 0.34);
 
   const key = new DirectionalLight('key', new Vector3(-0.4, 0.45, -0.8), scene);
   key.intensity = 1.1;
@@ -100,6 +120,7 @@ export function createViewportScene(canvas: HTMLCanvasElement): ViewportScene {
     pipeline,
     layoutFloor,
     dispose: () => {
+      environment.dispose();
       floor?.dispose();
       pipeline.dispose();
       scene.dispose();
@@ -111,37 +132,51 @@ export function createViewportScene(canvas: HTMLCanvasElement): ViewportScene {
 /**
  * A grid of lines in the XY plane, fading out from the model.
  *
+ * The floor is there to give the casting a ground to sit on and a sense of
+ * scale; it is not the subject. The first version reached to the horizon at
+ * a uniform weight and competed with the result for attention, so it is now
+ * held to about two and a half times the model, faded quadratically toward
+ * its edge, and drawn thin enough that the far lines dissolve rather than
+ * stop.
+ *
  * Drawn as a line system rather than a textured ground so that it needs no
  * material library, costs one draw call, and can carry a per-vertex alpha
- * ramp -- which is what stops the floor from reading as a hard-edged card
- * floating under the casting.
+ * ramp -- which is what stops it reading as a hard-edged card under the part.
  */
 function buildFloorGrid(scene: Scene, center: Vector3, extent: number, floorZ: number): Mesh {
-  const spacing = niceStep(extent / 10);
-  const halfSpan = Math.ceil((extent * 1.6) / spacing) * spacing;
+  const spacing = niceStep(extent / 8);
+  const halfSpan = Math.ceil((extent * FLOOR_EXTENT_FACTOR) / spacing) * spacing;
   const cx = Math.round(center.x / spacing) * spacing;
   const cy = Math.round(center.y / spacing) * spacing;
 
   const lines: Vector3[][] = [];
   const colors: Color4[][] = [];
-  const base = new Color3(0.32, 0.38, 0.45);
+  const base = new Color3(0.36, 0.42, 0.5);
 
+  // Each line is split at the centre so its alpha can fall off along its own
+  // length as well as with its distance from the model. A single segment can
+  // only fade as a whole, which leaves a bright cross through the origin.
+  const segments = 12;
   for (let offset = -halfSpan; offset <= halfSpan + 1e-6; offset += spacing) {
-    const fade = 1 - Math.abs(offset) / (halfSpan + spacing);
     const major = Math.abs(offset) < 1e-6;
-    const alpha = Math.max(0, fade * fade) * (major ? 0.55 : 0.28);
-    const color = new Color4(base.r, base.g, base.b, alpha);
-
-    lines.push([
-      new Vector3(cx + offset, cy - halfSpan, floorZ),
-      new Vector3(cx + offset, cy + halfSpan, floorZ)
-    ]);
-    colors.push([color, color]);
-    lines.push([
-      new Vector3(cx - halfSpan, cy + offset, floorZ),
-      new Vector3(cx + halfSpan, cy + offset, floorZ)
-    ]);
-    colors.push([color, color]);
+    for (let axis = 0; axis < 2; axis += 1) {
+      const points: Vector3[] = [];
+      const vertexColors: Color4[] = [];
+      for (let step = 0; step <= segments; step += 1) {
+        const along = -halfSpan + (2 * halfSpan * step) / segments;
+        const radial = Math.hypot(along, offset) / halfSpan;
+        const fade = Math.max(0, 1 - radial * radial);
+        const alpha = fade * (major ? FLOOR_MAJOR_ALPHA : FLOOR_MINOR_ALPHA);
+        points.push(
+          axis === 0
+            ? new Vector3(cx + offset, cy + along, floorZ)
+            : new Vector3(cx + along, cy + offset, floorZ)
+        );
+        vertexColors.push(new Color4(base.r, base.g, base.b, alpha));
+      }
+      lines.push(points);
+      colors.push(vertexColors);
+    }
   }
 
   const mesh = MeshBuilder.CreateLineSystem('shop-floor', { lines, colors, useVertexAlpha: true }, scene);
@@ -164,20 +199,21 @@ function niceStep(raw: number): number {
 /**
  * The world axes, drawn as three short lines at the origin.
  *
- * Separate from the corner gizmo: this one is in the scene and shows where
- * the model sits relative to the machine origin, which matters when a part
- * has been arranged away from it.
+ * Unit length, so the caller scales them to the model rather than guessing.
+ * They exist to show where the machine origin sits relative to a part that
+ * has been arranged away from it, which is a question about a few inches --
+ * axes long enough to cross the whole floor answered it by shouting.
  */
-export function createOriginAxes(scene: Scene, length: number): Mesh {
+export function createOriginAxes(scene: Scene): Mesh {
   const axes: Array<{ direction: Vector3; color: Color4 }> = [
-    { direction: new Vector3(1, 0, 0), color: new Color4(0.95, 0.28, 0.24, 0.85) },
-    { direction: new Vector3(0, 1, 0), color: new Color4(0.28, 0.85, 0.35, 0.85) },
-    { direction: new Vector3(0, 0, 1), color: new Color4(0.3, 0.52, 1, 0.85) }
+    { direction: new Vector3(1, 0, 0), color: new Color4(0.95, 0.28, 0.24, 0.7) },
+    { direction: new Vector3(0, 1, 0), color: new Color4(0.28, 0.85, 0.35, 0.7) },
+    { direction: new Vector3(0, 0, 1), color: new Color4(0.3, 0.52, 1, 0.7) }
   ];
   const mesh = MeshBuilder.CreateLineSystem(
     'origin-axes',
     {
-      lines: axes.map(({ direction }) => [Vector3.Zero(), direction.scale(length)]),
+      lines: axes.map(({ direction }) => [Vector3.Zero(), direction]),
       colors: axes.map(({ color }) => [color, color]),
       useVertexAlpha: true
     },
@@ -185,4 +221,32 @@ export function createOriginAxes(scene: Scene, length: number): Mesh {
   );
   mesh.isPickable = false;
   return mesh;
+}
+
+/**
+ * Screen-space ambient occlusion.
+ *
+ * The cheapest way to make a casting read as a solid object: it darkens the
+ * crevice where a riser meets the plate, which is exactly where the eye looks
+ * for the geometry. It is a full-resolution depth pass plus a blur on top of
+ * the existing chain, so whether to run it is a measurement, not a taste --
+ * see the caller.
+ */
+export function enableAmbientOcclusion(
+  scene: Scene,
+  camera: ArcRotateCamera
+): SSAO2RenderingPipeline | null {
+  if (!SSAO2RenderingPipeline.IsSupported) return null;
+  const pipeline = new SSAO2RenderingPipeline(
+    'viewport-ssao',
+    scene,
+    { ssaoRatio: 0.75, blurRatio: 1 },
+    [camera]
+  );
+  pipeline.samples = 12;
+  pipeline.radius = 1.1;
+  pipeline.totalStrength = 0.8;
+  pipeline.expensiveBlur = false;
+  pipeline.maxZ = 400;
+  return pipeline;
 }

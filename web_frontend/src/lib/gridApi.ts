@@ -173,6 +173,85 @@ export async function fetchFrames(
   };
 }
 
+/** A threshold isosurface, as the buffers a vertex buffer wants. */
+export type EnvelopeData = {
+  mode: ResultModeId;
+  positions: Float32Array;
+  normals: Float32Array;
+  indices: Uint32Array;
+  /** Per-vertex field value in field units, when the server sampled it. */
+  scalars: Float32Array | null;
+  vertexCount: number;
+  triangleCount: number;
+  threshold: number;
+  min: number;
+  max: number;
+  unit: string;
+};
+
+export type EnvelopeOptions = {
+  /** Iso level in **field units**, not percent. */
+  threshold: number;
+  castOnly?: boolean;
+  /** Skip the per-vertex sampling pass when the colour is not needed. */
+  scalars?: boolean;
+  /** Frame index, for the animated modes. */
+  frame?: number;
+  signal?: AbortSignal;
+};
+
+/**
+ * Fetch the threshold isosurface for a mode.
+ *
+ * The body is one little-endian block -- positions, normals, indices, then
+ * optional scalars -- with the counts in headers. Each section is a whole
+ * number of 4-byte words, so the typed-array views below are windows onto the
+ * response buffer rather than copies of it.
+ */
+export async function fetchEnvelope(
+  projectId: string,
+  mode: ResultModeId,
+  options: EnvelopeOptions
+): Promise<EnvelopeData> {
+  const params = new URLSearchParams({ threshold: String(options.threshold) });
+  if (options.castOnly) params.set('cast_only', '1');
+  if (options.scalars === false) params.set('scalars', '0');
+  if (options.frame !== undefined) params.set('frame', String(options.frame));
+
+  const response = await fetchBinary(
+    `${projectBase(projectId)}/${encodeURIComponent(mode)}/isosurface?${params}`,
+    options.signal
+  );
+  const buffer = await response.arrayBuffer();
+
+  const vertexCount = Math.trunc(parseNumber(response.headers.get('X-Vertex-Count'), 0));
+  const indexCount = Math.trunc(parseNumber(response.headers.get('X-Index-Count'), 0));
+  const hasScalar = response.headers.get('X-Has-Scalar') === '1';
+
+  let offset = 0;
+  const positions = new Float32Array(buffer, offset, vertexCount * 3);
+  offset += vertexCount * 3 * 4;
+  const normals = new Float32Array(buffer, offset, vertexCount * 3);
+  offset += vertexCount * 3 * 4;
+  const indices = new Uint32Array(buffer, offset, indexCount);
+  offset += indexCount * 4;
+  const scalars = hasScalar ? new Float32Array(buffer, offset, vertexCount) : null;
+
+  return {
+    mode,
+    positions,
+    normals,
+    indices,
+    scalars,
+    vertexCount,
+    triangleCount: Math.trunc(indexCount / 3),
+    threshold: parseNumber(response.headers.get('X-Threshold'), options.threshold),
+    min: parseNumber(response.headers.get('X-Field-Min'), 0),
+    max: parseNumber(response.headers.get('X-Field-Max'), 1),
+    unit: response.headers.get('X-Field-Unit') ?? ''
+  };
+}
+
 /** True when a rejection is the caller's own abort rather than a real failure. */
 export function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
