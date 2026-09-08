@@ -290,22 +290,28 @@ class NonMetalIsNotAMisrunTests(unittest.TestCase):
         legacy = np.array([0.5, 2.0, -1.0, -1.0, -1.0])
         self.assertEqual(build(legacy, centers, sizes).GetNumberOfPoints() // per_cube, 4)
 
-    def test_web_payload_excludes_non_metal_and_stays_json_safe(self) -> None:
-        import json
-
-        from web.payloads import _fill_time_payload
+    def test_web_grid_excludes_non_metal_and_misruns_from_the_range(self) -> None:
+        """The dense grid the browser reads must treat -1 (misrun) and NaN
+        (non-metal) as "no value", not as data: neither may set the field range,
+        and every cell must come back finite so the bytes are JSON- and
+        texture-safe."""
+        from web import fields
 
         arr = np.array([0.5, 1.5, -1.0, np.nan, np.nan])
-        idx = np.arange(len(arr))
-        out = _fill_time_payload({"fill_time": arr.tolist()}, idx, len(arr))
+        visualization = {
+            "centers": [[float(i), 0.0, 0.0] for i in range(len(arr))],
+            "sizes": [1.0] * len(arr),
+            "part_types": [0] * len(arr),
+            "fill_time": arr.tolist(),
+        }
+        grids = fields.build_field_grids(visualization, {"voxel_count": len(arr)})
 
-        self.assertEqual(out["filled_voxels"], 2)
-        self.assertEqual(out["unfilled_voxels"], 1, "mold counted as misrun")
-        self.assertAlmostEqual(out["max_finite_time_s"], 1.5)
-        self.assertEqual(out["misrun"], [False, False, True, False, False])
-        # NaN is not valid JSON; it must not survive into the payload.
-        self.assertTrue(all(np.isfinite(v) for v in out["values"]))
-        json.loads(json.dumps(out, allow_nan=False))
+        grid = grids.scalars["fill_time"]
+        self.assertGreaterEqual(grid.minimum, 0.0, "misrun sentinel leaked into the range")
+        self.assertAlmostEqual(grid.maximum, 1.5, places=5)
+        values = grid.dequantize()
+        self.assertTrue(np.all(np.isfinite(values)))
+        self.assertEqual(int(np.count_nonzero(grids.mask)), len(arr), "mask comes from geometry, not values")
 
     def test_filling_stage_writes_nan_for_non_metal(self) -> None:
         """The source of the sentinel, asserted directly on the gather step."""
