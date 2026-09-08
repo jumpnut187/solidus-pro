@@ -87,17 +87,16 @@ const ENVELOPE_DEBOUNCE_MS = 150;
 /**
  * Opacity the casting drops to so an envelope inside it can be seen.
  *
- * A defect envelope is a small blob somewhere inside the metal, so the shell
- * has to get out of its way almost entirely. A liquid front is not: it fills
- * the casting, and at 0.22 with no paint on it the shell disappeared -- which
- * is what "no results in the riser" was. A riser is mostly *outside* the front
- * for most of a run, so with the shell ghosted there was nothing there to see
- * at all. For the time modes the shell stays at the same 0.35 that 'both' uses
- * and keeps its paint, so the riser still carries the field.
+ * 0.35 in `envelope` and in `both` alike, but they get there differently. In
+ * `both` the shell keeps the field and steps back. In `envelope` it is a
+ * neutral grey with no field on it at all, which is what lets it stay this
+ * readable: an unpainted shell does not compete with the envelope inside it,
+ * where the old painted one at 0.22 both competed *and* disappeared -- and a
+ * riser sitting outside a liquid front for most of a run then had nothing on
+ * it to see, which is what "no results in the riser" was.
  */
-const ENVELOPE_SHELL_OPACITY = 0.22;
+const ENVELOPE_SHELL_OPACITY = 0.35;
 const BOTH_SHELL_OPACITY = 0.35;
-const TIME_ENVELOPE_SHELL_OPACITY = 0.35;
 
 /**
  * How much of its own colour the liquid front emits.
@@ -363,6 +362,11 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     // "no results in the riser" -- when in fact it had a perfectly good
     // fraction-liquid value the whole time. So a front gets a painted shell to
     // sit inside, not an empty one.
+    // In `envelope` the shell is context: it says where the result sits in the
+    // part and carries nothing of its own, so it is a neutral ghost. The time
+    // modes still paint, but only the liquid body -- `ghostSolid` below leaves
+    // everything the front has already passed through grey.
+    const ghostShell = state.style === 'envelope';
     const paintSurface =
       state.showResults && (state.style !== 'envelope' || isFrameMode(state.mode) || sweeping);
 
@@ -383,9 +387,10 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
         plugin.state.liquidColor = LIQUID_COLOR;
         plugin.state.liquidGlow = MOLTEN_GLOW;
         plugin.state.liquidBody = liquidBody;
-        plugin.state.solidAlpha = TIME_ENVELOPE_SHELL_OPACITY;
+        plugin.state.solidAlpha = ENVELOPE_SHELL_OPACITY;
         // One voxel: the layer the front is not allowed to enter.
         plugin.state.skinDepth = meta.spacing;
+        plugin.state.ghostSolid = ghostShell;
         plugin.fieldTextureA = stack ? stack.textureA : (field?.texture ?? null);
         plugin.fieldTextureB = stack ? stack.textureB : (field?.texture ?? null);
         plugin.maskTexture = resources.maskTexture;
@@ -394,6 +399,7 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
         plugin.state.strength = 0;
         plugin.state.sweepTime = null;
         plugin.state.liquidBody = false;
+        plugin.state.ghostSolid = false;
       }
     };
 
@@ -417,6 +423,7 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       // on: it shows the field on the inside, so it is never ghosted and never
       // needs closing.
       cap.plugin.state.liquidBody = false;
+      cap.plugin.state.ghostSolid = false;
     }
 
     // The envelope is clipped by the same planes, so a section cuts through
@@ -442,6 +449,7 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     // is what keeps the surface it does produce inside the casting.
     applyPaint(refs.envelope.clip, 0);
     refs.envelope.clip.state.liquidBody = false;
+    refs.envelope.clip.state.ghostSolid = false;
     refs.envelope.clip.state.discardOutside = molten;
     refs.envelope.clip.state.discardUnpaintable = molten && state.castOnly;
     refs.envelope.setStyle({
@@ -750,17 +758,14 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     if (!sceneRef.current) return;
     const style = view.style;
     const requested = Math.min(Math.max(view.modelOpacity, 0), 100) / 100;
-    // An envelope has to be visible through the casting that contains it --
-    // but a liquid front only has to be visible *through* it, not instead of
-    // it. See ENVELOPE_SHELL_OPACITY.
-    // A sweep's envelope is a front like any other, so it gets the readable
-    // shell rather than the defect envelope's near-invisible one.
-    const front = isFrameMode(view.mode) || isSweepMode(view.mode);
+    // See ENVELOPE_SHELL_OPACITY.
+    // One ghost opacity for every envelope now that the shell is neutral: a
+    // grey that carries no field does not compete with what is inside it the
+    // way a painted one did, so the defect envelopes get the same readable
+    // 35 percent the fronts already had rather than near-invisibility.
     const cap =
       style === 'envelope'
-        ? front
-          ? TIME_ENVELOPE_SHELL_OPACITY
-          : ENVELOPE_SHELL_OPACITY
+        ? ENVELOPE_SHELL_OPACITY
         : style === 'both'
           ? BOTH_SHELL_OPACITY
           : 1;
@@ -769,6 +774,7 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       opacity: Math.min(requested, cap),
       showModel: view.showModel,
       assemblySize: boundsRef.current?.size ?? 1,
+      neutralGhost: style === 'envelope',
       // A ghost shell must not claim the depth buffer ahead of the envelope
       // it is supposed to be showing.
       depthPrePass: !wantsEnvelope(style)

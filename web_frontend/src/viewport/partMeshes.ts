@@ -47,6 +47,18 @@ const PART_FINISH: Record<string, { metallic: number; roughness: number }> = {
 
 const SELECTION_COLOR = new Color3(1, 0.78, 0.2);
 
+/**
+ * The casting when it is only there to say where the result *is*.
+ *
+ * One neutral light grey, and a dull one: in `envelope` the shell is context,
+ * not content, so it carries neither the part-type colour nor the field. A
+ * riser tinted its own orange or a shell painted blue at the low end of the
+ * ramp both read as answers, and the only answer on screen should be the thing
+ * inside.
+ */
+const GHOST_COLOR = new Color3(0.74, 0.76, 0.79);
+const GHOST_FINISH = { metallic: 0.1, roughness: 0.75 };
+
 export function partColor(partType: string): Color3 {
   const rgb = PART_COLORS[partType] ?? PART_COLORS.cast;
   return new Color3(rgb[0], rgb[1], rgb[2]);
@@ -146,6 +158,14 @@ export type PartAppearance = {
    * claimed the depth buffer first.
    */
   depthPrePass: boolean;
+  /**
+   * Strip the part-type colour and show the casting as a neutral ghost.
+   *
+   * Set in `envelope`, where the shell exists to locate the result rather than
+   * to describe itself. The field paint on top of it is suppressed separately,
+   * by the plugin, so that the molten liquid body still comes through.
+   */
+  neutralGhost: boolean;
 };
 
 export function applyPartAppearance(
@@ -162,9 +182,9 @@ export function applyPartAppearance(
     const { mesh, material } = entry;
     const finish = PART_FINISH[part.part_type] ?? PART_FINISH.cast;
 
-    material.albedoColor = partColor(part.part_type);
-    material.metallic = finish.metallic;
-    material.roughness = finish.roughness;
+    material.albedoColor = appearance.neutralGhost ? GHOST_COLOR : partColor(part.part_type);
+    material.metallic = appearance.neutralGhost ? GHOST_FINISH.metallic : finish.metallic;
+    material.roughness = appearance.neutralGhost ? GHOST_FINISH.roughness : finish.roughness;
     material.alpha = opacity;
 
     if (translucent) {

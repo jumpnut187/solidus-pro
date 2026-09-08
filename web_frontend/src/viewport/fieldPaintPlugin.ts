@@ -54,7 +54,8 @@ const FIELD_UNIFORMS = [
   'fieldLiquidGlow',
   'fieldLiquidBody',
   'fieldSolidAlpha',
-  'fieldSkinDepth'
+  'fieldSkinDepth',
+  'fieldGhostSolid'
 ];
 
 export type FieldPaintState = {
@@ -140,6 +141,15 @@ export type FieldPaintState = {
    * meet exactly.
    */
   skinDepth: number;
+  /**
+   * Leave metal that is not still liquid unpainted.
+   *
+   * The material underneath is already the neutral ghost in `envelope`, so
+   * skipping the paint there is what makes the shell grey while the liquid
+   * body keeps its molten colour. In `both` this is off and the shell keeps
+   * the field, which is the whole difference between the two styles.
+   */
+  ghostSolid: boolean;
 };
 
 export const defaultFieldPaintState = (): FieldPaintState => ({
@@ -160,7 +170,8 @@ export const defaultFieldPaintState = (): FieldPaintState => ({
   liquidGlow: 0,
   liquidBody: false,
   solidAlpha: 1,
-  skinDepth: 0
+  skinDepth: 0,
+  ghostSolid: false
 });
 
 /**
@@ -286,6 +297,7 @@ uniform float fieldLiquidGlow;
 uniform float fieldLiquidBody;
 uniform float fieldSolidAlpha;
 uniform float fieldSkinDepth;
+uniform float fieldGhostSolid;
 `,
       // Runs after `vec3 surfaceAlbedo` and `float alpha` exist and before
       // any lighting, so the painted color is shaded like a real surface
@@ -347,18 +359,16 @@ uniform float fieldSkinDepth;
       }
 #endif
 
-      vec3 painted;
       if (stillLiquid) {
         // Drawn as metal rather than as a value: one colour for the whole
         // molten region, whatever colormap the rest of the casting is using.
-        painted = fieldLiquidColor;
+        surfaceAlbedo = mix(surfaceAlbedo, fieldLiquidColor, fieldStrength);
         castSimLiquid = fieldStrength;
-      } else {
+      } else if (fieldGhostSolid < 0.5) {
         float span = fieldScale.y - fieldScale.x;
         float t = span > 1e-9 ? clamp((value - fieldScale.x) / span, 0.0, 1.0) : 0.0;
-        painted = texture(fieldLutSampler, vec2(t, 0.5)).rgb;
+        surfaceAlbedo = mix(surfaceAlbedo, texture(fieldLutSampler, vec2(t, 0.5)).rgb, fieldStrength);
       }
-      surfaceAlbedo = mix(surfaceAlbedo, painted, fieldStrength);
       if (fieldLiquidBody > 0.5) {
         alpha = stillLiquid ? 1.0 : fieldSolidAlpha;
       }
@@ -423,6 +433,7 @@ uniform float fieldSkinDepth;
     effect.setFloat('fieldLiquidBody', state.liquidBody ? 1 : 0);
     effect.setFloat('fieldSolidAlpha', state.solidAlpha);
     effect.setFloat('fieldSkinDepth', state.skinDepth);
+    effect.setFloat('fieldGhostSolid', state.ghostSolid ? 1 : 0);
 
     effect.setTexture('fieldSamplerA', this.fieldTextureA ?? this._placeholderVolume);
     effect.setTexture('fieldSamplerB', this.fieldTextureB ?? this.fieldTextureA ?? this._placeholderVolume);
