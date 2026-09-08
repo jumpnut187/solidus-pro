@@ -35,7 +35,17 @@ echo $! >"$PIDFILE"
 
 for _ in $(seq 1 20); do
     if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-        echo "Solidus web app started (pid $(cat "$PIDFILE"), http://localhost:$PORT)"
+        echo "Solidus web app started (pid $(cat "$PIDFILE"))"
+        echo "  Local:   http://localhost:$PORT/"
+        # The server binds every interface, so it is reachable across the LAN;
+        # this is the address to use from another device. en0/en1 cover Wi-Fi
+        # and Ethernet on macOS, in that order.
+        LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)"
+        if [[ -n "$LAN_IP" ]]; then
+            echo "  Network: http://$LAN_IP:$PORT/"
+        else
+            echo "  Network: unavailable (no local network address)"
+        fi
         echo "Logs: $LOGFILE"
         exit 0
     fi
