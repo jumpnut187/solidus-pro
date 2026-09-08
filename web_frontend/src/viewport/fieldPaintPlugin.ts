@@ -37,7 +37,13 @@ export const CAST_MASK_CODE = 1;
 /** Sweep cut-off standing for "not sweeping"; see `FieldPaintState.sweepTime`. */
 const NO_SWEEP = 3.0e30;
 
-const FIELD_SAMPLERS = ['fieldSamplerA', 'fieldSamplerB', 'fieldMaskSampler', 'fieldLutSampler'];
+const FIELD_SAMPLERS = [
+  'fieldSamplerA',
+  'fieldSamplerB',
+  'fieldMaskSampler',
+  'fieldSkinSampler',
+  'fieldLutSampler'
+];
 
 const FIELD_UNIFORMS = [
   'fieldTexelStep',
@@ -49,7 +55,9 @@ const FIELD_UNIFORMS = [
   'fieldCastOnly',
   'fieldDiscardOutside',
   'fieldDiscardUnpaintable',
+  'fieldSkinClip',
   'fieldSweepTime',
+  'fieldLiquidBand',
   'fieldLiquidColor',
   'fieldLiquidGlow',
   'fieldLiquidBody',
@@ -97,6 +105,20 @@ export type FieldPaintState = {
    */
   discardUnpaintable: boolean;
   /**
+   * Discard fragments outside the parts' *real* surface.
+   *
+   * `discardOutside` asks the mask, and the mask is generous: the mesher
+   * counts a voxel as metal when its cube touches the part, so the voxel body
+   * overhangs the STL by up to half a voxel. A liquid front clipped against
+   * it alone could stand that far outside the casting's skin, and did --
+   * sheets draped down the outside of the riser, petals floating over its
+   * dome. This asks the skin distance grid instead (see
+   * `RunResources.skinTexture`), whose zero crossing is the drawn surface, so
+   * the front ends exactly where the skin begins. Ignored when no skin grid is
+   * bound: the placeholder reads as "inside" everywhere.
+   */
+  skinClip: boolean;
+  /**
    * Sweep cut-off in field units, or null for no sweep.
    *
    * Set only for the sweep modes, where the field's values are themselves
@@ -106,6 +128,21 @@ export type FieldPaintState = {
    * playable freezing sequence, with no second grid and no fetch.
    */
   sweepTime: number | null;
+  /**
+   * How far below `sweepTime` the skin takes to go from liquid to frozen, in
+   * field units.
+   *
+   * With a hard cut the skin is either opaque molten metal or a ghost, and
+   * wherever the frozen shell under it is about one voxel thick -- which on a
+   * coarse lattice is most of a riser wall for much of a run -- the decision
+   * flips from fragment to fragment. The shell came out mottled, with hard
+   * ghost strips through opaque metal that read as cracks in the casting.
+   * Over this band the skin fades instead: fully molten while the metal at
+   * its test depth is still liquid, fully ghosted once that metal has been
+   * frozen for this long, glowing through in between the way a fresh shell
+   * does.
+   */
+  liquidBand: number;
   /** Colour for cells the sweep has not reached, in linear space. */
   liquidColor: [number, number, number];
   /** How much of that colour those cells emit, matching the front's glow. */
@@ -165,7 +202,9 @@ export const defaultFieldPaintState = (): FieldPaintState => ({
   castOnly: false,
   discardOutside: false,
   discardUnpaintable: false,
+  skinClip: false,
   sweepTime: null,
+  liquidBand: 0,
   liquidColor: [1, 0.6, 0.15],
   liquidGlow: 0,
   liquidBody: false,
@@ -236,6 +275,8 @@ export class FieldPaintPluginMaterial extends MaterialPluginBase {
   fieldTextureA: RawTexture3D | null = null;
   fieldTextureB: RawTexture3D | null = null;
   maskTexture: RawTexture3D | null = null;
+  /** Signed distance to the parts' surface; null falls back to the mask. */
+  skinTexture: RawTexture3D | null = null;
   lutTexture: RawTexture | null = null;
 
   private readonly _placeholderVolume: RawTexture3D;
@@ -278,6 +319,7 @@ export class FieldPaintPluginMaterial extends MaterialPluginBase {
 uniform highp sampler3D fieldSamplerA;
 uniform highp sampler3D fieldSamplerB;
 uniform highp sampler3D fieldMaskSampler;
+uniform highp sampler3D fieldSkinSampler;
 uniform sampler2D fieldLutSampler;
 uniform vec3 fieldTexelStep;
 uniform vec3 fieldTexelBias;
@@ -288,10 +330,12 @@ uniform float fieldStrength;
 uniform float fieldCastOnly;
 uniform float fieldDiscardOutside;
 uniform float fieldDiscardUnpaintable;
+uniform float fieldSkinClip;
 // "No sweep" is carried as a cut-off above every possible field value rather
 // than as a second enable uniform: the test below is value > fieldSweepTime,
 // so a huge cut-off leaves every cell painted exactly as it was.
 uniform float fieldSweepTime;
+uniform float fieldLiquidBand;
 uniform vec3 fieldLiquidColor;
 uniform float fieldLiquidGlow;
 uniform float fieldLiquidBody;
@@ -306,8 +350,18 @@ uniform float fieldGhostSolid;
   // Declared outside the branch so the emissive injection further down the
   // shader can still see it; both markers sit in the same main().
   float castSimLiquid = 0.0;
-  if (fieldStrength > 0.0 || fieldDiscardOutside > 0.5 || fieldDiscardUnpaintable > 0.5) {
+  if (
+    fieldStrength > 0.0 ||
+    fieldDiscardOutside > 0.5 ||
+    fieldDiscardUnpaintable > 0.5 ||
+    fieldSkinClip > 0.5
+  ) {
     vec3 fieldUvw = vPositionW * fieldTexelStep + fieldTexelBias;
+    // Outside the parts' real surface. Sampled linearly, so the cut is the
+    // smooth skin and not the voxel body's staircase; above one half is out.
+    if (fieldSkinClip > 0.5 && texture(fieldSkinSampler, fieldUvw).r > 0.5) {
+      discard;
+    }
     float maskCode = texture(fieldMaskSampler, fieldUvw).r * 255.0;
     bool insideMetal = maskCode > 0.5;
     bool paintable = insideMetal && (fieldCastOnly < 0.5 || abs(maskCode - 1.0) < 0.5);
@@ -330,7 +384,7 @@ uniform float fieldGhostSolid;
       // solidification sweep the cut-off is the scrubber's own time; for a
       // fraction-liquid or fill frame it is the same 0.5 the front is
       // contoured at, so skin and front agree on where the liquid ends.
-      bool stillLiquid = value > fieldSweepTime;
+      float liquidValue = value;
 #ifdef NORMAL
       if (fieldLiquidBody > 0.5 && fieldSkinDepth > 0.0) {
         // See FieldPaintState.skinDepth. Only the liquid *test* moves; the
@@ -344,33 +398,41 @@ uniform float fieldGhostSolid;
             fieldBlend
           );
           float innerValue = fieldQuant.x + innerNormalized * (fieldQuant.y - fieldQuant.x);
-          stillLiquid = stillLiquid || innerValue > fieldSweepTime;
+          liquidValue = max(liquidValue, innerValue);
         }
       }
 #endif
+      // 1 while the metal at the test point is still liquid, easing to 0 as
+      // it has been frozen for a whole band; a band of zero is the hard cut.
+      // See FieldPaintState.liquidBand.
+      float liquid = fieldLiquidBand > 0.0
+        ? smoothstep(fieldSweepTime - fieldLiquidBand, fieldSweepTime, liquidValue)
+        : (liquidValue > fieldSweepTime ? 1.0 : 0.0);
 
 #ifdef DEPTHPREPASS
       // Only the opaque part of the skin may claim the depth buffer. The
       // ghost over frozen metal must not, or it would hide the very front it
       // is there to show; the liquid part must, or the far wall of the pool
       // draws over the near one and the body reads as a bag of triangles.
-      if (fieldLiquidBody > 0.5 && !stillLiquid) {
+      if (fieldLiquidBody > 0.5 && liquid < 0.5) {
         discard;
       }
 #endif
 
-      if (stillLiquid) {
-        // Drawn as metal rather than as a value: one colour for the whole
-        // molten region, whatever colormap the rest of the casting is using.
-        surfaceAlbedo = mix(surfaceAlbedo, fieldLiquidColor, fieldStrength);
-        castSimLiquid = fieldStrength;
-      } else if (fieldGhostSolid < 0.5) {
+      // Frozen metal keeps the field's colour, or the ghost's if the shell is
+      // meant to carry nothing; liquid metal is drawn as metal rather than as
+      // a value -- one colour for the whole molten region, whatever colormap
+      // the rest of the casting is using -- and the two blend across the band.
+      vec3 frozenAlbedo = surfaceAlbedo;
+      if (fieldGhostSolid < 0.5) {
         float span = fieldScale.y - fieldScale.x;
         float t = span > 1e-9 ? clamp((value - fieldScale.x) / span, 0.0, 1.0) : 0.0;
-        surfaceAlbedo = mix(surfaceAlbedo, texture(fieldLutSampler, vec2(t, 0.5)).rgb, fieldStrength);
+        frozenAlbedo = mix(surfaceAlbedo, texture(fieldLutSampler, vec2(t, 0.5)).rgb, fieldStrength);
       }
+      surfaceAlbedo = mix(frozenAlbedo, mix(surfaceAlbedo, fieldLiquidColor, fieldStrength), liquid);
+      castSimLiquid = fieldStrength * liquid;
       if (fieldLiquidBody > 0.5) {
-        alpha = stillLiquid ? 1.0 : fieldSolidAlpha;
+        alpha = mix(fieldSolidAlpha, 1.0, liquid);
       }
     }
   }
@@ -425,9 +487,11 @@ uniform float fieldGhostSolid;
     effect.setFloat('fieldCastOnly', state.castOnly ? 1 : 0);
     effect.setFloat('fieldDiscardOutside', state.discardOutside ? 1 : 0);
     effect.setFloat('fieldDiscardUnpaintable', state.discardUnpaintable ? 1 : 0);
+    effect.setFloat('fieldSkinClip', state.skinClip ? 1 : 0);
     // NO_SWEEP is above any field value the engine produces, so the shader's
     // `value > fieldSweepTime` is false everywhere and the paint is unchanged.
     effect.setFloat('fieldSweepTime', state.sweepTime ?? NO_SWEEP);
+    effect.setFloat('fieldLiquidBand', state.liquidBand);
     effect.setFloat3('fieldLiquidColor', state.liquidColor[0], state.liquidColor[1], state.liquidColor[2]);
     effect.setFloat('fieldLiquidGlow', state.liquidGlow);
     effect.setFloat('fieldLiquidBody', state.liquidBody ? 1 : 0);
@@ -438,6 +502,9 @@ uniform float fieldGhostSolid;
     effect.setTexture('fieldSamplerA', this.fieldTextureA ?? this._placeholderVolume);
     effect.setTexture('fieldSamplerB', this.fieldTextureB ?? this.fieldTextureA ?? this._placeholderVolume);
     effect.setTexture('fieldMaskSampler', this.maskTexture ?? this._placeholderVolume);
+    // The placeholder is a single zero byte: "inside", so an unbound skin
+    // never clips anything.
+    effect.setTexture('fieldSkinSampler', this.skinTexture ?? this._placeholderVolume);
     effect.setTexture('fieldLutSampler', this.lutTexture ?? this._placeholderLut);
   }
 }

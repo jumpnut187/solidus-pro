@@ -120,6 +120,33 @@ const MOLTEN_GLOW = 0.62;
 const FRONT_BLUR_STRENGTH = 0.3;
 
 /**
+ * How far ahead of the scrubber a sweep front's colour ramp reaches, as a
+ * fraction of the field's range.
+ *
+ * A frame mode's front is coloured by the fraction liquid just behind it,
+ * which is near 1 in a pool's body and falls toward 0.5 at the rim: hot in
+ * the middle, cooling at the edge. A sweep has no such quantity -- its field
+ * is a time -- so the front is coloured by how much longer the metal behind
+ * it stays liquid: metal that freezes within this much of the run after the
+ * current time ramps from red at the rim to yellow, and anything with more
+ * time left is yellow. Ramping over the whole range instead painted every
+ * early front dark red, and a dark red patch seen through a ghosted skin
+ * reads as a hole in the casting rather than as hot metal.
+ */
+const SWEEP_FRONT_SPAN = 0.15;
+
+/**
+ * How long the skin keeps glowing after the metal under it freezes, as a
+ * fraction of the field's range. See `FieldPaintState.liquidBand`.
+ *
+ * Wide enough that a frozen shell about one voxel thick -- where the skin's
+ * test point sits right on the front -- fades rather than flickers between
+ * molten and ghost from fragment to fragment; narrow enough that the skin is
+ * plainly a ghost well before the front has moved a second voxel in.
+ */
+const LIQUID_SKIN_BAND = 0.12;
+
+/**
  * Colour for metal the sweep has not reached, in linear space.
  *
  * The liquid end of the molten ramp, converted the same way the envelope's
@@ -351,6 +378,13 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
      */
     const liquidBody = liquidCutoff !== null && wantsEnvelope(state.style) && state.showResults;
 
+    // The sweep cut-off in the front's own normalized units; see SWEEP_FRONT_SPAN.
+    const quantSpan = quantMax - quantMin;
+    const sweepIso =
+      sweeping && liquidCutoff !== null && quantSpan > 1e-9
+        ? Math.min(1, Math.max(0, (liquidCutoff - quantMin) / quantSpan))
+        : 0;
+
     // In 'envelope' the shell is a ghost: it locates the defect in the part
     // but carries no colour of its own, so nothing competes with the surface
     // that does. In 'both' the shell keeps its paint and steps back.
@@ -384,6 +418,7 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
         plugin.state.castOnly = state.castOnly;
         plugin.state.strength = strength;
         plugin.state.sweepTime = liquidCutoff;
+        plugin.state.liquidBand = liquidBody ? LIQUID_SKIN_BAND * quantSpan : 0;
         plugin.state.liquidColor = LIQUID_COLOR;
         plugin.state.liquidGlow = MOLTEN_GLOW;
         plugin.state.liquidBody = liquidBody;
@@ -391,6 +426,9 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
         // One voxel: the layer the front is not allowed to enter.
         plugin.state.skinDepth = meta.spacing;
         plugin.state.ghostSolid = ghostShell;
+        // Off by default; only the contoured front is trimmed to the skin.
+        plugin.state.skinClip = false;
+        plugin.skinTexture = resources.skinTexture;
         plugin.fieldTextureA = stack ? stack.textureA : (field?.texture ?? null);
         plugin.fieldTextureB = stack ? stack.textureB : (field?.texture ?? null);
         plugin.maskTexture = resources.maskTexture;
@@ -398,8 +436,10 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       } else {
         plugin.state.strength = 0;
         plugin.state.sweepTime = null;
+        plugin.state.liquidBand = 0;
         plugin.state.liquidBody = false;
         plugin.state.ghostSolid = false;
+        plugin.state.skinClip = false;
       }
     };
 
@@ -452,6 +492,13 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     refs.envelope.clip.state.ghostSolid = false;
     refs.envelope.clip.state.discardOutside = molten;
     refs.envelope.clip.state.discardUnpaintable = molten && state.castOnly;
+    // The mask is the mesher's generous idea of the metal -- any voxel that
+    // touches the part -- so a surface clipped against it alone can stand half
+    // a voxel proud of the drawn skin. Where the server could measure the
+    // parts' real surface, every envelope is trimmed to that instead: a front
+    // ends exactly where the skin begins, and a defect envelope hugging the
+    // casting's rim stays inside it.
+    refs.envelope.clip.state.skinClip = resources?.skinTexture != null;
     refs.envelope.setStyle({
       // A molten front is coloured by the metal it encloses, so it takes the
       // molten map whatever the casting around it is painted with.
@@ -459,9 +506,10 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       // A front is contoured out of a normalized 0..1 grid, so its per-vertex
       // scalars are in those units and must be ramped over them, not over
       // whatever the legend has been clamped to. This is why the pool keeps
-      // its full molten range even when the scale is pinned.
-      scaleMin: molten ? 0 : scaleMin,
-      scaleMax: molten ? 1 : scaleMax,
+      // its full molten range even when the scale is pinned. A sweep ramps
+      // from the current time forward instead; see SWEEP_FRONT_SPAN.
+      scaleMin: molten ? (sweeping ? sweepIso : 0) : scaleMin,
+      scaleMax: molten ? (sweeping ? Math.min(1, sweepIso + SWEEP_FRONT_SPAN) : 1) : scaleMax,
       // Only reached when a surface arrives without per-vertex scalars.
       flatColor: METAL_COLOR,
       alpha: 1,

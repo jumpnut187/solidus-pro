@@ -104,6 +104,37 @@ export async function fetchMaskGrid(
   return { data: new Uint8Array(buffer), dims: parseDims(response.headers.get('X-Grid-Dims')) };
 }
 
+/** Signed distance from each cell to the parts' real surface; see `RunResources.skinTexture`. */
+export type SkinGridData = {
+  data: Uint8Array;
+  dims: [number, number, number];
+  /** Half-width of the encoded range, in voxels. Byte 127.5 is the surface. */
+  rangeVoxels: number;
+};
+
+/**
+ * The skin distance grid, or null when the server cannot build one.
+ *
+ * Missing part files or a lattice too large to measure come back as a 404,
+ * and that is not a failure of the run: the viewport clips the front against
+ * the mask instead, which is what it did before this grid existed. Only an
+ * abort propagates.
+ */
+export async function fetchSkinGrid(projectId: string, signal?: AbortSignal): Promise<SkinGridData | null> {
+  try {
+    const response = await fetchBinary(`${projectBase(projectId)}/skin`, signal);
+    const buffer = await response.arrayBuffer();
+    return {
+      data: new Uint8Array(buffer),
+      dims: parseDims(response.headers.get('X-Grid-Dims')),
+      rangeVoxels: parseNumber(response.headers.get('X-Skin-Range-Voxels'), 2)
+    };
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    return null;
+  }
+}
+
 /** One dense scalar grid, quantized to bytes. */
 export async function fetchFieldGrid(
   projectId: string,

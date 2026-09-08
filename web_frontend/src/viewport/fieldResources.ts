@@ -10,9 +10,15 @@
  */
 import type { RawTexture, RawTexture3D, Scene } from '@babylonjs/core';
 
-import { fetchFieldGrid, fetchFrames, fetchGridMeta, fetchMaskGrid } from '../lib/gridApi';
+import { fetchFieldGrid, fetchFrames, fetchGridMeta, fetchMaskGrid, fetchSkinGrid } from '../lib/gridApi';
 import type { ColormapId, GridMeta, ResultModeId } from '../lib/viewState';
-import { createColormapTexture, createFieldVolume, createMaskVolume, FrameStackTextures } from './fieldTextures';
+import {
+  createColormapTexture,
+  createFieldVolume,
+  createMaskVolume,
+  createSkinVolume,
+  FrameStackTextures
+} from './fieldTextures';
 import type { Dims, FrameSource } from './fieldTextures';
 
 /**
@@ -60,6 +66,19 @@ export class RunResources {
   readonly dims: Dims;
   readonly maskTexture: RawTexture3D;
   readonly mask: Uint8Array;
+  /**
+   * Signed distance to the parts' real surface, or null if the server could
+   * not measure it.
+   *
+   * The mask is the mesher's opinion of where the metal is, and the mesher
+   * counts a voxel as metal when its cube so much as touches the part. On a
+   * coarse lattice that leaves the voxel body up to half a voxel outside the
+   * STL, and anything clipped against the mask alone -- the liquid front
+   * above all -- stands that far proud of the skin. This grid is what the
+   * front is clipped against instead: it crosses one half exactly on the
+   * surface the casting is drawn with.
+   */
+  readonly skinTexture: RawTexture3D | null;
 
   private readonly _scene: Scene;
   private readonly _fields = new Map<ResultModeId, LoadedField>();
@@ -75,7 +94,8 @@ export class RunResources {
     projectId: string,
     meta: GridMeta,
     mask: Uint8Array,
-    maskTexture: RawTexture3D
+    maskTexture: RawTexture3D,
+    skinTexture: RawTexture3D | null
   ) {
     this._scene = scene;
     this.projectId = projectId;
@@ -83,6 +103,7 @@ export class RunResources {
     this.dims = [meta.dims[0], meta.dims[1], meta.dims[2]];
     this.mask = mask;
     this.maskTexture = maskTexture;
+    this.skinTexture = skinTexture;
   }
 
   static async load(
@@ -91,10 +112,14 @@ export class RunResources {
     signal: AbortSignal
   ): Promise<RunResources> {
     const meta = await fetchGridMeta(projectId, signal);
-    const mask = await fetchMaskGrid(projectId, signal);
+    const [mask, skin] = await Promise.all([fetchMaskGrid(projectId, signal), fetchSkinGrid(projectId, signal)]);
     const dims: Dims = [meta.dims[0], meta.dims[1], meta.dims[2]];
     const maskTexture = createMaskVolume(scene, mask.data, dims);
-    return new RunResources(scene, projectId, meta, mask.data, maskTexture);
+    // A skin grid of the wrong size would bind, sample garbage, and clip the
+    // front to noise; better none at all.
+    const skinTexture =
+      skin && skin.data.length === dims[0] * dims[1] * dims[2] ? createSkinVolume(scene, skin.data, dims) : null;
+    return new RunResources(scene, projectId, meta, mask.data, maskTexture, skinTexture);
   }
 
   /** Register the repaint hook for streamed frame arrivals. */
@@ -202,6 +227,7 @@ export class RunResources {
     if (this._disposed) return;
     this._disposed = true;
     this.maskTexture.dispose();
+    this.skinTexture?.dispose();
     for (const field of this._fields.values()) field.texture.dispose();
     for (const stack of this._stacks.values()) stack.dispose();
     this._fields.clear();

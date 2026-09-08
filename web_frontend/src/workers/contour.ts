@@ -20,6 +20,15 @@
  * Normals come from the central-difference gradient of the field at each
  * vertex, not from face normals, so the surface shades smoothly even where
  * the lattice is coarse relative to the curvature.
+ *
+ * The surface built here is deliberately a little too big. It is extracted in
+ * every cell that touches metal, and the mesher's idea of metal is any voxel
+ * whose cube touches the part, so the raw front reaches up to half a voxel
+ * beyond the casting's drawn skin. Nothing here tries to trim it back: the
+ * lattice cannot know where the STL is, and every attempt to approximate that
+ * with the mask either left the front proud of the skin or tore holes in it.
+ * The trim is done per fragment in the renderer, against the skin distance
+ * grid the server measures from the real part surfaces.
  */
 import type { ContourInit, ContourMessage, ContourRequest, ContourResult } from './contourTypes';
 
@@ -218,7 +227,8 @@ const CAST_CODE = 1;
  * solid *within* the metal, which is the only place a front physically is.
  * Where liquid runs to the mold wall the surface simply ends, which is why the
  * envelope material is two-sided. Anything the extension does produce out
- * beyond the casting is discarded per fragment against the same mask.
+ * beyond the casting is discarded per fragment -- against the parts' real
+ * surface where the run has a skin grid, and against this mask otherwise.
  */
 function buildField(current: State, request: ContourRequest): boolean {
   const { cellCount, mask, field, blurValue, blurWeight } = current;
@@ -393,8 +403,10 @@ function contour(request: ContourRequest): ContourResult | null {
         // Every corner also removes the tongues, but it takes the front out of
         // the whole boundary cell layer with it, and where the frozen shell is
         // thinner than a cell -- the fillet at the riser base, at 0.26 in --
-        // that left the liquid body open. The vertex itself is checked instead,
-        // below, which is the guarantee that actually matters.
+        // that left the liquid body open. Any corner keeps the front in every
+        // cell the casting's surface passes through, which is what lets the
+        // renderer's clip end it exactly on the skin; what it also builds in
+        // the mold beside the riser, the clip throws away.
         let metalCorners = 0;
         for (let c = 0; c < 8; c += 1) {
           const [dx, dy, dz] = CORNERS[c];
@@ -437,29 +449,21 @@ function contour(request: ContourRequest): ContourResult | null {
         const localY = sumY / crossings;
         const localZ = sumZ / crossings;
 
-        // The vertex must land in metal. This is the promise the renderer
-        // relies on: no part of the front hangs off the casting, so nothing
-        // has to be trimmed away afterwards to hide a drip.
-        //
-        // Tested on the *stored* coordinates, rounded to float32 exactly as
-        // the output buffer will hold them. A vertex sitting on a cell
-        // boundary otherwise answers this question one way here and the other
-        // way to anything that reads the buffer back.
-        const worldX = Math.fround(origin[0] + (ix + localX) * spacing);
-        const worldY = Math.fround(origin[1] + (iy + localY) * spacing);
-        const worldZ = Math.fround(origin[2] + (iz + localZ) * spacing);
-        if (
-          !usableCell(
-            Math.round((worldX - origin[0]) / spacing),
-            Math.round((worldY - origin[1]) / spacing),
-            Math.round((worldZ - origin[2]) / spacing)
-          )
-        ) {
-          continue;
-        }
-
+        // Every straddling cell that touches metal keeps its vertex, whether
+        // or not the vertex itself rounds to a metal cell. This used to drop
+        // the vertex when it did not, to keep the front off the mold -- but a
+        // dropped vertex takes the quads of up to twelve lattice edges with
+        // it, and those edges run through the *inside* of the pool wherever
+        // the front meets a wall at an angle. The pool came out torn along
+        // every wall it touched. Trimming is the fragment shader's job: it
+        // clips against the parts' real surface, which this lattice does not
+        // know, and against the mask where the run has no skin grid.
         cellVertex[cellIndex(ix, iy, iz)] = positions.length / 3;
-        positions.push(worldX, worldY, worldZ);
+        positions.push(
+          Math.fround(origin[0] + (ix + localX) * spacing),
+          Math.fround(origin[1] + (iy + localY) * spacing),
+          Math.fround(origin[2] + (iz + localZ) * spacing)
+        );
 
         // Central-difference gradient, one cell out, clamped at the border.
         const gx =
@@ -517,12 +521,19 @@ function contour(request: ContourRequest): ContourResult | null {
   };
 
   // One quad per sign-changing lattice edge, joining the four cells around it.
-  for (let iz = 1; iz < nz - 1; iz += 1) {
-    for (let iy = 1; iy < ny - 1; iy += 1) {
-      for (let ix = 1; ix < nx - 1; ix += 1) {
+  //
+  // An edge along x from (ix, iy, iz) is shared by the cells at iy-1..iy and
+  // iz-1..iz, so it needs iy and iz to be at least 1 -- but ix may be 0. The
+  // loops used to start every axis at 1, which silently skipped the edges
+  // leaving the first lattice plane of each axis. On a lattice that hugs the
+  // voxel extents that first plane is the underside of the plate, and the
+  // front had vertices but no quads for the whole layer above it.
+  for (let iz = 0; iz < nz - 1; iz += 1) {
+    for (let iy = 0; iy < ny - 1; iy += 1) {
+      for (let ix = 0; ix < nx - 1; ix += 1) {
         const here = insideAt(sampleAt(ix, iy, iz));
 
-        if (ix < nx - 1 && here !== insideAt(sampleAt(ix + 1, iy, iz))) {
+        if (iy > 0 && iz > 0 && here !== insideAt(sampleAt(ix + 1, iy, iz))) {
           quad(
             cellVertex[cellIndex(ix, iy - 1, iz - 1)],
             cellVertex[cellIndex(ix, iy, iz - 1)],
@@ -531,7 +542,7 @@ function contour(request: ContourRequest): ContourResult | null {
             here
           );
         }
-        if (iy < ny - 1 && here !== insideAt(sampleAt(ix, iy + 1, iz))) {
+        if (ix > 0 && iz > 0 && here !== insideAt(sampleAt(ix, iy + 1, iz))) {
           quad(
             cellVertex[cellIndex(ix - 1, iy, iz - 1)],
             cellVertex[cellIndex(ix, iy, iz - 1)],
@@ -540,7 +551,7 @@ function contour(request: ContourRequest): ContourResult | null {
             !here
           );
         }
-        if (iz < nz - 1 && here !== insideAt(sampleAt(ix, iy, iz + 1))) {
+        if (ix > 0 && iy > 0 && here !== insideAt(sampleAt(ix, iy, iz + 1))) {
           quad(
             cellVertex[cellIndex(ix - 1, iy - 1, iz)],
             cellVertex[cellIndex(ix, iy - 1, iz)],

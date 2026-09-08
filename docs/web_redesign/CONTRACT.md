@@ -74,6 +74,7 @@ JSON artifact and serve dense grids from it:
 |---|---|
 | `GET /api/projects/<id>/grid` | JSON: dims, origin, spacing, available modes with ranges and units, frame counts and times, part-type code table, statistics |
 | `GET /api/projects/<id>/grid/mask` | binary Uint8 grid, 0 = outside, otherwise part-type code |
+| `GET /api/projects/<id>/grid/skin` | binary Uint8 grid of signed distance from each cell center to the parts' STL surfaces, in voxels, clamped to `±X-Skin-Range-Voxels` with the surface at 127.5. The mask overhangs the STL by up to half a voxel; the liquid front is clipped against this instead. 404 when no part file can be measured |
 | `GET /api/projects/<id>/grid/<mode>` | binary Float32 (or normalized Uint8/Uint16 with a scale header) dense grid, outside cells filled with the nearest inside value so trilinear sampling does not bleed |
 | `GET /api/projects/<id>/grid/<mode>/frames?start=&count=` | consecutive time frames for `fraction_liquid` and `fill_animation`, quantized to Uint8, frame-major |
 | `GET /api/projects/<id>/grid/<mode>/isosurface?threshold=&cast_only=&scalars=&frame=` | one binary block: `positions Float32[3V]`, `normals Float32[3V]`, `indices Uint32[3T]`, then `scalars Float32[V]` unless `scalars=0`. Counts and the field range travel in `X-*` headers. Contoured from the dense grid, masked to the metal, so a surface cannot leak through the mold |

@@ -23,6 +23,7 @@ from flask import Blueprint, Response, current_app, jsonify, request
 
 from web import fields
 from web import repository as repo
+from web import skin
 from web.services.simulation_queue import SimulationQueueManager
 
 fields_bp = Blueprint("web_fields", __name__, url_prefix="/api")
@@ -85,6 +86,38 @@ def grid_mask(project_id: str):
         {
             "X-Grid-Dims": _dims_header(grids),
             "X-Grid-Dtype": "uint8",
+        },
+    )
+
+
+@fields_bp.route("/projects/<project_id>/grid/skin")
+def grid_skin(project_id: str):
+    """
+    Uint8 signed distance from each cell center to the parts' real surface.
+
+    The mask says which voxels the mesher counted as metal; this says where
+    the STL actually is, which on a coarse lattice is up to half a voxel
+    inside the mask's edge. Distances are in voxels, clamped to
+    ``+-X-Skin-Range-Voxels`` and mapped onto ``0..255`` with the surface at
+    127.5, so sampled linearly the grid crosses one half exactly on the skin.
+
+    404 when it cannot be built -- the part files are gone, or the lattice is
+    too large to measure -- and the client clips against the mask instead.
+    """
+    grids, failure = _grids_or_error(project_id)
+    if failure is not None:
+        return failure
+    assert grids is not None
+    parts = repo.get_parts(_database_path(), project_id)
+    grid = skin.load_skin_grid(project_id, grids.lattice, grids.mask, parts, _artifact_path(project_id))
+    if grid is None:
+        return jsonify({"error": "No part geometry is available to measure this run against"}), 404
+    return _binary_response(
+        grid.tobytes(),
+        {
+            "X-Grid-Dims": _dims_header(grids),
+            "X-Grid-Dtype": "uint8",
+            "X-Skin-Range-Voxels": repr(float(grid.range_voxels)),
         },
     )
 

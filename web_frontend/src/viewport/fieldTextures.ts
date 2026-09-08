@@ -52,6 +52,14 @@ export function createMaskVolume(scene: Scene, data: Uint8Array, dims: Dims): Ra
   return createVolume(scene, data, dims, Texture.NEAREST_SAMPLINGMODE, 'field-mask');
 }
 
+/**
+ * The skin distance: linear, so its zero crossing is the smooth surface of
+ * the part rather than a staircase of voxel faces.
+ */
+export function createSkinVolume(scene: Scene, data: Uint8Array, dims: Dims): RawTexture3D {
+  return createVolume(scene, data, dims, Texture.BILINEAR_SAMPLINGMODE, 'field-skin');
+}
+
 /** A 256x1 RGBA ramp of the chosen colormap, sampled by normalized value. */
 export function createColormapTexture(scene: Scene, colormap: ColormapId): RawTexture {
   const texture = RawTexture.CreateRGBATexture(

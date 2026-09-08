@@ -109,6 +109,7 @@ All routes are under `/api`.
 |---|---|---|
 | GET | `/projects/<id>/grid` | dims, origin, spacing, modes, ranges, frames, statistics |
 | GET | `/projects/<id>/grid/mask` | binary part-type mask |
+| GET | `/projects/<id>/grid/skin` | binary signed distance to the parts' real surface, in voxels; 404 when the part files are gone |
 | GET | `/projects/<id>/grid/<mode>` | binary dense field |
 | GET | `/projects/<id>/grid/<mode>/frames` | consecutive time frames |
 | GET | `/projects/<id>/grid/<mode>/isosurface` | contoured geometry as a binary block |

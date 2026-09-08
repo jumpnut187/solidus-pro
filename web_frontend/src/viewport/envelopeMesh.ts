@@ -62,14 +62,16 @@ export class EnvelopeMesh {
   private readonly _material: PBRMaterial;
   private readonly _glow: MoltenGlowPluginMaterial;
   /**
-   * The occupancy mask, used only to throw fragments away.
+   * The occupancy mask and the skin distance, used only to throw fragments
+   * away.
    *
    * The contourer no longer walls the metal off with a sentinel value -- that
    * is what made a fully liquid casting produce a second copy of its own
    * surface -- so the field it contours now extends past the casting, and a
    * level set can too. Painting is off (`strength` 0); this exists purely so
-   * that whatever the extension produces outside the metal never reaches the
-   * screen.
+   * that whatever the surface does outside the casting never reaches the
+   * screen. The cut is made against the parts' real surface when the run has
+   * a skin grid, and against the voxel mask when it does not.
    */
   private readonly _clip: FieldPaintPluginMaterial;
   private _scalars: Float32Array | null = null;
@@ -93,13 +95,15 @@ export class EnvelopeMesh {
     // multiplies the albedo by it -- so the albedo has to be white for the
     // colour buffer to survive unaltered.
     this._material.albedoColor = Color3.White();
-    // A level set of a filled region lands exactly on the metal boundary --
-    // which is where the casting's own surface is. Two surfaces at the same
-    // depth z-fight into stripes, and the one that should win is the one the
-    // user asked to see, so the isosurface is biased a hair toward the
-    // camera. A depth bias rather than moved geometry: the surface stays
-    // where the field says it is.
-    this._material.zOffset = -2;
+    // No depth bias. There used to be one, pulling the surface a hair toward
+    // the camera so that a level set lying on the casting's own surface would
+    // win the z-fight with the skin. Now that the surface is clipped exactly
+    // at the skin, the two only coincide along the seam where the front meets
+    // it, and a bias did real harm elsewhere: any front within a hair of the
+    // surface *inside* the metal -- a one-voxel frozen pocket under the plate
+    // top, the rim of a pool just under the riser wall -- punched through an
+    // opaque skin that should have hidden it, as dark spots and crack lines.
+    this._material.zOffset = 0;
     this._glow = new MoltenGlowPluginMaterial(this._material);
     this._clip = createClip(this._material);
     this._clip.state.strength = 0;
