@@ -117,18 +117,6 @@ class WebToolsTestCase(unittest.TestCase):
         self.assertEqual(second["display_name"], "cast")
         self.assertNotEqual(first["filepath"], second["filepath"])
 
-    def test_stored_part_names_lose_a_legacy_prefix_on_read(self) -> None:
-        project_id = self._create_project()
-        repo.add_part(
-            self.database_path,
-            project_id,
-            {"name": "602e27b4_b0_cast", "part_type": "cast", "filepath": "x.stl"},
-        )
-
-        parts = repo.get_parts(self.database_path, project_id)
-
-        self.assertEqual(parts[0]["name"], "cast")
-
     # -- part geometry restore -------------------------------------------
 
     def test_part_mesh_route_returns_geometry_for_a_stored_part(self) -> None:
@@ -637,6 +625,42 @@ class RiserDesignRouteTests(WebToolsTestCase):
         self.assertAlmostEqual(float(mesh.centroid[2]), 4.4, places=3)
         self.assertAlmostEqual(float(mesh.bounds[1][2] - mesh.bounds[0][2]), 6.0, places=3)
 
+    def test_apply_names_a_riser_after_its_type_when_none_is_given(self) -> None:
+        project_id = self._create_project()
+
+        response = self.client.post(
+            f"/api/projects/{project_id}/riser-design/apply",
+            json={
+                "risers": [
+                    {
+                        "diameter_in": 3.0,
+                        "height_in": 4.0,
+                        "position": [0, 0, 0],
+                        "riser_type": "BLIND",
+                    }
+                ]
+            },
+        )
+
+        # The design modal sends recommendations, which carry no name. The
+        # sanitizer's own fallback is the string "body", so the default has to
+        # be picked before sanitizing or every automatic riser is called "body".
+        self.assertEqual(response.get_json()["parts"][0]["name"], "AutoRiser_1_BLIND")
+
+    def test_apply_keeps_a_supplied_name(self) -> None:
+        project_id = self._create_project()
+
+        response = self.client.post(
+            f"/api/projects/{project_id}/riser-design/apply",
+            json={
+                "risers": [
+                    {"diameter_in": 3.0, "height_in": 4.0, "position": [0, 0, 0], "name": "Top feeder"}
+                ]
+            },
+        )
+
+        self.assertEqual(response.get_json()["parts"][0]["name"], "Top_feeder")
+
     def test_apply_marks_an_open_riser_as_open_top(self) -> None:
         project_id = self._create_project()
 
@@ -688,31 +712,572 @@ class JobLogTests(WebToolsTestCase):
 
         self.assertFalse(payload["available"])
         self.assertEqual(payload["lines"], [])
-        self.assertEqual(payload["total"], 0)
+        self.assertEqual(payload["next"], 0)
 
-    def test_log_route_returns_only_the_tail_after_since(self) -> None:
+    def test_log_route_returns_the_whole_buffer_by_default(self) -> None:
         project_id = self._create_project()
         manager = self.app.extensions["simulation_queue_manager"]
         manager._init_manager()
-        manager.simulation_logs[project_id] = ["one", "two", "three"]
+        manager.simulation_logs[project_id] = {"lines": ["one", "two", "three"], "first": 0}
 
         full = self.client.get(f"/api/projects/{project_id}/log").get_json()
-        tail = self.client.get(f"/api/projects/{project_id}/log?since=2").get_json()
 
         self.assertEqual(full["lines"], ["one", "two", "three"])
         self.assertTrue(full["available"])
-        self.assertEqual(tail["lines"], ["three"])
-        self.assertEqual(tail["total"], 3)
+        self.assertEqual(full["next"], 3)
 
     def test_clear_tracking_drops_the_log(self) -> None:
         project_id = self._create_project()
         manager = self.app.extensions["simulation_queue_manager"]
         manager._init_manager()
-        manager.simulation_logs[project_id] = ["one"]
+        manager.simulation_logs[project_id] = {"lines": ["one"], "first": 0}
 
         manager.clear_tracking(project_id)
 
         self.assertIsNone(manager.get_log(project_id))
+
+
+class PartFilePathSecurityTests(WebToolsTestCase):
+    """A part's file path is a file-read primitive unless it is confined.
+
+    Chain that used to work: add a part whose ``filepath`` is any file on the
+    server, duplicate the project (which copies part files into the upload
+    folder), then fetch it back through ``/api/uploads/<name>``.
+    """
+
+    def _secret(self) -> Path:
+        secret = Path(self.temp_dir.name) / "secret.pem"
+        secret.write_text("BEGIN PRIVATE KEY\ntop secret\n")
+        return secret
+
+    def test_add_part_refuses_a_path_outside_the_upload_folder(self) -> None:
+        project_id = self._create_project()
+        secret = self._secret()
+
+        response = self.client.post(
+            f"/api/projects/{project_id}/parts",
+            json={"name": "innocent", "part_type": "cast", "filepath": str(secret)},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("upload folder", response.get_json()["error"])
+        self.assertEqual(repo.get_parts(self.database_path, project_id), [])
+
+    def test_update_part_refuses_a_path_outside_the_upload_folder(self) -> None:
+        project_id = self._create_project()
+        uploaded = self._upload("cast.stl")
+        part_id = self._add_part(project_id, uploaded, "cast")
+        secret = self._secret()
+
+        response = self.client.put(
+            f"/api/projects/{project_id}/parts/{part_id}",
+            json={"name": "cast", "part_type": "cast", "filepath": str(secret)},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        stored = repo.get_part(self.database_path, project_id, part_id)
+        self.assertEqual(Path(stored["filepath"]).resolve(), Path(uploaded["filepath"]).resolve())
+
+    def test_add_part_refuses_a_traversal_relative_path(self) -> None:
+        project_id = self._create_project()
+        self._secret()
+
+        response = self.client.post(
+            f"/api/projects/{project_id}/parts",
+            json={"name": "x", "part_type": "cast", "filepath": "../secret.pem"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_add_part_ignores_fields_outside_the_whitelist(self) -> None:
+        project_id = self._create_project()
+        uploaded = self._upload("cast.stl")
+
+        response = self.client.post(
+            f"/api/projects/{project_id}/parts",
+            json={
+                "name": "cast",
+                "part_type": "cast",
+                "filepath": uploaded["filepath"],
+                "id": "attacker-chosen",
+                "project_id": "somewhere-else",
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        part = response.get_json()["part"]
+        self.assertNotEqual(part["id"], "attacker-chosen")
+        self.assertEqual(part["project_id"], project_id)
+
+    def test_duplicate_will_not_copy_a_file_from_outside_the_upload_folder(self) -> None:
+        project_id = self._create_project()
+        secret = self._secret()
+        # Straight to SQL: add_part refuses this path now, and the point of
+        # the test is a row written before that check existed.
+        with repo.get_db_connection(self.database_path) as db:
+            db.execute(
+                "INSERT INTO parts (id, project_id, name, part_type, filepath) VALUES (?,?,?,?,?)",
+                ("legacy01", project_id, "legacy", "cast", str(secret)),
+            )
+
+        response = self.client.post(f"/api/projects/{project_id}/duplicate", json={})
+
+        self.assertEqual(response.status_code, 201)
+        copies = list(self.upload_folder.glob("*"))
+        self.assertEqual(copies, [], "the foreign file must not be laundered into the served folder")
+        copy_id = response.get_json()["id"]
+        # The copy keeps pointing at the original path, which nothing serves.
+        self.assertEqual(repo.get_parts(self.database_path, copy_id)[0]["filepath"], str(secret))
+
+    def test_resolve_upload_path_accepts_a_file_inside_the_folder(self) -> None:
+        inside = self.upload_folder / "ok.stl"
+        inside.write_bytes(b"x")
+
+        self.assertEqual(
+            repo.resolve_upload_path(str(inside), self.upload_folder), str(inside.resolve())
+        )
+        self.assertEqual(repo.resolve_upload_path("ok.stl", self.upload_folder), str(inside.resolve()))
+
+    def test_resolve_upload_path_rejects_escapes(self) -> None:
+        for candidate in ("../secret.pem", "/etc/passwd", "sub/../../out.stl"):
+            with self.assertRaises(repo.UnsafePartFileError):
+                repo.resolve_upload_path(candidate, self.upload_folder)
+
+
+class RiserApplySecurityTests(WebToolsTestCase):
+    """The riser name is user text and must never reach the filesystem."""
+
+    def _apply(self, name: str, **overrides):
+        payload = {
+            "diameter_in": 2.0,
+            "height_in": 3.0,
+            "position": [0.0, 0.0, 0.0],
+            "name": name,
+        }
+        payload.update(overrides)
+        project_id = overrides.pop("project_id", None) or self._create_project()
+        return project_id, self.client.post(
+            f"/api/projects/{project_id}/riser-design/apply", json={"risers": [payload]}
+        )
+
+    def test_a_traversing_name_cannot_write_outside_the_upload_folder(self) -> None:
+        outside = Path(self.temp_dir.name) / "OUTSIDE"
+        outside.mkdir()
+
+        project_id, response = self._apply("../../OUTSIDE/pwned")
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(list(outside.glob("*")), [], "nothing may be written outside the folder")
+        stored = repo.get_parts(self.database_path, project_id)[0]
+        # The on-disk name is derived server-side and carries no user text.
+        self.assertRegex(Path(stored["filepath"]).name, r"^[0-9a-f]{8}_b0_riser_1\.stl$")
+        self.assertEqual(Path(stored["filepath"]).parent.resolve(), self.upload_folder.resolve())
+
+    def test_an_absolute_name_cannot_steer_the_export(self) -> None:
+        project_id, response = self._apply("/tmp/pwned")
+
+        self.assertEqual(response.status_code, 201)
+        stored = repo.get_parts(self.database_path, project_id)[0]
+        self.assertEqual(Path(stored["filepath"]).parent.resolve(), self.upload_folder.resolve())
+        self.assertFalse(Path("/tmp/pwned.stl").exists())
+
+    def test_a_very_long_name_does_not_break_the_write(self) -> None:
+        project_id, response = self._apply("A" * 300)
+
+        self.assertEqual(response.status_code, 201)
+        stored = repo.get_parts(self.database_path, project_id)[0]
+        # The display name is truncated, and the filename never used it.
+        self.assertLessEqual(len(stored["name"]), 120)
+        self.assertTrue(Path(stored["filepath"]).exists())
+
+    def test_a_bad_entry_leaves_no_partial_state(self) -> None:
+        project_id = self._create_project()
+
+        response = self.client.post(
+            f"/api/projects/{project_id}/riser-design/apply",
+            json={
+                "risers": [
+                    {"diameter_in": 2.0, "height_in": 3.0, "position": [0, 0, 0]},
+                    {"diameter_in": 2.0, "height_in": 3.0, "position": [0, 0, 0]},
+                    {"diameter_in": -1.0, "height_in": 3.0, "position": [0, 0, 0]},
+                ]
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        # Validation happens before any write, so the two good entries that
+        # preceded the bad one were never applied.
+        self.assertEqual(repo.get_parts(self.database_path, project_id), [])
+        self.assertEqual(list(self.upload_folder.glob("*")), [])
+
+    def test_non_finite_dimensions_are_refused(self) -> None:
+        project_id = self._create_project()
+
+        response = self.client.post(
+            f"/api/projects/{project_id}/riser-design/apply",
+            json={"risers": [{"diameter_in": 2.0, "height_in": 3.0, "position": [0, 0, "nan"]}]},
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_too_many_risers_at_once_is_refused(self) -> None:
+        import web.routes_tools as tools
+
+        project_id = self._create_project()
+        risers = [
+            {"diameter_in": 1.0, "height_in": 1.0, "position": [0, 0, 0]}
+        ] * (tools.MAX_RISERS_PER_APPLY + 1)
+
+        response = self.client.post(
+            f"/api/projects/{project_id}/riser-design/apply", json={"risers": risers}
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+
+class ReportEscapingTests(WebToolsTestCase):
+    """A report is the artifact most likely to be mailed around a foundry."""
+
+    def test_html_report_escapes_a_hostile_project_name(self) -> None:
+        project_id = self._create_project(name="<script>alert(1)</script>")
+
+        body = self.client.post(
+            f"/api/projects/{project_id}/report", json={"format": "html"}
+        ).get_data(as_text=True)
+
+        self.assertNotIn("<script>alert(1)</script>", body)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", body)
+
+    def test_html_report_escapes_a_hostile_part_name(self) -> None:
+        project_id = self._create_project()
+        uploaded = self._upload("cast.stl")
+        self._add_part(project_id, uploaded, '"><img src=x onerror=alert(1)>')
+
+        body = self.client.post(
+            f"/api/projects/{project_id}/report",
+            json={"format": "html", "sections": {"parts": True}},
+        ).get_data(as_text=True)
+
+        self.assertNotIn("<img src=x onerror=alert(1)>", body)
+        self.assertIn("&lt;img src=x onerror=alert(1)&gt;", body)
+
+    def test_markdown_report_escapes_hostile_text(self) -> None:
+        project_id = self._create_project(name="<script>alert(1)</script>")
+
+        body = self.client.post(
+            f"/api/projects/{project_id}/report", json={"format": "markdown"}
+        ).get_data(as_text=True)
+
+        self.assertNotIn("<script>", body)
+
+    def test_report_rejects_a_non_object_sections_field(self) -> None:
+        project_id = self._create_project()
+
+        response = self.client.post(
+            f"/api/projects/{project_id}/report", json={"format": "html", "sections": ["parts"]}
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_report_rejects_a_screenshot_that_is_not_a_png(self) -> None:
+        import base64
+
+        project_id = self._create_project()
+
+        response = self.client.post(
+            f"/api/projects/{project_id}/report",
+            json={
+                "format": "html",
+                "sections": {"screenshot": True},
+                "screenshot": base64.b64encode(b"GIF89a not a png").decode(),
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("PNG", response.get_json()["error"])
+
+    def test_report_rejects_an_oversized_screenshot(self) -> None:
+        import base64
+
+        import web.routes_tools as tools
+
+        project_id = self._create_project()
+        payload = tools.PNG_MAGIC + b"\x00" * (tools.MAX_SCREENSHOT_BYTES + 1)
+
+        response = self.client.post(
+            f"/api/projects/{project_id}/report",
+            json={
+                "format": "html",
+                "sections": {"screenshot": True},
+                "screenshot": base64.b64encode(payload).decode(),
+            },
+        )
+
+        self.assertEqual(response.status_code, 413)
+
+
+class ImportRobustnessTests(WebToolsTestCase):
+    def test_import_rejects_a_non_scalar_schema_version(self) -> None:
+        import io
+        import json
+
+        payload = {"schema_version": {}, "simulation": {}, "parts": []}
+
+        response = self.client.post(
+            "/api/projects/import",
+            data={"project": (io.BytesIO(json.dumps(payload).encode()), "broken.json")},
+            content_type="multipart/form-data",
+        )
+
+        # int({}) raises TypeError, which used to escape as a 500.
+        self.assertEqual(response.status_code, 400)
+
+    def test_import_rejects_a_json_array(self) -> None:
+        import io
+
+        response = self.client.post(
+            "/api/projects/import",
+            data={"project": (io.BytesIO(b"[1, 2, 3]"), "list.json")},
+            content_type="multipart/form-data",
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_import_rejects_an_oversized_project_file(self) -> None:
+        import io
+
+        import web.routes_tools as tools
+
+        blob = b"{" + b" " * (tools.MAX_PROJECT_FILE_BYTES + 16)
+
+        response = self.client.post(
+            "/api/projects/import",
+            data={"project": (io.BytesIO(blob), "huge.json")},
+            content_type="multipart/form-data",
+        )
+
+        self.assertEqual(response.status_code, 413)
+
+    def test_import_survives_malformed_part_transforms(self) -> None:
+        import io
+        import json
+
+        payload = {
+            "schema_version": 2,
+            "simulation": {"alloy_name": "WCB"},
+            "ui_state": [],
+            "parts": [
+                {"filepath": "cast.stl", "name": "cast", "position": "nope", "rotation": [1, 2]},
+            ],
+        }
+
+        response = self.client.post(
+            "/api/projects/import",
+            data={
+                "project": (io.BytesIO(json.dumps(payload).encode()), "odd.solidus-project.json"),
+                "files": (io.BytesIO(_cube_stl_bytes()), "cast.stl"),
+            },
+            content_type="multipart/form-data",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        parts = repo.get_parts(self.database_path, response.get_json()["id"])
+        self.assertEqual(len(parts), 1)
+        # A position that is not three numbers falls back to the origin rather
+        # than raising; the schema loader pads a short rotation itself.
+        self.assertEqual(
+            (parts[0]["position_x"], parts[0]["position_y"], parts[0]["position_z"]),
+            (0.0, 0.0, 0.0),
+        )
+
+    def test_import_reports_display_name_collisions_instead_of_overwriting(self) -> None:
+        import io
+        import json
+
+        payload = {
+            "schema_version": 2,
+            "simulation": {"alloy_name": "WCB"},
+            "ui_state": {},
+            "parts": [{"filepath": "bracket.stl", "name": "bracket"}],
+        }
+
+        response = self.client.post(
+            "/api/projects/import",
+            data={
+                "project": (io.BytesIO(json.dumps(payload).encode()), "p.solidus-project.json"),
+                "files": [
+                    (io.BytesIO(_cube_stl_bytes()), "bracket.stl"),
+                    (io.BytesIO(_cube_stl_bytes(3.0)), "bracket.stl"),
+                ],
+            },
+            content_type="multipart/form-data",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        body = response.get_json()
+        # The second body did not silently replace the first.
+        self.assertEqual(body["name_collisions"], ["bracket"])
+        self.assertEqual(body["missing_parts"], [])
+
+
+class JobLogCursorTests(WebToolsTestCase):
+    def _manager(self):
+        manager = self.app.extensions["simulation_queue_manager"]
+        manager._init_manager()
+        return manager
+
+    def test_cursor_survives_the_ring_buffer_wrapping(self) -> None:
+        project_id = self._create_project()
+        manager = self._manager()
+        # 20 lines produced, but only the last 5 kept: sequence numbers 15..19.
+        manager.simulation_logs[project_id] = {
+            "lines": [f"line {n}" for n in range(15, 20)],
+            "first": 15,
+        }
+
+        # A client still holding cursor 5 must be told it fell behind and be
+        # given everything still available, not an empty list forever.
+        payload = self.client.get(f"/api/projects/{project_id}/log?since=5").get_json()
+
+        self.assertEqual(payload["dropped"], 10)
+        self.assertEqual(payload["lines"], [f"line {n}" for n in range(15, 20)])
+        self.assertEqual(payload["next"], 20)
+
+    def test_cursor_returns_only_the_tail(self) -> None:
+        project_id = self._create_project()
+        manager = self._manager()
+        manager.simulation_logs[project_id] = {"lines": ["a", "b", "c"], "first": 0}
+
+        payload = self.client.get(f"/api/projects/{project_id}/log?since=2").get_json()
+
+        self.assertEqual(payload["lines"], ["c"])
+        self.assertEqual(payload["next"], 3)
+        self.assertEqual(payload["dropped"], 0)
+
+    def test_a_rerun_resets_the_buffer_rather_than_appending(self) -> None:
+        from web.services.simulation_queue import JOB_LOG_LINES
+
+        project_id = self._create_project()
+        manager = self._manager()
+        manager.simulation_logs[project_id] = {"lines": ["old run"], "first": 0}
+
+        # What the worker does at the top of a run.
+        manager.simulation_logs[project_id] = {"lines": [], "first": 0}
+
+        payload = self.client.get(f"/api/projects/{project_id}/log").get_json()
+        self.assertEqual(payload["lines"], [])
+        self.assertEqual(payload["next"], 0)
+        self.assertGreater(JOB_LOG_LINES, 0)
+
+    def test_log_for_a_project_that_never_ran(self) -> None:
+        project_id = self._create_project()
+
+        payload = self.client.get(f"/api/projects/{project_id}/log").get_json()
+
+        self.assertFalse(payload["available"])
+        self.assertEqual(payload["lines"], [])
+
+
+class HardwareTierTests(WebToolsTestCase):
+    def test_hardware_reports_core_tiers_by_name(self) -> None:
+        payload = self.client.get("/api/hardware").get_json()
+
+        self.assertIn("core_tiers", payload)
+        self.assertIsInstance(payload["core_tiers"], list)
+        for tier in payload["core_tiers"]:
+            self.assertIsInstance(tier["name"], str)
+            self.assertTrue(tier["name"])
+            self.assertGreater(tier["cores"], 0)
+
+    def test_core_tier_detection_reads_names_not_positions(self) -> None:
+        """The tiers must come from ``hw.perflevelN.name``, not an assumption.
+
+        This machine reports perflevel0 = "Super" and perflevel1 =
+        "Performance", so a detector that assumed position would label twelve
+        fast cores as efficiency cores.
+        """
+        import platform
+
+        from config.hardware_config import HardwareConfig
+
+        if platform.system() != "Darwin":
+            self.skipTest("performance levels are a macOS concept")
+        tiers = HardwareConfig()._detect_core_tiers()
+        if not tiers:
+            self.skipTest("this CPU reports no performance levels")
+        total = sum(tier["cores"] for tier in tiers)
+        self.assertGreater(total, 0)
+        self.assertTrue(all(tier["name"] for tier in tiers))
+
+
+class ArtifactCacheTests(WebToolsTestCase):
+    def test_artifact_cache_reparses_when_the_file_changes(self) -> None:
+        import json
+        import os
+
+        import web.routes_tools as tools
+
+        tools._ARTIFACT_CACHE.clear()
+        path = Path(self.temp_dir.name) / "artifact.json"
+        path.write_text(json.dumps({"summary": {"voxel_count": 1}, "visualization": {}}))
+
+        first = tools._read_artifact_cached(str(path))
+        cached = tools._read_artifact_cached(str(path))
+        self.assertIs(first, cached, "an unchanged artifact should not be re-parsed")
+
+        path.write_text(json.dumps({"summary": {"voxel_count": 2}, "visualization": {}}))
+        os.utime(path, (0, 0))
+        second = tools._read_artifact_cached(str(path))
+
+        self.assertEqual(second["summary"]["voxel_count"], 2)
+
+    def test_artifact_cache_is_bounded(self) -> None:
+        import json
+
+        import web.routes_tools as tools
+
+        tools._ARTIFACT_CACHE.clear()
+        for index in range(tools._ARTIFACT_CACHE_MAX + 3):
+            path = Path(self.temp_dir.name) / f"a{index}.json"
+            path.write_text(json.dumps({"summary": {"n": index}, "visualization": {}}))
+            tools._read_artifact_cached(str(path))
+
+        self.assertLessEqual(len(tools._ARTIFACT_CACHE), tools._ARTIFACT_CACHE_MAX)
+
+    def test_missing_artifact_returns_none(self) -> None:
+        import web.routes_tools as tools
+
+        self.assertIsNone(tools._read_artifact_cached(str(Path(self.temp_dir.name) / "gone.json")))
+
+
+class PartNameTests(WebToolsTestCase):
+    def test_a_users_own_name_is_never_rewritten_on_read(self) -> None:
+        project_id = self._create_project()
+        uploaded = self._upload("cast.stl")
+        part_id = self._add_part(project_id, uploaded, "cast")
+
+        # Eight hex digits and an underscore is a perfectly good part name, and
+        # it used to be mangled into "v2" by the read-time prefix stripping.
+        self.client.put(
+            f"/api/projects/{project_id}/parts/{part_id}",
+            json={"name": "12345678_v2", "part_type": "cast", "filepath": uploaded["filepath"]},
+        )
+
+        stored = repo.get_part(self.database_path, project_id, part_id)
+        self.assertEqual(stored["name"], "12345678_v2")
+
+    def test_legacy_storage_names_are_repaired_once_at_startup(self) -> None:
+        project_id = self._create_project()
+        # A row as written before uploads reported a clean display name.
+        with repo.get_db_connection(self.database_path) as db:
+            db.execute(
+                "INSERT INTO parts (id, project_id, name, part_type, filepath) VALUES (?,?,?,?,?)",
+                ("legacy02", project_id, "602e27b4_b0_cast", "cast", ""),
+            )
+
+        repo.init_db(self.database_path)
+
+        self.assertEqual(repo.get_parts(self.database_path, project_id)[0]["name"], "cast")
 
 
 class UploadPrefixTests(unittest.TestCase):

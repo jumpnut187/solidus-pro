@@ -10,22 +10,6 @@
 import { defaultResultViewState, type ResultViewState, type ViewportTool } from './viewState';
 import { deepMerge } from './defaults';
 
-/**
- * The single-axis section shape the legacy renderer takes.
- *
- * Kept for the viewport adapter (`src/viewport/ResultsViewport.tsx`), which
- * flattens the shell's three-axis `SectionState` down to this. The shell
- * itself works in `viewState.SectionState`; do not add fields here.
- */
-export type SectionState = {
-  enabled: boolean;
-  mode: 'single' | 'slab';
-  axis: 'x' | 'y' | 'z';
-  position: number;
-  thickness: number;
-  invert: boolean;
-};
-
 export type PanelId =
   | 'parts'
   | 'material'

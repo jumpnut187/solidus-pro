@@ -1,6 +1,7 @@
 import { Camera, FlameKindling, FolderOpen, Play, Plus, Save, Square } from 'lucide-react';
 
 import { Menu } from './Menu';
+import { shortcutFor } from '../lib/shortcuts';
 import type { JobState } from '../hooks/useSimulationJob';
 
 export type TopBarProps = {
@@ -80,7 +81,10 @@ export function TopBar({
           type="button"
           className="btn btn-ghost btn-sm"
           onClick={onSaveProject}
-          title="Save now (Cmd/Ctrl+Shift+S). Settings already save themselves as you change them; this writes the name and settings immediately."
+          title={
+            `Save now (${shortcutFor('Save project')}). Settings already save themselves as you ` +
+            'change them; this writes the name and settings immediately.'
+          }
         >
           <Save size={13} />
           Save
@@ -103,7 +107,7 @@ export function TopBar({
           className="btn btn-run btn-sm"
           onClick={onRun}
           disabled={!canRun || isBusy}
-          title="Run simulation (F5)"
+          title={`Run simulation (${shortcutFor('Run simulation')})`}
         >
           <Play size={13} />
           Run
@@ -113,7 +117,7 @@ export function TopBar({
           className="btn btn-sm"
           onClick={onStop}
           disabled={!isBusy}
-          title="Stop simulation (Shift+F5)"
+          title={`Stop simulation (${shortcutFor('Stop simulation')})`}
         >
           <Square size={12} />
           Stop
@@ -139,7 +143,7 @@ export function TopBar({
       </div>
 
       <div className="topbar-group">
-        <button type="button" className="btn btn-ghost btn-sm" onClick={onScreenshot} title="Export screenshot (Cmd/Ctrl+S)">
+        <button type="button" className="btn btn-ghost btn-sm" onClick={onScreenshot} title={`Export screenshot (${shortcutFor('Export screenshot')})`}>
           <Camera size={13} />
           Screenshot
         </button>
@@ -153,7 +157,7 @@ export function TopBar({
               disabled: !exportsAvailable.riserDesign
             },
             { label: 'Export', heading: true },
-            { label: 'Screenshot (PNG)', onSelect: () => onExport('screenshot'), shortcut: `${'\u2318'}S` },
+            { label: 'Screenshot (PNG)', onSelect: () => onExport('screenshot'), shortcut: shortcutFor('Export screenshot') },
             {
               label: 'Animation (WebM)',
               onSelect: () => onExport('animation'),
@@ -172,8 +176,8 @@ export function TopBar({
         <Menu
           label="Help"
           items={[
-            { label: 'Help Guide', onSelect: () => onHelp('guide'), shortcut: 'F1' },
-            { label: 'Keyboard Shortcuts', onSelect: () => onHelp('shortcuts'), shortcut: '?' },
+            { label: 'Help Guide', onSelect: () => onHelp('guide'), shortcut: shortcutFor('Help guide') },
+            { label: 'Keyboard Shortcuts', onSelect: () => onHelp('shortcuts'), shortcut: shortcutFor('This cheat sheet') },
             { label: 'Hardware Info', onSelect: () => onHelp('hardware') },
             { label: 'About Solidus Pro', onSelect: () => onHelp('about') }
           ]}

@@ -268,17 +268,6 @@ def upload_cad_file(file: FileStorage, upload_folder: Path) -> List[Dict[str, An
     return entries
 
 
-# Backwards-compatible alias for any external callers still importing
-# the old name. Mirrors upload_cad_file; prefer the new name.
-def upload_stl_file(file: FileStorage, upload_folder: Path) -> List[Dict[str, Any]]:
-    """Deprecated: use :func:`upload_cad_file` instead.
-
-    Retained as a thin alias for one release so external integrations
-    don't break. Internally identical to ``upload_cad_file``.
-    """
-    return upload_cad_file(file, upload_folder)
-
-
 def load_part_mesh_data(filepath: str) -> Optional[Dict[str, Any]]:
     """Re-read a stored part file and rebuild its ``mesh_data`` payload.
 

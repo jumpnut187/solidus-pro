@@ -62,54 +62,6 @@
   padding: 0;
 }
 
-.axis-value {
-  color: var(--text-dim);
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  text-align: right;
-}
-
-.camera-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: var(--sp-2);
-}
-
-.tool-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: var(--sp-2);
-}
-
-.tool-btn {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 2px;
-  min-height: 44px;
-  padding: var(--sp-2) 2px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  background: var(--bg-3);
-  color: var(--text-dim);
-  font-size: var(--fs-xs);
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
-}
-
-.tool-btn:hover {
-  background: var(--bg-hover);
-  color: var(--text);
-}
-
-.tool-btn[aria-pressed='true'] {
-  background: var(--accent-dim);
-  border-color: var(--accent-border);
-  color: var(--accent-hover);
-}
-
 .scale-row {
   display: grid;
   grid-template-columns: 1fr 1fr auto;

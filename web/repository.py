@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional, Tuple, cast
 import json
+import os
 import re
 import sqlite3
 import uuid
@@ -15,6 +16,40 @@ import uuid
 #: Matches the collision-avoidance prefix stamped onto every stored upload:
 #: an 8-hex ``file_id``, optionally followed by a ``_b<N>`` body index.
 _UPLOAD_PREFIX_RE = re.compile(r"^[0-9a-f]{8}(?:_b\d+)?_")
+
+
+class UnsafePartFileError(ValueError):
+    """A part referenced a file outside the upload folder."""
+
+
+def resolve_upload_path(filepath: str, upload_root: Path) -> str:
+    """Validate that a part's file lives inside the upload folder.
+
+    Part rows are the only thing that names a file on disk, and several
+    features act on that name: the duplicate endpoint copies it, the export
+    endpoint publishes its basename, and ``/api/uploads/<filename>`` serves
+    anything sitting in the folder. So a client-supplied ``filepath`` is a
+    file-read primitive unless it is checked here -- adding a part pointing at
+    ``~/.ssh/id_rsa`` and duplicating the project used to copy that key into
+    the served folder.
+
+    Every path a client can influence goes through this function; files
+    produced server-side (``upload_cad_file``, the riser exporter) already land
+    inside the folder and pass unchanged.
+
+    Raises:
+        UnsafePartFileError: when the path escapes ``upload_root``.
+    """
+    root = Path(upload_root).resolve()
+    # resolve() also flattens '..' and follows symlinks, so a link planted
+    # inside the folder cannot be used to reach outside it either.
+    candidate = (root / filepath).resolve() if not os.path.isabs(filepath) else Path(filepath).resolve()
+    if candidate != root and root not in candidate.parents:
+        raise UnsafePartFileError(
+            "A part file must live in the server's upload folder. Upload the CAD file instead of "
+            "referencing a path."
+        )
+    return str(candidate)
 
 
 def strip_upload_prefix(stem: str) -> str:
@@ -104,6 +139,28 @@ def init_db(database_path: Path) -> None:
             )
             """
         )
+        _backfill_part_names(db)
+
+
+def _backfill_part_names(db: sqlite3.Connection) -> None:
+    """One-time repair of part names that hold a storage filename.
+
+    Rows written before uploads reported a clean display name stored the
+    prefixed on-disk name ("602e27b4_b0_cast"). That used to be papered over by
+    stripping the prefix on every read, which silently renamed a part a user
+    had deliberately called "12345678_v2". Repairing the data once and reading
+    it verbatim afterwards fixes the old rows without editing anyone's chosen
+    name from then on.
+    """
+    try:
+        rows = db.execute("SELECT id, name FROM parts").fetchall()
+    except sqlite3.Error:
+        return
+    for row in rows:
+        name = str(row["name"] or "")
+        cleaned = strip_upload_prefix(name)
+        if cleaned != name:
+            db.execute("UPDATE parts SET name = ? WHERE id = ?", (cleaned, row["id"]))
 
 
 def create_project(database_path: Path, data: Dict[str, Any]) -> str:
@@ -307,7 +364,50 @@ def delete_project(database_path: Path, project_id: str) -> list[str]:
     return filepaths
 
 
-def add_part(database_path: Path, project_id: str, data: Dict[str, Any]) -> str:
+#: The only part fields a client may set. Anything else in the request body is
+#: dropped rather than trusted -- the row also carries `id`, `project_id` and
+#: `created_at`, none of which a caller has any business choosing.
+PART_WRITABLE_FIELDS = frozenset(
+    {
+        "name",
+        "part_type",
+        "filepath",
+        "position_x",
+        "position_y",
+        "position_z",
+        "rotation_x",
+        "rotation_y",
+        "rotation_z",
+        "scale",
+        "visible",
+        "is_open_top",
+    }
+)
+
+
+def _checked_part_data(data: Dict[str, Any], upload_root: Optional[Path]) -> Dict[str, Any]:
+    """Whitelist a part payload and validate its file path.
+
+    ``upload_root`` is required for any payload carrying a ``filepath``; the
+    only callers that may omit it are internal ones writing a path they just
+    produced themselves.
+    """
+    clean = {key: value for key, value in data.items() if key in PART_WRITABLE_FIELDS}
+    if "filepath" in clean and clean["filepath"]:
+        if upload_root is None:
+            raise UnsafePartFileError("A part file path cannot be accepted without an upload folder.")
+        clean["filepath"] = resolve_upload_path(str(clean["filepath"]), upload_root)
+    return clean
+
+
+def add_part(
+    database_path: Path,
+    project_id: str,
+    data: Dict[str, Any],
+    *,
+    upload_root: Optional[Path] = None,
+) -> str:
+    data = _checked_part_data(data, upload_root)
     part_id = str(uuid.uuid4())[:8]
     with get_db_connection(database_path) as db:
         db.execute(
@@ -341,10 +441,18 @@ def add_part(database_path: Path, project_id: str, data: Dict[str, Any]) -> str:
     return part_id
 
 
-def update_part(database_path: Path, project_id: str, part_id: str, data: Dict[str, Any]) -> None:
+def update_part(
+    database_path: Path,
+    project_id: str,
+    part_id: str,
+    data: Dict[str, Any],
+    *,
+    upload_root: Optional[Path] = None,
+) -> None:
     current = get_part(database_path, project_id, part_id)
     if current is None:
         return
+    data = _checked_part_data(data, upload_root)
     with get_db_connection(database_path) as db:
         db.execute(
             """
@@ -473,13 +581,11 @@ def _loads(value: Any, default: Dict[str, Any]) -> Dict[str, Any]:
 def _normalize_part(row: Dict[str, Any]) -> Dict[str, Any]:
     row["visible"] = bool(row.get("visible", 1))
     row["is_open_top"] = bool(row.get("is_open_top", 0))
-    # Rows written before uploads carried a clean display name hold the storage
-    # filename verbatim ("602e27b4_b0_cast", or worse after a re-upload). Strip
-    # the prefix on read so existing projects show the same name a new upload
-    # would get. A part the user renames is written back through update_part
-    # and keeps whatever they chose -- the pattern is specific enough (8 hex
-    # digits, optional _b<N>, underscore) that a real name will not match it.
-    row["name"] = strip_upload_prefix(str(row.get("name", "")))
+    # The name is returned exactly as stored. It used to be run through
+    # strip_upload_prefix on every read, which also renamed a part the user had
+    # deliberately called something like "12345678_v2". Uploads now store a
+    # clean display name up front (see upload_cad_file) and rows written before
+    # that are repaired once by _backfill_part_names.
     return row
 
 

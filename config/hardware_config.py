@@ -37,6 +37,10 @@ class HardwareConfig:
         self.cpu_vendor = "Unknown"
         self.performance_cores = None
         self.efficiency_cores = None
+        #: Core tiers under the names the OS reports, e.g.
+        #: [{"name": "Super", "cores": 6}, {"name": "Performance", "cores": 12}].
+        #: Empty on platforms that do not expose performance levels.
+        self.core_tiers = []
         self.gpu_available = False
         self.neural_engine_available = False
         self.metal_available = False
@@ -92,19 +96,34 @@ class HardwareConfig:
                 # Apple Silicon (M-series chips)
                 self.cpu_vendor = "Apple"
                 
-                # Detect performance/efficiency core split
+                # Detect performance/efficiency core split.
+                #
+                # These two fields assume perflevel0 is the performance tier
+                # and perflevel1 the efficiency tier. That is NOT reliable:
+                # this M5 Pro reports perflevel0.name = "Super" (6 cores) and
+                # perflevel1.name = "Performance" (12 cores), so the twelve
+                # fast cores land in `efficiency_cores`.
+                #
+                # They are left as they are on purpose. `core.mesh_ml` feeds
+                # both numbers into a trained model's feature vector, so
+                # changing what they mean would silently shift that model's
+                # inputs. Anything that wants the truth should read
+                # `core_tiers` below, which carries the tiers under the names
+                # the OS gives them.
                 try:
-                    perf_result = subprocess.run(['sysctl', '-n', 'hw.perflevel0.logicalcpu'], 
+                    perf_result = subprocess.run(['sysctl', '-n', 'hw.perflevel0.logicalcpu'],
                                                 capture_output=True, text=True, timeout=1)
-                    eff_result = subprocess.run(['sysctl', '-n', 'hw.perflevel1.logicalcpu'], 
+                    eff_result = subprocess.run(['sysctl', '-n', 'hw.perflevel1.logicalcpu'],
                                               capture_output=True, text=True, timeout=1)
-                    
+
                     if perf_result.returncode == 0:
                         self.performance_cores = int(perf_result.stdout.strip())
                     if eff_result.returncode == 0:
                         self.efficiency_cores = int(eff_result.stdout.strip())
                 except:
                     pass
+
+                self.core_tiers = self._detect_core_tiers()
                 
                 # Apple Silicon has integrated GPU and Neural Engine
                 self.gpu_available = True
@@ -121,6 +140,43 @@ class HardwareConfig:
             print(f"  Warning: Could not detect macOS CPU details: {e}")
             self.cpu_brand = "Unknown macOS CPU"
     
+    def _detect_core_tiers(self):
+        """Read macOS performance levels as (name, cores) pairs.
+
+        Apple exposes one ``hw.perflevelN`` group per core tier, each carrying
+        the tier's own name. Reading the names instead of assuming an ordering
+        is the only way to describe a chip honestly: on this machine the tiers
+        are "Super" (6) and "Performance" (12), and there is no efficiency tier
+        at all, so any code that hardcodes P-then-E gets it backwards.
+
+        Returns a list of ``{"name": str, "cores": int}``, highest tier first
+        as the OS orders them, or an empty list on a chip that reports no
+        performance levels (Intel, or a detection failure).
+        """
+        tiers = []
+        try:
+            count = subprocess.run(['sysctl', '-n', 'hw.nperflevels'],
+                                   capture_output=True, text=True, timeout=1)
+            levels = int(count.stdout.strip()) if count.returncode == 0 else 0
+        except Exception:
+            levels = 0
+
+        for index in range(min(levels, 4)):
+            try:
+                name_result = subprocess.run(['sysctl', '-n', f'hw.perflevel{index}.name'],
+                                             capture_output=True, text=True, timeout=1)
+                cores_result = subprocess.run(['sysctl', '-n', f'hw.perflevel{index}.physicalcpu'],
+                                              capture_output=True, text=True, timeout=1)
+                if name_result.returncode != 0 or cores_result.returncode != 0:
+                    continue
+                name = name_result.stdout.strip()
+                cores = int(cores_result.stdout.strip())
+            except Exception:
+                continue
+            if name and cores > 0:
+                tiers.append({"name": name, "cores": cores})
+        return tiers
+
     def _detect_windows_cpu(self):
         """Detect CPU on Windows (Intel or AMD)"""
         try:

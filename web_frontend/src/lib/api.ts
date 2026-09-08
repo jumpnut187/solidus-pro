@@ -241,6 +241,8 @@ export type HardwareInfo = {
   logical_cores: number | null;
   performance_cores: number | null;
   efficiency_cores: number | null;
+  /** CPU core tiers under the names the OS reports, e.g. Performance / Efficiency. */
+  core_tiers: { name: string; cores: number }[];
   total_memory_gb: number | null;
   available_memory_gb: number | null;
   numba_threads: number | null;
@@ -324,8 +326,10 @@ export type ReportSectionToggles = {
 
 export type JobLog = {
   lines: string[];
-  /** Total lines held server-side; pass as `since` to fetch only the tail. */
-  total: number;
+  /** Monotonic cursor to pass as `since` on the next poll. */
+  next: number;
+  /** Lines that rolled off the ring buffer before the client asked for them. */
+  dropped: number;
   available: boolean;
 };
 

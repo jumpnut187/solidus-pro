@@ -166,21 +166,41 @@ def _simulation_process_worker(
         its entry the moment the job ends -- so the log lives in its own
         Manager dict that outlives the run.
 
-        A Manager dict does not proxy nested mutation: the list has to be read,
-        copied, appended to and written back, exactly like the status entries
-        below. Consecutive duplicates are dropped, because the solver emits the
-        same "Solidifying: 61%" string many times in a row.
+        The buffer is stored as ``{"lines": [...], "first": n}``: ``first`` is
+        the sequence number of ``lines[0]``, so a client's cursor stays
+        meaningful after the ring has wrapped. Without it, a poller holding
+        cursor 500 against a total that never moves past 500 receives an empty
+        tail forever.
+
+        A Manager dict does not proxy nested mutation: the entry has to be
+        read, copied, appended to and written back, exactly like the status
+        entries below. Consecutive duplicates are dropped, because the solver
+        emits the same "Solidifying: 61%" string many times in a row.
         """
         try:
             with queue_lock:
-                lines = list(simulation_logs.get(sim_id, []))
+                entry = dict(simulation_logs.get(sim_id) or {"lines": [], "first": 0})
+                lines = list(entry.get("lines", []))
                 if lines and lines[-1].endswith(message):
                     return
                 lines.append(f"{time.strftime('%H:%M:%S')}  {message}")
-                simulation_logs[sim_id] = lines[-JOB_LOG_LINES:]
+                first = int(entry.get("first", 0))
+                if len(lines) > JOB_LOG_LINES:
+                    dropped = len(lines) - JOB_LOG_LINES
+                    lines = lines[dropped:]
+                    first += dropped
+                simulation_logs[sim_id] = {"lines": lines, "first": first}
         except Exception:
             # Logging must never be the reason a simulation fails.
             pass
+
+    # A re-run starts a new log. Appending to the previous run's lines made the
+    # drawer read as one impossibly long job that solidified twice.
+    try:
+        with queue_lock:
+            simulation_logs[sim_id] = {"lines": [], "first": 0}
+    except Exception:
+        pass
 
     def _update_active(**kwargs: Any) -> None:
         with queue_lock:
@@ -281,8 +301,12 @@ def _simulation_process_worker(
         write_artifact(artifact_path, artifact)
         repo.mark_project_completed(db_path, sim_id, artifact["summary"], str(artifact_path))
 
+        # The artifact is on disk and its path is in the database, so every
+        # reader can find it. Keeping the parsed 50-180 MB copy in the Manager
+        # as well meant one process held every completed run of the session
+        # until restart; the routes re-read from disk through a small LRU.
         with queue_lock:
-            simulation_results[sim_id] = artifact
+            simulation_results.pop(sim_id, None)
 
         _log("Simulation complete")
         _update_active(status="completed", message="Simulation complete", progress=100)
@@ -756,19 +780,37 @@ class SimulationQueueManager:
 
         return cancelled
 
-    def get_log(self, sim_id: str) -> Optional[list[str]]:
-        """This job's progress log, newest last, or None when nothing is kept.
+    def get_log(self, sim_id: str, since: int = 0) -> Optional[Dict[str, Any]]:
+        """This job's progress log from sequence number ``since``.
 
         Survives completion on purpose: the lines that explain a failure are
         wanted after the job has gone, not during it.
+
+        Returns ``{"lines", "next", "dropped"}``, or None when nothing is kept
+        for this job. ``next`` is the cursor to pass on the following poll, and
+        ``dropped`` counts lines that had already rolled off the ring before
+        the client asked -- silence would misreport a wrapped buffer as "no new
+        output".
         """
         self._init_manager()
         with self.queue_lock:
             logs = self.simulation_logs
             if logs is None:
                 return None
-            lines = logs.get(sim_id)
-            return list(lines) if lines is not None else None
+            entry = logs.get(sim_id)
+            if entry is None:
+                return None
+            lines = list(entry.get("lines", []))
+            first = int(entry.get("first", 0))
+
+        cursor = max(0, int(since))
+        dropped = max(0, first - cursor)
+        start = max(0, cursor - first)
+        return {
+            "lines": lines[start:],
+            "next": first + len(lines),
+            "dropped": dropped,
+        }
 
     def clear_tracking(self, sim_id: str) -> None:
         self._init_manager()

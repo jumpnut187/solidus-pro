@@ -147,6 +147,12 @@ export function PerformancePanel({ options, hardware, onSet, onReset, onClose }:
             <dd>
               {hardware.physical_cores ?? '--'} physical / {hardware.logical_cores ?? '--'} logical
             </dd>
+            {hardware.core_tiers?.length ? (
+              <>
+                <dt>Tiers</dt>
+                <dd>{hardware.core_tiers.map((tier) => `${tier.cores} ${tier.name}`).join(' / ')}</dd>
+              </>
+            ) : null}
             <dt>Memory</dt>
             <dd>
               {hardware.available_memory_gb ?? '--'} GB free of {hardware.total_memory_gb ?? '--'} GB

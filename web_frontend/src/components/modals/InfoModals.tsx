@@ -3,6 +3,7 @@ import { Modal } from './Modal';
 // bumped on release, rather than a constant that quietly goes stale.
 import { version as appVersion } from '../../../package.json';
 import { formatNumber } from '../../lib/format';
+import { SHORTCUT_GROUPS } from '../../lib/shortcuts';
 import type { AlloyGuideRow, HardwareInfo } from '../../lib/api';
 
 export function HelpGuideModal({ alloys, onClose }: { alloys: AlloyGuideRow[]; onClose: () => void }) {
@@ -109,11 +110,11 @@ export function HardwareInfoModal({ hardware, onClose }: { hardware: HardwareInf
           <dd>{hardware.physical_cores ?? '--'}</dd>
           <dt>Logical cores</dt>
           <dd>{hardware.logical_cores ?? '--'}</dd>
-          {hardware.performance_cores !== null ? (
+          {hardware.core_tiers?.length ? (
             <>
-              <dt>Core split</dt>
+              <dt>Core tiers</dt>
               <dd>
-                {hardware.performance_cores} P / {hardware.efficiency_cores ?? '--'} E
+                {hardware.core_tiers.map((tier) => `${tier.cores} ${tier.name}`).join(' / ')}
               </dd>
             </>
           ) : null}
@@ -140,42 +141,6 @@ export function HardwareInfoModal({ hardware, onClose }: { hardware: HardwareInf
   );
 }
 
-/** Modifier label for the platform the page is actually running on. */
-const MOD = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? 'Cmd' : 'Ctrl';
-
-const SHORTCUTS: { group: string; items: [string, string][] }[] = [
-  {
-    group: 'Simulation',
-    items: [
-      ['F5', 'Run simulation'],
-      ['Shift + F5', 'Stop simulation']
-    ]
-  },
-  {
-    group: 'Project',
-    items: [
-      [`${MOD} + O`, 'Add CAD parts'],
-      [`${MOD} + Shift + S`, 'Save project'],
-      [`${MOD} + S`, 'Export screenshot']
-    ]
-  },
-  {
-    group: 'View',
-    items: [
-      ['Home', 'Fit the model to the view'],
-      ['Space', 'Play / pause a time mode'],
-      ['Escape', 'Close the top panel, dialog or tool']
-    ]
-  },
-  {
-    group: 'Help',
-    items: [
-      ['F1', 'Help guide'],
-      ['?', 'This cheat sheet']
-    ]
-  }
-];
-
 export function ShortcutsModal({ onClose }: { onClose: () => void }) {
   return (
     <Modal
@@ -192,13 +157,13 @@ export function ShortcutsModal({ onClose }: { onClose: () => void }) {
       }
     >
       <div className="property-sheet">
-        {SHORTCUTS.map((group) => (
+        {SHORTCUT_GROUPS.map((group) => (
           <div key={group.group}>
             <p className="property-section-title">{group.group}</p>
-            {group.items.map(([keys, description]) => (
-              <div className="property-row" key={keys}>
-                <span className="property-label">{description}</span>
-                <span className="property-value">{keys}</span>
+            {group.items.map((item) => (
+              <div className="property-row" key={item.keys}>
+                <span className="property-label">{item.description}</span>
+                <span className="property-value">{item.keys}</span>
               </div>
             ))}
           </div>

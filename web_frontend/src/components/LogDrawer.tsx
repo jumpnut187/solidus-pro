@@ -7,6 +7,8 @@ export type LogDrawerProps = {
   lines: string[];
   available: boolean;
   isRunning: boolean;
+  /** Lines the server's ring buffer discarded before they were fetched. */
+  dropped: number;
 };
 
 /**
@@ -16,7 +18,7 @@ export type LogDrawerProps = {
  * this is every line the solver actually emitted, plus the traceback when a run
  * fails. Collapsed it is a single strip, so it costs nothing when unwanted.
  */
-export function LogDrawer({ open, onToggle, lines, available, isRunning }: LogDrawerProps) {
+export function LogDrawer({ open, onToggle, lines, available, isRunning, dropped }: LogDrawerProps) {
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const pinnedRef = useRef(true);
 
@@ -49,6 +51,11 @@ export function LogDrawer({ open, onToggle, lines, available, isRunning }: LogDr
           const element = event.currentTarget;
           pinnedRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24;
         }}>
+          {dropped > 0 ? (
+            <div className="log-line log-line-muted">
+              ... {dropped.toLocaleString()} earlier line{dropped === 1 ? '' : 's'} rolled out of the buffer
+            </div>
+          ) : null}
           {lines.length ? (
             lines.map((line, index) => (
               <div className="log-line" key={`${index}-${line}`}>

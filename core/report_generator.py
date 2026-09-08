@@ -26,6 +26,7 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Union, BinaryIO
 import base64
+import html as html_module
 import io
 import os
 import tempfile
@@ -394,6 +395,34 @@ class ReportGenerator:
         
         return output_path
     
+    @staticmethod
+    def _esc(value: Any) -> str:
+        """Escape a value for HTML text or an attribute.
+
+        Every string that reaches the HTML output is user data: project names,
+        part names, settings text and table cells all originate in a form. This
+        renderer builds its markup with f-strings, so without escaping a
+        project named ``<script>alert(1)</script>`` executes in whoever opens
+        the report -- and a report is the artifact most likely to be mailed
+        around a foundry. ``quote=True`` so the same helper is safe inside the
+        ``alt`` attribute.
+        """
+        return html_module.escape("" if value is None else str(value), quote=True)
+
+    @staticmethod
+    def _esc_md(value: Any) -> str:
+        """Neutralize Markdown control characters in untrusted text.
+
+        Markdown is commonly rendered to HTML downstream, where a raw
+        ``<script>`` or an ``[x](javascript:...)`` link would come back to
+        life. Escaping the structural characters keeps a name that contains
+        them readable without letting it become markup.
+        """
+        text = "" if value is None else str(value)
+        for char in ("\\", "`", "*", "_", "[", "]", "(", ")", "#", "<", ">", "|"):
+            text = text.replace(char, "\\" + char)
+        return text
+
     def _generate_html(self) -> str:
         """Generate HTML content."""
         # Build HTML
@@ -416,7 +445,7 @@ class ReportGenerator:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{self.config.title}</title>
+    <title>{self._esc(self.config.title)}</title>
     <style>
         {self._get_css_styles()}
     </style>
@@ -424,10 +453,10 @@ class ReportGenerator:
 <body>
     <div class="report-container">
         <header class="report-header">
-            <h1>{self.config.title}</h1>
-            {f'<p class="author">Author: {self.config.author}</p>' if self.config.author else ''}
-            {f'<p class="company">{self.config.company}</p>' if self.config.company else ''}
-            {f'<p class="timestamp">Generated: {timestamp}</p>' if timestamp else ''}
+            <h1>{self._esc(self.config.title)}</h1>
+            {f'<p class="author">Author: {self._esc(self.config.author)}</p>' if self.config.author else ''}
+            {f'<p class="company">{self._esc(self.config.company)}</p>' if self.config.company else ''}
+            {f'<p class="timestamp">Generated: {self._esc(timestamp)}</p>' if timestamp else ''}
         </header>
         <main class="report-content">
 '''
@@ -663,14 +692,15 @@ class ReportGenerator:
     
     def _render_text_section(self, section: ReportSection) -> str:
         """Render text section."""
-        # Simple markdown-like conversion
-        content = section.content
-        content = content.replace('\n\n', '</p><p>')
+        # Escape first, then apply the paragraph conversion, so the only tags
+        # in the result are the ones this method put there.
+        content = self._esc(section.content)
+        content = content.replace('\n\n', '</p><p>').replace('\n', '<br>')
         content = f'<p>{content}</p>'
         
         return f'''
         <div class="section section-text">
-            <h2>{section.title}</h2>
+            <h2>{self._esc(section.title)}</h2>
             {content}
         </div>
         '''
@@ -680,19 +710,19 @@ class ReportGenerator:
         table: TableData = section.content
         
         # Build header
-        header_html = ''.join(f'<th>{h}</th>' for h in table.headers)
+        header_html = ''.join(f'<th>{self._esc(h)}</th>' for h in table.headers)
         
         # Build rows
         rows_html = ''
         for row in table.rows:
-            cells = ''.join(f'<td>{cell}</td>' for cell in row)
+            cells = ''.join(f'<td>{self._esc(cell)}</td>' for cell in row)
             rows_html += f'<tr>{cells}</tr>'
         
-        caption = f'<caption>{table.caption}</caption>' if table.caption else ''
+        caption = f'<caption>{self._esc(table.caption)}</caption>' if table.caption else ''
         
         return f'''
         <div class="section section-table">
-            <h2>{section.title}</h2>
+            <h2>{self._esc(section.title)}</h2>
             <table>
                 {caption}
                 <thead><tr>{header_html}</tr></thead>
@@ -710,13 +740,13 @@ class ReportGenerator:
         image_bytes = self._images.get(image_id, b'')
         image_b64 = base64.b64encode(image_bytes).decode('utf-8')
         
-        caption_html = f'<figcaption>{caption}</figcaption>' if caption else ''
+        caption_html = f'<figcaption>{self._esc(caption)}</figcaption>' if caption else ''
         
         return f'''
         <div class="section section-image">
-            <h2>{section.title}</h2>
+            <h2>{self._esc(section.title)}</h2>
             <figure>
-                <img src="data:image/png;base64,{image_b64}" alt="{section.title}">
+                <img src="data:image/png;base64,{image_b64}" alt="{self._esc(section.title)}">
                 {caption_html}
             </figure>
         </div>
@@ -742,14 +772,14 @@ class ReportGenerator:
             cards_html += f'''
             <div class="metric-card {severity_class}">
                 <div class="metric-value">{value:.2f}</div>
-                <div class="metric-name">{name}</div>
-                <div class="metric-unit">{unit}</div>
+                <div class="metric-name">{self._esc(name)}</div>
+                <div class="metric-unit">{self._esc(unit)}</div>
             </div>
             '''
         
         return f'''
         <div class="section">
-            <h2>{section.title}</h2>
+            <h2>{self._esc(section.title)}</h2>
             <div class="section-metrics">
                 {cards_html}
             </div>
@@ -762,11 +792,11 @@ class ReportGenerator:
         
         items_html = ''
         for rec in recs.recommendations:
-            items_html += f'<li class="{recs.severity}">{rec}</li>'
+            items_html += f'<li class="{self._esc(recs.severity)}">{self._esc(rec)}</li>'
         
         return f'''
         <div class="section section-recommendations">
-            <h2>{section.title}</h2>
+            <h2>{self._esc(section.title)}</h2>
             <ul>{items_html}</ul>
         </div>
         '''
@@ -804,45 +834,50 @@ class ReportGenerator:
             )
     
     def _generate_markdown(self) -> str:
-        """Generate Markdown content."""
+        """Generate Markdown content.
+
+        Every value that came from a user is escaped: Markdown is routinely
+        rendered to HTML by whatever opens it, so an unescaped part name is the
+        same injection as in the HTML path, one hop later.
+        """
         parts = [
-            f"# {self.config.title}",
+            f"# {self._esc_md(self.config.title)}",
             "",
         ]
         
         if self.config.author:
-            parts.append(f"**Author:** {self.config.author}")
+            parts.append(f"**Author:** {self._esc_md(self.config.author)}")
         if self.config.company:
-            parts.append(f"**Company:** {self.config.company}")
+            parts.append(f"**Company:** {self._esc_md(self.config.company)}")
         if self.config.include_timestamp:
             parts.append(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
         parts.extend(["", "---", ""])
         
         for section in self._sections:
-            parts.append(f"## {section.title}")
+            parts.append(f"## {self._esc_md(section.title)}")
             parts.append("")
             
             if section.section_type == SectionType.TEXT:
-                parts.append(section.content)
+                parts.append(self._esc_md(section.content))
                 
             elif section.section_type == SectionType.TABLE:
                 table: TableData = section.content
-                parts.append("| " + " | ".join(table.headers) + " |")
+                parts.append("| " + " | ".join(self._esc_md(h) for h in table.headers) + " |")
                 parts.append("| " + " | ".join(["---"] * len(table.headers)) + " |")
                 for row in table.rows:
-                    parts.append("| " + " | ".join(str(c) for c in row) + " |")
+                    parts.append("| " + " | ".join(self._esc_md(c) for c in row) + " |")
                     
             elif section.section_type == SectionType.METRICS:
                 metrics: MetricsData = section.content
                 for name, value in metrics.metrics.items():
                     unit = metrics.units.get(name, '')
-                    parts.append(f"- **{name}:** {value:.2f} {unit}")
+                    parts.append(f"- **{self._esc_md(name)}:** {value:.2f} {self._esc_md(unit)}")
                     
             elif section.section_type == SectionType.RECOMMENDATIONS:
                 recs: RecommendationData = section.content
                 for rec in recs.recommendations:
-                    parts.append(f"- {rec}")
+                    parts.append(f"- {self._esc_md(rec)}")
             
             parts.append("")
         

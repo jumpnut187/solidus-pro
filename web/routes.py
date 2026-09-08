@@ -183,13 +183,26 @@ def delete_project(project_id: str):
 def add_part(project_id: str):
     if repo.get_project(database_path(), project_id) is None:
         return jsonify({"error": "Project not found"}), 404
-    part_id = repo.add_part(database_path(), project_id, request.json or {})
+    try:
+        # `filepath` must name a file this server stored; see
+        # repo.resolve_upload_path for why an arbitrary path is a file-read
+        # primitive rather than a convenience.
+        part_id = repo.add_part(
+            database_path(), project_id, request.json or {}, upload_root=upload_folder()
+        )
+    except repo.UnsafePartFileError as exc:
+        return jsonify({"error": str(exc)}), 400
     return jsonify({"id": part_id, "part": repo.get_part(database_path(), project_id, part_id)}), 201
 
 
 @api_bp.route("/projects/<project_id>/parts/<part_id>", methods=["PUT"])
 def update_part(project_id: str, part_id: str):
-    repo.update_part(database_path(), project_id, part_id, request.json or {})
+    try:
+        repo.update_part(
+            database_path(), project_id, part_id, request.json or {}, upload_root=upload_folder()
+        )
+    except repo.UnsafePartFileError as exc:
+        return jsonify({"error": str(exc)}), 400
     part = repo.get_part(database_path(), project_id, part_id)
     if part is None:
         return jsonify({"error": "Part not found"}), 404
@@ -357,6 +370,12 @@ def volume(project_id: str):
 
 @api_bp.route("/uploads/<path:filename>")
 def uploaded_file(filename: str):
+    """Serve a stored CAD file.
+
+    ``send_from_directory`` already refuses to escape the folder, so the guard
+    that matters is upstream: nothing outside the folder may be *placed* in it.
+    See ``repo.resolve_upload_path`` and the duplicate endpoint.
+    """
     return send_from_directory(str(upload_folder()), filename)
 
 

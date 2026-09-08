@@ -451,13 +451,6 @@
 /* Structural rules for the renderer's own markup (`src/viewport/`). The shell
  * owns the stylesheet but not that component, so these stay minimal: fill the
  * well, do not scroll, and let the gizmo overlay sit in a corner. */
-.viewport-wrap {
-  position: relative;
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: hidden;
-}
-
 .viewport-canvas {
   display: block;
   width: 100%;
@@ -834,6 +827,11 @@
   line-height: 1.6;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.log-line-muted {
+  color: var(--text-faint);
+  font-style: italic;
 }
 
 .log-empty {

@@ -1232,6 +1232,7 @@ export function App() {
               onToggle={() => patchShell({ logOpen: !shell.logOpen })}
               lines={jobLog.lines}
               available={jobLog.available}
+              dropped={jobLog.dropped}
               isRunning={job.isBusy}
             />
           }

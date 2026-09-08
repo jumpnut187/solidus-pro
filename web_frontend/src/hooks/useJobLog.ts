@@ -16,29 +16,34 @@ const POLL_MS = 1200;
 export function useJobLog(projectId: string | null, active: boolean, isRunning: boolean) {
   const [lines, setLines] = useState<string[]>([]);
   const [available, setAvailable] = useState(false);
-  const countRef = useRef(0);
+  /** Lines the ring buffer discarded before we asked for them. */
+  const [dropped, setDropped] = useState(0);
+  const cursorRef = useRef(0);
 
   // A different project has a different log; never show one under the other.
   useEffect(() => {
     setLines([]);
     setAvailable(false);
-    countRef.current = 0;
+    setDropped(0);
+    cursorRef.current = 0;
   }, [projectId]);
 
   const fetchOnce = useCallback(async () => {
     if (!projectId) return;
     try {
-      const payload = await api.projectLog(projectId, countRef.current);
+      const payload = await api.projectLog(projectId, cursorRef.current);
       setAvailable(payload.available);
-      if (payload.total < countRef.current) {
-        // The buffer was cleared or rolled over; start again rather than
-        // splicing new lines onto a log that no longer matches.
-        countRef.current = payload.total;
+      if (payload.next < cursorRef.current) {
+        // A re-run resets the buffer, so the sequence goes backwards. Start
+        // again rather than splicing new lines onto the previous run's log.
+        cursorRef.current = payload.next;
+        setDropped(0);
         setLines(payload.lines);
         return;
       }
+      if (payload.dropped > 0) setDropped((current) => current + payload.dropped);
       if (payload.lines.length) {
-        countRef.current = payload.total;
+        cursorRef.current = payload.next;
         setLines((current) => [...current, ...payload.lines]);
       }
     } catch {
@@ -54,5 +59,5 @@ export function useJobLog(projectId: string | null, active: boolean, isRunning: 
     return () => window.clearInterval(timer);
   }, [projectId, active, isRunning, fetchOnce]);
 
-  return { lines, available, refresh: fetchOnce };
+  return { lines, available, dropped, refresh: fetchOnce };
 }

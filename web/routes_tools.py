@@ -7,18 +7,50 @@ Owned by the shell/parity workstream. Registered by
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, cast
+import math
 import os
 import shutil
 
 import numpy as np
 from flask import Blueprint, current_app, jsonify, request
+from werkzeug.utils import secure_filename
 
 from core.materials import get_all_alloy_names, get_alloy
 from web import repository as repo
-from web.payloads import read_artifact
+from web.payloads import _sanitize_body_name, read_artifact
 from web.services.simulation_queue import SimulationQueueManager
+
+#: Upper bound on a single riser-apply request, so one call cannot fill the
+#: upload folder with cylinders.
+MAX_RISERS_PER_APPLY = 20
+
+#: A project file is settings, not geometry. The app-wide 500 MB limit exists
+#: for STEP assemblies and is far too generous for a JSON blob read into memory.
+MAX_PROJECT_FILE_BYTES = 4 * 1024 * 1024
+
+#: Cap on a client-supplied report screenshot, decoded.
+MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024
+
+#: PNG signature. The report renderer embeds images under a hardcoded
+#: ``data:image/png`` URL, so anything else would be mislabelled.
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+def _triple(value: Any) -> List[float]:
+    """Three finite floats from untrusted JSON, defaulting to the origin."""
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        return [0.0, 0.0, 0.0]
+    out: List[float] = []
+    for item in value:
+        try:
+            number = float(item)
+        except (TypeError, ValueError):
+            return [0.0, 0.0, 0.0]
+        out.append(number if math.isfinite(number) else 0.0)
+    return out
 
 tools_bp = Blueprint("web_tools", __name__, url_prefix="/api")
 
@@ -36,6 +68,38 @@ def _queue_manager() -> Optional[SimulationQueueManager]:
     return cast(Optional[SimulationQueueManager], manager)
 
 
+#: Parsed artifacts, keyed by (path, mtime_ns, size). Artifacts run to 50-180
+#: MB of JSON and both riser design and the report re-read one per request; two
+#: entries is enough to keep an interactive session off the disk while bounding
+#: the memory a web worker holds.
+_ARTIFACT_CACHE: "OrderedDict[Tuple[str, int, int], Dict[str, Any]]" = OrderedDict()
+_ARTIFACT_CACHE_MAX = 2
+
+
+def _read_artifact_cached(artifact_path: str) -> Optional[Dict[str, Any]]:
+    """Parse an artifact, reusing the last few parses.
+
+    The key includes mtime and size so a re-run's artifact is never served from
+    a stale entry -- the path alone is reused for every run of a project.
+    """
+    path = Path(artifact_path)
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    key = (str(path.resolve()), stat.st_mtime_ns, stat.st_size)
+    cached = _ARTIFACT_CACHE.get(key)
+    if cached is not None:
+        _ARTIFACT_CACHE.move_to_end(key)
+        return cached
+    artifact = read_artifact(artifact_path)
+    _ARTIFACT_CACHE[key] = artifact
+    _ARTIFACT_CACHE.move_to_end(key)
+    while len(_ARTIFACT_CACHE) > _ARTIFACT_CACHE_MAX:
+        _ARTIFACT_CACHE.popitem(last=False)
+    return artifact
+
+
 def _load_artifact(project_id: str) -> Optional[Dict[str, Any]]:
     """The completed run's artifact, from the queue cache or from disk.
 
@@ -51,7 +115,7 @@ def _load_artifact(project_id: str) -> Optional[Dict[str, Any]]:
     artifact_path = repo.get_artifact_path(_database_path(), project_id)
     if artifact_path is None or not Path(artifact_path).exists():
         return None
-    return read_artifact(artifact_path)
+    return _read_artifact_cached(artifact_path)
 
 
 @tools_bp.route("/tools/health")
@@ -92,10 +156,20 @@ def duplicate_project(project_id: str):
     upload_folder.mkdir(parents=True, exist_ok=True)
     filepath_map: Dict[str, str] = {}
     for part in repo.get_parts(database_path, project_id):
-        original = Path(str(part.get("filepath") or ""))
-        if not original.name or not original.exists():
+        stored = str(part.get("filepath") or "")
+        if not stored:
             continue
-        copy_path = upload_folder / f"{os.urandom(4).hex()}_{original.name}"
+        try:
+            # Rows written before the path check landed may still name a file
+            # anywhere on the filesystem. Copying one into the upload folder
+            # would publish it through /api/uploads, so refuse instead: this
+            # endpoint must not be a way to launder a path past the check.
+            original = Path(repo.resolve_upload_path(stored, upload_folder))
+        except repo.UnsafePartFileError:
+            continue
+        if not original.name or not original.is_file():
+            continue
+        copy_path = upload_folder / f"{os.urandom(4).hex()}_{secure_filename(original.name)}"
         try:
             shutil.copy2(original, copy_path)
         except OSError:
@@ -319,12 +393,14 @@ def riser_design_apply(project_id: str):
     if not isinstance(raw, list) or not raw:
         return jsonify({"error": "Select at least one riser to add."}), 400
 
-    import trimesh
+    if len(raw) > MAX_RISERS_PER_APPLY:
+        return jsonify({"error": f"At most {MAX_RISERS_PER_APPLY} risers can be added at once."}), 400
 
-    upload_folder = _upload_folder()
-    upload_folder.mkdir(parents=True, exist_ok=True)
-    added: List[Dict[str, Any]] = []
-
+    # Validate every entry before writing anything. The previous version
+    # checked inside the write loop, so a bad third entry left the first two on
+    # disk and in the database behind a 400 the client read as "nothing
+    # happened".
+    validated: List[Dict[str, Any]] = []
     for offset, item in enumerate(raw):
         if not isinstance(item, dict):
             return jsonify({"error": "Each riser must be an object."}), 400
@@ -334,37 +410,86 @@ def riser_design_apply(project_id: str):
             position = [float(value) for value in item["position"]]
         except (KeyError, TypeError, ValueError):
             return jsonify({"error": "Each riser needs a diameter, a height and a position."}), 400
-        if not (diameter > 0 and height > 0) or len(position) != 3:
-            return jsonify({"error": "Riser dimensions must be positive."}), 400
+        if len(position) != 3 or not all(math.isfinite(value) for value in position):
+            return jsonify({"error": "A riser position needs three finite coordinates."}), 400
+        if not (math.isfinite(diameter) and math.isfinite(height)):
+            return jsonify({"error": "Riser dimensions must be finite."}), 400
+        if not (0 < diameter <= RISER_MAX_DIAMETER_IN * 4 and 0 < height <= RISER_MAX_DIAMETER_IN * 12):
+            return jsonify({"error": "Riser dimensions are outside the buildable range."}), 400
 
-        mesh = trimesh.creation.cylinder(radius=diameter / 2.0, height=height, sections=32)
-        # trimesh centres a cylinder on the origin, so lift it by half its
-        # height to sit on the attachment point, then sink the penetration.
-        penetration = diameter * 0.40
-        mesh.apply_translation(
-            [position[0], position[1], position[2] - penetration + height / 2.0]
+        type_name = str(item.get("riser_type", "BLIND"))[:32]
+        # The display name is user text and is stored as such; it never reaches
+        # the filesystem. The on-disk name is derived below, so a name like
+        # "../../../etc/cron.d/x" cannot steer the export out of the folder.
+        #
+        # Note `_sanitize_body_name("")` returns "body", so the default has to
+        # be chosen before sanitizing rather than as an `or` fallback after it.
+        requested = str(item.get("name") or "").strip()
+        display_name = (
+            _sanitize_body_name(requested)
+            if requested
+            else f"AutoRiser_{offset + 1}_{_sanitize_body_name(type_name)}"
         )
-
-        type_name = str(item.get("riser_type", "BLIND"))
-        name = str(item.get("name") or f"AutoRiser_{offset + 1}_{type_name}")
-        filename = f"{os.urandom(4).hex()}_b0_{repo.strip_upload_prefix(name)}.stl"
-        filepath = upload_folder / filename
-        mesh.export(str(filepath))
-
-        part_id = repo.add_part(
-            _database_path(),
-            project_id,
+        validated.append(
             {
-                "name": name,
-                "part_type": "riser",
-                "filepath": str(filepath),
-                "visible": True,
-                "is_open_top": type_name.upper() == "OPEN",
-            },
+                "diameter": diameter,
+                "height": height,
+                "position": position,
+                "type_name": type_name,
+                "name": display_name[:120],
+            }
         )
-        part = repo.get_part(_database_path(), project_id, part_id)
-        if part is not None:
-            added.append(part)
+
+    import trimesh
+
+    upload_folder = _upload_folder()
+    upload_folder.mkdir(parents=True, exist_ok=True)
+    added: List[Dict[str, Any]] = []
+    written: List[Path] = []
+
+    try:
+        for offset, spec in enumerate(validated):
+            mesh = trimesh.creation.cylinder(
+                radius=spec["diameter"] / 2.0, height=spec["height"], sections=32
+            )
+            # trimesh centres a cylinder on the origin, so lift it by half its
+            # height to sit on the attachment point, then sink the penetration.
+            penetration = spec["diameter"] * 0.40
+            position = spec["position"]
+            mesh.apply_translation(
+                [position[0], position[1], position[2] - penetration + spec["height"] / 2.0]
+            )
+
+            filepath = upload_folder / f"{os.urandom(4).hex()}_b0_riser_{offset + 1}.stl"
+            # Belt and braces: the name above contains nothing but hex digits
+            # and an index, and this asserts that stays true.
+            repo.resolve_upload_path(str(filepath), upload_folder)
+            mesh.export(str(filepath))
+            written.append(filepath)
+
+            part_id = repo.add_part(
+                _database_path(),
+                project_id,
+                {
+                    "name": spec["name"],
+                    "part_type": "riser",
+                    "filepath": str(filepath),
+                    "visible": True,
+                    "is_open_top": spec["type_name"].upper() == "OPEN",
+                },
+                upload_root=upload_folder,
+            )
+            part = repo.get_part(_database_path(), project_id, part_id)
+            if part is not None:
+                added.append(part)
+    except Exception as exc:
+        # Roll back so a half-applied set does not leave orphan parts and STLs.
+        for part in added:
+            repo.delete_part(_database_path(), project_id, str(part["id"]))
+        for path in written:
+            path.unlink(missing_ok=True)
+        current_app.logger.exception("Riser apply failed")
+        return jsonify({"error": f"Could not add the risers: {exc}"}), 500
 
     return jsonify({"parts": added, "added": len(added)}), 201
 
@@ -378,20 +503,22 @@ def riser_design_apply(project_id: str):
 def project_log(project_id: str):
     """Progress lines for a run, live while it works and after it finishes.
 
-    ``since`` lets the client poll for the tail only: pass the number of lines
-    already held and get back whatever came after them.
+    ``since`` is a monotonic sequence cursor, not an index into the lines
+    returned: the buffer is a ring, so once it wraps an index would point at
+    the wrong line (or at nothing, forever). Pass back the ``next`` value from
+    the previous response.
     """
-    manager = _queue_manager()
-    lines = manager.get_log(project_id) if manager is not None else None
-    if lines is None:
-        # Not an error: a project that has never run simply has no log.
-        return jsonify({"lines": [], "total": 0, "available": False})
-
     try:
         since = max(0, int(request.args.get("since", 0)))
     except (TypeError, ValueError):
         since = 0
-    return jsonify({"lines": lines[since:], "total": len(lines), "available": True})
+
+    manager = _queue_manager()
+    payload = manager.get_log(project_id, since) if manager is not None else None
+    if payload is None:
+        # Not an error: a project that has never run simply has no log.
+        return jsonify({"lines": [], "next": 0, "dropped": 0, "available": False})
+    return jsonify({**payload, "available": True})
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +542,7 @@ def hardware():
         "logical_cores": None,
         "performance_cores": None,
         "efficiency_cores": None,
+        "core_tiers": [],
         "total_memory_gb": None,
         "available_memory_gb": None,
         "numba_threads": None,
@@ -434,8 +562,17 @@ def hardware():
                 "cpu_vendor": str(config.cpu_vendor),
                 "physical_cores": config.physical_cores,
                 "logical_cores": config.logical_cores,
+                # `performance_cores`/`efficiency_cores` assume perflevel0 is
+                # the fast tier, which is wrong on chips whose tiers are named
+                # otherwise; `core_tiers` carries the OS's own names and is
+                # what the UI shows. See config.hardware_config for why the
+                # older pair is not simply corrected.
                 "performance_cores": config.performance_cores,
                 "efficiency_cores": config.efficiency_cores,
+                "core_tiers": [
+                    {"name": str(tier.get("name", "")), "cores": int(tier.get("cores", 0))}
+                    for tier in getattr(config, "core_tiers", []) or []
+                ],
                 "total_memory_gb": round(config.total_memory / (1024 ** 3), 1),
                 "available_memory_gb": round(config.available_memory / (1024 ** 3), 1),
                 "numba_threads": config.get_optimal_thread_count("compute"),
@@ -560,31 +697,56 @@ def import_project_file():
     upload = request.files.get("project")
     if upload is None:
         return jsonify({"error": "Attach a .solidus-project.json file."}), 400
+
+    # The app's MAX_CONTENT_LENGTH is 500 MB to admit large STEP assemblies; a
+    # project file is a few kilobytes of settings, so it gets its own cap and
+    # is parsed off the stream rather than read whole into memory first.
+    head = upload.read(MAX_PROJECT_FILE_BYTES + 1)
+    if len(head) > MAX_PROJECT_FILE_BYTES:
+        return jsonify(
+            {"error": f"The project file is larger than {MAX_PROJECT_FILE_BYTES // (1024 * 1024)} MB."}
+        ), 413
     try:
-        payload = json.loads(upload.read().decode("utf-8"))
+        payload = json.loads(head.decode("utf-8"))
     except Exception:
         return jsonify({"error": "That file is not valid JSON."}), 400
+    if not isinstance(payload, dict):
+        return jsonify({"error": "A project file must contain a JSON object."}), 400
 
     try:
         # Schema v1 files are migrated forward here -- including the legacy
         # pour-rate repair, which nothing on the web side reproduces.
+        # TypeError as well as ValueError: `int(payload["schema_version"])` on a
+        # non-scalar raises the former, which used to escape as a 500.
         state = load_project_state(payload).to_dict()
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+    except (ValueError, TypeError) as exc:
+        return jsonify({"error": f"That project file could not be read: {exc}"}), 400
 
     simulation = state.get("simulation", {})
-    ui_state = dict(state.get("ui_state", {}))
+    if not isinstance(simulation, dict):
+        return jsonify({"error": "Project file simulation settings must be an object."}), 400
+    ui_state = state.get("ui_state", {})
+    ui_state = dict(ui_state) if isinstance(ui_state, dict) else {}
 
-    # Store the uploaded CAD files first, indexed by their original name so the
-    # file's relative paths can be matched against them.
+    # Store the uploaded CAD files, indexed by the display name each body
+    # reports. Indexing by the *upload's* filename collapsed a multi-body STEP
+    # onto whichever body came last, and let bracket.stl and bracket.step
+    # overwrite one another; the display name is per body and is what the
+    # project file's paths are matched against.
     stored: Dict[str, Dict[str, Any]] = {}
+    collisions: List[str] = []
     for file in request.files.getlist("files"):
         if not file.filename:
             continue
         try:
             for entry in upload_cad_file(file, _upload_folder()):
-                stored[os.path.basename(file.filename).lower()] = entry
-                stored[str(entry.get("display_name", "")).lower()] = entry
+                key = str(entry.get("display_name", "")).lower()
+                if not key:
+                    continue
+                if key in stored:
+                    collisions.append(entry.get("display_name", key))
+                    continue
+                stored[key] = entry
         except ValueError as exc:
             return jsonify({"error": f"{file.filename}: {exc}"}), 400
 
@@ -609,23 +771,25 @@ def import_project_file():
 
     missing: List[str] = []
     for part in state.get("parts", []):
+        if not isinstance(part, dict):
+            continue
         # A project file may name a part by its original file name, by the
         # server's prefixed storage name (an export from an older build), with
         # or without an extension. Try all four rather than making the user
         # guess which one the importer wants.
         stem = os.path.basename(str(part.get("filepath", "")))
-        candidates = {
-            stem.lower(),
+        candidates = [
             os.path.splitext(stem)[0].lower(),
-            repo.strip_upload_prefix(stem).lower(),
+            stem.lower(),
             repo.strip_upload_prefix(os.path.splitext(stem)[0]).lower(),
-        }
+            repo.strip_upload_prefix(stem).lower(),
+        ]
         entry = next((stored[key] for key in candidates if key in stored), None)
         if entry is None:
             missing.append(part.get("name") or stem)
             continue
-        position = list(part.get("position", [0.0, 0.0, 0.0]))
-        rotation = list(part.get("rotation", [0.0, 0.0, 0.0]))
+        position = _triple(part.get("position"))
+        rotation = _triple(part.get("rotation"))
         repo.add_part(
             _database_path(),
             project_id,
@@ -643,6 +807,7 @@ def import_project_file():
                 "visible": part.get("visible", True),
                 "is_open_top": part.get("is_open_top", False),
             },
+            upload_root=_upload_folder(),
         )
 
     return jsonify(
@@ -650,6 +815,9 @@ def import_project_file():
             "id": project_id,
             "project": repo.get_project(_database_path(), project_id),
             "missing_parts": missing,
+            # Bodies that shared a display name; only the first was kept, and
+            # the user needs to know the rest were not silently applied.
+            "name_collisions": collisions,
             "schema_version": state.get("schema_version"),
         }
     ), 201
@@ -732,7 +900,9 @@ def project_report(project_id: str):
     if project is None:
         return jsonify({"error": "Project not found"}), 404
 
-    payload = request.json or {}
+    payload = request.json if isinstance(request.json, dict) else None
+    if payload is None:
+        return jsonify({"error": "The request body must be a JSON object."}), 400
     fmt = str(payload.get("format", "html")).lower()
     if fmt not in REPORT_FORMATS:
         return jsonify({"error": f"Unknown report format '{fmt}'."}), 400
@@ -741,8 +911,16 @@ def project_report(project_id: str):
             {"error": "PDF export needs weasyprint or pdfkit installed on the server."}
         ), 503
 
-    sections = payload.get("sections") or {}
-    want = lambda key: bool(sections.get(key, True))  # noqa: E731 - local shorthand
+    # `sections` used to be read with `.get` on whatever arrived, so a list or a
+    # string turned into an AttributeError and a 500.
+    sections = payload.get("sections")
+    if sections is None:
+        sections = {}
+    if not isinstance(sections, dict):
+        return jsonify({"error": "`sections` must be an object of booleans."}), 400
+
+    def want(key: str) -> bool:
+        return bool(sections.get(key, True))
 
     from core.report_generator import (
         MetricsData,
@@ -789,8 +967,13 @@ def project_report(project_id: str):
         )
 
     if want("statistics"):
-        artifact = _load_artifact(project_id)
-        summary = (artifact or {}).get("summary", {}) or project.get("summary", {}) or {}
+        # The project row carries the same summary the artifact does, recorded
+        # by mark_project_completed. Prefer it: reading it avoids parsing a
+        # 50-180 MB artifact whose visualization arrays this section never
+        # touches. The artifact is only opened when the row has no summary.
+        summary = project.get("summary") or {}
+        if not summary:
+            summary = (_load_artifact(project_id) or {}).get("summary", {}) or {}
         # add_metrics_section formats every value with `f"{value:.2f}"`, so a
         # string statistic (the Niyama metadata is full of them) would raise.
         metrics = {
@@ -808,10 +991,19 @@ def project_report(project_id: str):
     screenshot = payload.get("screenshot")
     if want("screenshot") and isinstance(screenshot, str) and screenshot:
         image = _decode_data_url(screenshot)
-        if image is not None:
-            # `_process_image` treats a str as a FILE PATH, so the PNG has to be
-            # handed over as bytes.
-            generator.add_image_section("Result View", image, caption="Viewport screenshot")
+        if image is None:
+            return jsonify({"error": "The screenshot could not be decoded."}), 400
+        if len(image) > MAX_SCREENSHOT_BYTES:
+            return jsonify(
+                {"error": f"The screenshot exceeds {MAX_SCREENSHOT_BYTES // (1024 * 1024)} MB."}
+            ), 413
+        # The renderer hardcodes `data:image/png`, so anything that is not a
+        # PNG would be embedded under a lying media type.
+        if not image.startswith(PNG_MAGIC):
+            return jsonify({"error": "The screenshot must be a PNG."}), 400
+        # `_process_image` treats a str as a FILE PATH, so the PNG has to be
+        # handed over as bytes.
+        generator.add_image_section("Result View", image, caption="Viewport screenshot")
 
     import tempfile
 
@@ -863,9 +1055,15 @@ def _flat_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _decode_data_url(value: str) -> Optional[bytes]:
-    """Decode a ``data:image/png;base64,...`` URL, or a bare base64 payload."""
+    """Decode a ``data:image/png;base64,...`` URL, or a bare base64 payload.
+
+    Refuses anything longer than the screenshot cap before decoding, so a
+    gigabyte of base64 is not expanded in memory just to be rejected after.
+    """
     import base64
 
+    if len(value) > MAX_SCREENSHOT_BYTES * 2:
+        return None
     encoded = value.split(",", 1)[1] if value.startswith("data:") else value
     try:
         return base64.b64decode(encoded, validate=True)
