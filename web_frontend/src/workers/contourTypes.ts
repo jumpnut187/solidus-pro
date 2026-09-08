@@ -33,6 +33,18 @@ export type ContourRequest = {
   castOnly: boolean;
   /** True when the region of interest is where the field is *below* the iso. */
   invert: boolean;
+  /**
+   * How much of the masked blur to mix into the raw frame, 0..1.
+   *
+   * The blur exists because a fill frame is noisy at cell level and contouring
+   * it raw at 0.5 turns every dipped cell into a hole. But a fully blurred
+   * field pushes the 0.5 crossing outward at a wall, and on a coarse lattice
+   * that crossing drapes down the *outside* of the riser as molten tongues.
+   * Now that the casting's own skin closes the liquid body at the wall, the
+   * front does not have to reach it, so a light mix keeps the noise down
+   * without the drape.
+   */
+  blurStrength: number;
 };
 
 export type ContourResult = {

@@ -110,6 +110,17 @@ const TIME_ENVELOPE_SHELL_OPACITY = 0.35;
 const MOLTEN_GLOW = 0.62;
 
 /**
+ * How much of the contourer's masked blur to keep.
+ *
+ * A full blur was needed while the front had to look solid on its own; it also
+ * pushed the 0.5 crossing out to the casting wall, where on a coarse lattice
+ * it draped as molten tongues down the outside of the riser. The skin now
+ * closes the liquid body at the wall, so the front only has to be smooth
+ * *inside* the metal, and a light mix does that without the drape.
+ */
+const FRONT_BLUR_STRENGTH = 0.3;
+
+/**
  * Colour for metal the sweep has not reached, in linear space.
  *
  * The liquid end of the molten ramp, converted the same way the envelope's
@@ -243,6 +254,7 @@ function wantsEnvelope(style: ResultViewState['style']): boolean {
   return style === 'envelope' || style === 'both';
 }
 
+
 export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(function ResultsViewport(props, ref) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -317,7 +329,28 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     // "the first cell is about to". At 100 percent it sits on the maximum, so
     // every cell is at or below it and the view is the static map exactly.
     const sweeping = isSweepMode(mode) && ready;
-    const sweepTime = sweeping ? (state.timePercent / 100) * quantMax : null;
+
+    /**
+     * The value above which the metal at a point is still liquid.
+     *
+     * For a sweep it is the scrubber's own time. For a frame mode it is the
+     * same 0.5 the front is contoured at -- but only in the styles that draw a
+     * front, because in `surface` the whole point is the field's own colours
+     * and recolouring half of it as metal would throw them away.
+     */
+    const liquidCutoff = sweeping
+      ? (state.timePercent / 100) * quantMax
+      : isFrameMode(mode) && ready && wantsEnvelope(state.style)
+        ? 0.5
+        : null;
+
+    /**
+     * Whether the skin closes the liquid region into a solid body.
+     *
+     * Only where a front is drawn: in `surface` the casting is opaque anyway
+     * and there is nothing to close.
+     */
+    const liquidBody = liquidCutoff !== null && wantsEnvelope(state.style) && state.showResults;
 
     // In 'envelope' the shell is a ghost: it locates the defect in the part
     // but carries no colour of its own, so nothing competes with the surface
@@ -346,9 +379,13 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
         plugin.state.frameBlend = blend;
         plugin.state.castOnly = state.castOnly;
         plugin.state.strength = strength;
-        plugin.state.sweepTime = sweepTime;
+        plugin.state.sweepTime = liquidCutoff;
         plugin.state.liquidColor = LIQUID_COLOR;
         plugin.state.liquidGlow = MOLTEN_GLOW;
+        plugin.state.liquidBody = liquidBody;
+        plugin.state.solidAlpha = TIME_ENVELOPE_SHELL_OPACITY;
+        // One voxel: the layer the front is not allowed to enter.
+        plugin.state.skinDepth = meta.spacing;
         plugin.fieldTextureA = stack ? stack.textureA : (field?.texture ?? null);
         plugin.fieldTextureB = stack ? stack.textureB : (field?.texture ?? null);
         plugin.maskTexture = resources.maskTexture;
@@ -356,6 +393,7 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       } else {
         plugin.state.strength = 0;
         plugin.state.sweepTime = null;
+        plugin.state.liquidBody = false;
       }
     };
 
@@ -375,6 +413,10 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     for (const cap of refs.caps.entries()) {
       applyPaint(cap.plugin, state.showResults && ready ? 1 : 0);
       cap.plugin.state.discardOutside = true;
+      // A cut face is a solid slab of metal whichever side of the front it is
+      // on: it shows the field on the inside, so it is never ghosted and never
+      // needs closing.
+      cap.plugin.state.liquidBody = false;
     }
 
     // The envelope is clipped by the same planes, so a section cuts through
@@ -399,6 +441,7 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     // sentinel value, which is what removed the false shell at t = 0, and this
     // is what keeps the surface it does produce inside the casting.
     applyPaint(refs.envelope.clip, 0);
+    refs.envelope.clip.state.liquidBody = false;
     refs.envelope.clip.state.discardOutside = molten;
     refs.envelope.clip.state.discardUnpaintable = molten && state.castOnly;
     refs.envelope.setStyle({
@@ -710,9 +753,12 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     // An envelope has to be visible through the casting that contains it --
     // but a liquid front only has to be visible *through* it, not instead of
     // it. See ENVELOPE_SHELL_OPACITY.
+    // A sweep's envelope is a front like any other, so it gets the readable
+    // shell rather than the defect envelope's near-invisible one.
+    const front = isFrameMode(view.mode) || isSweepMode(view.mode);
     const cap =
       style === 'envelope'
-        ? isFrameMode(view.mode)
+        ? front
           ? TIME_ENVELOPE_SHELL_OPACITY
           : ENVELOPE_SHELL_OPACITY
         : style === 'both'
@@ -730,7 +776,16 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     paint();
     // `view.mode` is a dependency because the opacity cap now depends on it:
     // a time mode keeps a readable shell where a defect mode ghosts it.
-  }, [parts, selectedPartId, view.modelOpacity, view.showModel, view.style, view.mode, paint]);
+  }, [
+    parts,
+    selectedPartId,
+    view.modelOpacity,
+    view.showModel,
+    view.style,
+    view.mode,
+    view.showResults,
+    paint
+  ]);
 
   // Markers belong to the tool that made them.
   useEffect(() => {
@@ -976,7 +1031,8 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
         // Fraction liquid is high where the metal is still molten, so the
         // region of interest is above the iso; a fill fraction behaves the
         // same way, and nothing else reaches here.
-        invert: false
+        invert: false,
+        blurStrength: FRONT_BLUR_STRENGTH
       });
     });
 
@@ -1017,7 +1073,8 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       castOnly: view.castOnly,
       // Still liquid means "has not solidified yet", which is where the
       // solidification time is *above* the cut-off.
-      invert: false
+      invert: false,
+      blurStrength: FRONT_BLUR_STRENGTH
     });
   }, [view.mode, view.style, view.timePercent, view.castOnly, resourcesEpoch]);
 

@@ -233,7 +233,7 @@ function buildField(current: State, request: ContourRequest): boolean {
     blurValue[index] = usable ? (a[index] * (1 - blend) + b[index] * blend) / 255 : 0;
   }
 
-  blurInsideMask(current);
+  blurInsideMask(current, Math.min(Math.max(request.blurStrength ?? 1, 0), 1));
 
   const nearest = nearestUsableMap(current, request.castOnly);
   if (!nearest) return false;
@@ -258,8 +258,12 @@ function buildField(current: State, request: ContourRequest): boolean {
  * plain blur would mix in the zeros of the mold and pull the front back off
  * every wall, eroding exactly the surface being drawn.
  */
-function blurInsideMask(current: State): void {
+function blurInsideMask(current: State, strength: number): void {
   const [nx, ny, nz] = current.dims;
+  if (strength <= 0) return;
+  // Kept so the blurred result can be mixed back over the raw values; a
+  // partial blur is what stops the 0.5 crossing drifting out to the wall.
+  const raw = current.blurValue.slice();
   let value = current.blurValue;
   let weight = current.blurWeight;
   let valueOut = current.blurValueSwap;
@@ -294,7 +298,8 @@ function blurInsideMask(current: State): void {
   const cellCount = current.cellCount;
   for (let index = 0; index < cellCount; index += 1) {
     const total = weight[index];
-    current.blurValue[index] = total > 0 ? value[index] / total : 0;
+    const blurred = total > 0 ? value[index] / total : 0;
+    current.blurValue[index] = raw[index] + (blurred - raw[index]) * strength;
   }
 }
 
@@ -333,14 +338,14 @@ function contour(request: ContourRequest): ContourResult | null {
   const normals: number[] = [];
   const scalars: number[] = [];
 
-  const usableAt = (fx: number, fy: number, fz: number): boolean => {
-    const ix = Math.round(fx);
-    const iy = Math.round(fy);
-    const iz = Math.round(fz);
+  const usableCell = (ix: number, iy: number, iz: number): boolean => {
     if (ix < 0 || iy < 0 || iz < 0 || ix >= nx || iy >= ny || iz >= nz) return false;
     const code = current.mask[ix + nx * (iy + ny * iz)];
     return code !== 0 && (!request.castOnly || code === CAST_CODE);
   };
+
+  const usableAt = (fx: number, fy: number, fz: number): boolean =>
+    usableCell(Math.round(fx), Math.round(fy), Math.round(fz));
 
   /** Trilinear sample in lattice coordinates, clamped at the border. */
   const sampleLattice = (fx: number, fy: number, fz: number): number => {
@@ -374,6 +379,29 @@ function contour(request: ContourRequest): ContourResult | null {
   for (let iz = 0; iz < nz - 1; iz += 1) {
     for (let iy = 0; iy < ny - 1; iy += 1) {
       for (let ix = 0; ix < nx - 1; ix += 1) {
+        // A cell with no metal in it at all cannot hold a front.
+        //
+        // The field no longer has a wall around the casting, which is what
+        // stopped the front copying the skin -- but it does mean the extension
+        // out in the mold carries real values, and where the extension of a
+        // frozen region meets the extension of a liquid one, out in the air
+        // beside the riser, it crosses the iso. That crossing is not a front;
+        // it is an artefact of the extension, and it was the molten tongues
+        // running down the outside of the riser wall.
+        //
+        // The test is deliberately "any corner" rather than "every corner".
+        // Every corner also removes the tongues, but it takes the front out of
+        // the whole boundary cell layer with it, and where the frozen shell is
+        // thinner than a cell -- the fillet at the riser base, at 0.26 in --
+        // that left the liquid body open. The vertex itself is checked instead,
+        // below, which is the guarantee that actually matters.
+        let metalCorners = 0;
+        for (let c = 0; c < 8; c += 1) {
+          const [dx, dy, dz] = CORNERS[c];
+          if (usableCell(ix + dx, iy + dy, iz + dz)) metalCorners += 1;
+        }
+        if (metalCorners === 0) continue;
+
         let insideCount = 0;
         for (let c = 0; c < 8; c += 1) {
           const [dx, dy, dz] = CORNERS[c];
@@ -409,12 +437,29 @@ function contour(request: ContourRequest): ContourResult | null {
         const localY = sumY / crossings;
         const localZ = sumZ / crossings;
 
+        // The vertex must land in metal. This is the promise the renderer
+        // relies on: no part of the front hangs off the casting, so nothing
+        // has to be trimmed away afterwards to hide a drip.
+        //
+        // Tested on the *stored* coordinates, rounded to float32 exactly as
+        // the output buffer will hold them. A vertex sitting on a cell
+        // boundary otherwise answers this question one way here and the other
+        // way to anything that reads the buffer back.
+        const worldX = Math.fround(origin[0] + (ix + localX) * spacing);
+        const worldY = Math.fround(origin[1] + (iy + localY) * spacing);
+        const worldZ = Math.fround(origin[2] + (iz + localZ) * spacing);
+        if (
+          !usableCell(
+            Math.round((worldX - origin[0]) / spacing),
+            Math.round((worldY - origin[1]) / spacing),
+            Math.round((worldZ - origin[2]) / spacing)
+          )
+        ) {
+          continue;
+        }
+
         cellVertex[cellIndex(ix, iy, iz)] = positions.length / 3;
-        positions.push(
-          origin[0] + (ix + localX) * spacing,
-          origin[1] + (iy + localY) * spacing,
-          origin[2] + (iz + localZ) * spacing
-        );
+        positions.push(worldX, worldY, worldZ);
 
         // Central-difference gradient, one cell out, clamped at the border.
         const gx =

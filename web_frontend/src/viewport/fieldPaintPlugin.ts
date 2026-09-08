@@ -51,7 +51,10 @@ const FIELD_UNIFORMS = [
   'fieldDiscardUnpaintable',
   'fieldSweepTime',
   'fieldLiquidColor',
-  'fieldLiquidGlow'
+  'fieldLiquidGlow',
+  'fieldLiquidBody',
+  'fieldSolidAlpha',
+  'fieldSkinDepth'
 ];
 
 export type FieldPaintState = {
@@ -106,6 +109,37 @@ export type FieldPaintState = {
   liquidColor: [number, number, number];
   /** How much of that colour those cells emit, matching the front's glow. */
   liquidGlow: number;
+  /**
+   * Draw the still-liquid metal as a closed solid body.
+   *
+   * The interior front only exists where liquid meets *solid*. Where liquid
+   * runs to the casting's own skin there is no front to draw, so a ghosted
+   * shell left the pool open to the background there: dark cut-outs around the
+   * riser base and at the end of the plate, and at t = 0 -- when the whole
+   * casting is liquid and there is no front at all -- an empty glass box.
+   *
+   * With this on, the skin itself closes the body: opaque wherever the metal
+   * under it is still liquid, ghosted at `solidAlpha` wherever it has frozen.
+   * The liquid region is then watertight without a second surface anywhere
+   * near the wall, which is what kept the old sentinel-wall version z-fighting.
+   */
+  liquidBody: boolean;
+  /** Opacity of the skin over metal that has already solidified. */
+  solidAlpha: number;
+  /**
+   * How far below the surface the skin asks "is this still liquid?", in world
+   * units. Normally one voxel.
+   *
+   * The front is built only from cells made entirely of metal, so it can never
+   * reach into the outermost cell layer. If the skin tested the field at the
+   * surface itself, then wherever the frozen shell is thinner than one cell
+   * the skin would already read solid -- and go ghost -- while the front still
+   * could not be built there. Neither would cover it and the body would open
+   * up, which is what left a jagged dark crescent around the riser fillet.
+   * Testing one cell down hands that outermost layer to the skin, so the two
+   * meet exactly.
+   */
+  skinDepth: number;
 };
 
 export const defaultFieldPaintState = (): FieldPaintState => ({
@@ -123,7 +157,10 @@ export const defaultFieldPaintState = (): FieldPaintState => ({
   discardUnpaintable: false,
   sweepTime: null,
   liquidColor: [1, 0.6, 0.15],
-  liquidGlow: 0
+  liquidGlow: 0,
+  liquidBody: false,
+  solidAlpha: 1,
+  skinDepth: 0
 });
 
 /**
@@ -246,6 +283,9 @@ uniform float fieldDiscardUnpaintable;
 uniform float fieldSweepTime;
 uniform vec3 fieldLiquidColor;
 uniform float fieldLiquidGlow;
+uniform float fieldLiquidBody;
+uniform float fieldSolidAlpha;
+uniform float fieldSkinDepth;
 `,
       // Runs after `vec3 surfaceAlbedo` and `float alpha` exist and before
       // any lighting, so the painted color is shaded like a real surface
@@ -274,12 +314,43 @@ uniform float fieldLiquidGlow;
         fieldBlend
       );
       float value = fieldQuant.x + normalized * (fieldQuant.y - fieldQuant.x);
+      // Above the cut-off the metal here has not frozen yet. For the
+      // solidification sweep the cut-off is the scrubber's own time; for a
+      // fraction-liquid or fill frame it is the same 0.5 the front is
+      // contoured at, so skin and front agree on where the liquid ends.
+      bool stillLiquid = value > fieldSweepTime;
+#ifdef NORMAL
+      if (fieldLiquidBody > 0.5 && fieldSkinDepth > 0.0) {
+        // See FieldPaintState.skinDepth. Only the liquid *test* moves; the
+        // colour still comes from the value at the surface.
+        vec3 innerUvw =
+          (vPositionW - normalize(vNormalW) * fieldSkinDepth) * fieldTexelStep + fieldTexelBias;
+        if (texture(fieldMaskSampler, innerUvw).r * 255.0 > 0.5) {
+          float innerNormalized = mix(
+            texture(fieldSamplerA, innerUvw).r,
+            texture(fieldSamplerB, innerUvw).r,
+            fieldBlend
+          );
+          float innerValue = fieldQuant.x + innerNormalized * (fieldQuant.y - fieldQuant.x);
+          stillLiquid = stillLiquid || innerValue > fieldSweepTime;
+        }
+      }
+#endif
+
+#ifdef DEPTHPREPASS
+      // Only the opaque part of the skin may claim the depth buffer. The
+      // ghost over frozen metal must not, or it would hide the very front it
+      // is there to show; the liquid part must, or the far wall of the pool
+      // draws over the near one and the body reads as a bag of triangles.
+      if (fieldLiquidBody > 0.5 && !stillLiquid) {
+        discard;
+      }
+#endif
+
       vec3 painted;
-      if (value > fieldSweepTime) {
-        // This cell has not reached its own time yet. In a solidification
-        // sweep that means it is still liquid, so it is drawn as metal rather
-        // than as a value: one colour for the whole molten region, whatever
-        // colormap the rest of the casting is using.
+      if (stillLiquid) {
+        // Drawn as metal rather than as a value: one colour for the whole
+        // molten region, whatever colormap the rest of the casting is using.
         painted = fieldLiquidColor;
         castSimLiquid = fieldStrength;
       } else {
@@ -288,6 +359,9 @@ uniform float fieldLiquidGlow;
         painted = texture(fieldLutSampler, vec2(t, 0.5)).rgb;
       }
       surfaceAlbedo = mix(surfaceAlbedo, painted, fieldStrength);
+      if (fieldLiquidBody > 0.5) {
+        alpha = stillLiquid ? 1.0 : fieldSolidAlpha;
+      }
     }
   }
 `,
@@ -346,6 +420,9 @@ uniform float fieldLiquidGlow;
     effect.setFloat('fieldSweepTime', state.sweepTime ?? NO_SWEEP);
     effect.setFloat3('fieldLiquidColor', state.liquidColor[0], state.liquidColor[1], state.liquidColor[2]);
     effect.setFloat('fieldLiquidGlow', state.liquidGlow);
+    effect.setFloat('fieldLiquidBody', state.liquidBody ? 1 : 0);
+    effect.setFloat('fieldSolidAlpha', state.solidAlpha);
+    effect.setFloat('fieldSkinDepth', state.skinDepth);
 
     effect.setTexture('fieldSamplerA', this.fieldTextureA ?? this._placeholderVolume);
     effect.setTexture('fieldSamplerB', this.fieldTextureB ?? this.fieldTextureA ?? this._placeholderVolume);
