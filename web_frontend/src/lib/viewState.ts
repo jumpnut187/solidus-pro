@@ -212,7 +212,7 @@ export const defaultResultViewState: ResultViewState = {
   timePercent: 0,
   playing: false,
   speed: 1,
-  style: 'surface',
+  style: 'envelope',
   showModel: true,
   showResults: true,
   modelOpacity: 100,

@@ -37,7 +37,7 @@ export function HelpGuideModal({ alloys, onClose }: { alloys: AlloyGuideRow[]; o
         <div>
           <h3>Reading the results</h3>
           <ul>
-            <li>Surface paints the field on the casting; Envelope draws an isosurface around everything above the threshold.</li>
+            <li>The envelope is an isosurface drawn around everything above the threshold; the casting itself stays a neutral ghost behind it.</li>
             <li>The threshold slider carries a marker at the recommended value for the current mode.</li>
             <li>Section cuts on X, Y and Z show the interior; enable caps to paint the field on the cut face.</li>
           </ul>

@@ -15,7 +15,6 @@ import {
   type GridMeta,
   type MeasureResult,
   type ResultModeId,
-  type ResultStyle,
   type ResultViewState,
   type SectionAxisState,
   type SectionState
@@ -204,19 +203,6 @@ export function ResultsPanel(props: ResultsPanelProps) {
                   ))}
                 </select>
               </div>
-
-              <div className="segmented segmented-block" role="group" aria-label="Result style">
-                {(['surface', 'envelope', 'both'] as ResultStyle[]).map((style) => (
-                  <button
-                    key={style}
-                    type="button"
-                    aria-pressed={view.style === style}
-                    onClick={() => onViewChange({ style })}
-                  >
-                    {style === 'surface' ? 'Surface' : style === 'envelope' ? 'Envelope' : 'Both'}
-                  </button>
-                ))}
-              </div>
             </CollapsibleGroup>
 
             {!timeMode ? (
@@ -249,9 +235,7 @@ export function ResultsPanel(props: ResultsPanelProps) {
                   </div>
                   <span className="field-hint">
                     Recommended for {RESULT_MODE_LABELS[view.mode]}: {DEFAULT_THRESHOLD[view.mode]}%.
-                    {view.style === 'surface'
-                      ? ' In Surface style it sets the defect volume below; switch to Envelope or Both to see it as a shape.'
-                      : ' The envelope encloses everything at or above this value.'}
+                    {' The envelope encloses everything at or above this value.'}
                   </span>
                 </div>
 
