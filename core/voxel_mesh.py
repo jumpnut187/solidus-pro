@@ -65,6 +65,11 @@ _INTERFACE_BRIDGE_CODES = tuple(
     sorted({code for pair in _INTERFACE_BRIDGE_PAIRS for code in pair})
 )
 import multiprocessing
+import os
+import shutil
+import tempfile
+import threading
+import time
 from core.acceleration import (
     compute_modulus_parallel
 )
@@ -107,17 +112,84 @@ except ImportError:
     RTREE_AVAILABLE = False
 
 
-_PART_ASSIGNMENT_WORKER_MESH = None
+#: Worker-local cache: (part_key, trimesh.Trimesh). One pool now serves every
+#: part in an assembly, so the worker swaps its mesh when a task arrives for a
+#: different part. Only the current part is kept so a worker never holds more
+#: than one BVH at a time.
+_PART_ASSIGNMENT_WORKER_MESH: Optional[Tuple[str, trimesh.Trimesh]] = None
+
+#: Points per call to ``mesh.nearest.on_surface``. trimesh's closest-point
+#: query allocates per (point x candidate-triangle) pair, and on a 500k-face
+#: mesh a single 2,500-point call peaks above 1 GB. Chunking bounds that.
+_PROXIMITY_CHUNK_POINTS = 512
+
+#: RSS a freshly spawned worker costs before it does any work. Each worker
+#: re-imports numba/taichi/mlx/scipy/trimesh through ``core/__init__``;
+#: measured at ~200 MB on macOS arm64.
+_WORKER_BASE_BYTES = 256 * 1024 ** 2
 
 
-def _init_part_assignment_worker(mesh_payload: Dict[str, np.ndarray]) -> None:
-    """Initialize worker-local mesh cache for part assignment containment checks."""
+def _available_memory_bytes() -> int:
+    """Live available RAM. ``hardware.available_memory`` is an import-time snapshot."""
+    try:
+        import psutil
+        return int(psutil.virtual_memory().available)
+    except Exception:
+        return int(getattr(hardware, "available_memory", 0) or 0)
+
+
+def _load_part_assignment_mesh(part_key: str, mesh_path: str) -> trimesh.Trimesh:
+    """Return the cached mesh for ``part_key``, loading it from ``mesh_path`` on a miss."""
     global _PART_ASSIGNMENT_WORKER_MESH
-    _PART_ASSIGNMENT_WORKER_MESH = trimesh.Trimesh(
-        vertices=np.asarray(mesh_payload["vertices"]),
-        faces=np.asarray(mesh_payload["faces"]),
-        process=False,
-    )
+    cached = _PART_ASSIGNMENT_WORKER_MESH
+    if cached is not None and cached[0] == part_key:
+        return cached[1]
+    # Drop the previous part before loading the next so peak RSS is one mesh.
+    _PART_ASSIGNMENT_WORKER_MESH = None
+    with np.load(mesh_path) as payload:
+        mesh = trimesh.Trimesh(
+            vertices=np.asarray(payload["vertices"]),
+            faces=np.asarray(payload["faces"]),
+            process=False,
+        )
+    _PART_ASSIGNMENT_WORKER_MESH = (part_key, mesh)
+    return mesh
+
+
+def _near_surface_mask(mesh: trimesh.Trimesh, points: np.ndarray, tolerance: float) -> np.ndarray:
+    """True where a point lies within ``tolerance`` of the mesh surface.
+
+    Same answer as ``mesh.nearest.on_surface(points)[1] < tolerance`` without
+    the memory. trimesh's closest-point query sizes its candidate box by the
+    distance to the nearest *vertex*, so a point far from a long thin part
+    pulls in thousands of triangles; measured at 2 GB per 2,500 points on a
+    24k-face runner. We only need a yes/no at a fixed radius, so the box is
+    +/- tolerance and the candidate set is a handful of triangles per point.
+    A triangle within ``tolerance`` of a point must have its AABB intersect
+    that box, so nothing is missed.
+    """
+    n_points = len(points)
+    result = np.zeros(n_points, dtype=bool)
+    if n_points == 0 or tolerance <= 0:
+        return result
+    tree = mesh.triangles_tree
+    lo = points - tolerance
+    hi = points + tolerance
+    pair_points: List[int] = []
+    pair_tris: List[int] = []
+    for i in range(n_points):
+        hits = list(tree.intersection((lo[i, 0], lo[i, 1], lo[i, 2], hi[i, 0], hi[i, 1], hi[i, 2])))
+        if hits:
+            pair_points.extend([i] * len(hits))
+            pair_tris.extend(hits)
+    if not pair_points:
+        return result
+    pp = np.asarray(pair_points, dtype=np.int64)
+    pt = np.asarray(pair_tris, dtype=np.int64)
+    closest = trimesh.triangles.closest_point(mesh.triangles[pt], points[pp])
+    dist = np.linalg.norm(closest - points[pp], axis=1)
+    result[np.unique(pp[dist < tolerance])] = True
+    return result
 
 
 def _robust_contains_check_impl(mesh: trimesh.Trimesh, points: np.ndarray, tolerance: float) -> np.ndarray:
@@ -132,12 +204,14 @@ def _robust_contains_check_impl(mesh: trimesh.Trimesh, points: np.ndarray, toler
         if np.sum(inside_mask) == 0:
             logger.debug(f"mesh.contains() returned all False for {n_points} points, trying fallbacks")
         else:
-            # Also check proximity for points near the surface (touching assemblies)
+            # Also check proximity for points near the surface (touching assemblies).
+            # Only points contains() rejected need the query, and it runs in
+            # fixed-size chunks to bound closest-point scratch memory.
             try:
-                if hasattr(mesh, 'nearest'):
-                    _closest_pts, distances, _ = mesh.nearest.on_surface(points)
-                    near_surface = distances < tolerance
-                    inside_mask = inside_mask | near_surface
+                outside_idx = np.flatnonzero(~inside_mask)
+                for start in range(0, len(outside_idx), _PROXIMITY_CHUNK_POINTS):
+                    chunk = outside_idx[start:start + _PROXIMITY_CHUNK_POINTS]
+                    inside_mask[chunk[_near_surface_mask(mesh, points[chunk], tolerance)]] = True
             except Exception:
                 pass  # Proximity check failed, use contains() result
             return inside_mask
@@ -159,13 +233,14 @@ def _robust_contains_check_impl(mesh: trimesh.Trimesh, points: np.ndarray, toler
     # Strategy 3: Proximity-based containment (for non-watertight meshes)
     # If a point is very close to the mesh surface, consider it "inside"
     try:
-        if hasattr(mesh, 'nearest'):
-            _closest_pts, distances, _ = mesh.nearest.on_surface(points)
-            # Consider points within 1.5x tolerance as "inside"
-            # This is more generous for RISER/CHILL parts that may touch the casting
-            inside_mask = distances < (tolerance * 1.5)
-            if np.sum(inside_mask) > 0:
-                return inside_mask
+        # Consider points within 1.5x tolerance as "inside"
+        # This is more generous for RISER/CHILL parts that may touch the casting
+        inside_mask = np.zeros(n_points, dtype=bool)
+        for start in range(0, n_points, _PROXIMITY_CHUNK_POINTS):
+            stop = start + _PROXIMITY_CHUNK_POINTS
+            inside_mask[start:stop] = _near_surface_mask(mesh, points[start:stop], tolerance * 1.5)
+        if np.sum(inside_mask) > 0:
+            return inside_mask
     except Exception as e:
         logger.debug(f"proximity fallback failed: {e}")
 
@@ -186,12 +261,12 @@ def _robust_contains_check_impl(mesh: trimesh.Trimesh, points: np.ndarray, toler
         return np.zeros(n_points, dtype=bool)
 
 
-def _part_assignment_contains_worker(chunk_idx: int, chunk_indices: np.ndarray,
+def _part_assignment_contains_worker(part_key: str, mesh_path: str,
+                                     chunk_idx: int, chunk_indices: np.ndarray,
                                      chunk_points: np.ndarray, tolerance: float) -> Tuple[int, np.ndarray]:
     """Worker task for part-assignment containment checks."""
-    if _PART_ASSIGNMENT_WORKER_MESH is None:
-        raise RuntimeError("Part assignment worker mesh was not initialized")
-    inside_mask = _robust_contains_check_impl(_PART_ASSIGNMENT_WORKER_MESH, chunk_points, tolerance)
+    mesh = _load_part_assignment_mesh(part_key, mesh_path)
+    inside_mask = _robust_contains_check_impl(mesh, chunk_points, tolerance)
     return chunk_idx, chunk_indices[inside_mask]
 
 
@@ -317,8 +392,29 @@ class AdaptiveVoxelMesh:
     """
 
     AUTO_PART_ASSIGNMENT_MIN_CANDIDATES = 10_000
+    #: Per-worker budget used to size the pool before anything is measured.
+    #: Once a part's first batch has run in the parent, the measured peak
+    #: replaces this for that part (see ``_run_part_assignment_parallel``).
     AUTO_PART_ASSIGNMENT_MEMORY_PER_WORKER_BYTES = int(1.5 * 1024 ** 3)
     PART_ASSIGNMENT_SUBMIT_MULTIPLIER = 2
+    #: Containment memory scales with (points per batch) x (candidate faces).
+    #: Above this face count the configured batch size is scaled down
+    #: proportionally, so a 500k-face mesh gets ~1/10 the points per batch.
+    PART_ASSIGNMENT_BATCH_FACE_REFERENCE = 50_000
+    PART_ASSIGNMENT_MIN_BATCH = 256
+    #: RAM that must stay free while worker batches are in flight. The larger
+    #: of this fraction of total RAM and 2 GB. Falling below it stops new
+    #: submissions and finishes the part sequentially in the parent.
+    PART_ASSIGNMENT_MEMORY_RESERVE_FRACTION = 0.20
+    PART_ASSIGNMENT_MEMORY_RESERVE_MIN_BYTES = 2 * 1024 ** 3
+    #: Multiplier on the measured first-batch peak. Batches differ in how many
+    #: triangles the rays and proximity queries touch; 1.5x covers that spread.
+    PART_ASSIGNMENT_PROBE_SAFETY = 1.5
+    #: In auto mode, only build the pool when the sequential estimate from the
+    #: probed batch exceeds this. Spawning 17 interpreters that each re-import
+    #: numba/taichi/mlx costs a few seconds; a part that finishes in-process
+    #: faster than that should just finish in-process.
+    PART_ASSIGNMENT_MIN_PARALLEL_SECONDS = 3.0
     
     @staticmethod
     def preview_voxel_count(
@@ -494,6 +590,12 @@ class AdaptiveVoxelMesh:
         self.part_assignment_mode = mode if mode in {"auto", "parallel", "legacy"} else "auto"
         self.part_assignment_workers = max(0, int(part_assignment_workers))
         self.part_assignment_batch_size = max(256, int(part_assignment_batch_size))
+        # One process pool and one scratch dir serve every part of an assembly.
+        # Created lazily by the first part that parallelizes, torn down at the
+        # end of assign_part_types(). See _get_part_assignment_pool().
+        self._part_assignment_pool: Optional[ProcessPoolExecutor] = None
+        self._part_assignment_scratch_dir: Optional[str] = None
+        self._part_assignment_pool_size: int = 0
         self.voxel_size_was_adjusted = False
         self.adjustment_message = ""
         
@@ -1598,85 +1700,17 @@ class AdaptiveVoxelMesh:
         # Use half voxel size to catch voxels at touching surfaces
         proximity_tolerance = self.base_voxel_size * 0.5
         
-        for idx, (mesh, part_type) in enumerate(all_parts):
-            type_name = _type_name(part_type)
-            print(f"    [{idx+1}/{total_parts}] Checking {type_name} part...", end=" ", flush=True)
-            
-            # OPTIMIZATION: Use bounding box to pre-filter voxels
-            # Expand bbox slightly to catch voxels at touching surfaces
-            bbox_min = mesh.bounds[0] - proximity_tolerance
-            bbox_max = mesh.bounds[1] + proximity_tolerance
-            
-            # Find voxels within expanded bounding box (fast NumPy operation)
-            in_bbox = (
-                (voxel_centers_array[:, 0] >= bbox_min[0]) & 
-                (voxel_centers_array[:, 0] <= bbox_max[0]) &
-                (voxel_centers_array[:, 1] >= bbox_min[1]) & 
-                (voxel_centers_array[:, 1] <= bbox_max[1]) &
-                (voxel_centers_array[:, 2] >= bbox_min[2]) & 
-                (voxel_centers_array[:, 2] <= bbox_max[2])
+        try:
+            self._assign_part_types_loop(
+                all_parts=all_parts,
+                voxel_centers_array=voxel_centers_array,
+                total_parts=total_parts,
+                proximity_tolerance=proximity_tolerance,
+                type_name_fn=_type_name,
             )
-            
-            candidate_indices = np.where(in_bbox)[0]
-            n_candidates = len(candidate_indices)
-            
-            if n_candidates == 0:
-                print(f"0 voxels (bbox filter: 0 candidates)")
-                continue
-            
-            # Process containment check with batched progress feedback.
-            # In parallel mode we use worker processes (not threads) for safety.
-            BATCH_SIZE = self.part_assignment_batch_size
-            inside_global_indices = []
-            
-            if n_candidates > BATCH_SIZE:
-                print(f"({n_candidates:,} candidates, {len(mesh.faces):,} faces)", flush=True)
-                use_parallel = self._should_parallelize_part_assignment(n_candidates)
-                if use_parallel:
-                    inside_global_indices = self._run_part_assignment_parallel(
-                        mesh=mesh,
-                        candidate_indices=candidate_indices,
-                        voxel_centers_array=voxel_centers_array,
-                        part_idx=idx,
-                        total_parts=total_parts,
-                        type_name=type_name,
-                        tolerance=proximity_tolerance,
-                    )
-                else:
-                    inside_global_indices = self._run_part_assignment_sequential(
-                        mesh=mesh,
-                        candidate_indices=candidate_indices,
-                        voxel_centers_array=voxel_centers_array,
-                        part_idx=idx,
-                        total_parts=total_parts,
-                        type_name=type_name,
-                        tolerance=proximity_tolerance,
-                    )
+        finally:
+            self._shutdown_part_assignment_pool()
 
-                inside_global_indices = np.array(inside_global_indices) if inside_global_indices else np.array([], dtype=int)
-                print(f"\r    [{idx+1}/{total_parts}] Checking {type_name} part... {len(inside_global_indices):,} voxels ({n_candidates:,} candidates)   ")
-            else:
-                # Small batch - process all at once
-                try:
-                    candidate_centers = voxel_centers_array[candidate_indices]
-                    
-                    # Primary check: strict containment with cross-platform fallbacks
-                    inside_mask = self._robust_contains_check(mesh, candidate_centers, proximity_tolerance)
-                    
-                    inside_global_indices = candidate_indices[inside_mask]
-                    print(f"{len(inside_global_indices):,} voxels ({n_candidates:,} candidates)")
-                except Exception as e:
-                    logger.error(f"Part type assignment error: {e}")
-                    print(f"error: {e}")
-                    inside_global_indices = np.array([], dtype=int)
-            
-            # Assign part types (RISER/CHILL/RISER_POST override CAST)
-            if len(inside_global_indices) > 0:
-                current_types = self.voxel_part_types[inside_global_indices]
-                override_mask = part_type >= current_types
-                if np.any(override_mask):
-                    self.voxel_part_types[inside_global_indices[override_mask]] = part_type
-        
         # Count voxels by type
         counts = {
             code: int(np.sum(self.voxel_part_types == code))
@@ -1709,6 +1743,99 @@ class AdaptiveVoxelMesh:
 
         # Neighbour graph and part types are both final now.
         self._material_surface_indices = None
+
+    def _assign_part_types_loop(
+        self,
+        *,
+        all_parts: list,
+        voxel_centers_array: np.ndarray,
+        total_parts: int,
+        proximity_tolerance: float,
+        type_name_fn,
+    ) -> None:
+        """Containment loop over every non-CAST part. Split out so the caller
+        can guarantee pool teardown with a single try/finally."""
+        _type_name = type_name_fn
+        for idx, (mesh, part_type) in enumerate(all_parts):
+            type_name = _type_name(part_type)
+            print(f"    [{idx+1}/{total_parts}] Checking {type_name} part...", end=" ", flush=True)
+            
+            # OPTIMIZATION: Use bounding box to pre-filter voxels
+            # Expand bbox slightly to catch voxels at touching surfaces
+            bbox_min = mesh.bounds[0] - proximity_tolerance
+            bbox_max = mesh.bounds[1] + proximity_tolerance
+            
+            # Find voxels within expanded bounding box (fast NumPy operation)
+            in_bbox = (
+                (voxel_centers_array[:, 0] >= bbox_min[0]) & 
+                (voxel_centers_array[:, 0] <= bbox_max[0]) &
+                (voxel_centers_array[:, 1] >= bbox_min[1]) & 
+                (voxel_centers_array[:, 1] <= bbox_max[1]) &
+                (voxel_centers_array[:, 2] >= bbox_min[2]) & 
+                (voxel_centers_array[:, 2] <= bbox_max[2])
+            )
+            
+            candidate_indices = np.where(in_bbox)[0]
+            n_candidates = len(candidate_indices)
+            
+            if n_candidates == 0:
+                print(f"0 voxels (bbox filter: 0 candidates)")
+                continue
+            
+            # Process containment check with batched progress feedback.
+            # In parallel mode we use worker processes (not threads) for safety.
+            BATCH_SIZE = self._effective_batch_size(len(mesh.faces))
+            inside_global_indices = []
+            
+            if n_candidates > BATCH_SIZE:
+                print(f"({n_candidates:,} candidates, {len(mesh.faces):,} faces, batch {BATCH_SIZE})", flush=True)
+                use_parallel = self._should_parallelize_part_assignment(n_candidates, batch_size=BATCH_SIZE)
+                if use_parallel:
+                    inside_global_indices = self._run_part_assignment_parallel(
+                        mesh=mesh,
+                        candidate_indices=candidate_indices,
+                        voxel_centers_array=voxel_centers_array,
+                        part_idx=idx,
+                        total_parts=total_parts,
+                        type_name=type_name,
+                        tolerance=proximity_tolerance,
+                        batch_size=BATCH_SIZE,
+                    )
+                else:
+                    inside_global_indices = self._run_part_assignment_sequential(
+                        mesh=mesh,
+                        candidate_indices=candidate_indices,
+                        voxel_centers_array=voxel_centers_array,
+                        part_idx=idx,
+                        total_parts=total_parts,
+                        type_name=type_name,
+                        tolerance=proximity_tolerance,
+                        batch_size=BATCH_SIZE,
+                    )
+
+                inside_global_indices = np.array(inside_global_indices) if inside_global_indices else np.array([], dtype=int)
+                print(f"\r    [{idx+1}/{total_parts}] Checking {type_name} part... {len(inside_global_indices):,} voxels ({n_candidates:,} candidates)   ")
+            else:
+                # Small batch - process all at once
+                try:
+                    candidate_centers = voxel_centers_array[candidate_indices]
+                    
+                    # Primary check: strict containment with cross-platform fallbacks
+                    inside_mask = self._robust_contains_check(mesh, candidate_centers, proximity_tolerance)
+                    
+                    inside_global_indices = candidate_indices[inside_mask]
+                    print(f"{len(inside_global_indices):,} voxels ({n_candidates:,} candidates)")
+                except Exception as e:
+                    logger.error(f"Part type assignment error: {e}")
+                    print(f"error: {e}")
+                    inside_global_indices = np.array([], dtype=int)
+            
+            # Assign part types (RISER/CHILL/RISER_POST override CAST)
+            if len(inside_global_indices) > 0:
+                current_types = self.voxel_part_types[inside_global_indices]
+                override_mask = part_type >= current_types
+                if np.any(override_mask):
+                    self.voxel_part_types[inside_global_indices[override_mask]] = part_type
     
     def _bridge_part_interfaces(self):
         """
@@ -1836,24 +1963,131 @@ class AdaptiveVoxelMesh:
         return _robust_contains_check_impl(mesh, points, tolerance)
 
     def _get_part_assignment_workers(self) -> int:
-        """Resolve worker count for part assignment.
+        """Upper bound on part-assignment worker processes (the pool size).
 
-        Worker count is bounded by both the CPU budget (physical cores - 1)
-        and a memory budget (assume ~1.5 GB of working set per worker for
-        the trimesh mesh payload and numpy scratch). The lower of the two
-        wins, so 8 GB machines do not over-spawn workers and start
-        swapping.
+        Bounded by the CPU budget (physical cores - 1, or the fair-share cap)
+        and by live available RAM at the default per-worker budget. This is
+        only the pool's ceiling: how many workers are actually kept busy on a
+        given part is decided per part from a measured batch, see
+        ``_run_part_assignment_parallel``.
         """
         if self.part_assignment_workers > 0:
             return max(1, self.part_assignment_workers)
         cpu_budget = hardware.get_optimal_thread_count('compute')
         mem_budget = max(
             1,
-            int(hardware.available_memory // self.AUTO_PART_ASSIGNMENT_MEMORY_PER_WORKER_BYTES),
+            int(_available_memory_bytes() // self.AUTO_PART_ASSIGNMENT_MEMORY_PER_WORKER_BYTES),
         )
         return max(1, min(cpu_budget, mem_budget))
 
-    def _should_parallelize_part_assignment(self, n_candidates: int) -> bool:
+    def _effective_batch_size(self, n_faces: int) -> int:
+        """Points per containment batch for a mesh with ``n_faces`` triangles.
+
+        Containment scratch memory grows with points x candidate triangles, so
+        the configured batch size is scaled down above
+        ``PART_ASSIGNMENT_BATCH_FACE_REFERENCE`` faces.
+        """
+        configured = self.part_assignment_batch_size
+        reference = self.PART_ASSIGNMENT_BATCH_FACE_REFERENCE
+        if n_faces <= reference:
+            return configured
+        scaled = int(configured * reference / max(1, n_faces))
+        return max(self.PART_ASSIGNMENT_MIN_BATCH, min(configured, scaled))
+
+    def _memory_reserve_bytes(self) -> int:
+        """RAM that must remain free while worker batches are in flight."""
+        try:
+            import psutil
+            total = int(psutil.virtual_memory().total)
+        except Exception:
+            total = int(getattr(hardware, "total_memory", 0) or 0)
+        return max(
+            self.PART_ASSIGNMENT_MEMORY_RESERVE_MIN_BYTES,
+            int(total * self.PART_ASSIGNMENT_MEMORY_RESERVE_FRACTION),
+        )
+
+    def _memory_bounded_concurrency(self, per_worker_bytes: int, ceiling: int) -> int:
+        """How many workers can run at once without eating into the reserve."""
+        headroom = _available_memory_bytes() - self._memory_reserve_bytes()
+        if headroom <= 0:
+            return 0
+        return max(0, min(ceiling, int(headroom // max(1, per_worker_bytes))))
+
+    @staticmethod
+    def _measure_peak_rss(fn):
+        """Run ``fn()`` and return ``(result, peak_rss_growth_bytes)``.
+
+        A sampler thread watches this process's RSS while ``fn`` runs. Used to
+        price one containment batch before fanning the rest out to workers.
+        """
+        try:
+            import psutil
+            proc = psutil.Process()
+        except Exception:
+            return fn(), 0
+        baseline = proc.memory_info().rss
+        peak = [baseline]
+        stop = threading.Event()
+
+        def _sample() -> None:
+            while not stop.is_set():
+                try:
+                    peak[0] = max(peak[0], proc.memory_info().rss)
+                except Exception:
+                    break
+                stop.wait(0.005)
+
+        sampler = threading.Thread(target=_sample, daemon=True)
+        sampler.start()
+        try:
+            result = fn()
+        finally:
+            stop.set()
+            sampler.join(timeout=1.0)
+        try:
+            peak[0] = max(peak[0], proc.memory_info().rss)
+        except Exception:
+            pass
+        return result, max(0, peak[0] - baseline)
+
+    def _get_part_assignment_pool(self) -> ProcessPoolExecutor:
+        """Return the shared worker pool, creating it on first use.
+
+        One pool serves every part of the assembly. Before this each part
+        built and tore down its own pool, which on a 27-part assembly spawned
+        ~90 interpreters, each re-importing numba/taichi/mlx (~200 MB, 0.6 s).
+        """
+        if self._part_assignment_pool is None:
+            workers = self._get_part_assignment_workers()
+            _spawn_ctx = multiprocessing.get_context('spawn')
+            self._part_assignment_pool = ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=_spawn_ctx,
+            )
+            self._part_assignment_pool_size = workers
+        return self._part_assignment_pool
+
+    def _part_assignment_scratch(self) -> str:
+        if self._part_assignment_scratch_dir is None:
+            self._part_assignment_scratch_dir = tempfile.mkdtemp(prefix="castsim_parts_")
+        return self._part_assignment_scratch_dir
+
+    def _shutdown_part_assignment_pool(self) -> None:
+        """Tear down the shared pool and scratch dir. Safe to call repeatedly."""
+        pool = self._part_assignment_pool
+        self._part_assignment_pool = None
+        self._part_assignment_pool_size = 0
+        if pool is not None:
+            try:
+                pool.shutdown(wait=True, cancel_futures=True)
+            except Exception as e:
+                logger.debug(f"Part assignment pool shutdown error: {e}")
+        scratch = self._part_assignment_scratch_dir
+        self._part_assignment_scratch_dir = None
+        if scratch is not None:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+    def _should_parallelize_part_assignment(self, n_candidates: int, batch_size: Optional[int] = None) -> bool:
         """Decide if this part should use process-based parallel containment checks."""
         if self.part_assignment_mode == "legacy":
             return False
@@ -1862,10 +2096,11 @@ class AdaptiveVoxelMesh:
             return False
         if self.part_assignment_mode == "parallel":
             return True
+        batch = batch_size if batch_size is not None else self.part_assignment_batch_size
         # auto mode: avoid process overhead and worker data copies for medium jobs
         return n_candidates >= max(
             self.AUTO_PART_ASSIGNMENT_MIN_CANDIDATES,
-            self.part_assignment_batch_size * workers * self.PART_ASSIGNMENT_SUBMIT_MULTIPLIER,
+            batch * workers * self.PART_ASSIGNMENT_SUBMIT_MULTIPLIER,
         )
 
     def _run_part_assignment_sequential(
@@ -1878,34 +2113,46 @@ class AdaptiveVoxelMesh:
         total_parts: int,
         type_name: str,
         tolerance: float,
+        batch_size: Optional[int] = None,
+        start_batch: int = 0,
+        initial_inside: Optional[List[np.ndarray]] = None,
     ) -> List[int]:
-        """Legacy sequential batched containment processing."""
-        inside_global_indices: List[int] = []
-        n_candidates = len(candidate_indices)
-        n_batches = (n_candidates + self.part_assignment_batch_size - 1) // self.part_assignment_batch_size
+        """Legacy sequential batched containment processing.
 
-        for batch_idx in range(n_batches):
-            start = batch_idx * self.part_assignment_batch_size
-            end = min(start + self.part_assignment_batch_size, n_candidates)
+        ``start_batch``/``initial_inside`` let the parallel path hand over a
+        partially processed part without redoing finished batches.
+        """
+        batch_size = batch_size or self.part_assignment_batch_size
+        found: List[np.ndarray] = list(initial_inside or [])
+        inside_count = sum(len(a) for a in found)
+        n_candidates = len(candidate_indices)
+        n_batches = (n_candidates + batch_size - 1) // batch_size
+
+        for batch_idx in range(start_batch, n_batches):
+            start = batch_idx * batch_size
+            end = min(start + batch_size, n_candidates)
             batch_indices = candidate_indices[start:end]
             batch_centers = voxel_centers_array[batch_indices]
 
             try:
                 inside_mask = self._robust_contains_check(mesh, batch_centers, tolerance)
                 batch_inside = batch_indices[inside_mask]
-                inside_global_indices.extend(batch_inside)
+                found.append(batch_inside)
+                inside_count += len(batch_inside)
             except Exception as e:
                 logger.warning(f"Part type batch processing error: {e}")
                 print(f" [batch error: {e}]", end="", flush=True)
 
             pct = int((batch_idx + 1) / n_batches * 100)
             print(
-                f"\r    [{part_idx+1}/{total_parts}] Checking {type_name} part... {pct}% ({len(inside_global_indices):,} inside)",
+                f"\r    [{part_idx+1}/{total_parts}] Checking {type_name} part... {pct}% ({inside_count:,} inside)",
                 end="",
                 flush=True,
             )
 
-        return inside_global_indices
+        if not found:
+            return []
+        return list(np.concatenate(found))
 
     def _run_part_assignment_parallel(
         self,
@@ -1917,76 +2164,37 @@ class AdaptiveVoxelMesh:
         total_parts: int,
         type_name: str,
         tolerance: float,
+        batch_size: Optional[int] = None,
     ) -> List[int]:
-        """Process part assignment containment checks in parallel worker processes."""
-        try:
-            workers = self._get_part_assignment_workers()
-            n_candidates = len(candidate_indices)
-            n_batches = (n_candidates + self.part_assignment_batch_size - 1) // self.part_assignment_batch_size
-            mesh_payload = {
-                "vertices": np.asarray(mesh.vertices),
-                "faces": np.asarray(mesh.faces),
-            }
+        """Process part assignment containment checks in parallel worker processes.
 
-            found_by_batch: Dict[int, np.ndarray] = {}
-            inside_count = 0
-            completed = 0
+        Memory discipline, in order:
 
-            _spawn_ctx = multiprocessing.get_context('spawn')
-            with ProcessPoolExecutor(
-                max_workers=workers,
-                mp_context=_spawn_ctx,
-                initializer=_init_part_assignment_worker,
-                initargs=(mesh_payload,),
-            ) as executor:
-                futures = {}
-                next_batch_idx = 0
-                max_pending = max(1, workers * self.PART_ASSIGNMENT_SUBMIT_MULTIPLIER)
+        1. Batch 0 runs in this process under an RSS sampler. Its peak growth,
+           times ``PART_ASSIGNMENT_PROBE_SAFETY``, plus the interpreter's base
+           footprint, is what one worker is assumed to cost for this part.
+        2. Concurrency for this part is ``min(pool size, headroom / cost)``
+           where headroom is live available RAM minus the reserve. Tasks in
+           flight are capped at that number, so idle pool processes stay idle.
+        3. Before every submission the guard re-reads available RAM. Below the
+           reserve, submissions stop, in-flight work drains, and the remaining
+           batches finish sequentially here.
 
-                def submit_batch(batch_idx: int) -> None:
-                    start = batch_idx * self.part_assignment_batch_size
-                    end = min(start + self.part_assignment_batch_size, n_candidates)
-                    batch_indices = candidate_indices[start:end]
-                    batch_centers = voxel_centers_array[batch_indices]
-                    future = executor.submit(
-                        _part_assignment_contains_worker,
-                        batch_idx,
-                        batch_indices,
-                        batch_centers,
-                        tolerance,
-                    )
-                    futures[future] = batch_idx
+        The pool is shared across parts; the mesh reaches workers through a
+        scratch ``.npz`` that each worker loads once per part.
+        """
+        batch_size = batch_size or self.part_assignment_batch_size
+        n_candidates = len(candidate_indices)
+        n_batches = (n_candidates + batch_size - 1) // batch_size
 
-                while next_batch_idx < n_batches and len(futures) < max_pending:
-                    submit_batch(next_batch_idx)
-                    next_batch_idx += 1
+        def _batch_slice(batch_idx: int) -> Tuple[np.ndarray, np.ndarray]:
+            start = batch_idx * batch_size
+            end = min(start + batch_size, n_candidates)
+            batch_indices = candidate_indices[start:end]
+            return batch_indices, voxel_centers_array[batch_indices]
 
-                while futures:
-                    done, _pending = wait(futures, return_when=FIRST_COMPLETED)
-                    for future in done:
-                        futures.pop(future, None)
-                        chunk_idx, inside_chunk = future.result()
-                        found_by_batch[chunk_idx] = inside_chunk
-                        inside_count += len(inside_chunk)
-                        completed += 1
-                        pct = int(completed / n_batches * 100)
-                        print(
-                            f"\r    [{part_idx+1}/{total_parts}] Checking {type_name} part... {pct}% ({inside_count:,} inside)",
-                            end="",
-                            flush=True,
-                        )
-
-                        if next_batch_idx < n_batches:
-                            submit_batch(next_batch_idx)
-                            next_batch_idx += 1
-
-            ordered = [found_by_batch[i] for i in sorted(found_by_batch)]
-            if not ordered:
-                return []
-            return list(np.concatenate(ordered))
-        except Exception as e:
-            logger.error(f"Parallel part assignment failed; falling back to sequential: {e}")
-            print(f"\n      Parallel fallback: {e}")
+        def _sequential_from(start_batch: int, found: Dict[int, np.ndarray]) -> List[int]:
+            ordered = [found[i] for i in sorted(found)]
             return self._run_part_assignment_sequential(
                 mesh=mesh,
                 candidate_indices=candidate_indices,
@@ -1995,6 +2203,160 @@ class AdaptiveVoxelMesh:
                 total_parts=total_parts,
                 type_name=type_name,
                 tolerance=tolerance,
+                batch_size=batch_size,
+                start_batch=start_batch,
+                initial_inside=ordered,
+            )
+
+        found_by_batch: Dict[int, np.ndarray] = {}
+        try:
+            # Step 1: price one batch in-process, on a fresh copy of the mesh.
+            # Workers start from bare vertices/faces and build the ray BVH and
+            # triangle rtree on their first batch; the parent's mesh may have
+            # those cached already, which would hide that cost from the probe.
+            probe_indices, probe_centers = _batch_slice(0)
+            probe_mesh = trimesh.Trimesh(
+                vertices=np.asarray(mesh.vertices), faces=np.asarray(mesh.faces), process=False
+            )
+            probe_t0 = time.perf_counter()
+            probe_mask, probe_peak = self._measure_peak_rss(
+                lambda: self._robust_contains_check(probe_mesh, probe_centers, tolerance)
+            )
+            probe_seconds = time.perf_counter() - probe_t0
+            found_by_batch[0] = probe_indices[probe_mask]
+            if n_batches == 1:
+                del probe_mesh
+                return list(found_by_batch[0])
+
+            # The first batch pays for the ray BVH and triangle rtree, so its
+            # time is not the per-batch rate. Time a second batch on the same
+            # warm mesh for the steady-state rate; its result is needed anyway.
+            steady_seconds = probe_seconds
+            next_batch_idx = 1
+            if n_batches > 2:
+                b1_indices, b1_centers = _batch_slice(1)
+                t1 = time.perf_counter()
+                b1_mask = self._robust_contains_check(probe_mesh, b1_centers, tolerance)
+                steady_seconds = time.perf_counter() - t1
+                found_by_batch[1] = b1_indices[b1_mask]
+                next_batch_idx = 2
+            del probe_mesh
+
+            # Auto mode: skip the pool when finishing here is faster than
+            # starting it. Once a pool exists its cost is sunk, so use it.
+            sequential_estimate = steady_seconds * (n_batches - next_batch_idx)
+            if (
+                self.part_assignment_mode == "auto"
+                and self._part_assignment_pool is None
+                and sequential_estimate < self.PART_ASSIGNMENT_MIN_PARALLEL_SECONDS
+            ):
+                logger.info(
+                    f"Part assignment: {n_batches} batches at ~{steady_seconds*1000:.0f} ms each, "
+                    f"~{sequential_estimate:.1f}s sequential estimate; not worth a worker pool"
+                )
+                return _sequential_from(next_batch_idx, found_by_batch)
+
+            per_worker = _WORKER_BASE_BYTES + int(probe_peak * self.PART_ASSIGNMENT_PROBE_SAFETY)
+
+            # Step 2: size concurrency for this part from live headroom.
+            pool = self._get_part_assignment_pool()
+            concurrency = self._memory_bounded_concurrency(per_worker, self._part_assignment_pool_size)
+            if concurrency < 2:
+                logger.info(
+                    f"Part assignment: batch peak {probe_peak/2**20:.0f} MB, "
+                    f"headroom allows {concurrency} worker(s); running sequentially"
+                )
+                return _sequential_from(next_batch_idx, found_by_batch)
+
+            logger.info(
+                f"Part assignment: {n_batches} batches of {batch_size}, batch peak "
+                f"{probe_peak/2**20:.0f} MB, ~{per_worker/2**20:.0f} MB/worker, "
+                f"{concurrency}/{self._part_assignment_pool_size} workers"
+            )
+
+            mesh_path = os.path.join(self._part_assignment_scratch(), f"part_{part_idx}.npz")
+            np.savez(mesh_path, vertices=np.asarray(mesh.vertices), faces=np.asarray(mesh.faces))
+            part_key = f"{id(mesh)}:{part_idx}"
+            reserve = self._memory_reserve_bytes()
+
+            futures: Dict[object, int] = {}
+            inside_count = sum(len(v) for v in found_by_batch.values())
+            completed = len(found_by_batch)
+            degraded = False
+
+            def submit_batch(batch_idx: int) -> None:
+                batch_indices, batch_centers = _batch_slice(batch_idx)
+                future = pool.submit(
+                    _part_assignment_contains_worker,
+                    part_key,
+                    mesh_path,
+                    batch_idx,
+                    batch_indices,
+                    batch_centers,
+                    tolerance,
+                )
+                futures[future] = batch_idx
+
+            def can_submit() -> bool:
+                # Step 3: the guard. Re-read RAM on every submission.
+                return _available_memory_bytes() > reserve
+
+            while next_batch_idx < n_batches and len(futures) < concurrency:
+                if not can_submit():
+                    degraded = True
+                    break
+                submit_batch(next_batch_idx)
+                next_batch_idx += 1
+
+            while futures:
+                done, _pending = wait(futures, return_when=FIRST_COMPLETED)
+                for future in done:
+                    futures.pop(future, None)
+                    chunk_idx, inside_chunk = future.result()
+                    found_by_batch[chunk_idx] = inside_chunk
+                    inside_count += len(inside_chunk)
+                    completed += 1
+                    pct = int(completed / n_batches * 100)
+                    print(
+                        f"\r    [{part_idx+1}/{total_parts}] Checking {type_name} part... {pct}% ({inside_count:,} inside)",
+                        end="",
+                        flush=True,
+                    )
+
+                    if next_batch_idx < n_batches and not degraded:
+                        if can_submit():
+                            submit_batch(next_batch_idx)
+                            next_batch_idx += 1
+                        else:
+                            degraded = True
+
+            if degraded and next_batch_idx < n_batches:
+                logger.warning(
+                    f"Part assignment: available RAM fell below the "
+                    f"{reserve/2**30:.1f} GB reserve; finishing "
+                    f"{n_batches - next_batch_idx} batches sequentially"
+                )
+                print(f"\n      Memory guard: finishing part sequentially", flush=True)
+                return _sequential_from(next_batch_idx, found_by_batch)
+
+            ordered = [found_by_batch[i] for i in sorted(found_by_batch)]
+            if not ordered:
+                return []
+            return list(np.concatenate(ordered))
+        except Exception as e:
+            logger.error(f"Parallel part assignment failed; falling back to sequential: {e}")
+            print(f"\n      Parallel fallback: {e}")
+            # A broken pool must not be reused by the next part.
+            self._shutdown_part_assignment_pool()
+            return self._run_part_assignment_sequential(
+                mesh=mesh,
+                candidate_indices=candidate_indices,
+                voxel_centers_array=voxel_centers_array,
+                part_idx=part_idx,
+                total_parts=total_parts,
+                type_name=type_name,
+                tolerance=tolerance,
+                batch_size=batch_size,
             )
     
     def get_voxels_by_type(self, part_type: int) -> np.ndarray:

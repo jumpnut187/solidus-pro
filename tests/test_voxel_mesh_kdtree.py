@@ -222,16 +222,10 @@ class TrimeshProximityTests(unittest.TestCase):
         self.assertTrue(_use_midpoint_kdtree_in_trimesh_proximity())
         self.assertTrue(_use_midpoint_kdtree_in_trimesh_proximity())
 
-    def test_the_containment_path_builds_midpoint_trees(self) -> None:
-        """
-        The assertion that matters, and it runs the pipeline's own function.
-
-        Every tree ``trimesh.proximity`` builds while
-        ``_robust_contains_check_impl`` is running is captured and rebuilt both
-        ways. It has to match the midpoint build; and for this fixture the two
-        rules genuinely disagree, which is what stops the comparison from
-        passing vacuously.
-        """
+    @staticmethod
+    def _capture_proximity_trees(run):
+        """Run ``run()`` and return every point array ``trimesh.proximity``
+        built a kd-tree from while it ran."""
         import trimesh.proximity
 
         captured = []
@@ -244,15 +238,47 @@ class TrimeshProximityTests(unittest.TestCase):
 
         trimesh.proximity.cKDTree = _Spy
         try:
-            inside = _robust_contains_check_impl(self.mesh, self.points, 0.05)
+            result = run()
         finally:
             trimesh.proximity.cKDTree = installed
+        return result, captured, installed
+
+    def test_the_primary_containment_path_builds_no_proximity_tree(self) -> None:
+        """
+        The near-surface check used to go through ``mesh.nearest.on_surface``,
+        which is where the vertex kd-tree crash lived and where a 24k-face
+        runner cost 2 GB per 2,500 points. It is now a fixed-radius rtree box
+        query; the primary path must not reach ``trimesh.proximity`` at all.
+        """
+        inside, captured, _ = self._capture_proximity_trees(
+            lambda: _robust_contains_check_impl(self.mesh, self.points, 0.05)
+        )
+        self.assertEqual(inside.shape, (len(self.points),))
+        self.assertEqual(captured, [], "primary containment path built a trimesh.proximity kd-tree")
+
+    def test_the_containment_fallback_builds_midpoint_trees(self) -> None:
+        """
+        The assertion that matters, and it runs the pipeline's own function.
+
+        ``trimesh.proximity`` is still reached when ``mesh.contains`` fails and
+        the signed-distance fallback runs. Every tree it builds while
+        ``_robust_contains_check_impl`` is on that path is captured and
+        rebuilt both ways. It has to match the midpoint build; and for this
+        fixture the two rules genuinely disagree, which is what stops the
+        comparison from passing vacuously.
+        """
+        from unittest.mock import patch
+
+        with patch.object(type(self.mesh), "contains", side_effect=RuntimeError("forced")):
+            inside, captured, installed = self._capture_proximity_trees(
+                lambda: _robust_contains_check_impl(self.mesh, self.points, 0.05)
+            )
 
         self.assertTrue(
             captured,
-            "the proximity path built no kd-tree, so this test is watching "
-            "the wrong code -- check that _robust_contains_check_impl still "
-            "calls mesh.nearest.on_surface",
+            "the fallback built no kd-tree, so this test is watching the wrong "
+            "code -- check that the signed_distance fallback still runs when "
+            "mesh.contains raises",
         )
         self.assertEqual(inside.shape, (len(self.points),))
 

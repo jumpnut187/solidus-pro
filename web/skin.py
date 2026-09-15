@@ -32,11 +32,22 @@ only thing anyone reads out of this grid is where it crosses zero.
 
 Cost is kept to the band of cells within two voxels of the mask boundary,
 which is the only place the zero crossing can be. The unsigned distance there
-is one closest-point query per part, which is cheap. The *sign* is what is
-expensive -- an inside test is a ray cast -- so it is resolved by ray only for
-cells close enough to a surface for the mask to be wrong about them, and taken
-from the mask everywhere else: a voxel the mesher left empty is outside, and a
-metal voxel further than half a diagonal from every surface is inside.
+is a bounded closest-point search per part: only triangles within the encoded
+range of a cell can change its byte, so the search stops at that radius. The
+*sign* is what is expensive -- an inside test is a ray cast -- so it is
+resolved by ray only for cells close enough to a surface for the mask to be
+wrong about them, and taken from the mask everywhere else: a voxel the mesher
+left empty is outside, and a metal voxel further than half a diagonal from
+every surface is inside.
+
+Why the search is bounded, and not ``trimesh.proximity.closest_point``: that
+routine finds the exact nearest triangle at any distance, and to do it sizes
+each point's candidate box by the distance to the nearest *vertex*. A band
+cell around a 28 in plate is a foot or more from the chill on the far side,
+so against that chill every cell pulled in the whole part. Measured: 2,000
+band cells against a 24k-face runner passed 6 GB. The real call was 528,435
+cells against 27 parts, and the gunicorn worker reached 124 GB before the
+kernel killed it.
 """
 
 from __future__ import annotations
@@ -54,6 +65,7 @@ import threading
 
 import numpy as np
 from scipy import ndimage
+from scipy.spatial import cKDTree
 
 from web.fields import Lattice
 
@@ -149,19 +161,27 @@ def build_skin_grid(lattice: Lattice, mask: np.ndarray, meshes: Sequence[Any]) -
     origin = np.asarray(lattice.origin, dtype=np.float64)
     points = origin + np.stack([bx, by, bz], axis=1).astype(np.float64) * spacing
 
+    inside = metal[bz, by, bx].copy()
+
     unsigned = np.full(band_count, np.inf, dtype=np.float64)
     # A second opinion on the sign, from the geometry alone: which side of its
     # nearest triangle each point is on. Wrong only where the nearest point is
     # an edge or a corner, which is exactly where the ray test below is spent.
-    facing_inside = np.zeros(band_count, dtype=bool)
+    # Cells with no surface inside the encoded range keep the mask's sign: the
+    # byte there is pinned to the range limit either way, and the mask is
+    # trusted at that distance.
+    facing_inside = inside.copy()
+    radius = SKIN_RANGE_VOXELS * spacing
     for mesh in meshes:
-        closest, part_distance, triangle = _closest_point(mesh, points)
-        np.minimum(unsigned, part_distance, out=unsigned)
-        normals = np.asarray(mesh.face_normals)[np.asarray(triangle, dtype=np.int64)]
-        facing_inside |= np.einsum("ij,ij->i", points - closest, normals) < 0.0
+        closest, part_distance, triangle = _closest_point_within(mesh, points, radius)
+        nearer = part_distance < unsigned
+        if not np.any(nearer):
+            continue
+        unsigned[nearer] = part_distance[nearer]
+        normals = np.asarray(mesh.face_normals)[triangle[nearer]]
+        facing_inside[nearer] = np.einsum("ij,ij->i", points[nearer] - closest[nearer], normals) < 0.0
     unsigned_voxels = unsigned / spacing
 
-    inside = metal[bz, by, bx].copy()
     # The mask is trusted where it can be right: a cell further from every
     # surface than a voxel the mesher counted as metal can reach. Where the
     # geometry disagrees with it anyway -- a part moved since the run, an STL
@@ -178,10 +198,139 @@ def build_skin_grid(lattice: Lattice, mask: np.ndarray, meshes: Sequence[Any]) -
     return quantize(distance.reshape(-1))
 
 
-def _closest_point(mesh: Any, points: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+#: Upper bound on (triangle, point) pairs materialised at once inside
+#: :func:`_closest_point_within`. Each pair costs ~150 bytes across the
+#: triangle copy, closest point and distance, so this is ~500 MB.
+_PAIR_BUDGET = 3_000_000
+
+#: Points per ``mesh.contains`` call. Without embree, trimesh's ray caster
+#: allocates per (ray, candidate triangle) pair; chunking bounds that.
+_CONTAINS_CHUNK = 20_000
+
+
+def _closest_point_within(
+    mesh: Any, points: np.ndarray, radius: float
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Nearest point on ``mesh`` for every point that has one within ``radius``.
+
+    Returns ``(closest, distance, triangle)`` shaped like
+    ``trimesh.proximity.closest_point``, except that points with no triangle
+    inside ``radius`` get ``distance = inf`` and ``triangle = -1``.
+
+    The search is driven from the triangles: a KD-tree over the query points
+    is asked, per triangle, for points within ``radius`` plus that triangle's
+    reach from its centroid. A triangle is the convex hull of its vertices,
+    so its farthest point from the centroid is a vertex, and any point within
+    ``radius`` of the triangle is within ``radius + reach`` of the centroid.
+
+    Two things keep the pair count bounded. Triangles whose reach exceeds
+    ``radius`` -- a plate face can be a single triangle inches across -- are
+    subdivided first; the pieces tile the original exactly, so distances are
+    unchanged, and each piece now sees only its own neighbourhood. And the
+    work is cut into batches by a budget on pairs, not on triangles, using a
+    cheap count-only query first. Exact point-triangle distances are then
+    computed on the surviving pairs.
+    """
     import trimesh  # Deferred: this module is imported by the app factory.
 
-    return trimesh.proximity.closest_point(mesh, points)
+    n_points = len(points)
+    best_distance = np.full(n_points, np.inf, dtype=np.float64)
+    best_triangle = np.full(n_points, -1, dtype=np.int64)
+    best_closest = np.zeros((n_points, 3), dtype=np.float64)
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    if n_points == 0 or len(faces) == 0:
+        return best_closest, best_distance, best_triangle
+
+    # Only points within the part's box, grown by the radius, can be within
+    # the radius of any of its triangles. For a small part this discards
+    # nearly every band cell before any geometry is touched.
+    lo = vertices.min(axis=0) - radius
+    hi = vertices.max(axis=0) + radius
+    selected = np.flatnonzero(np.all((points >= lo) & (points <= hi), axis=1))
+    if selected.size == 0:
+        return best_closest, best_distance, best_triangle
+    local_points = points[selected]
+
+    triangles = vertices[faces]
+    face_index = np.arange(len(faces), dtype=np.int64)
+    centroids = triangles.mean(axis=1)
+    reach = np.linalg.norm(triangles - centroids[:, None, :], axis=2).max(axis=1)
+    big = reach > radius
+    if np.any(big):
+        # Edges no longer than 1.5 r bound the centroid reach to r: the
+        # farthest vertex from the centroid is at most 2/3 of the longest edge.
+        sub_vertices, sub_faces, sub_index = trimesh.remesh.subdivide_to_size(
+            vertices, faces[big], max_edge=radius * 1.5, max_iter=12, return_index=True
+        )
+        sub_triangles = np.asarray(sub_vertices, dtype=np.float64)[np.asarray(sub_faces, dtype=np.int64)]
+        triangles = np.vstack([triangles[~big], sub_triangles])
+        face_index = np.concatenate([face_index[~big], np.flatnonzero(big)[np.asarray(sub_index, dtype=np.int64)]])
+        centroids = triangles.mean(axis=1)
+        reach = np.linalg.norm(triangles - centroids[:, None, :], axis=2).max(axis=1)
+    query_radius = reach + radius
+
+    tree = cKDTree(local_points)
+    counts = np.asarray(
+        tree.query_ball_point(centroids, query_radius, workers=-1, return_length=True), dtype=np.int64
+    )
+    total_pairs = int(counts.sum())
+    if total_pairs == 0:
+        return best_closest, best_distance, best_triangle
+
+    # Batch boundaries such that no batch exceeds the pair budget.
+    cumulative = np.cumsum(counts)
+    boundaries = [0]
+    while boundaries[-1] < len(counts):
+        start = boundaries[-1]
+        base = cumulative[start - 1] if start > 0 else 0
+        stop = int(np.searchsorted(cumulative, base + _PAIR_BUDGET, side="right"))
+        boundaries.append(max(stop, start + 1))
+
+    local_best_distance = np.full(len(local_points), np.inf, dtype=np.float64)
+    local_best_triangle = np.full(len(local_points), -1, dtype=np.int64)
+    local_best_closest = np.zeros((len(local_points), 3), dtype=np.float64)
+
+    for start, stop in zip(boundaries[:-1], boundaries[1:]):
+        chunk_counts = counts[start:stop]
+        if chunk_counts.sum() == 0:
+            continue
+        hits = tree.query_ball_point(
+            centroids[start:stop], query_radius[start:stop], workers=-1, return_sorted=False
+        )
+        point_idx = np.concatenate([np.asarray(h, dtype=np.int64) for h in hits if len(h)])
+        tri_idx = np.repeat(np.arange(start, stop, dtype=np.int64), chunk_counts)
+
+        closest = trimesh.triangles.closest_point(triangles[tri_idx], local_points[point_idx])
+        distance = np.linalg.norm(closest - local_points[point_idx], axis=1)
+
+        within = distance <= radius
+        if not np.any(within):
+            continue
+        point_idx, tri_idx, closest, distance = (
+            point_idx[within], tri_idx[within], closest[within], distance[within]
+        )
+        # One winner per point in this batch, then merge with earlier batches.
+        order = np.lexsort((distance, point_idx))
+        point_sorted = point_idx[order]
+        first = np.ones(len(order), dtype=bool)
+        first[1:] = point_sorted[1:] != point_sorted[:-1]
+        winners = order[first]
+        cand_points = point_idx[winners]
+        better = distance[winners] < local_best_distance[cand_points]
+        if not np.any(better):
+            continue
+        winners = winners[better]
+        cand_points = cand_points[better]
+        local_best_distance[cand_points] = distance[winners]
+        local_best_triangle[cand_points] = face_index[tri_idx[winners]]
+        local_best_closest[cand_points] = closest[winners]
+
+    best_distance[selected] = local_best_distance
+    best_triangle[selected] = local_best_triangle
+    best_closest[selected] = local_best_closest
+    return best_closest, best_distance, best_triangle
 
 
 def _contains_any(meshes: Sequence[Any], points: np.ndarray) -> Optional[np.ndarray]:
@@ -194,14 +343,16 @@ def _contains_any(meshes: Sequence[Any], points: np.ndarray) -> Optional[np.ndar
     """
     inside = np.zeros(len(points), dtype=bool)
     for mesh in meshes:
-        try:
-            result = np.asarray(mesh.contains(points), dtype=bool)
-        except Exception as exc:  # noqa: BLE001 -- any failure means "unknown"
-            logger.info("Skin grid: inside test failed (%s); keeping the mask's sign", exc)
-            return None
-        if result.shape != inside.shape:
-            return None
-        inside |= result
+        for start in range(0, len(points), _CONTAINS_CHUNK):
+            stop = start + _CONTAINS_CHUNK
+            try:
+                result = np.asarray(mesh.contains(points[start:stop]), dtype=bool)
+            except Exception as exc:  # noqa: BLE001 -- any failure means "unknown"
+                logger.info("Skin grid: inside test failed (%s); keeping the mask's sign", exc)
+                return None
+            if result.shape != inside[start:stop].shape:
+                return None
+            inside[start:stop] |= result
     return inside
 
 

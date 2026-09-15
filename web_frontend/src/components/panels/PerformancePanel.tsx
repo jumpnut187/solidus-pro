@@ -73,12 +73,12 @@ export function PerformancePanel({ options, hardware, onSet, onReset, onClose }:
           <span className="field-label">Mode</span>
           <select
             className="select"
-            value={String(options.part_assignment_mode ?? 'parallel')}
+            value={String(options.part_assignment_mode ?? 'auto')}
             onChange={(event) => onSet('part_assignment_mode', event.target.value)}
           >
             <option value="auto">Auto</option>
             <option value="parallel">Parallel</option>
-            <option value="serial">Serial</option>
+            <option value="legacy">Serial</option>
           </select>
         </label>
 

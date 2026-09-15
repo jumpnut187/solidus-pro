@@ -54,6 +54,17 @@ def check_dependencies() -> list[str]:
     except ImportError:
         print("○ cascadio (STEP support disabled — install with `pip install cascadio` for STEP files)")
 
+    # Strongly recommended: embreex gives trimesh.contains() a C ray-casting
+    # BVH. Without it trimesh falls back to a pure-numpy path that peaked at
+    # ~5 GB per 2,500-point batch on a 500k-face mesh and, fanned out across
+    # 17 workers, swapped a 48 GB machine into a kernel panic.
+    try:
+        __import__('embreex')
+        print("✓ embreex (Embree ray casting for part assignment)")
+    except ImportError:
+        print("⚠ embreex missing — part assignment will use the slow, memory-hungry "
+              "pure-Python ray caster. Install with `pip install embreex`.")
+
     return missing
 
 

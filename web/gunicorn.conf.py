@@ -14,6 +14,18 @@ import gunicorn.util as _util
 
 _util._setproctitle = lambda title: None
 
+# Gunicorn 25.1+ starts a control-socket server thread in the master right
+# after the first worker is forked (arbiter._start_control_server). From then
+# on the master is multithreaded, and on macOS the Objective-C runtime
+# refuses to run any class's +initialize in a child forked from a
+# multithreaded parent: the replacement worker dies in MLX/Metal setup with
+# "+[NSNumber initialize] may have been in progress in another thread when
+# fork() was called", the arbiter forks another, and the loop never ends.
+# Observed 2026-09-15 after the kernel killed a worker for memory. The first
+# worker always booted fine because it was forked before the thread existed.
+# Nothing here uses `gunicornc`, so the socket is not needed.
+control_socket_disable = True
+
 
 def pre_fork(server, worker) -> None:
     pass

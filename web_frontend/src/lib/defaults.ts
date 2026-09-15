@@ -31,7 +31,7 @@ export const performanceDefaults: PerformanceOptions = {
   use_gpu: true,
   use_incremental: false,
   use_chunked_voxelization: false,
-  part_assignment_mode: 'parallel',
+  part_assignment_mode: 'auto',
   part_assignment_workers: 0,
   part_assignment_batch_size: 2500,
   max_voxels_for_visualization: 90000
