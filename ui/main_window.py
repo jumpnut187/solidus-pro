@@ -92,7 +92,12 @@ from core.memory_limits import (
 )
 from .visualizer import CastingVisualizer, COLOR_MAPS, FILL_ANIMATION_WETTED_THRESHOLD
 from .custom_slider import MarkedSlider
-from .dialogs import AnalysisOptionsDialog, DraggableDialog, PartsDialog
+from .dialogs import (
+    AnalysisOptionsDialog,
+    ComponentVisibilityDialog,
+    DraggableDialog,
+    PartsDialog,
+)
 from .project_state import build_project_state, load_project_state
 from .workers import (
     DeepAutoTrainWorker,
@@ -2941,6 +2946,13 @@ class MainWindow(QMainWindow):
         self.parts_dialog.duplicate_requested.connect(self._duplicate_selected_part)
         self.parts_dialog.open_top_changed.connect(self._on_part_open_top_changed)
         
+        # Component visibility dialog (popup component show/hide list)
+        self.components_dialog = ComponentVisibilityDialog(self)
+        self.components_list = self.components_dialog.components_list
+        self.components_show_all_btn = self.components_dialog.show_all_btn
+        self.components_list.itemChanged.connect(self._on_component_item_changed)
+        self.components_show_all_btn.clicked.connect(self._show_all_components)
+
         # Material dialog
         self.material_dialog = MaterialDialog(self)
         self.material_dialog.alloy_changed.connect(self._on_alloy_confirmed)
@@ -3166,27 +3178,19 @@ class MainWindow(QMainWindow):
         # hides its skin and drops its voxels from the result overlay. This is
         # display state only: part.visible (simulation membership) is untouched,
         # so a hidden riser is still in the next run.
-        components_header = QHBoxLayout()
-        components_header.addWidget(QLabel("Components:"))
-        components_header.addStretch()
-        self.components_show_all_btn = QPushButton("Show All")
-        self.components_show_all_btn.setFlat(True)
-        self.components_show_all_btn.setToolTip("Show every component again")
-        self.components_show_all_btn.setStyleSheet("font-size: 10px; padding: 0 4px;")
-        self.components_show_all_btn.clicked.connect(self._show_all_components)
-        self.components_show_all_btn.setEnabled(False)
-        components_header.addWidget(self.components_show_all_btn)
-        vis_layout.addLayout(components_header)
-
-        self.components_list = QListWidget()
-        self.components_list.setToolTip(
-            "Uncheck a component to hide it and its result voxels while reviewing.\n"
+        self.open_components_btn = QPushButton("👁 Components...")
+        self.open_components_btn.setToolTip(
+            "Open the component list to show or hide individual parts.\n"
             "Hidden components are still included when the simulation runs."
         )
-        self.components_list.setMaximumHeight(110)
-        self.components_list.setSelectionMode(QAbstractItemView.NoSelection)
-        self.components_list.itemChanged.connect(self._on_component_item_changed)
-        vis_layout.addWidget(self.components_list)
+        self.open_components_btn.clicked.connect(self._open_components_dialog)
+        vis_layout.addWidget(self.open_components_btn)
+
+        self.components_summary_label = QLabel("No components loaded")
+        self.components_summary_label.setStyleSheet(
+            "font-size: 10px; color: #888; margin-left: 10px;"
+        )
+        vis_layout.addWidget(self.components_summary_label)
         
         self.show_results_check = QCheckBox("Show Results")
         self.show_results_check.setChecked(True)
@@ -3325,6 +3329,13 @@ class MainWindow(QMainWindow):
         self.parts_dialog.show()
         self.parts_dialog.raise_()
     
+    def _open_components_dialog(self):
+        """Open the component show/hide popup"""
+        self._refresh_components_list()
+        self.components_dialog.center_on_parent()
+        self.components_dialog.show()
+        self.components_dialog.raise_()
+
     def _open_material_dialog(self):
         """Open the material properties dialog"""
         self.material_dialog.set_alloy(self._current_alloy)
@@ -4400,7 +4411,7 @@ class MainWindow(QMainWindow):
     # ==================== Component visibility (results review) ====================
 
     def _refresh_components_list(self):
-        """Rebuild the sidebar component checklist from the part manager."""
+        """Rebuild the popup component checklist from the part manager."""
         if not hasattr(self, "components_list") or not hasattr(self, "visualizer"):
             return
         hidden = self.visualizer.hidden_part_ids()
@@ -4422,6 +4433,24 @@ class MainWindow(QMainWindow):
             self.components_list.addItem(item)
         self.components_list.blockSignals(False)
         self.components_show_all_btn.setEnabled(bool(hidden))
+        self._update_components_summary()
+
+    def _update_components_summary(self):
+        """Keep the sidebar label in sync with the popup's check states."""
+        if not hasattr(self, "components_summary_label"):
+            return
+        total = len(self.part_manager.parts)
+        if hasattr(self, "components_dialog"):
+            self.components_dialog.set_empty_state(total > 0)
+        if total == 0:
+            self.components_summary_label.setText("No components loaded")
+            return
+        hidden = len(self.visualizer.hidden_part_ids() & set(self.part_manager.parts))
+        visible = total - hidden
+        suffix = f", {hidden} hidden" if hidden else ""
+        self.components_summary_label.setText(
+            f"{visible} of {total} visible{suffix}"
+        )
 
     def _on_component_item_changed(self, item):
         """Hide or show one component (skin + result voxels)."""
@@ -4431,6 +4460,7 @@ class MainWindow(QMainWindow):
         hidden = item.checkState() != Qt.Checked
         self.visualizer.set_component_hidden(part_id, hidden)
         self.components_show_all_btn.setEnabled(bool(self.visualizer.hidden_part_ids()))
+        self._update_components_summary()
         self._apply_component_mask_to_results()
 
     def _show_all_components(self):
