@@ -12,16 +12,31 @@ import hashlib
 import json
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from core.part_manager import PART_TYPE_CHILL
 from core.surrogate.conditioning import Conditioning, build_conditioning_vector
-from core.surrogate.fields import GridMeta, encode_channels, encode_field
+from core.surrogate.fields import PART_TYPE_DIVISOR, GridMeta, encode_channels, encode_field
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEFAULT_DATASET_DIR = os.path.join(PROJECT_ROOT, "data", "surrogate_dataset")
 INDEX_FILENAME = "index.csv"
+
+#: Tolerance around ``PART_TYPE_CHILL / PART_TYPE_DIVISOR`` in channel 1 that
+#: marks a chill cell (same window as ``core.deep_model.dataset._occupancy_mask``).
+CHILL_CHANNEL_TOL = 0.05
+#: Records where more than this fraction of active cells have end < start are
+#: rejected by :func:`validate_record`.
+MAX_END_BEFORE_START_FRACTION = 0.01
+#: Minimum median active end time (seconds).  Five legacy 16^3 WCB records of
+#: a 17 in part carry end times of 0.01-0.3 s, i.e. an aborted solve; no real
+#: casting in this catalog finishes solidifying in under a second.
+MIN_MEDIAN_END_S = 1.0
+
+#: ``(path, reason)`` pairs skipped by the most recent :func:`load_dataset` call.
+_LAST_LOAD_SKIPS: List[Tuple[str, str]] = []
 
 
 def _config_for_engine(engine: Any, voxel_size: float) -> Dict[str, float]:
@@ -150,17 +165,105 @@ def dataset_summary(out_dir: str = DEFAULT_DATASET_DIR) -> Dict[str, Any]:
     return {"count": len(runs), "alloys": alloys, "runs": runs}
 
 
+def active_cell_mask(channels: np.ndarray) -> np.ndarray:
+    """Flat mask of occupied, non-chill grid cells for a record's channels."""
+    channels = np.asarray(channels)
+    occupied = channels[0].reshape(-1) > 0.5
+    chill = np.abs(channels[1].reshape(-1) - PART_TYPE_CHILL / PART_TYPE_DIVISOR) < CHILL_CHANNEL_TOL
+    return occupied & ~chill
+
+
+def validate_record(record: Dict[str, Any]) -> Optional[str]:
+    """Return a skip reason for an unusable record, or ``None`` when it is fine.
+
+    Checks run on active (occupied, non-chill) cells:
+      * ``no_active_cells`` -- occupancy grid is empty
+      * ``nonfinite_end`` / ``nonfinite_start`` / ``nonfinite_local`` -- NaN or inf
+      * ``no_positive_end`` -- no active cell has end > 0
+      * ``median_end_nonpositive`` -- median active end <= 0
+      * ``median_end_below_1s`` -- median active end < ``MIN_MEDIAN_END_S``
+      * ``end_before_start_gt_1pct`` -- end < start on > 1% of active cells
+    """
+    active = active_cell_mask(record["channels"])
+    if not np.any(active):
+        return "no_active_cells"
+    end = np.asarray(record["end"], dtype=np.float32).reshape(-1)[active]
+    start = np.asarray(record["start"], dtype=np.float32).reshape(-1)[active]
+    local = np.asarray(record["local"], dtype=np.float32).reshape(-1)[active]
+    if not np.all(np.isfinite(end)):
+        return "nonfinite_end"
+    if not np.all(np.isfinite(start)):
+        return "nonfinite_start"
+    if not np.all(np.isfinite(local)):
+        return "nonfinite_local"
+    if not np.any(end > 0.0):
+        return "no_positive_end"
+    # Median over cells the solver actually scheduled.  CORE and gating
+    # voxels are encoded as active but carry end == 0, so an assembly with a
+    # large core must not be rejected for having a zero median.
+    positive_end = end[end > 0.0]
+    median_end = float(np.median(positive_end))
+    if median_end <= 0.0:
+        return "median_end_nonpositive"
+    if median_end < MIN_MEDIAN_END_S:
+        return "median_end_below_1s"
+    if float(np.mean(end < start)) > MAX_END_BEFORE_START_FRACTION:
+        return "end_before_start_gt_1pct"
+    return None
+
+
+def last_load_skips() -> List[Tuple[str, str]]:
+    """``(path, reason)`` pairs skipped by the most recent :func:`load_dataset`."""
+    return list(_LAST_LOAD_SKIPS)
+
+
+def load_record(path: str) -> Dict[str, Any]:
+    """Load one captured ``.npz`` record without validation.
+
+    Raises:
+        ValueError: schema older than 2 or field size mismatch.
+    """
+    with np.load(path, allow_pickle=True) as npz:
+        if int(npz.get("schema_version", 1)) < 2:
+            raise ValueError("schema_version_lt_2")
+        meta = GridMeta.from_dict(json.loads(str(npz["grid_meta"])))
+        conditioning = Conditioning(
+            vector=np.asarray(npz["conditioning"], dtype=np.float32),
+            names=list(npz["conditioning_names"]),
+        )
+        channels = np.asarray(npz["channels"], dtype=np.float32)
+        end = np.asarray(npz["solidification_end_times"], dtype=np.float32)
+        if end.size != channels[0].size:
+            raise ValueError("grid_size_mismatch")
+        return {
+            "path": path,
+            "alloy_name": str(npz["alloy_name"]),
+            "meta": meta,
+            "channels": channels,
+            "start": np.asarray(npz["solidification_start_times"], dtype=np.float32),
+            "end": end,
+            "local": np.asarray(npz["local_solidification_time"], dtype=np.float32),
+            "conditioning": conditioning,
+        }
+
+
 def load_dataset(
     out_dir: str = DEFAULT_DATASET_DIR,
     limit: Optional[int] = None,
+    skipped: Optional[List[Tuple[str, str]]] = None,
 ) -> List[Dict[str, Any]]:
-    """Load captured records for training.
+    """Load captured records for training, dropping unusable ones.
+
+    Every record passes :func:`validate_record`; rejected files are appended
+    to ``skipped`` (when given) as ``(path, reason)`` and are also available
+    from :func:`last_load_skips`.
 
     Returns:
         List of records with ``channels``, ``conditioning`` (Conditioning),
         ``end``/``start``/``local`` fields, and ``meta``.
     """
     records: List[Dict[str, Any]] = []
+    _LAST_LOAD_SKIPS.clear()
     if not os.path.isdir(out_dir):
         return records
     names = sorted(
@@ -171,31 +274,16 @@ def load_dataset(
     for name in names:
         path = os.path.join(out_dir, name)
         try:
-            with np.load(path, allow_pickle=True) as npz:
-                if int(npz.get("schema_version", 1)) < 2:
-                    continue
-                meta = GridMeta.from_dict(json.loads(str(npz["grid_meta"])))
-                conditioning = Conditioning(
-                    vector=np.asarray(npz["conditioning"], dtype=np.float32),
-                    names=list(npz["conditioning_names"]),
-                )
-                channels = np.asarray(npz["channels"], dtype=np.float32)
-                grid_size = channels[0].size
-                end = np.asarray(npz["solidification_end_times"], dtype=np.float32)
-                if end.size != grid_size:
-                    continue
-                records.append(
-                    {
-                        "path": path,
-                        "alloy_name": str(npz["alloy_name"]),
-                        "meta": meta,
-                        "channels": np.asarray(npz["channels"], dtype=np.float32),
-                        "start": np.asarray(npz["solidification_start_times"], dtype=np.float32),
-                        "end": np.asarray(npz["solidification_end_times"], dtype=np.float32),
-                        "local": np.asarray(npz["local_solidification_time"], dtype=np.float32),
-                        "conditioning": conditioning,
-                    }
-                )
-        except Exception:
+            record = load_record(path)
+            reason = validate_record(record)
+        except ValueError as exc:
+            reason = str(exc)
+        except Exception as exc:
+            reason = f"load_error: {type(exc).__name__}: {exc}"
+        if reason is not None:
+            _LAST_LOAD_SKIPS.append((path, reason))
+            if skipped is not None:
+                skipped.append((path, reason))
             continue
+        records.append(record)
     return records

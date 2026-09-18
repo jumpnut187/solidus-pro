@@ -226,7 +226,7 @@ class DeepModelSettings:
     epochs: int = 100
     batch_size: int = 4
     learning_rate: float = 1e-3
-    grid_resolution: int = 32        # restricted to {16, 32, 64, 128}
+    grid_resolution: int = 64        # restricted to {16, 32, 64, 128}; 64 keeps captured 64^3 geometry
     model_dir: str = "models/deep_model"
     export_dir: str = "models/deep_model/export"
     last_model_path: str = ""        # last deep model loaded/trained
@@ -237,7 +237,7 @@ class DeepModelSettings:
     def normalize(self) -> None:
         """Clamp/validate fields; called at construction and after load."""
         if self.grid_resolution not in (16, 32, 64, 128):
-            self.grid_resolution = 32
+            self.grid_resolution = 64
         self.epochs = max(1, int(self.epochs))
         self.batch_size = max(1, int(self.batch_size))
         self.learning_rate = max(1e-8, float(self.learning_rate))
@@ -702,7 +702,7 @@ deep:
   epochs: 100
   batch_size: 4
   learning_rate: 0.001
-  grid_resolution: 32             # restricted to {16, 32, 64, 128}
+  grid_resolution: 64             # restricted to {16, 32, 64, 128}
   model_dir: models/deep_model
   export_dir: models/deep_model/export
   last_model_path: ""
@@ -763,7 +763,7 @@ cooldown_seconds = 300
 epochs = 100
 batch_size = 4
 learning_rate = 0.001
-grid_resolution = 32
+grid_resolution = 64
 model_dir = "models/deep_model"
 export_dir = "models/deep_model/export"
 last_model_path = ""

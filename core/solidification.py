@@ -23,7 +23,6 @@ import time
 import warnings
 from typing import Any, Callable, Tuple, Dict, Optional, List
 from collections import deque
-from scipy.spatial import cKDTree
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from core.solidification_params import (
     SHRINK_SCALAR_DEFAULT,
@@ -61,7 +60,7 @@ from core.acceleration import (
     compute_isolation_score_parallel,
 )
 from core.materials import AlloyProperties
-from core.voxel_mesh import AdaptiveVoxelMesh
+from core.voxel_mesh import AdaptiveVoxelMesh, _build_kdtree
 from core.memory_manager import create_managed_array, get_memory_manager
 from config.hardware_config import hardware
 from core.solidification_loop import (
@@ -1185,7 +1184,7 @@ class SolidificationEngine:
         riser_influence_radius = base_feeding_distance * material_factor
         min_influence_factor = fp.min_influence_factor
 
-        riser_tree = cKDTree(riser_centers)
+        riser_tree = _build_kdtree(riser_centers)
         distances, _ = riser_tree.query(cast_centers, k=1)
         compute_riser_influence_parallel(
             schedule_slowdown,
@@ -1456,7 +1455,7 @@ class SolidificationEngine:
             # Use KD-tree nearest-neighbor query on CPU.
             # This scales much better than O(n_voxels * n_surface) pairwise scans.
             try:
-                surface_tree = cKDTree(surface_centers)
+                surface_tree = _build_kdtree(surface_centers)
                 distances, _ = surface_tree.query(voxel_centers, k=1, workers=-1)
                 self.surface_distances = np.asarray(distances, dtype=np.float32)
                 print("  Feeding distances computed (KD-tree)")
@@ -1484,7 +1483,7 @@ class SolidificationEngine:
 
         extra_centers = np.ascontiguousarray(self.mesh.voxel_centers[extra], dtype=np.float32)
         try:
-            distances, _ = cKDTree(extra_centers).query(voxel_centers, k=1, workers=-1)
+            distances, _ = _build_kdtree(extra_centers).query(voxel_centers, k=1, workers=-1)
             extra_distances = np.asarray(distances, dtype=np.float32)
         except Exception:
             extra_distances = compute_min_distances_parallel(voxel_centers, extra_centers)
@@ -2080,7 +2079,7 @@ class SolidificationEngine:
         
         if len(cast_indices) > 0:
             # Build KD-tree for riser centers
-            riser_tree = cKDTree(riser_centers)
+            riser_tree = _build_kdtree(riser_centers)
             
             # Find cast voxels within riser influence radius
             cast_centers = self.mesh.voxel_centers[cast_indices]
@@ -2171,7 +2170,7 @@ class SolidificationEngine:
         print(f"  Chill shrinkage reduction zone: {chill_influence_radius:.2f}\" (1.5 × {chill_thickness:.2f}\" thickness)")
         
         # Build KD-tree for chill centers
-        chill_tree = cKDTree(chill_centers)
+        chill_tree = _build_kdtree(chill_centers)
         
         # Get CAST voxel indices (only casting voxels get shrinkage reduction, not risers)
         if self.mesh.voxel_part_types is not None:
@@ -2274,7 +2273,7 @@ class SolidificationEngine:
             fed_post_count = 0
             if path_lengths is None:
                 riser_centers = self.mesh.voxel_centers[riser_indices]
-                riser_tree = cKDTree(riser_centers)
+                riser_tree = _build_kdtree(riser_centers)
                 target_centers = self.mesh.voxel_centers[target_indices]
                 distances, _ = riser_tree.query(target_centers, k=1)
             else:
@@ -4587,7 +4586,7 @@ class SolidificationEngine:
         if np.any(core_voxels):
             core_centers = voxel_centers[core_voxels]
             if len(core_centers) > 0:
-                kdtree = cKDTree(core_centers)
+                kdtree = _build_kdtree(core_centers)
                 distances, _ = kdtree.query(voxel_centers)
                 core_weight = np.clip(1.0 - distances / restraint_depth, 0.0, 1.0)
                 restraint_index = np.maximum(restraint_index, core_restraint * core_weight)
@@ -4914,7 +4913,6 @@ class SolidificationEngine:
             
             if len(chill_indices) > 0:
                 try:
-                    from scipy.spatial import cKDTree
                     chill_centers = self.mesh.voxel_centers[chill_indices]
                     surface_centers = self.mesh.voxel_centers[surface_indices]
                     
@@ -4928,7 +4926,7 @@ class SolidificationEngine:
                     chill_burn_in_radius = chill_thickness * 1.5  # Same as shrinkage reduction zone
                     max_reduction = 0.3  # At chill contact, only 30% burn-in risk
 
-                    chill_tree = cKDTree(chill_centers)
+                    chill_tree = _build_kdtree(chill_centers)
                     distances, _ = chill_tree.query(
                         surface_centers,
                         k=1,

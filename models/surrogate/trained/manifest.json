@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "kind": "numpy_weights",
   "backend": "numpy",
-  "grid_resolution": 64,
+  "grid_resolution": 16,
+  "part_type_divisor": 3.0,
   "channels": [
     "occupancy",
     "part_type",
@@ -40,13 +41,23 @@
     "WCB (Carbon Steel Casting)"
   ],
   "accuracy": {
-    "rmse_s": 12.11,
-    "mae_s": 0.97,
-    "max_error_s": 525.93,
-    "confidence": 0.645
+    "rmse_s": 63.13,
+    "mae_s": 33.28,
+    "max_error_s": 952.29,
+    "end_rmse_s": 63.13,
+    "end_mae_s": 33.28,
+    "baseline_rmse_s": 139.31,
+    "skill": 0.547,
+    "confidence": 0.547,
+    "evaluation": "geometry-grouped holdout; active non-chill cells with reference end > 0",
+    "train_records": 280,
+    "val_records": 72,
+    "train_groups": 48,
+    "val_groups": 15,
+    "val_cells": 1219756
   },
-  "trained_on": "2026-08-17",
+  "trained_on": "2026-09-17",
   "units": "inches/seconds/celsius",
-  "notes": "Linear-log least-squares surrogate fit on captured runs. Upgrade path: torch 3D U-Net + FiLM (next phase) for higher fidelity.",
+  "notes": "Linear-log ridge least-squares surrogate (end and local-time heads) fit on captured runs, split by geometry group. Upgrade path: torch 3D U-Net + FiLM for higher fidelity.",
   "artifact_path": ""
 }

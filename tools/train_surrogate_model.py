@@ -72,11 +72,15 @@ def main() -> int:
 
     headline = result["headline"]
     print(f"Fitted on {result['records']} records "
-          f"({result['train']} train / {result['test']} test)")
+          f"({result['train']} train / {result['test']} val; "
+          f"{result.get('train_groups', '?')} / {result.get('val_groups', '?')} geometry groups)")
     print(f"\n✓ Model saved to {result['saved_to']}")
-    print(f"  RMSE {headline.get('rmse_s', 0):.1f}s · "
-          f"MAE {headline.get('mae_s', 0):.1f}s · "
-          f"conf {headline.get('confidence', 0):.2f}")
+    nan = float("nan")
+    print(f"  end RMSE {headline.get('end_rmse_s', nan):.1f}s · "
+          f"MAE {headline.get('end_mae_s', nan):.1f}s · "
+          f"constant-mean baseline {headline.get('baseline_rmse_s', nan):.1f}s · "
+          f"skill {headline.get('skill', nan):.2f}")
+    print("  (active, non-chill cells with reference end > 0 on geometry-grouped validation)")
     return 0
 
 

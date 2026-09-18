@@ -2,13 +2,20 @@
 
 Reuses ``core.surrogate.dataset.load_dataset`` (schema v2 ``.npz`` records
 from ``data/surrogate_dataset``) — no new capture code.  Records captured at
-any resolution (16/32/64) are resampled to the training resolution (32^3
-default) with block-average pooling (nearest-neighbour fallback).
+any resolution (16/32/64) are resampled to the training resolution (64^3
+default) with occupancy-aware block pooling (linear-zoom fallback).
 
 Each item yields the channels, conditioning vector, target schedule fields
 (start / end / local), and an occupancy mask marking cells to include in the
-loss (occupancy > 0.5, chill cells excluded — same exclusion the surrogate
-pipeline applies).
+loss and metrics (occupancy > 0.5, chill cells excluded, reference end > 0).
+
+Train / validation membership comes from
+``core.surrogate.split.grouped_train_val_indices`` so no geometry appears on
+both sides of the split.
+
+Grid axis order is ``(z, y, x)`` (``core.surrogate.fields._scatter`` packs
+``ix + R * (iy + R * iz)``), so ``normalized_height`` varies along axis 0 and
+``augment_batch`` only flips / rotates the trailing two axes.
 """
 
 from __future__ import annotations
@@ -20,12 +27,20 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from core.deep_model.model import DEFAULT_TRAINING_RESOLUTION, TARGET_NAMES
 from core.surrogate.dataset import DEFAULT_DATASET_DIR, load_dataset
 from core.surrogate.fields import PART_TYPE_DIVISOR
+from core.surrogate.split import (
+    DEFAULT_SEED,
+    DEFAULT_VAL_FRACTION,
+    geometry_group_key,
+    grouped_train_val_indices,
+)
 from core.part_manager import PART_TYPE_CHILL
 
 CHILL_PART_TYPE = PART_TYPE_CHILL  # encoded as part_type / PART_TYPE_DIVISOR
 CHILL_CHANNEL_TOL = 0.05
+MIN_GEOMETRY_GROUPS = 2
 
 
 def _block_mean(arr: np.ndarray, factor: int) -> np.ndarray:
@@ -126,10 +141,55 @@ class DeepItem:
 
 
 def _occupancy_mask(channels: np.ndarray) -> np.ndarray:
-    """Loss mask: occupied cells, excluding chill cells."""
+    """Occupied cells, excluding chill cells (part_type 2)."""
     occ = channels[0] > 0.5
     chill = np.abs(channels[1] - CHILL_PART_TYPE / PART_TYPE_DIVISOR) < CHILL_CHANNEL_TOL
     return occ & ~chill
+
+
+def evaluation_mask(channels: np.ndarray, ref_end: np.ndarray) -> np.ndarray:
+    """Cells that count for the loss and for every reported metric.
+
+    Active (occupancy > 0.5), not chill, and reference end time > 0.  Shared
+    by the dataset items and ``training._evaluate`` so the loss mask and the
+    metric mask are the same set of cells.
+    """
+    return _occupancy_mask(channels) & (np.asarray(ref_end) > 0.0)
+
+
+def log1p_targets(start: torch.Tensor, local: torch.Tensor) -> torch.Tensor:
+    """Stack the network targets ``log1p(start), log1p(local)`` -> ``(B, 2, ...)``."""
+    return torch.stack(
+        [torch.log1p(torch.clamp(start, min=0.0)), torch.log1p(torch.clamp(local, min=0.0))],
+        dim=1,
+    )
+
+
+def augment_batch(batch: Dict[str, torch.Tensor], rng: torch.Generator) -> Dict[str, torch.Tensor]:
+    """Random flips on the x / y axes and 90-degree rotations about z.
+
+    Applied identically to channels, targets and mask.  Grid axis 0 is the
+    vertical (``normalized_height`` and gravity), so it is never touched.
+    Tensor dims: ``(B, C, z, y, x)`` for channels and ``(B, z, y, x)`` for
+    the fields, so y is the second-to-last dim and x the last.
+    """
+    flip_y = bool(torch.rand((), generator=rng) < 0.5)
+    flip_x = bool(torch.rand((), generator=rng) < 0.5)
+    quarter_turns = int(torch.randint(0, 4, (), generator=rng))
+
+    def _apply(t: torch.Tensor) -> torch.Tensor:
+        y_dim, x_dim = t.ndim - 2, t.ndim - 1
+        if flip_y:
+            t = torch.flip(t, dims=(y_dim,))
+        if flip_x:
+            t = torch.flip(t, dims=(x_dim,))
+        if quarter_turns:
+            t = torch.rot90(t, quarter_turns, dims=(y_dim, x_dim))
+        return t
+
+    # Grids are (B, C, z, y, x) or (B, z, y, x); the conditioning vector (B, K)
+    # has no spatial axes and passes through untouched.
+    return {k: (_apply(v) if v.ndim >= 4 else v) for k, v in batch.items()}
 
 
 class DeepDataset(Dataset):
@@ -137,16 +197,19 @@ class DeepDataset(Dataset):
 
     Args:
         records: Output of ``core.surrogate.dataset.load_dataset``.
-        resolution: Training grid resolution (default 32).
-        split: One of ``"train"`` / ``"val"`` / ``"all"``.  The last 20% of
-            records form validation (same convention as ``train_numpy``).
+        resolution: Training grid resolution (default 64).
+        split: One of ``"train"`` / ``"val"`` / ``"all"``.  Train / val
+            membership is the geometry-grouped split from
+            ``core.surrogate.split`` (``val_fraction`` 0.2, ``seed`` 0).
     """
 
     def __init__(
         self,
         records: List[Dict[str, Any]],
-        resolution: int = 32,
+        resolution: int = DEFAULT_TRAINING_RESOLUTION,
         split: str = "all",
+        val_fraction: float = DEFAULT_VAL_FRACTION,
+        seed: int = DEFAULT_SEED,
     ):
         if resolution not in (8, 16, 32, 64, 128):
             raise ValueError(
@@ -160,8 +223,8 @@ class DeepDataset(Dataset):
         self.resolution = int(resolution)
         indices = list(range(len(records)))
         if split in ("train", "val"):
-            split_at = max(1, int(len(records) * 0.8))
-            indices = indices[:split_at] if split == "train" else indices[split_at:]
+            train_idx, val_idx = grouped_train_val_indices(records, val_fraction, seed)
+            indices = train_idx if split == "train" else val_idx
         self._records = [records[i] for i in indices]
         if not self._records:
             raise ValueError(f"No records in split '{split}'")
@@ -176,7 +239,7 @@ class DeepDataset(Dataset):
                 np.asarray(record["local"], dtype=np.float32).reshape(src_res, src_res, src_res),
                 self.resolution,
             )
-            mask = _occupancy_mask(channels)
+            mask = evaluation_mask(channels, end)
             item = DeepItem(
                 channels=torch.from_numpy(channels).float(),
                 conditioning=torch.from_numpy(
@@ -187,7 +250,6 @@ class DeepDataset(Dataset):
                 local=torch.from_numpy(local).float(),
                 mask=torch.from_numpy(mask).bool(),
             )
-            item.mask &= item.end > 0.0
             self._items.append(item)
 
     def __len__(self) -> int:
@@ -205,6 +267,38 @@ class DeepDataset(Dataset):
     def conditioning_size(self) -> int:
         return int(self._items[0].conditioning.shape[0])
 
+    @property
+    def geometry_groups(self) -> int:
+        """Number of distinct geometry groups among the records."""
+        return len({geometry_group_key(r) for r in self._records})
+
+    def target_normalization(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Mean / std of the ``TARGET_NAMES`` log1p targets over masked cells.
+
+        Computed on this dataset only; callers pass the *train* split so the
+        validation statistics never leak into the model.  A degenerate std
+        (constant target) is floored at 1.0.
+        """
+        sums = np.zeros(len(TARGET_NAMES), dtype=np.float64)
+        sq_sums = np.zeros(len(TARGET_NAMES), dtype=np.float64)
+        count = 0
+        for item in self._items:
+            mask = item.mask
+            if not bool(mask.any()):
+                continue
+            targets = log1p_targets(item.start[None], item.local[None])[0]  # (2, R, R, R)
+            vals = targets[:, mask].double().numpy()  # (2, n)
+            sums += vals.sum(axis=1)
+            sq_sums += (vals ** 2).sum(axis=1)
+            count += vals.shape[1]
+        if count == 0:
+            return np.zeros(len(TARGET_NAMES), dtype=np.float32), np.ones(len(TARGET_NAMES), dtype=np.float32)
+        mean = sums / count
+        var = np.maximum(sq_sums / count - mean ** 2, 0.0)
+        std = np.sqrt(var)
+        std = np.where(std < 1e-6, 1.0, std)
+        return mean.astype(np.float32), std.astype(np.float32)
+
     @staticmethod
     def collate(batch: List[DeepItem]) -> Dict[str, torch.Tensor]:
         """Collate a batch of :class:`DeepItem` into stacked tensors."""
@@ -220,20 +314,25 @@ class DeepDataset(Dataset):
 
 def make_train_val_datasets(
     data_dir: str = DEFAULT_DATASET_DIR,
-    resolution: int = 32,
+    resolution: int = DEFAULT_TRAINING_RESOLUTION,
     limit: Optional[int] = None,
+    val_fraction: float = DEFAULT_VAL_FRACTION,
+    seed: int = DEFAULT_SEED,
 ) -> Tuple[DeepDataset, Optional[DeepDataset]]:
-    """Load records and split into train / validation datasets.
+    """Load records and split them by geometry group into train / validation.
 
     Returns:
-        ``(train, val)``; ``val`` is None when fewer than 5 records exist (the
-        whole dataset trains — same spirit as the numpy surrogate's split).
+        ``(train, val)``; ``val`` is None only when the grouped split holds
+        nothing out (a single geometry group, or ``val_fraction`` 0).
     """
     records = load_dataset(data_dir, limit=limit)
     if not records:
         raise ValueError(f"No usable training records found in {data_dir}")
-    if len(records) < 5:
-        return DeepDataset(records, resolution=resolution, split="all"), None
-    train = DeepDataset(records, resolution=resolution, split="train")
-    val = DeepDataset(records, resolution=resolution, split="val")
+    train_idx, val_idx = grouped_train_val_indices(records, val_fraction, seed)
+    train = DeepDataset(
+        [records[i] for i in train_idx], resolution=resolution, split="all"
+    )
+    if not val_idx:
+        return train, None
+    val = DeepDataset([records[i] for i in val_idx], resolution=resolution, split="all")
     return train, val

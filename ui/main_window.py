@@ -3511,7 +3511,10 @@ class MainWindow(QMainWindow):
             # Position near the main window if first time
             if not self.console_window.pos().x():
                 main_geo = self.geometry()
-                screen_geo = QApplication.desktop().availableGeometry(self)
+                # Qt6 removed QApplication.desktop(); use the screen this
+                # window is on, falling back to the primary screen.
+                screen = self.screen() or QApplication.primaryScreen()
+                screen_geo = screen.availableGeometry()
                 x, y = clamp_window_position(
                     main_geo.x() + main_geo.width() + 10,
                     main_geo.y(),

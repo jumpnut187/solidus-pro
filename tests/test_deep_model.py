@@ -35,8 +35,15 @@ from core.deep_model.autotrain import (
     save_state,
     should_retrain,
 )
-from core.deep_model.model import UNet3D, levels_for_resolution
-from core.deep_model.model import DeepModelManifest, read_deep_manifest
+from core.deep_model.model import (
+    TARGET_NAMES,
+    DeepModelManifest,
+    FiLM,
+    UNet3D,
+    levels_for_resolution,
+    read_deep_manifest,
+)
+from core.surrogate.split import geometry_group_key
 
 HAVE_TORCH = torch is not None
 HAVE_COREML = False
@@ -66,9 +73,15 @@ def _conditioning():
 
 
 def _write_synthetic_record(out_dir: str, seed: int, resolution: int = 8) -> str:
-    """Write a schema-v2 .npz record in the capture_run format."""
-    rng = np.random.default_rng(seed)
+    """Write a schema-v2 .npz record in the capture_run format.
+
+    Geometry varies with ``seed % 3`` (the box is shortened along x) so
+    datasets built from several seeds contain several geometry groups, which
+    the grouped train/val split requires.  Grid axis order is ``(z, y, x)``
+    like the real capture; ``normalized_height`` varies along axis 0.
+    """
     R = resolution
+    x_hi = R - 1 - (seed % 3)
     meta = GridMeta(
         resolution=R,
         bbox=np.array([[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]]),
@@ -76,11 +89,11 @@ def _write_synthetic_record(out_dir: str, seed: int, resolution: int = 8) -> str
         max_dim=2.0,
     )
     channels = np.zeros((7, R, R, R), dtype=np.float32)
-    channels[0, 1:-1, 1:-1, 1:-1] = 1.0
-    channels[1, 1:-1, 1:-1, 1:-1] = 0.0
+    channels[0, 1:-1, 1:-1, 1:x_hi] = 1.0
+    channels[1, 1:-1, 1:-1, 1:x_hi] = 0.0
     channels[2] = 0.5
     channels[3] = 0.5
-    height = np.linspace(0, 1, R).reshape(1, 1, R).repeat(R, axis=1).repeat(R, axis=0)
+    height = np.linspace(0, 1, R).reshape(R, 1, 1).repeat(R, axis=1).repeat(R, axis=2)
     channels[4] = height.astype(np.float32)
     end = np.full((R, R, R), 300.0 + seed * 50.0, dtype=np.float32)
     end[channels[0] == 0] = 0.0
@@ -136,6 +149,45 @@ class ArchitectureTests(unittest.TestCase):
             out = model(channels, cond)
             self.assertEqual(out.shape, (2, 3, resolution, resolution, resolution))
             self.assertTrue(torch.isfinite(out).all())
+            heads = model.forward_normalized(channels, cond)
+            self.assertEqual(heads.shape, (2, len(TARGET_NAMES), resolution, resolution, resolution))
+
+    def test_forward_derives_end_from_start_and_local(self):
+        model = UNet3D(levels=levels_for_resolution(8))
+        model.set_target_normalization([3.0, 4.0], [1.5, 0.5])
+        channels = torch.rand(2, 7, 8, 8, 8)
+        cond = torch.rand(2, 23)
+        out = model(channels, cond)
+        torch.testing.assert_close(out[:, 1], out[:, 0] + out[:, 2])
+        self.assertTrue((out >= 0).all())
+
+    def test_normalization_round_trip(self):
+        model = UNet3D(levels=levels_for_resolution(8))
+        mean, std = [2.5, 4.0], [0.7, 1.3]
+        model.set_target_normalization(mean, std)
+        channels = torch.rand(1, 7, 8, 8, 8)
+        cond = torch.rand(1, 23)
+        with torch.no_grad():
+            z = model.forward_normalized(channels, cond)
+            out = model(channels, cond)
+        expected_start = torch.expm1(torch.clamp(z[:, 0] * std[0] + mean[0], min=0.0, max=11.0))
+        expected_local = torch.expm1(torch.clamp(z[:, 1] * std[1] + mean[1], min=0.0, max=11.0))
+        torch.testing.assert_close(out[:, 0], expected_start)
+        torch.testing.assert_close(out[:, 2], expected_local)
+        with self.assertRaises(ValueError):
+            model.set_target_normalization([1.0, 1.0], [0.0, 1.0])
+
+    def test_film_is_identity_at_init(self):
+        film = FiLM(channels=16, conditioning_size=23)
+        x = torch.randn(2, 16, 4, 4, 4)
+        cond = torch.randn(2, 23)
+        torch.testing.assert_close(film(x, cond), x)
+
+    def test_default_model_size(self):
+        model = UNet3D(levels=4)
+        params = sum(p.numel() for p in model.parameters())
+        self.assertGreater(params, 4_000_000)
+        self.assertLess(params, 8_000_000)
 
     def test_resolution_levels(self):
         self.assertEqual(levels_for_resolution(8), 3)
@@ -164,7 +216,10 @@ class TrainingTests(unittest.TestCase):
                 min_records=1,
             )
             self.assertEqual(summary["records"], 2)
+            self.assertEqual(summary["train"], 1)
+            self.assertEqual(summary["test"], 1)
             self.assertGreaterEqual(summary["first_loss"], summary["last_loss"])
+            self.assertIsNotNone(summary["val_loss"])
             self.assertTrue(os.path.exists(os.path.join(out_dir, "weights.pt")))
             self.assertTrue(os.path.exists(os.path.join(out_dir, "manifest.json")))
             self.assertTrue(os.path.exists(os.path.join(out_dir, "deep_manifest.json")))
@@ -172,6 +227,14 @@ class TrainingTests(unittest.TestCase):
             deep = read_deep_manifest(out_dir)
             self.assertIsNotNone(deep)
             self.assertEqual(deep.kind, "torch_unet")
+            self.assertEqual(deep.target_names, list(TARGET_NAMES))
+            self.assertEqual(len(deep.target_mean), 2)
+            self.assertTrue(all(sd > 0 for sd in deep.target_std))
+            self.assertEqual(deep.training["train_records"], 1)
+            self.assertEqual(deep.training["val_records"], 1)
+            self.assertIn("val_loss", deep.notes)
+            self.assertNotIn("best_val_mse", deep.notes)
+            self.assertIn("baseline_end_rmse_s", deep.accuracy)
 
     def test_training_raises_without_data(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -179,6 +242,141 @@ class TrainingTests(unittest.TestCase):
 
             with self.assertRaises(ValueError):
                 train_deep_model(data_dir=tmp, output_dir=tmp, grid=8, min_records=1)
+
+    def test_training_refuses_single_geometry_group(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = os.path.join(tmp, "data")
+            for seed in (0, 3, 6):  # same geometry (seed % 3 == 0), different end times
+                _write_synthetic_record(data_dir, seed)
+            from core.deep_model.training import train_deep_model
+
+            with self.assertRaises(ValueError) as ctx:
+                train_deep_model(data_dir=data_dir, output_dir=os.path.join(tmp, "out"),
+                                 grid=8, epochs=1, min_records=1)
+            self.assertIn("geometry group", str(ctx.exception))
+
+    def test_early_stopping_keeps_best_checkpoint(self):
+        from torch.utils.data import DataLoader
+
+        from core.deep_model.dataset import DeepDataset, make_train_val_datasets
+        from core.deep_model.inference import build_unet_from_artifact
+        from core.deep_model.training import _validation_loss, train_deep_model
+        from core.surrogate.model import _read_manifest
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = os.path.join(tmp, "data")
+            for seed in range(4):
+                _write_synthetic_record(data_dir, seed)
+            out_dir = os.path.join(tmp, "out")
+            summary = train_deep_model(
+                data_dir=data_dir, output_dir=out_dir, grid=8, epochs=40,
+                batch_size=2, learning_rate=3e-2, min_records=1, patience=2,
+                augment=False,
+            )
+            self.assertLessEqual(summary["best_epoch"], summary["epochs_run"])
+            deep = read_deep_manifest(out_dir)
+            self.assertEqual(deep.epochs, summary["epochs_run"])
+            self.assertEqual(deep.training["best_epoch"], summary["best_epoch"])
+            self.assertEqual(deep.training["early_stopped"], summary["early_stopped"])
+            if summary["epochs_run"] == 40:
+                self.assertFalse(summary["early_stopped"])
+            else:
+                self.assertTrue(summary["early_stopped"])
+                self.assertEqual(summary["epochs_run"], summary["best_epoch"] + 2)
+
+            # The saved weights are the best-val epoch, not the last one.
+            model = build_unet_from_artifact(out_dir, _read_manifest(out_dir))
+            _, val = make_train_val_datasets(data_dir, resolution=8)
+            loader = DataLoader(val, batch_size=2, collate_fn=DeepDataset.collate)
+            val_loss = _validation_loss(model, loader, torch.device("cpu"))
+            self.assertAlmostEqual(
+                val_loss, summary["val_loss"], delta=max(1e-3, 0.02 * summary["val_loss"])
+            )
+
+    def test_evaluation_matches_inference_path(self):
+        from core.deep_model.dataset import make_train_val_datasets
+        from core.deep_model.inference import load_deep_model
+        from core.deep_model.training import _evaluate, _masked_end_mean, train_deep_model
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = os.path.join(tmp, "data")
+            for seed in range(4):
+                _write_synthetic_record(data_dir, seed)
+            out_dir = os.path.join(tmp, "out")
+            summary = train_deep_model(
+                data_dir=data_dir, output_dir=out_dir, grid=8, epochs=3,
+                batch_size=2, min_records=1,
+            )
+            result = load_deep_model(out_dir, backend="cpu")
+            self.assertEqual(result.error, "")
+            train, val = make_train_val_datasets(data_dir, resolution=8)
+            metrics = _evaluate(
+                result.model.model, val, torch.device("cpu"), _masked_end_mean(train)
+            )
+
+            end_pred, end_ref = [], []
+            for item, record in zip(val, val.records):
+                pred = result.model.predict(item.channels.numpy(), record["conditioning"])
+                mask = item.mask.numpy()
+                end_pred.append(pred[1][mask])
+                end_ref.append(item.end.numpy()[mask])
+            end_pred, end_ref = np.concatenate(end_pred), np.concatenate(end_ref)
+            rmse = float(np.sqrt(np.mean((end_pred - end_ref) ** 2)))
+            self.assertAlmostEqual(metrics["end_time"]["rmse"], rmse, places=3)
+            self.assertEqual(metrics["baseline"]["n_cells"], end_ref.size)
+            self.assertIn("baseline_end_rmse_s", summary["headline"])
+            self.assertGreaterEqual(summary["headline"]["confidence"], 0.0)
+            self.assertLessEqual(summary["headline"]["confidence"], 1.0)
+
+
+@unittest.skipUnless(HAVE_TORCH, "torch not installed")
+class GroupedSplitTests(unittest.TestCase):
+    def test_make_train_val_datasets_groups_geometry(self):
+        from core.deep_model.dataset import make_train_val_datasets
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = os.path.join(tmp, "data")
+            for seed in range(9):  # 3 geometries x 3 end-time variants
+                _write_synthetic_record(data_dir, seed)
+            train, val = make_train_val_datasets(data_dir, resolution=8)
+            self.assertIsNotNone(val)
+            self.assertEqual(len(train) + len(val), 9)
+            train_keys = {geometry_group_key(r) for r in train.records}
+            val_keys = {geometry_group_key(r) for r in val.records}
+            self.assertFalse(train_keys & val_keys)
+            self.assertEqual(train.geometry_groups + val.geometry_groups, 3)
+
+    def test_single_geometry_has_no_validation(self):
+        from core.deep_model.dataset import make_train_val_datasets
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = os.path.join(tmp, "data")
+            for seed in (0, 3, 6, 9, 12):
+                _write_synthetic_record(data_dir, seed)
+            train, val = make_train_val_datasets(data_dir, resolution=8)
+            self.assertIsNone(val)
+            self.assertEqual(len(train), 5)
+
+    def test_augment_batch_preserves_z_and_alignment(self):
+        from core.deep_model.dataset import augment_batch
+
+        R = 8
+        channels = torch.rand(2, 7, R, R, R)
+        start = torch.rand(2, R, R, R)
+        mask = torch.rand(2, R, R, R) > 0.5
+        batch = {"channels": channels, "start": start, "mask": mask,
+                 "conditioning": torch.rand(2, 23)}
+        for seed in range(6):
+            out = augment_batch(batch, torch.Generator().manual_seed(seed))
+            # Same permutation applied to every grid: masked values line up.
+            torch.testing.assert_close(out["channels"][:, 0][out["mask"]].sort().values,
+                                       channels[:, 0][mask].sort().values)
+            torch.testing.assert_close(out["start"][out["mask"]].sort().values,
+                                       start[mask].sort().values)
+            # z profile (axis 0 of the grid) is untouched.
+            torch.testing.assert_close(out["channels"].mean(dim=(1, 3, 4)),
+                                       channels.mean(dim=(1, 3, 4)))
+            torch.testing.assert_close(out["conditioning"], batch["conditioning"])
 
 
 @unittest.skipUnless(HAVE_TORCH, "torch not installed")
@@ -287,7 +485,7 @@ class InferenceTests(unittest.TestCase):
             channels[1, 2:6, 2:6, 2:6] = 0.0
             channels[2] = 0.5
             channels[3] = 0.5
-            channels[4] = np.linspace(0, 1, 8)[None, None, :] * np.ones((8, 8, 1))
+            channels[4] = np.linspace(0, 1, 8)[:, None, None] * np.ones((1, 8, 8))
             cond = _conditioning()
             from core.surrogate.conditioning import raw_from_conditioning
 
@@ -306,6 +504,7 @@ class InferenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = os.path.join(tmp, "data")
             _write_synthetic_record(data_dir, 0, resolution=16)
+            _write_synthetic_record(data_dir, 1, resolution=16)
             from core.deep_model.training import train_deep_model
 
             summary = train_deep_model(
@@ -411,6 +610,27 @@ class ExportSmokeTests(unittest.TestCase):
             self.assertTrue(os.path.isdir(result["artifact_path"]))
             self.assertTrue(result["validated"])
             self.assertIn("coreml", read_deep_manifest(saved_to).targets)
+
+            # Regression: the GroupNorm export shim must reproduce the torch
+            # forward (it once normalized per channel, i.e. InstanceNorm).
+            from core.deep_model.backend import DeepBackend
+            from core.deep_model.inference import load_deep_model
+
+            coreml = load_deep_model(saved_to, backend="coreml").model
+            torch_cpu = load_deep_model(saved_to, backend="cpu").model
+            self.assertEqual(coreml._backend, DeepBackend.COREML)
+            channels = np.zeros((7, 8, 8, 8), dtype=np.float32)
+            channels[0, 2:6, 2:6, 2:6] = 1.0
+            channels[2] = 0.5
+            channels[3] = 0.5
+            cond = _conditioning()
+            pred_coreml = coreml.predict(channels, cond)
+            pred_torch = torch_cpu.predict(channels, cond)
+            active = channels[0] > 0.5
+            np.testing.assert_allclose(
+                pred_coreml[1][active], pred_torch[1][active], rtol=2e-2, atol=2.0
+            )
+            self.assertIs(coreml._coreml_model, coreml._coreml())
 
     def test_tflite_missing_toolchain_message(self):
         import importlib.util

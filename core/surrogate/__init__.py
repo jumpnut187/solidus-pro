@@ -37,8 +37,13 @@ from core.surrogate.metrics import (
     compute_field_metrics,
     field_confidence,
     format_metrics,
+    masked_schedule_metrics,
+    schedule_evaluation_mask,
     schedule_metrics,
+    skill_score,
+    train_mean_baseline_rmse,
 )
+from core.surrogate.split import geometry_group_key, grouped_train_val_indices, split_records
 from core.surrogate.model import (
     ModelLoadResult,
     ModelManifest,
@@ -71,7 +76,14 @@ __all__ = [
     "encode_channels",
     "field_confidence",
     "format_metrics",
+    "geometry_group_key",
     "get_available_backends",
+    "grouped_train_val_indices",
+    "masked_schedule_metrics",
+    "schedule_evaluation_mask",
+    "skill_score",
+    "split_records",
+    "train_mean_baseline_rmse",
     "is_coreml_active",
     "load_dataset",
     "load_model",

@@ -27,8 +27,16 @@ from core.surrogate import (
     unproject_grid,
 )
 from core.surrogate.dataset import DEFAULT_DATASET_DIR, capture_run, load_dataset
-from core.surrogate.metrics import aggregate_schedule_metrics, compute_field_metrics, schedule_metrics
-from core.surrogate.model import ModelManifest, NumpyDemoModel, NumpyWeightsModel
+from core.surrogate.metrics import (
+    aggregate_schedule_metrics,
+    compute_field_metrics,
+    masked_schedule_metrics,
+    schedule_evaluation_mask,
+    schedule_metrics,
+    skill_score,
+)
+from core.surrogate.model import ModelManifest, NumpyDemoModel, NumpyWeightsModel, _mushy_fraction
+from core.surrogate.split import geometry_group_key, grouped_train_val_indices
 
 
 def _fake_engine(n=300, resolution=16):
@@ -159,6 +167,71 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(pred.shape, (3, 16, 16, 16))
         self.assertTrue(np.all(np.isfinite(pred)))
 
+    def _fit_inputs(self):
+        engine = _fake_engine()
+        boost = np.ones(len(engine.mesh.voxel_centers), dtype=np.float32)
+        slow = np.ones(len(engine.mesh.voxel_centers), dtype=np.float32)
+        channels, _ = encode_channels(engine, boost, slow, resolution=16)
+        cond = build_conditioning_vector(get_alloy("WCB"), {"max_dim": 10.0, "voxel_size": 0.1})
+        rng = np.random.default_rng(1)
+        end = 500 + np.abs(rng.normal(0, 100, (16, 16, 16)))
+        local = 0.1 * end
+        return channels, cond, end, local
+
+    def test_local_head_is_learned_and_bounded_by_end(self):
+        channels, cond, end, local = self._fit_inputs()
+        weights = NumpyWeightsModel._fit_weights([channels], [cond], [end])
+        local_weights = NumpyWeightsModel._fit_local_weights([channels], [cond], [local])
+        self.assertEqual(local_weights.shape, weights.shape)
+        manifest = ModelManifest(name="t", version="0", kind="numpy_weights", backend="numpy", grid_resolution=16)
+        model = NumpyWeightsModel(manifest, weights, local_weights)
+        self.assertTrue(model.has_local_head)
+        pred = model.predict(channels, cond)
+        active = channels[0] > 0.5
+        start, pred_end, pred_local = pred
+        self.assertTrue(np.all(pred_local[active] <= pred_end[active] + 1e-4))
+        self.assertTrue(np.all(pred_local[active] >= 0))
+        np.testing.assert_allclose(start[active], pred_end[active] - pred_local[active], atol=1e-3)
+        self.assertTrue(np.all(pred[:, ~active] == 0))
+        # The learned head tracks the 10% local/end ratio, not the mushy fraction (~0.27).
+        ratio = np.median(pred_local[active] / pred_end[active])
+        self.assertLess(ratio, 0.2)
+        self.assertIn("learned", model.describe())
+
+    def test_missing_local_weights_falls_back_to_mushy_fraction(self):
+        channels, cond, end, _ = self._fit_inputs()
+        weights = NumpyWeightsModel._fit_weights([channels], [cond], [end])
+        manifest = ModelManifest(name="old", version="0", kind="numpy_weights", backend="numpy", grid_resolution=16)
+        with tempfile.TemporaryDirectory() as tmp:
+            from core.surrogate.model import _save_manifest
+
+            _save_manifest(manifest, tmp)
+            # Artifact layout from before the local head existed: weights only.
+            np.savez_compressed(os.path.join(tmp, "weights.npz"), weights=weights)
+            res = load_model(tmp)
+            self.assertIsNotNone(res.model, res.error)
+            self.assertFalse(res.model.has_local_head)
+            pred = res.model.predict(channels, cond)
+            active = channels[0] > 0.5
+            mushy = _mushy_fraction(raw_from_conditioning(cond))
+            np.testing.assert_allclose(pred[2][active], pred[1][active] * mushy, rtol=1e-5)
+            self.assertIn("mushy_fraction", res.model.describe())
+
+    def test_load_reads_local_weights(self):
+        channels, cond, end, local = self._fit_inputs()
+        weights = NumpyWeightsModel._fit_weights([channels], [cond], [end])
+        local_weights = NumpyWeightsModel._fit_local_weights([channels], [cond], [local])
+        manifest = ModelManifest(name="new", version="0", kind="numpy_weights", backend="numpy", grid_resolution=16)
+        with tempfile.TemporaryDirectory() as tmp:
+            from core.surrogate.model import _save_manifest
+
+            _save_manifest(manifest, tmp)
+            np.savez_compressed(os.path.join(tmp, "weights.npz"), weights=weights, local_weights=local_weights)
+            res = load_model(tmp)
+            self.assertIsNotNone(res.model, res.error)
+            self.assertTrue(res.model.has_local_head)
+            np.testing.assert_allclose(res.model.local_weights, local_weights)
+
 
 class MetricsTests(unittest.TestCase):
     def test_compute_field_metrics(self):
@@ -177,6 +250,69 @@ class MetricsTests(unittest.TestCase):
         self.assertIn("rmse_s", head)
         self.assertIn("confidence", head)
         self.assertIn("s", format_metrics(head))
+
+    def test_baseline_and_skill(self):
+        ref = np.array([10.0, 20.0, 30.0, 40.0])
+        # Constant-mean baseline RMSE is the population std (11.18 s).
+        m_perfect = compute_field_metrics(ref, ref)
+        self.assertAlmostEqual(m_perfect["baseline_rmse"], float(np.std(ref)), places=6)
+        self.assertAlmostEqual(m_perfect["skill"], 1.0, places=6)
+        m_mean = compute_field_metrics(np.full(4, ref.mean()), ref)
+        self.assertAlmostEqual(m_mean["skill"], 0.0, places=6)
+        m_worse = compute_field_metrics(np.full(4, 1000.0), ref)
+        self.assertEqual(m_worse["skill"], 0.0)  # clipped, never negative
+        self.assertEqual(skill_score(5.0, 10.0), 0.5)
+        self.assertTrue(np.isnan(skill_score(float("nan"), 10.0)))
+
+        sm = schedule_metrics(np.zeros(4), ref + 1.0, np.zeros(4), np.zeros(4), ref, np.zeros(4))
+        head = aggregate_schedule_metrics(sm)
+        self.assertAlmostEqual(head["baseline_rmse_s"], float(np.std(ref)), places=6)
+        self.assertAlmostEqual(head["end_rmse_s"], 1.0, places=6)
+        self.assertAlmostEqual(head["skill"], round(1.0 - 1.0 / float(np.std(ref)), 3), places=6)
+        self.assertEqual(head["confidence"], head["skill"])
+        self.assertIn("baseline", format_metrics(head))
+
+    def test_aggregate_empty_is_nan(self):
+        head = aggregate_schedule_metrics({})
+        self.assertTrue(np.isnan(head["rmse_s"]))
+        self.assertTrue(np.isnan(head["baseline_rmse_s"]))
+        self.assertTrue(np.isnan(head["confidence"]))
+        self.assertEqual(format_metrics(head), "accuracy unknown")
+
+    def test_masked_schedule_metrics_ignores_unmasked_cells(self):
+        pred = np.zeros((3, 2, 2, 2), dtype=np.float32)
+        pred[1] = 100.0
+        ref_end = np.zeros(8)
+        ref_end[:3] = [100.0, 110.0, 90.0]
+        mask = np.zeros(8, dtype=bool)
+        mask[:3] = True
+        m = masked_schedule_metrics(pred, np.zeros(8), ref_end, np.zeros(8), mask)
+        self.assertEqual(m["end_time"]["n_compared"], 3)
+        self.assertAlmostEqual(m["end_time"]["rmse"], np.sqrt((0 + 100 + 100) / 3.0), places=6)
+        # Unmasked comparison would be dominated by 5 zero-vs-100 cells.
+        full = compute_field_metrics(pred[1].reshape(-1), ref_end)
+        self.assertGreater(full["rmse"], m["end_time"]["rmse"])
+
+        empty = masked_schedule_metrics(pred, np.zeros(8), ref_end, np.zeros(8), np.zeros(8, dtype=bool))
+        self.assertEqual(empty["end_time"]["n_compared"], 0)
+        self.assertTrue(np.isnan(empty["end_time"]["rmse"]))
+
+    def test_schedule_evaluation_mask_excludes_chill_and_zero_end(self):
+        from core.part_manager import PART_TYPE_CHILL
+        from core.surrogate.fields import PART_TYPE_DIVISOR
+
+        channels = np.zeros((7, 2, 2, 2), dtype=np.float32)
+        channels[0, 0] = 1.0  # first 4 cells active
+        channels[1, 0, 0, 0] = PART_TYPE_CHILL / PART_TYPE_DIVISOR  # one chill cell
+        ref_end = np.ones(8)
+        ref_end[1] = 0.0  # active, non-chill, but end == 0
+        mask = schedule_evaluation_mask(channels, ref_end)
+        self.assertEqual(mask.shape, (8,))
+        self.assertEqual(int(mask.sum()), 2)
+        self.assertFalse(mask[0])
+        self.assertFalse(mask[1])
+        self.assertTrue(mask[2] and mask[3])
+        self.assertFalse(mask[4:].any())
 
 
 class DatasetTests(unittest.TestCase):
@@ -201,8 +337,8 @@ class DatasetTests(unittest.TestCase):
 
 
 class TrainingTests(unittest.TestCase):
-    def _make_record(self, out_dir: str, seed: int = 0) -> str:
-        rng = np.random.default_rng(seed)
+    def _make_record(self, out_dir: str, seed: int = 0, geometry_seed: int = None) -> str:
+        rng = np.random.default_rng(seed if geometry_seed is None else geometry_seed)
         n = 200
         engine = SimpleNamespace(
             alloy=get_alloy("WCB"),
@@ -243,8 +379,97 @@ class TrainingTests(unittest.TestCase):
             res = load_model(out_dir)
             self.assertIsNotNone(res.model, res.error)
             self.assertEqual(res.model.manifest.name, "Test Model")
-            self.assertGreaterEqual(res.model.manifest.accuracy.get("confidence", 0.0), 0.0)
-            self.assertLessEqual(res.model.manifest.accuracy.get("confidence", 0.0), 1.0)
+            self.assertTrue(res.model.has_local_head)
+            acc = res.model.manifest.accuracy
+            self.assertGreaterEqual(acc.get("confidence", 0.0), 0.0)
+            self.assertLessEqual(acc.get("confidence", 0.0), 1.0)
+            self.assertEqual(acc["train_records"] + acc["val_records"], 5)
+            self.assertEqual(acc["train_records"], summary["train"])
+            self.assertEqual(acc["val_records"], summary["test"])
+            self.assertGreater(acc["val_records"], 0)
+            self.assertGreaterEqual(acc["train_groups"], 1)
+            self.assertEqual(acc["train_groups"], summary["train_groups"])
+            self.assertEqual(acc["val_groups"], summary["val_groups"])
+            self.assertIn("baseline_rmse_s", acc)
+            self.assertIn("skill", acc)
+            self.assertGreater(acc["val_cells"], 0)
+            with np.load(os.path.join(out_dir, "weights.npz")) as npz:
+                self.assertIn("local_weights", npz.files)
+
+    def test_train_numpy_fits_on_train_split_only(self):
+        from unittest import mock
+
+        from core.surrogate.training import train_numpy
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # 3 geometries x 2 alloy-ish variants = 6 records.
+            for geometry in range(3):
+                for variant in range(2):
+                    self._make_record(tmp, seed=geometry * 2 + variant, geometry_seed=geometry)
+            records = load_dataset(tmp)
+            self.assertEqual(len(records), 6)
+            train_idx, val_idx = grouped_train_val_indices(records, val_fraction=0.2, seed=0)
+            self.assertGreater(len(val_idx), 0)
+
+            fit_end = mock.Mock(wraps=NumpyWeightsModel._fit_weights)
+            fit_local = mock.Mock(wraps=NumpyWeightsModel._fit_local_weights)
+            with mock.patch.object(NumpyWeightsModel, "_fit_weights", staticmethod(fit_end)), \
+                 mock.patch.object(NumpyWeightsModel, "_fit_local_weights", staticmethod(fit_local)):
+                result = train_numpy(records, grid=8)
+
+            for fit in (fit_end, fit_local):
+                fit.assert_called_once()
+                channels_arg = fit.call_args.args[0]
+                self.assertEqual(len(channels_arg), len(train_idx))
+                fitted_keys = {geometry_group_key({"channels": c}) for c in channels_arg}
+                val_keys = {geometry_group_key(records[i]) for i in val_idx}
+                self.assertFalse(fitted_keys & val_keys)
+
+            self.assertEqual(result["train_records"], len(train_idx))
+            self.assertEqual(result["val_records"], len(val_idx))
+            self.assertEqual(result["train_groups"] + result["val_groups"], 3)
+            self.assertGreaterEqual(result["val_groups"], 1)
+            expected_cells = sum(
+                int(schedule_evaluation_mask(records[i]["channels"], records[i]["end"]).sum())
+                for i in val_idx
+            )
+            self.assertEqual(result["val_cells"], expected_cells)
+            self.assertEqual(result["metrics"]["end_time"]["n_compared"], expected_cells)
+            self.assertTrue(np.isfinite(result["headline"]["end_rmse_s"]))
+
+    def test_single_geometry_group_reports_unmeasured_accuracy(self):
+        import json
+
+        from core.surrogate.training import retrain_from_dataset, train_numpy
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = os.path.join(tmp, "data")
+            out_dir = os.path.join(tmp, "model")
+            for seed in range(4):
+                self._make_record(data_dir, seed=seed, geometry_seed=7)
+            records = load_dataset(data_dir)
+            result = train_numpy(records, grid=8)
+            self.assertEqual(result["val_records"], 0)
+            self.assertEqual(result["train_records"], 4)
+            self.assertEqual(result["train_groups"], 1)
+            self.assertEqual(result["val_groups"], 0)
+            self.assertEqual(result["metrics"], {})
+            self.assertTrue(np.isnan(result["headline"]["rmse_s"]))
+            self.assertTrue(np.isnan(result["headline"]["confidence"]))
+
+            summary = retrain_from_dataset(data_dir=data_dir, output_dir=out_dir, grid=8)
+            self.assertEqual(summary["test"], 0)
+            with open(os.path.join(out_dir, "manifest.json")) as fh:
+                manifest = json.load(fh)
+            acc = manifest["accuracy"]
+            self.assertIsNone(acc["rmse_s"])
+            self.assertIsNone(acc["confidence"])
+            self.assertIsNone(acc["baseline_rmse_s"])
+            self.assertEqual(acc["val_records"], 0)
+            self.assertIn("No validation split", manifest["notes"])
+            res = load_model(out_dir)
+            self.assertIsNotNone(res.model, res.error)
+            self.assertIn("n/a", res.model.describe())
 
     def test_retrain_raises_without_data(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -343,3 +568,38 @@ class PipelineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TrainBaselineTests(unittest.TestCase):
+    """The manifest baseline is the TRAIN-mean constant scored on val cells."""
+
+    def test_train_numpy_baseline_is_train_mean_on_val(self):
+        from core.surrogate.metrics import schedule_evaluation_mask
+        from core.surrogate.split import grouped_train_val_indices
+        from core.surrogate.training import train_numpy
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for geometry in range(3):
+                for variant in range(2):
+                    TrainingTests._make_record(
+                        TrainingTests(), tmp, seed=geometry * 2 + variant, geometry_seed=geometry
+                    )
+            records = load_dataset(tmp)
+            train_idx, val_idx = grouped_train_val_indices(records, val_fraction=0.2, seed=0)
+            self.assertTrue(val_idx)
+
+            def _masked_end(i):
+                r = records[i]
+                m = schedule_evaluation_mask(r["channels"], r["end"])
+                return np.asarray(r["end"]).reshape(-1)[m]
+
+            train_end = np.concatenate([_masked_end(i) for i in train_idx])
+            val_end = np.concatenate([_masked_end(i) for i in val_idx])
+            expected = float(np.sqrt(np.mean((val_end - train_end.mean()) ** 2)))
+            oracle = float(val_end.std())
+
+            result = train_numpy(records, grid=8)
+            baseline = result["headline"]["baseline_rmse_s"]
+            self.assertAlmostEqual(baseline, expected, places=4)
+            # Train-mean baseline is never below the oracle (val std) constant.
+            self.assertGreaterEqual(baseline + 1e-9, oracle)
+            self.assertEqual(result["metrics"]["end_time"]["baseline_rmse"], baseline)

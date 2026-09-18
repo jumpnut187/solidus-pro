@@ -146,13 +146,27 @@ class SurrogateModel(ABC):
         if m.accuracy:
             acc = m.accuracy
             lines.append(
-                f"  Accuracy: RMSE={acc.get('rmse_s', 0):.1f}s "
-                f"MAE={acc.get('mae_s', 0):.1f}s "
-                f"conf={acc.get('confidence', 0):.2f}"
+                f"  Accuracy: RMSE={_fmt_num(acc.get('rmse_s'), 1)}s "
+                f"MAE={_fmt_num(acc.get('mae_s'), 1)}s "
+                f"baseline={_fmt_num(acc.get('baseline_rmse_s'), 1)}s "
+                f"conf={_fmt_num(acc.get('confidence'), 2)}"
             )
         if m.notes:
             lines.append(f"  Notes: {m.notes}")
         return "\n".join(lines)
+
+
+def _fmt_num(value: Any, digits: int) -> str:
+    """Format a manifest number; ``None``/NaN render as ``n/a``."""
+    if value is None:
+        return "n/a"
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if math.isnan(f):
+        return "n/a"
+    return f"{f:.{digits}f}"
 
 
 class NumpyDemoModel(SurrogateModel):
@@ -212,7 +226,11 @@ class NumpyWeightsModel(SurrogateModel):
     """Linear-log surrogate fit by least squares over captured runs.
 
     The feature matrix per cell combines the physics-informed channels and the
-    reconstructed conditioning constants; the target is ``log(end_time)``.
+    reconstructed conditioning constants.  Two ridge least-squares heads share
+    it: ``weights`` predicts ``log(end_time)`` and ``local_weights`` predicts
+    ``log(local_time)``.  ``local_weights`` is optional so a ``weights.npz``
+    written before the local head existed still loads; it then falls back to
+    ``local = end * mushy_fraction``.
     """
 
     FEATURE_NAMES: List[str] = [
@@ -230,13 +248,30 @@ class NumpyWeightsModel(SurrogateModel):
         "log1p(mushy_fraction)",
     ]
 
-    def __init__(self, manifest: ModelManifest, weights: np.ndarray):
+    def __init__(
+        self,
+        manifest: ModelManifest,
+        weights: np.ndarray,
+        local_weights: Optional[np.ndarray] = None,
+    ):
+        weights = np.asarray(weights, dtype=np.float64)
         if weights.shape[0] != len(self.FEATURE_NAMES):
             raise ValueError(
                 f"Weights length {weights.shape[0]} != features {len(self.FEATURE_NAMES)}"
             )
+        if local_weights is not None:
+            local_weights = np.asarray(local_weights, dtype=np.float64)
+            if local_weights.shape != weights.shape:
+                raise ValueError(
+                    f"local_weights shape {local_weights.shape} != weights shape {weights.shape}"
+                )
         self.manifest = manifest
-        self.weights = np.asarray(weights, dtype=np.float64)
+        self.weights = weights
+        self.local_weights = local_weights
+
+    @property
+    def has_local_head(self) -> bool:
+        return self.local_weights is not None
 
     # -- feature building shared by fit (dataset) and predict (inference) ----
     @staticmethod
@@ -281,23 +316,25 @@ class NumpyWeightsModel(SurrogateModel):
         return X, active
 
     @staticmethod
-    def _fit_weights(
+    def _fit_log_target(
         channels_list: List[np.ndarray],
         conditioning_list: List[Conditioning],
-        end_list: List[np.ndarray],
+        target_list: List[np.ndarray],
         ridge: float = 1e-3,
     ) -> np.ndarray:
-        """Least-squares fit of ``log(end_time)`` over all active cells."""
+        """Ridge least-squares fit of ``log(target)`` over active cells with target > 0."""
         X_rows: List[np.ndarray] = []
         y_rows: List[np.ndarray] = []
-        for channels, conditioning, end in zip(channels_list, conditioning_list, end_list):
+        for channels, conditioning, target in zip(channels_list, conditioning_list, target_list):
             X, active = NumpyWeightsModel._features(channels, conditioning)
-            end_flat = np.asarray(end, dtype=np.float64).reshape(-1)
-            keep = active & (end_flat > 0) & np.isfinite(end_flat)
+            target_flat = np.asarray(target, dtype=np.float64).reshape(-1)
+            keep = active & (target_flat > 0) & np.isfinite(target_flat)
             X_rows.append(X[:, keep])
-            y_rows.append(np.log(np.maximum(end_flat[keep], 1e-6)))
+            y_rows.append(np.log(np.maximum(target_flat[keep], 1e-6)))
         Xm = np.concatenate(X_rows, axis=1)
         ym = np.concatenate(y_rows)
+        if ym.size == 0:
+            raise ValueError("No active cells with a positive target to fit")
         n_features = Xm.shape[0]
         if ridge > 0:
             Xm = np.concatenate([Xm, np.eye(n_features) * math.sqrt(ridge)], axis=1)
@@ -305,17 +342,41 @@ class NumpyWeightsModel(SurrogateModel):
         weights, *_ = np.linalg.lstsq(Xm.T, ym, rcond=None)
         return weights
 
+    @staticmethod
+    def _fit_weights(
+        channels_list: List[np.ndarray],
+        conditioning_list: List[Conditioning],
+        end_list: List[np.ndarray],
+        ridge: float = 1e-3,
+    ) -> np.ndarray:
+        """Least-squares fit of ``log(end_time)`` over all active cells."""
+        return NumpyWeightsModel._fit_log_target(channels_list, conditioning_list, end_list, ridge)
+
+    @staticmethod
+    def _fit_local_weights(
+        channels_list: List[np.ndarray],
+        conditioning_list: List[Conditioning],
+        local_list: List[np.ndarray],
+        ridge: float = 1e-3,
+    ) -> np.ndarray:
+        """Least-squares fit of ``log(local_time)`` over all active cells."""
+        return NumpyWeightsModel._fit_log_target(channels_list, conditioning_list, local_list, ridge)
+
     def predict(self, channels: np.ndarray, conditioning: Conditioning) -> np.ndarray:
         raw = raw_from_conditioning(conditioning)
         max_time_cap = float(raw.get("max_simulation_time", 14400.0))
-        mushy = _mushy_fraction(raw)
         X, active = self._features(channels, conditioning)
         log_end = self.weights @ X
         end = np.exp(log_end)
         end = np.minimum(end, max_time_cap)
         end = np.maximum(end, _TIME_STEP_FLOOR)
         end[~active] = 0.0
-        local = end * mushy
+        if self.local_weights is None:
+            local = end * _mushy_fraction(raw)
+        else:
+            local = np.exp(self.local_weights @ X)
+            local = np.minimum(local, end)
+        local = np.maximum(local, 0.0)
         local[~active] = 0.0
         start = end - local
         start[~active] = 0.0
@@ -327,6 +388,17 @@ class NumpyWeightsModel(SurrogateModel):
 
     def close(self) -> None:
         pass
+
+    def describe(self) -> str:
+        text = super().describe()
+        if self.local_weights is None:
+            text += (
+                "\n  Local-time head: none (weights.npz predates local_weights); "
+                "using local = end * mushy_fraction"
+            )
+        else:
+            text += "\n  Local-time head: learned log(local_time) ridge fit"
+        return text
 
 
 def build_demo_manifest(resolution: int = 64, name: str = "Reference Chvorinov Model") -> ModelManifest:
@@ -429,7 +501,11 @@ def load_model(path: Union[str, os.PathLike]) -> ModelLoadResult:
         try:
             with np.load(weights_path) as npz:
                 weights = npz["weights"]
-            model = NumpyWeightsModel(manifest, weights)
+                # Artifacts written before the local head have no
+                # ``local_weights``; the model then falls back to the
+                # mushy-fraction local time.
+                local_weights = npz["local_weights"] if "local_weights" in npz.files else None
+            model = NumpyWeightsModel(manifest, weights, local_weights)
             model.manifest.artifact_path = weights_path
             return ModelLoadResult(model=model)
         except Exception as exc:

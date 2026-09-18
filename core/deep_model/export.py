@@ -23,9 +23,9 @@ from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 
+from core.deep_model.inference import build_unet_from_artifact
 from core.deep_model.model import (
     UNet3D,
-    levels_for_resolution,
     read_deep_manifest,
     save_deep_manifest,
 )
@@ -53,7 +53,12 @@ TARGET_NOTES = {
 
 
 def _build_model(model_dir: str) -> UNet3D:
-    """Load weights + manifest and build the U-Net for export."""
+    """Load weights + manifests and build the U-Net for export.
+
+    The exported graph is ``UNet3D.forward``: physical ``(1, 3, R, R, R)``
+    seconds ``[start, end, local]`` with the target denormalization and
+    ``end = start + local`` inside the graph.
+    """
     manifest = _read_manifest(model_dir)
     if manifest is None:
         raise ValueError(f"No manifest.json found at {model_dir}")
@@ -64,20 +69,7 @@ def _build_model(model_dir: str) -> UNet3D:
         raise ValueError(
             f"Grid resolution {resolution} not in {{8, 16, 32, 64, 128}}"
         )
-
-    deep = read_deep_manifest(model_dir)
-    cond_size = int(getattr(deep, "conditioning_size", 0) or 23)
-    weights_path = os.path.join(model_dir, "weights.pt")
-    if not os.path.exists(weights_path):
-        raise FileNotFoundError(f"Missing weights.pt in {model_dir}")
-
-    import torch
-
-    model = UNet3D(conditioning_size=cond_size, levels=levels_for_resolution(resolution))
-    state = torch.load(weights_path, map_location="cpu", weights_only=True)
-    model.load_state_dict(state)
-    model.eval()
-    return model
+    return build_unet_from_artifact(model_dir, manifest)
 
 
 def _update_deep_manifest(
@@ -155,8 +147,11 @@ def _export_coreml(model_dir: str, out_dir: str, grid: int, progress_cb: Progres
             normalized = []
             for g in range(self.num_groups):
                 sl = x[:, g * per_group : (g + 1) * per_group]
-                mean = sl.mean(dim=(2, 3, 4), keepdim=True)
-                var = sl.var(dim=(2, 3, 4), keepdim=True, unbiased=False)
+                # GroupNorm statistics span every channel in the group plus the
+                # spatial dims; per-channel stats (dims 2-4 only) would be
+                # InstanceNorm and diverge from the trained weights.
+                mean = sl.mean(dim=(1, 2, 3, 4), keepdim=True)
+                var = sl.var(dim=(1, 2, 3, 4), keepdim=True, unbiased=False)
                 normalized.append((sl - mean) / torch.sqrt(var + self.eps))
             y = torch.cat(normalized, dim=1)
             c = self.num_channels

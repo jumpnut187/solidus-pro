@@ -5,12 +5,18 @@ Input: ``(7, R, R, R)`` channel grid (same channel order as
 (normalized alloy + config, size >= 20).
 
 Encoder: 4 levels, each ``Conv3D + GroupNorm + SiLU`` with stride-2
-downsampling; base channels 32 doubling per level (32 -> 64 -> 128 -> 256).
+downsampling; base channels 16 doubling per level (16 -> 32 -> 64 -> 128).
 Bottleneck: conv block at the lowest resolution.  Decoder: 4 levels with
 transposed-conv upsample, skip concatenation, ``Conv3D + GroupNorm + SiLU``,
 and a FiLM block per level that modulates features by the conditioning
-vector.  Head: 1x1x1 conv producing ``(3, R, R, R)`` = start_time, end_time
-(log space), local_time.
+vector.  Head: 1x1x1 conv producing two normalized log targets,
+``log1p(start_time)`` and ``log1p(local_time)`` (see ``TARGET_NAMES``).
+
+``forward_normalized`` returns those two heads (the training target).
+``forward`` denormalizes them with the stored ``target_mean`` /
+``target_std`` buffers and returns physical ``(3, R, R, R)`` seconds
+``[start, end, local]`` with ``end = start + local`` computed in-graph, so
+inference, evaluation and every export target share one output contract.
 
 The number of levels adapts to the resolution: the network needs R divisible
 by 8 (R=8 trains with 3 levels; R in {16, 32, 64, 128} trains with 4).
@@ -33,6 +39,17 @@ SUPPORTED_RESOLUTIONS = (8, 16, 32, 64, 128)
 SETTINGS_RESOLUTIONS = (16, 32, 64, 128)
 
 DEFAULT_CONDITIONING_SIZE = 23  # 15 alloy + 8 config features
+DEFAULT_BASE_CHANNELS = 16
+DEFAULT_TRAINING_RESOLUTION = 64
+
+#: Network heads, in output order.  Both are ``log1p`` of seconds so a zero
+#: start time maps to 0 instead of -inf; each is normalized by the training
+#: split mean / std stored on the model.
+TARGET_NAMES = ("log1p_start", "log1p_local")
+#: Upper clamp on the denormalized log1p heads before ``expm1``.  e^11 - 1 is
+#: 5.99e4 s, above the largest ``max_simulation_time`` the conditioning range
+#: admits (21600 s), and keeps the fp16 ONNX export finite (fp16 max 65504).
+LOG_TARGET_CEILING = 11.0
 
 
 def levels_for_resolution(resolution: int) -> int:
@@ -90,6 +107,10 @@ class FiLM(nn.Module):
     The conditioning vector goes through an MLP producing per-channel scale
     (gamma) and shift (beta) for the incoming feature map, letting the model
     modulate physics per alloy/config.
+
+    The block is the identity at initialization: ``gamma = 1 + delta`` with
+    the last Linear zero-initialized, so decoder features pass through
+    unchanged until training moves the modulation away from identity.
     """
 
     def __init__(self, channels: int, conditioning_size: int, hidden: int = 64):
@@ -99,12 +120,14 @@ class FiLM(nn.Module):
             nn.SiLU(inplace=True),
             nn.Linear(hidden, 2 * channels),
         )
+        nn.init.zeros_(self.mlp[2].weight)
+        nn.init.zeros_(self.mlp[2].bias)
         self.channels = channels
 
     def forward(self, x: torch.Tensor, conditioning: torch.Tensor) -> torch.Tensor:
         params = self.mlp(conditioning)  # (B, 2C) or (2C,)
-        gamma, beta = params.chunk(2, dim=-1)
-        gamma = gamma.view(*gamma.shape, 1, 1, 1)
+        delta_gamma, beta = params.chunk(2, dim=-1)
+        gamma = 1.0 + delta_gamma.view(*delta_gamma.shape, 1, 1, 1)
         beta = beta.view(*beta.shape, 1, 1, 1)
         return gamma * x + beta
 
@@ -115,8 +138,7 @@ class UNet3D(nn.Module):
     def __init__(
         self,
         in_channels: int = 7,
-        out_channels: int = 3,
-        base_channels: int = 32,
+        base_channels: int = DEFAULT_BASE_CHANNELS,
         levels: int = 4,
         conditioning_size: int = DEFAULT_CONDITIONING_SIZE,
         groups: int = 8,
@@ -124,6 +146,11 @@ class UNet3D(nn.Module):
         super().__init__()
         if levels < 1:
             raise ValueError(f"levels must be >= 1, got {levels}")
+        if base_channels % groups != 0:
+            raise ValueError(
+                f"base_channels ({base_channels}) must be divisible by groups ({groups})"
+            )
+        self.base_channels = int(base_channels)
         channels = [base_channels * (2 ** i) for i in range(levels)]
 
         self.encoder = nn.ModuleList()
@@ -147,16 +174,34 @@ class UNet3D(nn.Module):
             self.films.append(FiLM(c, conditioning_size))
             prev = c
 
-        self.head = nn.Conv3d(channels[0], out_channels, 1)
+        self.head = nn.Conv3d(channels[0], len(TARGET_NAMES), 1)
+        # Per-head normalization of the log1p targets (train-split statistics).
+        self.register_buffer("target_mean", torch.zeros(len(TARGET_NAMES)))
+        self.register_buffer("target_std", torch.ones(len(TARGET_NAMES)))
 
-    def forward(
+    def set_target_normalization(self, mean, std) -> None:
+        """Store train-split mean / std of the ``TARGET_NAMES`` log1p targets."""
+        mean_t = torch.as_tensor(mean, dtype=torch.float32).reshape(-1)
+        std_t = torch.as_tensor(std, dtype=torch.float32).reshape(-1)
+        if mean_t.shape != self.target_mean.shape or std_t.shape != self.target_std.shape:
+            raise ValueError(
+                f"Expected {len(TARGET_NAMES)} normalization values, "
+                f"got mean {tuple(mean_t.shape)} std {tuple(std_t.shape)}"
+            )
+        if bool((std_t <= 0).any()):
+            raise ValueError(f"target_std must be positive, got {std_t.tolist()}")
+        with torch.no_grad():
+            self.target_mean.copy_(mean_t.to(self.target_mean.device))
+            self.target_std.copy_(std_t.to(self.target_std.device))
+
+    def forward_normalized(
         self, channels: torch.Tensor, conditioning: torch.Tensor
     ) -> torch.Tensor:
-        """Predict schedule fields from channels + conditioning.
+        """Predict the normalized log1p heads.
 
         Returns:
-            Shape ``(B, 3, R, R, R)``: start_time, log(end_time),
-            local_time.
+            Shape ``(B, 2, R, R, R)`` in ``TARGET_NAMES`` order, in the
+            normalized space the loss is computed in.
         """
         x = channels
         skips: List[torch.Tensor] = []
@@ -173,6 +218,27 @@ class UNet3D(nn.Module):
             x = block(x)
             x = film(x, conditioning)
         return self.head(x)
+
+    def forward(
+        self, channels: torch.Tensor, conditioning: torch.Tensor
+    ) -> torch.Tensor:
+        """Predict the physical schedule in seconds.
+
+        Returns:
+            Shape ``(B, 3, R, R, R)``: ``start_time``, ``end_time``,
+            ``local_time`` with ``end == start + local`` and every value
+            ``>= 0``.  Callers still apply the active-cell mask and the
+            ``max_simulation_time`` clamp (see
+            ``core.deep_model.inference.reconstruct_schedule``).
+        """
+        normalized = self.forward_normalized(channels, conditioning)
+        mean = self.target_mean.view(1, -1, 1, 1, 1)
+        std = self.target_std.view(1, -1, 1, 1, 1)
+        log_fields = torch.clamp(normalized * std + mean, min=0.0, max=LOG_TARGET_CEILING)
+        fields = torch.expm1(log_fields)
+        start = fields[:, 0:1]
+        local = fields[:, 1:2]
+        return torch.cat([start, start + local, local], dim=1)
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +266,15 @@ class DeepModelManifest:
     trained_on: str = ""
     training_device: str = ""
     conditioning_size: int = DEFAULT_CONDITIONING_SIZE
+    base_channels: int = DEFAULT_BASE_CHANNELS
     epochs: int = 0
+    target_names: List[str] = field(default_factory=lambda: list(TARGET_NAMES))
+    #: Empty until training writes them.  Empty means "trust the buffers in
+    #: weights.pt"; a manifest regenerated without these keys must never
+    #: overwrite trained stats with identity normalization.
+    target_mean: List[float] = field(default_factory=list)
+    target_std: List[float] = field(default_factory=list)
+    training: Dict[str, Any] = field(default_factory=dict)
     notes: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
