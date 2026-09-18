@@ -241,6 +241,49 @@ def trace_paths_batch(
 
 
 @jit(nopython=True, cache=True)
+def _heap_sift_up(heap: np.ndarray, heap_pos: np.ndarray, keys: np.ndarray, i: int) -> None:
+    """Restore the min-heap property upward from slot ``i`` (indexed heap)."""
+    node = heap[i]
+    key = keys[node]
+    while i > 0:
+        parent = (i - 1) >> 1
+        parent_node = heap[parent]
+        if keys[parent_node] <= key:
+            break
+        heap[i] = parent_node
+        heap_pos[parent_node] = i
+        i = parent
+    heap[i] = node
+    heap_pos[node] = i
+
+
+@jit(nopython=True, cache=True)
+def _heap_sift_down(heap: np.ndarray, heap_pos: np.ndarray, keys: np.ndarray, i: int, size: int) -> None:
+    """Restore the min-heap property downward from slot ``i`` (indexed heap)."""
+    node = heap[i]
+    key = keys[node]
+    while True:
+        child = 2 * i + 1
+        if child >= size:
+            break
+        child_key = keys[heap[child]]
+        right = child + 1
+        if right < size:
+            right_key = keys[heap[right]]
+            if right_key < child_key:
+                child = right
+                child_key = right_key
+        if child_key >= key:
+            break
+        child_node = heap[child]
+        heap[i] = child_node
+        heap_pos[child_node] = i
+        i = child
+    heap[i] = node
+    heap_pos[node] = i
+
+
+@jit(nopython=True, cache=True)
 def trace_paths_from_risers_batch(
     riser_voxel_indices: np.ndarray,
     fraction_solid: np.ndarray,
@@ -249,6 +292,21 @@ def trace_paths_from_risers_batch(
     voxel_centers: np.ndarray,
     permeability_threshold: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Multi-source Dijkstra from every riser voxel through the permeable mush.
+
+    The frontier is an indexed binary min-heap keyed on ``path_length`` with a
+    ``heap_pos`` back-pointer per voxel, so pop is O(log F) and a relaxation
+    of a voxel already in the frontier is an in-place decrease-key (sift-up)
+    rather than a second push.  Each voxel is pushed at most once (on first
+    discovery), so the heap never exceeds ``n_voxels`` slots.
+
+    The previous implementation extracted the minimum by scanning the whole
+    frontier array on every pop.  On a 3D voxel mesh the frontier is a
+    wavefront of roughly ``n_voxels ** (2/3)`` cells, making each snapshot
+    trace ~O(N^1.7); ``FeedingPathAnalyzer.analyze`` runs up to 48 snapshots,
+    which is what made "Tracing feeding paths from risers..." take minutes at
+    a few hundred thousand voxels.
+    """
     n_voxels = len(fraction_solid)
     path_length = np.full(n_voxels, -1.0, dtype=np.float32)
     path_permeability = np.zeros(n_voxels, dtype=np.float64)
@@ -261,28 +319,31 @@ def trace_paths_from_risers_batch(
         feeding_source[riser_idx] = riser_idx
 
     visited = np.zeros(n_voxels, dtype=np.bool_)
-    frontier = np.zeros(n_voxels, dtype=np.int64)
-    frontier_size = 0
+    heap = np.zeros(n_voxels, dtype=np.int64)
+    heap_pos = np.full(n_voxels, -1, dtype=np.int64)
+    heap_size = 0
 
+    # All sources have key 0.0, so appending preserves the heap property.
     for riser_idx in sorted_risers:
-        frontier[frontier_size] = riser_idx
-        frontier_size += 1
+        if visited[riser_idx]:
+            continue  # duplicate index in riser_voxel_indices
+        heap[heap_size] = riser_idx
+        heap_pos[riser_idx] = heap_size
+        heap_size += 1
         visited[riser_idx] = True
 
     max_neighbors = neighbors.shape[1]
     c_epsilon = 1e-6
 
-    while frontier_size > 0:
-        min_idx = 0
-        min_dist = path_length[frontier[0]]
-        for i in range(1, frontier_size):
-            if path_length[frontier[i]] < min_dist:
-                min_dist = path_length[frontier[i]]
-                min_idx = i
-
-        current = frontier[min_idx]
-        frontier[min_idx] = frontier[frontier_size - 1]
-        frontier_size -= 1
+    while heap_size > 0:
+        current = heap[0]
+        heap_size -= 1
+        if heap_size > 0:
+            last = heap[heap_size]
+            heap[0] = last
+            heap_pos[last] = 0
+            _heap_sift_down(heap, heap_pos, path_length, 0, heap_size)
+        heap_pos[current] = -1
 
         visited[current] = True
 
@@ -318,11 +379,14 @@ def trace_paths_from_risers_batch(
             old_dist = path_length[neighbor]
 
             if old_dist < 0.0:
+                # First discovery: the only time a voxel is pushed.
                 path_length[neighbor] = new_dist
                 path_permeability[neighbor] = new_min_perm
                 feeding_source[neighbor] = current_source
-                frontier[frontier_size] = neighbor
-                frontier_size += 1
+                heap[heap_size] = neighbor
+                heap_pos[neighbor] = heap_size
+                heap_size += 1
+                _heap_sift_up(heap, heap_pos, path_length, heap_size - 1)
             else:
                 update = new_dist < old_dist - c_epsilon
                 if not update:
@@ -331,23 +395,20 @@ def trace_paths_from_risers_batch(
                     update = tie_condition and source_condition
 
                 if update:
-                    # Relax in place -- do NOT push onto the frontier here.
+                    # Decrease-key in place -- never push a second time.
                     #
-                    # Reaching this branch means path_length[neighbor] >= 0 and
-                    # visited[neighbor] is False, so the neighbor was already
-                    # pushed when it was first discovered above and has not been
-                    # popped yet: it is still in the frontier. The frontier's
-                    # minimum is recomputed by linear scan each iteration, so the
-                    # improved key is picked up without re-inserting.
-                    #
-                    # Pushing again would make total insertions unbounded by
-                    # n_voxels (a node can be relaxed many times), overflowing
-                    # the fixed-capacity frontier array. Under @jit(nopython=True)
-                    # that is an unchecked out-of-bounds write which corrupts the
-                    # heap and later crashes the process in unrelated code.
+                    # path_length[neighbor] >= 0 and visited[neighbor] is False,
+                    # so the neighbor is still in the heap at heap_pos[neighbor].
+                    # Re-pushing would let insertions exceed n_voxels (a node
+                    # can be relaxed many times) and overflow the fixed-capacity
+                    # heap array; under @jit(nopython=True) that is an unchecked
+                    # out-of-bounds write.
                     path_length[neighbor] = new_dist
                     path_permeability[neighbor] = new_min_perm
                     feeding_source[neighbor] = current_source
+                    slot = heap_pos[neighbor]
+                    if slot >= 0:
+                        _heap_sift_up(heap, heap_pos, path_length, slot)
 
     return path_length, path_permeability, feeding_source
 
