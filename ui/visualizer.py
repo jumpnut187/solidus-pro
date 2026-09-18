@@ -39,7 +39,7 @@ from ui.qt import (
     Signal,
 )
 from dataclasses import dataclass, field
-from typing import Optional, Dict, List, Tuple, Callable, Set
+from typing import Any, Optional, Dict, List, Tuple, Callable, Set
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 import threading
@@ -195,6 +195,21 @@ def apply_colormap_to_array(intensities: np.ndarray, colormap: str = 'red_gradie
     interpolated = color1 + t * (color2 - color1)
 
     return interpolated.astype(np.uint8)
+
+
+def apply_display_mask(viz: Any, mask: np.ndarray) -> np.ndarray:
+    """AND the visualizer's review-time voxel display mask into ``mask``.
+
+    Module-level on purpose: the geometry builders are also exercised as
+    unbound functions with mocked or bare ``self`` objects, so the mask is
+    read with ``getattr`` and only honoured when it is a real bool array of
+    the right length. A stale mask from a previous mesh must never blank the
+    view, so a length mismatch also falls through to ``mask`` unchanged.
+    """
+    display = getattr(viz, "_voxel_display_mask", None)
+    if not isinstance(display, np.ndarray) or len(display) != len(mask):
+        return mask
+    return mask & display
 
 
 def compute_top_percent_mask(values: np.ndarray,
@@ -937,6 +952,15 @@ class CastingVisualizer(QWidget):
         
         # Multiple part actors
         self.part_actors: Dict[str, vtk.vtkActor] = {}
+
+        # Review-time component hiding. ``_hidden_part_ids`` are parts whose
+        # skin actor is switched off; ``_voxel_display_mask`` (None or an
+        # N-bool array, True = drawable) is ANDed into every result geometry
+        # builder so a hidden component's voxels drop out of the analysis
+        # overlays too. ``_model_visible`` is the master "Show Model" flag.
+        self._hidden_part_ids: set = set()
+        self._voxel_display_mask: Optional[np.ndarray] = None
+        self._model_visible: bool = True
         
         # Shrinkage actor
         self.shrinkage_actor = None
@@ -2265,7 +2289,63 @@ class CastingVisualizer(QWidget):
         mask = values >= threshold
         if base_mask is not None:
             mask = np.asarray(base_mask, dtype=bool) & mask
-        return int(np.count_nonzero(mask))
+        return int(np.count_nonzero(apply_display_mask(self, mask)))
+
+    # ==================== Component (part) display filtering ====================
+
+    def _apply_display_mask(self, mask: np.ndarray) -> np.ndarray:
+        """AND the review-time voxel display mask into a builder's selection mask."""
+        return apply_display_mask(self, mask)
+
+    def _part_actor_should_show(self, part_id: str) -> bool:
+        model_visible = getattr(self, "_model_visible", True)
+        hidden = getattr(self, "_hidden_part_ids", None)
+        if not isinstance(hidden, set):
+            hidden = set()
+        return bool(model_visible is not False) and part_id not in hidden
+
+    def set_voxel_display_mask(self, mask: Optional[np.ndarray]) -> None:
+        """Install the per-voxel display mask (True = drawable) and drop caches.
+
+        Every cached polydata was built under the previous mask, so all
+        result caches are invalidated. The caller re-runs the current result
+        visualization afterwards; this method does not redraw.
+        """
+        if mask is None:
+            self._voxel_display_mask = None
+        else:
+            self._voxel_display_mask = np.ascontiguousarray(mask, dtype=bool)
+        self._clear_result_caches()
+
+    def voxel_display_mask(self) -> Optional[np.ndarray]:
+        """The installed per-voxel display mask, or None when nothing is hidden."""
+        return self._voxel_display_mask
+
+    def hidden_part_ids(self) -> set:
+        """Parts hidden for review (display only, not simulation membership)."""
+        return set(self._hidden_part_ids)
+
+    def set_component_hidden(self, part_id: str, hidden: bool) -> None:
+        """Hide or show one component's skin actor without redrawing results."""
+        if hidden:
+            self._hidden_part_ids.add(part_id)
+        else:
+            self._hidden_part_ids.discard(part_id)
+        self._apply_part_actor_visibility()
+        self.render_window.Render()
+
+    def clear_hidden_components(self) -> None:
+        """Show every component skin and drop the voxel display mask."""
+        self._hidden_part_ids.clear()
+        self._voxel_display_mask = None
+        self._clear_result_caches()
+        self._apply_part_actor_visibility()
+        self.render_window.Render()
+
+    def _apply_part_actor_visibility(self) -> None:
+        """Part skin visible = master Show Model flag AND not hidden for review."""
+        for part_id, actor in self.part_actors.items():
+            actor.SetVisibility(self._part_actor_should_show(part_id))
 
     def _should_cache_threshold(
         self,
@@ -2451,6 +2531,7 @@ class CastingVisualizer(QWidget):
 
         # Capture source voxel indices for the inspector (per-glyph)
         mask = np.asarray(shrinkage_intensity, dtype=np.float32) >= float(threshold)
+        mask = apply_display_mask(self, mask)
         self._shrinkage_displayed_voxel_indices = np.where(mask)[0].astype(np.int32)
         self._shrinkage_cells_per_glyph = 6  # vtkCubeSource emits 6 quad faces
 
@@ -2503,7 +2584,7 @@ class CastingVisualizer(QWidget):
             VTK polydata with colored cubes, or None if no voxels to display
         """
         # Shrinkage uses direct risk cutoff: 70% means show 0.70-1.00 risk voxels.
-        mask = shrinkage_intensity >= threshold
+        mask = apply_display_mask(self, shrinkage_intensity >= threshold)
         filtered_centers = voxel_centers[mask]
         filtered_sizes = voxel_sizes[mask]
         filtered_intensities = shrinkage_intensity[mask]
@@ -2726,7 +2807,7 @@ class CastingVisualizer(QWidget):
             VTK polydata with colored cubes
         """
         # Direct intensity cutoff: 70% means show 0.70-1.00.
-        mask = hotspot_intensity >= threshold
+        mask = apply_display_mask(self, hotspot_intensity >= threshold)
         filtered_centers = voxel_centers[mask]
         filtered_sizes = voxel_sizes[mask]
         filtered_intensities = hotspot_intensity[mask]
@@ -2864,7 +2945,7 @@ class CastingVisualizer(QWidget):
             VTK polydata with colored cubes
         """
         # Direct risk cutoff: 70% means show 0.70-1.00.
-        mask = defect_risk >= threshold
+        mask = apply_display_mask(self, defect_risk >= threshold)
         filtered_centers = voxel_centers[mask]
         filtered_sizes = voxel_sizes[mask]
         filtered_risk = defect_risk[mask]
@@ -3036,7 +3117,7 @@ class CastingVisualizer(QWidget):
             VTK polydata with colored cubes (only liquid voxels shown)
         """
         # Filter voxels by threshold - only show liquid voxels (solid becomes transparent)
-        mask = fraction_liquid > threshold
+        mask = apply_display_mask(self, fraction_liquid > threshold)
         filtered_centers = voxel_centers[mask]
         filtered_sizes = voxel_sizes[mask]
         filtered_liquid = fraction_liquid[mask]
@@ -3211,7 +3292,7 @@ class CastingVisualizer(QWidget):
         fill_time = np.asarray(fill_time, dtype=np.float64)
         misrun_mask = fill_time < 0.0
         arrived_mask = (~misrun_mask) & (fill_time <= time_threshold)
-        mask = misrun_mask | arrived_mask
+        mask = apply_display_mask(self, misrun_mask | arrived_mask)
 
         filtered_centers = voxel_centers[mask]
         filtered_sizes = voxel_sizes[mask]
@@ -3381,7 +3462,7 @@ class CastingVisualizer(QWidget):
             wetted threshold.
         """
         fill_fraction = np.asarray(fill_fraction, dtype=np.float64)
-        mask = fill_fraction > FILL_ANIMATION_WETTED_THRESHOLD
+        mask = apply_display_mask(self, fill_fraction > FILL_ANIMATION_WETTED_THRESHOLD)
 
         filtered_centers = voxel_centers[mask]
         filtered_sizes = voxel_sizes[mask]
@@ -3615,7 +3696,7 @@ class CastingVisualizer(QWidget):
             VTK polydata with colored cubes
         """
         # Apply direct cutoff within physics-derived eligible zones.
-        mask = hot_tear_zones & (hot_tear_risk >= threshold)
+        mask = apply_display_mask(self, hot_tear_zones & (hot_tear_risk >= threshold))
         filtered_centers = voxel_centers[mask]
         filtered_sizes = voxel_sizes[mask]
         filtered_risk = hot_tear_risk[mask]
@@ -3867,7 +3948,7 @@ class CastingVisualizer(QWidget):
         """
         try:
             # Apply direct cutoff within burn-in eligibility zones.
-            mask = sand_burn_in_zones & (sand_burn_in_risk >= threshold)
+            mask = apply_display_mask(self, sand_burn_in_zones & (sand_burn_in_risk >= threshold))
             filtered_centers = voxel_centers[mask]
             filtered_sizes = voxel_sizes[mask]
             filtered_risk = sand_burn_in_risk[mask]
@@ -4107,7 +4188,7 @@ class CastingVisualizer(QWidget):
                                       mode: str) -> Optional[vtk.vtkPolyData]:
         """Build gas porosity visualization geometry with defect_industry colors."""
         try:
-            mask = intensities >= threshold
+            mask = apply_display_mask(self, intensities >= threshold)
             filtered_centers = voxel_centers[mask]
             filtered_sizes = voxel_sizes[mask]
             filtered_intensities = intensities[mask]
@@ -4339,6 +4420,9 @@ class CastingVisualizer(QWidget):
 
         # Clear all cached result geometry
         self._clear_result_caches()
+        # The voxel array is about to change; the hidden component ids are
+        # kept so the main window can rebuild the mask for the next mesh.
+        self._voxel_display_mask = None
 
         # Clear stored data
         self.current_shrinkage_data = None
@@ -4485,6 +4569,7 @@ class CastingVisualizer(QWidget):
         
         self.renderer.AddActor(actor)
         self.part_actors[part_id] = actor
+        actor.SetVisibility(self._part_actor_should_show(part_id))
         
         # Update bounds
         self._update_model_bounds()
@@ -4514,10 +4599,8 @@ class CastingVisualizer(QWidget):
             self.render_window.Render()
     
     def set_part_visibility(self, part_id: str, visible: bool):
-        """Toggle visibility of a specific part"""
-        if part_id in self.part_actors:
-            self.part_actors[part_id].SetVisibility(visible)
-            self.render_window.Render()
+        """Toggle visibility of a specific part (alias of set_component_hidden)."""
+        self.set_component_hidden(part_id, not visible)
     
     def highlight_part(self, part_id: str, highlight: bool = True):
         """Highlight or unhighlight a part (makes it more opaque and adds edge lines)"""
@@ -4634,6 +4717,7 @@ class CastingVisualizer(QWidget):
 
         # Refresh the displayed voxel indices for the inspector
         mask = np.asarray(intensities, dtype=np.float32) >= float(threshold)
+        mask = apply_display_mask(self, mask)
         self._shrinkage_displayed_voxel_indices = np.where(mask)[0].astype(np.int32)
         self._shrinkage_cells_per_glyph = 6
 
@@ -4672,10 +4756,12 @@ class CastingVisualizer(QWidget):
         self._prebuild_cache_async(voxel_centers, voxel_sizes, intensities, threshold)
     
     def toggle_mesh_visibility(self, visible: bool):
-        """Toggle mesh visibility"""
+        """Master model toggle: the legacy combined mesh and every part skin."""
+        self._model_visible = bool(visible)
         if self.mesh_actor is not None:
-            self.mesh_actor.SetVisibility(visible)
-            self.render_window.Render()
+            self.mesh_actor.SetVisibility(self._model_visible)
+        self._apply_part_actor_visibility()
+        self.render_window.Render()
     
     def toggle_shrinkage_visibility(self, visible: bool):
         """Toggle shrinkage visibility"""

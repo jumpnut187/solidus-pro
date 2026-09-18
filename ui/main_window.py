@@ -76,6 +76,7 @@ from core.part_manager import (
     PART_TYPE_ABBREVIATIONS,
     PART_TYPE_BADGES,
     PART_TYPE_COLORS,
+    PART_TYPE_TO_CODE,
     part_type_from_display_name,
 )
 from core.materials import get_all_alloy_names, get_alloy
@@ -3160,6 +3161,32 @@ class MainWindow(QMainWindow):
         self.show_mesh_check.setChecked(True)
         self.show_mesh_check.stateChanged.connect(self._toggle_mesh_visibility)
         vis_layout.addWidget(self.show_mesh_check)
+
+        # Per-component visibility for reviewing results. Unchecking a part
+        # hides its skin and drops its voxels from the result overlay. This is
+        # display state only: part.visible (simulation membership) is untouched,
+        # so a hidden riser is still in the next run.
+        components_header = QHBoxLayout()
+        components_header.addWidget(QLabel("Components:"))
+        components_header.addStretch()
+        self.components_show_all_btn = QPushButton("Show All")
+        self.components_show_all_btn.setFlat(True)
+        self.components_show_all_btn.setToolTip("Show every component again")
+        self.components_show_all_btn.setStyleSheet("font-size: 10px; padding: 0 4px;")
+        self.components_show_all_btn.clicked.connect(self._show_all_components)
+        self.components_show_all_btn.setEnabled(False)
+        components_header.addWidget(self.components_show_all_btn)
+        vis_layout.addLayout(components_header)
+
+        self.components_list = QListWidget()
+        self.components_list.setToolTip(
+            "Uncheck a component to hide it and its result voxels while reviewing.\n"
+            "Hidden components are still included when the simulation runs."
+        )
+        self.components_list.setMaximumHeight(110)
+        self.components_list.setSelectionMode(QAbstractItemView.NoSelection)
+        self.components_list.itemChanged.connect(self._on_component_item_changed)
+        vis_layout.addWidget(self.components_list)
         
         self.show_results_check = QCheckBox("Show Results")
         self.show_results_check.setChecked(True)
@@ -4370,6 +4397,110 @@ class MainWindow(QMainWindow):
             f"Voxel: {self._current_voxel_size:.3f}\", Ref: {int(self._current_refinement)}"
         )
     
+    # ==================== Component visibility (results review) ====================
+
+    def _refresh_components_list(self):
+        """Rebuild the sidebar component checklist from the part manager."""
+        if not hasattr(self, "components_list") or not hasattr(self, "visualizer"):
+            return
+        hidden = self.visualizer.hidden_part_ids()
+        live_ids = set(self.part_manager.parts.keys())
+        # A removed part must not linger in the hidden set: the next mask
+        # build would look up a part that no longer exists.
+        for stale in hidden - live_ids:
+            self.visualizer.set_component_hidden(stale, False)
+        hidden &= live_ids
+
+        self.components_list.blockSignals(True)
+        self.components_list.clear()
+        for part_id, part in self.part_manager.parts.items():
+            badge = PART_TYPE_BADGES.get(part.part_type, "")
+            item = QListWidgetItem(f"{badge} {part.name}".strip())
+            item.setData(Qt.UserRole, part_id)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked if part_id in hidden else Qt.Checked)
+            self.components_list.addItem(item)
+        self.components_list.blockSignals(False)
+        self.components_show_all_btn.setEnabled(bool(hidden))
+
+    def _on_component_item_changed(self, item):
+        """Hide or show one component (skin + result voxels)."""
+        part_id = item.data(Qt.UserRole)
+        if not part_id:
+            return
+        hidden = item.checkState() != Qt.Checked
+        self.visualizer.set_component_hidden(part_id, hidden)
+        self.components_show_all_btn.setEnabled(bool(self.visualizer.hidden_part_ids()))
+        self._apply_component_mask_to_results()
+
+    def _show_all_components(self):
+        """Re-show every component and rebuild the result overlay."""
+        self.visualizer.clear_hidden_components()
+        self._refresh_components_list()
+        self._apply_component_mask_to_results()
+
+    def _apply_component_mask_to_results(self):
+        """Install the voxel display mask for the hidden set and redraw results."""
+        worker = self.simulation_worker
+        if worker is None or worker.simulation is None or worker.voxel_mesh is None:
+            return
+        self.visualizer.set_voxel_display_mask(
+            self._build_voxel_display_mask(worker.voxel_mesh)
+        )
+        self._update_results_visualization()
+
+    def _build_voxel_display_mask(self, voxel_mesh) -> Optional[np.ndarray]:
+        """Per-voxel drawable mask for the current hidden components.
+
+        A voxel is attributed to a hidden part when its part type matches
+        and its centre lies inside the part's bounding box (padded by half
+        a voxel, the same tolerance the pipeline used to claim it). The
+        pipeline only records the type per voxel, not the part, so two
+        same-type parts with overlapping boxes can misattribute a few
+        boundary voxels. Exact containment would cost a trimesh query per
+        toggle on the full casting; the box test is instant.
+
+        Returns None when nothing is hidden (no filtering).
+        """
+        hidden = self.visualizer.hidden_part_ids()
+        centers = getattr(voxel_mesh, "voxel_centers", None)
+        if not hidden or centers is None:
+            return None
+        centers = np.asarray(centers)
+        n_voxels = len(centers)
+        if n_voxels == 0:
+            return None
+
+        part_types = getattr(voxel_mesh, "voxel_part_types", None)
+        if part_types is not None and len(part_types) == n_voxels:
+            part_types = np.asarray(part_types, dtype=np.int32)
+        else:
+            part_types = None
+        pad = 0.5 * float(getattr(voxel_mesh, "base_voxel_size", 0.0) or 0.0)
+
+        drawable = np.ones(n_voxels, dtype=bool)
+        for part_id in hidden:
+            part = self.part_manager.get_part(part_id)
+            if part is None:
+                continue
+            try:
+                bounds = np.asarray(part.get_transformed_mesh().bounds, dtype=np.float64)
+            except Exception as exc:
+                logger.warning(
+                    "Could not bound hidden component",
+                    context={"part": part.name, "error": str(exc)},
+                )
+                continue
+            lo = bounds[0] - pad
+            hi = bounds[1] + pad
+            in_box = np.all((centers >= lo) & (centers <= hi), axis=1)
+            if part_types is not None:
+                code = PART_TYPE_TO_CODE.get(part.part_type)
+                if code is not None:
+                    in_box &= part_types == int(code)
+            drawable &= ~in_box
+        return drawable
+
     def _update_parts_summary(self):
         """Update the parts summary label in sidebar"""
         count = len(self.part_manager.parts)
@@ -4681,6 +4812,7 @@ class MainWindow(QMainWindow):
 
         # Update sidebar summary
         self._update_parts_summary()
+        self._refresh_components_list()
         
         # Update info label in dialog
         count = self.part_manager.get_part_count()
@@ -5057,6 +5189,17 @@ class MainWindow(QMainWindow):
 
         gc.collect()
     
+    def _load_model_skins_for_results(self) -> None:
+        """Load the model skin shown behind results: per-part actors, or the
+        legacy combined mesh when no parts are managed."""
+        if self.part_manager.get_all_parts():
+            self.visualizer.load_parts_from_manager(self.part_manager)
+        else:
+            self.visualizer.load_mesh(
+                self.stl_loader.get_vertices(),
+                self.stl_loader.get_faces(),
+            )
+
     def _run_simulation(self):
         """Run solidification simulation"""
         if not self.stl_loader.is_valid():
@@ -5151,19 +5294,9 @@ class MainWindow(QMainWindow):
         # Clear previous simulation outputs without removing loaded parts.
         self._purge_previous_simulation_memory()
         
-        # Show combined mesh (includes all parts: casting, risers, chills)
-        combined_mesh = self.part_manager.get_combined_mesh()
-        if combined_mesh is not None:
-            self.visualizer.load_mesh(
-                combined_mesh.vertices,
-                combined_mesh.faces
-            )
-        else:
-            # Fall back to just the STL loader mesh
-            self.visualizer.load_mesh(
-                self.stl_loader.get_vertices(),
-                self.stl_loader.get_faces()
-            )
+        # Show the model as one skin actor per part so components can be
+        # hidden individually while reviewing results.
+        self._load_model_skins_for_results()
         
         # Use stored memory mode
         memory_mode = self._current_memory_mode
@@ -5896,11 +6029,7 @@ class MainWindow(QMainWindow):
         self._stop_fraction_liquid_playback()
         self._purge_previous_simulation_memory()
 
-        combined_mesh = self.part_manager.get_combined_mesh()
-        if combined_mesh is not None:
-            self.visualizer.load_mesh(combined_mesh.vertices, combined_mesh.faces)
-        else:
-            self.visualizer.load_mesh(self.stl_loader.get_vertices(), self.stl_loader.get_faces())
+        self._load_model_skins_for_results()
 
         voxel_size = self._current_voxel_size
         self.status_label.setText("Starting surrogate simulation...")
@@ -6091,6 +6220,15 @@ class MainWindow(QMainWindow):
         # Clear ALL previous result actors before loading new visualization
         # This ensures we don't have overlapping visualizations
         self.visualizer.clear_result_actors()
+
+        # Hidden components carry across runs, but the voxel array does not:
+        # rebuild the display mask whenever it is missing for the current mesh.
+        if self.visualizer.hidden_part_ids():
+            mask = self.visualizer.voxel_display_mask()
+            if mask is None or len(mask) != len(voxel_mesh.voxel_centers):
+                self.visualizer.set_voxel_display_mask(
+                    self._build_voxel_display_mask(voxel_mesh)
+                )
         
         if self._current_vis_mode == 'shrinkage':
             self._visualize_shrinkage(simulation, voxel_mesh, threshold)
