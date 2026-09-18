@@ -254,41 +254,56 @@ class NonMetalIsNotAMisrunTests(unittest.TestCase):
                          "the two NaN mold voxels were counted as misruns")
 
     def test_renderer_drops_non_metal_entirely(self) -> None:
-        """A chill is not a misrun -- it must not be drawn at all."""
-        from ui.visualizer import CastingVisualizer
+        """A chill is not a misrun -- it must not be painted or swept at all.
 
-        fill_time = np.array([0.5, 2.0, -1.0, np.nan, np.nan])
+        The desktop renderer classifies each voxel of a fill-time frame before
+        handing it to the surface renderer: arrived (painted by time), misrun
+        (flat grey), not yet arrived (steel), non-metal NaN (excluded from
+        everything). This checks the classification the visualizer computes,
+        independent of VTK.
+        """
+        import vtk as _vtk
+        if not hasattr(_vtk, "vtkFlyingEdges3D") or isinstance(getattr(_vtk, "vtkFlyingEdges3D"), mock.Mock):
+            self.skipTest("vtk is stubbed by another test module in this process")
+        try:
+            from ui.result_surface import ResultSurfaceRenderer, palette_fill_time
+        except Exception as exc:  # pragma: no cover
+            self.skipTest(f"result renderer unavailable: {exc}")
+
+        fill_time = np.array([0.5, 2.0, -1.0, np.nan, np.nan], dtype=np.float32)
         centers = np.zeros((5, 3), dtype=np.float64)
-        centers[:, 0] = np.arange(5)
+        centers[:, 0] = np.arange(5) * 0.25
         sizes = np.full(5, 0.25)
 
-        def build(ft, centers_, sizes_):
-            return CastingVisualizer._build_fill_time_geometry(
-                mock.MagicMock(), centers_, sizes_, ft,
-                time_threshold=1.0, max_fill_time_s=2.0,
-            )
+        renderer = ResultSurfaceRenderer(_vtk.vtkRenderer())
+        if not renderer.set_voxels(centers, sizes, None):
+            self.skipTest("lattice unavailable")
+        finite = np.isfinite(fill_time)
+        misrun = finite & (fill_time < 0.0)
+        arrived = finite & (fill_time >= 0.0) & (fill_time <= 1.0)
+        sweep_values = np.where(misrun, 20.0, fill_time)
+        ok = renderer.show("fill_time", sweep_values, 0.0, 2.0, 1.0, palette_fill_time,
+                           valid=finite, paint_mask=arrived, glow=True,
+                           flat_paint={"misrun": (misrun, (140, 140, 140))})
+        self.assertTrue(ok)
 
-        # Derive points-per-cube from a one-voxel reference rather than
-        # hard-coding VTK's cube tessellation. This doubles as the liveness
-        # check: tests/test_cross_section_plane.py installs a module-level vtk
-        # stub into sys.modules and never removes it, so in a full-suite run
-        # these calls may return chaining mocks instead of geometry. Its
-        # module __getattr__ answers every probe, including __file__, so the
-        # only reliable test is whether a real point count comes back.
-        probe = build(np.array([0.5]), centers[:1], sizes[:1])
-        per_cube = probe.GetNumberOfPoints() if probe is not None else None
-        if not isinstance(per_cube, int) or per_cube <= 0:
-            self.skipTest("vtk is stubbed by another test module in this process")
-
-        polydata = build(fill_time, centers, sizes)
-        # Shown: the one arrival at 0.5 and the one real misrun. Not the
-        # 2.0 arrival (later than the sweep) and not the two NaN voxels.
-        self.assertIsNotNone(polydata)
-        self.assertEqual(polydata.GetNumberOfPoints() // per_cube, 2)
-
-        # And with the old -1 sentinel the mold would be drawn: 4 cubes.
-        legacy = np.array([0.5, 2.0, -1.0, -1.0, -1.0])
-        self.assertEqual(build(legacy, centers, sizes).GetNumberOfPoints() // per_cube, 4)
+        cells = renderer._cell_of_voxel
+        colours = renderer._colors_for_cells(cells)
+        steel = np.array([158, 168, 184])
+        # Voxel 0 arrived at 0.5 s: painted by arrival time (not steel, not grey).
+        self.assertFalse(np.array_equal(colours[0], steel))
+        self.assertFalse(np.array_equal(colours[0], [140, 140, 140]))
+        # Voxel 1 arrives at 2.0 s, after the 1.0 s sweep: still bare steel.
+        np.testing.assert_array_equal(colours[1], steel)
+        # Voxel 2 is a real misrun: the flat misrun grey.
+        np.testing.assert_array_equal(colours[2], [140, 140, 140])
+        # The NaN voxels are excluded from everything, so their cells read as
+        # "outside": the paint grid there is nearest-filled but never marked painted.
+        self.assertFalse(renderer._painted_cells[cells[3]])
+        self.assertFalse(renderer._painted_cells[cells[4]])
+        for grid, _rgb in renderer._flat_grids.values():
+            self.assertFalse(grid[cells[3]])
+            self.assertFalse(grid[cells[4]])
 
     def test_web_grid_excludes_non_metal_and_misruns_from_the_range(self) -> None:
         """The dense grid the browser reads must treat -1 (misrun) and NaN

@@ -3196,6 +3196,25 @@ class MainWindow(QMainWindow):
         self.show_results_check.setChecked(True)
         self.show_results_check.stateChanged.connect(self._toggle_shrinkage_visibility)
         vis_layout.addWidget(self.show_results_check)
+
+        # How the result is drawn: the field painted on the casting surface,
+        # the isosurface of the threshold inside a ghosted shell, or both.
+        style_row = QHBoxLayout()
+        style_row.addWidget(QLabel("Result Style:"))
+        self.result_style_combo = QComboBox()
+        self.result_style_combo.addItem("Envelope", "envelope")
+        self.result_style_combo.addItem("Surface", "surface")
+        self.result_style_combo.addItem("Both", "both")
+        self.result_style_combo.setToolTip(
+            "Envelope: smooth surface enclosing everything above the threshold, inside a ghosted model.\n"
+            "Surface: the result field painted on the casting's own surface.\n"
+            "Both: painted surface at partial opacity with the envelope inside."
+        )
+        self.result_style_combo.currentIndexChanged.connect(
+            lambda _i: self.visualizer.set_result_style(self.result_style_combo.currentData())
+        )
+        style_row.addWidget(self.result_style_combo)
+        vis_layout.addLayout(style_row)
         
         # Result type selector
         vis_layout.addWidget(QLabel("Result Type:"))
@@ -6250,6 +6269,9 @@ class MainWindow(QMainWindow):
         # Clear ALL previous result actors before loading new visualization
         # This ensures we don't have overlapping visualizations
         self.visualizer.clear_result_actors()
+        # The surface renderer paints from a dense lattice of this mesh; part
+        # types decide which cells are metal. Idempotent per mesh.
+        self.visualizer.set_result_mesh(voxel_mesh)
 
         # Hidden components carry across runs, but the voxel array does not:
         # rebuild the display mask whenever it is missing for the current mesh.
@@ -6419,6 +6441,8 @@ class MainWindow(QMainWindow):
             voxel_mesh.voxel_sizes,
             np.where(np.isfinite(feed_modulus_in), feed_modulus_in, 0.0).astype(np.float32),
             threshold_in,
+            vmin=min_in,
+            vmax=max_in,
         )
         self.visualizer.current_shrinkage_data = (
             voxel_mesh.voxel_centers,

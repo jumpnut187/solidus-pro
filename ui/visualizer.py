@@ -40,9 +40,6 @@ from ui.qt import (
 )
 from dataclasses import dataclass, field
 from typing import Any, Optional, Dict, List, Tuple, Callable, Set
-from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
-import threading
 import time
 import os
 import tempfile
@@ -55,6 +52,17 @@ except ImportError:
     from core.error_logger_dummy import logger
 
 from core.pour_location import PourLocation
+from ui.result_surface import (
+    ResultSurfaceRenderer,
+    make_environment_texture,
+    palette_fill_speed,
+    palette_fill_time,
+    palette_hot_tear,
+    palette_hotspot,
+    palette_liquid,
+    palette_niyama,
+    palette_sand_burn_in,
+)
 
 #: Marker color for the picked pour (metal-entry) location -- magenta, chosen
 #: to be distinct from every entry in ``core.part_manager.PART_TYPE_COLORS``
@@ -710,20 +718,18 @@ class InspectorLayer:
 
     Attributes:
         mode: Free-form identifier such as ``"feed_modulus"`` or ``"shrinkage"``.
-        pick_actor: VTK actor the cell picker is restricted to.
-        displayed_voxel_indices: Per-glyph global voxel index, in the order
-            the geometry was built. ``cell_id // cells_per_glyph`` indexes it.
-        cells_per_glyph: Number of cells emitted by the glyph source per glyph.
-            ``6`` for the default cube source (6 quad faces).
+        pick_actors: VTK actors the cell picker is restricted to (the result
+            envelope, the painted skins and the section caps).
+        voxel_at: Maps the picked world position to a global voxel index
+            (``-1`` when the position lies outside the result lattice).
         resolver: Callable invoked with the picked voxel index. Returns a
             ``LeaderCallout`` describing the label text and anchor position
             to render. Returning ``None`` clears the existing leader.
     """
 
     mode: str
-    pick_actor: vtk.vtkActor
-    displayed_voxel_indices: np.ndarray
-    cells_per_glyph: int
+    pick_actors: List[vtk.vtkActor]
+    voxel_at: Callable[[Tuple[float, float, float]], int]
     resolver: Callable[[int], Optional[LeaderCallout]]
 
 
@@ -922,16 +928,6 @@ class CastingVisualizer(QWidget):
         (0.9, 0.7, 0.5),    # Tan
     ]
 
-    MAX_CACHED_THRESHOLD_LEVELS = 4
-    MAX_CACHED_DISPLAY_VOXELS = 20_000
-
-    # Fraction liquid playback caches rendered frame geometry per slider frame.
-    # Bounded by frame count and total glyph points to cap unified-memory use
-    # (a glyph cube has 24 points per voxel).
-    FRACTION_LIQUID_CACHE_MAX_FRAMES = 64
-    FRACTION_LIQUID_CACHE_MAX_POINTS = 20_000_000
-    FRACTION_LIQUID_LOAD_PRINT_INTERVAL = 10
-
     # Emitted with the new PourLocation when a pick lands, or with None when
     # the pour location is cleared. main_window listens to keep its label
     # and the "Mold Filling" analysis gate in sync.
@@ -962,34 +958,12 @@ class CastingVisualizer(QWidget):
         self._voxel_display_mask: Optional[np.ndarray] = None
         self._model_visible: bool = True
         
-        # Shrinkage actor
-        self.shrinkage_actor = None
-        
-        # Hot spots actor
-        self.hotspot_actor = None
-        
-        # Niyama actor
-        self.niyama_actor = None
-        
-        # Hot tear actor
-        self.hot_tear_actor = None
-        
-        # Sand burn-in actor
-        self.sand_burn_in_actor = None
-        
-        # Gas porosity actor
-        self.gas_porosity_actor = None
-        
-        # Fraction liquid actor
-        self.fraction_liquid_actor = None
+        # Result overlays: painted skin, threshold envelope and section caps.
+        # Built in _init_ui once the renderer exists.
+        self.result_surface = None
+        self._result_lattice_key = None
 
-        # Fill time actor (mold-filling arrival-time visualization)
-        self.fill_time_actor = None
-
-        # Fill animation actor (mold-filling playback -- advancing free surface)
-        self.fill_animation_actor = None
-
-        # Data
+        # Data the main window reads back (mode -> (centers, sizes, values))
         self.current_mesh = None
         self.current_shrinkage_data = None
         self.current_hotspot_data = None
@@ -1000,45 +974,6 @@ class CastingVisualizer(QWidget):
         self.current_fraction_liquid_data = None
         self.current_fill_time_data = None
         self.current_fill_animation_data = None
-
-        # Pre-rendered shrinkage cache for fast threshold updates
-        # Maps threshold levels (0.05, 0.10, ..., 1.0) to pre-built VTK polydata
-        self._shrinkage_cache: Dict[float, vtk.vtkPolyData] = {}
-        self._shrinkage_cache_built = False
-        self._cache_threshold_levels = [i / 100.0 for i in range(1, 101, 1)]  # 1% to 100%
-        self._shrinkage_cache_lock = threading.Lock()
-        self._shrinkage_cache_generation = 0
-        self._pending_shrinkage_thresholds: Set[float] = set()
-        self._cache_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="viz-cache")
-        
-        # Caches for other analysis types
-        self._hotspot_cache: Dict[float, vtk.vtkPolyData] = {}
-        self._niyama_cache: Dict[float, vtk.vtkPolyData] = {}
-        self._hot_tear_cache: Dict[float, vtk.vtkPolyData] = {}
-        self._sand_burn_in_cache: Dict[float, vtk.vtkPolyData] = {}
-        self._gas_porosity_cache: Dict[float, vtk.vtkPolyData] = {}
-
-        # Fraction liquid frame cache: slider frame value -> rendered polydata.
-        # Playback is deterministic per slider value, so repeats can reuse the
-        # geometry instead of rebuilding the full glyph every tick.
-        self._fraction_liquid_cache: OrderedDict[int, vtk.vtkPolyData] = OrderedDict()
-        self._fraction_liquid_cache_point_count = 0
-        self._fraction_liquid_load_count = 0
-
-        # Fill time frame cache: slider frame value -> rendered polydata.
-        # Mirrors the fraction liquid cache above -- same threshold-sweep
-        # slider mechanism, just keyed to a different scalar field.
-        self._fill_time_cache: OrderedDict[int, vtk.vtkPolyData] = OrderedDict()
-        self._fill_time_cache_point_count = 0
-        self._fill_time_load_count = 0
-
-        # Fill animation frame cache: playback frame INDEX -> rendered polydata.
-        # Mirrors the fill time cache above, but keyed to the solver's own
-        # discrete frame index rather than a slider-derived time -- frames are
-        # actual solver states, not points on a continuous sweep.
-        self._fill_animation_cache: OrderedDict[int, vtk.vtkPolyData] = OrderedDict()
-        self._fill_animation_cache_point_count = 0
-        self._fill_animation_load_count = 0
 
         # ==================== NEW FEATURES ====================
         
@@ -1072,9 +1007,6 @@ class CastingVisualizer(QWidget):
 
         # Active result-mode inspector (feedmod, shrink/porosity, ...)
         self._inspector_layer: Optional[InspectorLayer] = None
-        # Cached source-voxel indices for the currently-displayed shrinkage actor
-        self._shrinkage_displayed_voxel_indices: Optional[np.ndarray] = None
-        self._shrinkage_cells_per_glyph: int = 6
 
         # Animation export
         self._animation_frames: List[np.ndarray] = []
@@ -1099,10 +1031,14 @@ class CastingVisualizer(QWidget):
         
         # Setup VTK rendering
         self.renderer = vtk.vtkRenderer()
-        self.renderer.SetBackground(0.1, 0.1, 0.15)  # Dark blue-grey
+        self.renderer.SetBackground(0.04, 0.05, 0.07)  # web app --bg-0
         
         self.render_window = self.vtk_widget.GetRenderWindow()
         self.render_window.AddRenderer(self.renderer)
+        self._setup_lighting_and_passes()
+
+        # Result overlays (painted skin, envelope, section caps).
+        self.result_surface = ResultSurfaceRenderer(self.renderer)
         
         self.interactor = self.render_window.GetInteractor()
         
@@ -1186,18 +1122,22 @@ class CastingVisualizer(QWidget):
         # keeps its old "FM: X.XX in" text while shrink/porosity can
         # extract a connected pocket and report its volume in in^3.
         layer = self._inspector_layer
-        if layer is not None and layer.pick_actor is not None:
+        if layer is not None and layer.pick_actors:
             click_pos = self.interactor.GetEventPosition()
             x, y = click_pos[0], click_pos[1]
 
             picker = vtk.vtkCellPicker()
-            picker.AddPickList(layer.pick_actor)
+            for actor in layer.pick_actors:
+                picker.AddPickList(actor)
             picker.SetPickFromList(True)
-            picker.SetTolerance(0.01)
+            picker.SetTolerance(0.005)
             picker.Pick(x, y, 0, self.renderer)
 
             try:
-                if picker.GetCellId() < 0:
+                voxel_index = -1
+                if picker.GetCellId() >= 0:
+                    voxel_index = int(layer.voxel_at(tuple(picker.GetPickPosition())))
+                if voxel_index < 0:
                     if self.feed_modulus_leader is not None:
                         self.feed_modulus_leader.clear()
                     self.render_window.Render()
@@ -1207,23 +1147,6 @@ class CastingVisualizer(QWidget):
                         pass
                     return
 
-                glyph_index = picker.GetCellId() // max(int(layer.cells_per_glyph), 1)
-                voxel_indices = layer.displayed_voxel_indices
-                if (
-                    voxel_indices is None
-                    or glyph_index < 0
-                    or glyph_index >= int(voxel_indices.shape[0])
-                ):
-                    if self.feed_modulus_leader is not None:
-                        self.feed_modulus_leader.clear()
-                    self.render_window.Render()
-                    try:
-                        self.interactor.GetInteractorStyle().SetAbortFlag(1)
-                    except AttributeError:
-                        pass
-                    return
-
-                voxel_index = int(voxel_indices[glyph_index])
                 callout = layer.resolver(voxel_index)
                 if callout is None:
                     if self.feed_modulus_leader is not None:
@@ -1242,6 +1165,56 @@ class CastingVisualizer(QWidget):
                     self.feed_modulus_leader.clear()
                 self.render_window.Render()
     
+    def _setup_lighting_and_passes(self):
+        """PBR image-based lighting plus SSAO / FXAA, the web viewport's look.
+
+        The environment is generated (``make_environment_texture``), so no
+        HDR asset is needed. Depth peeling stays behind the platform guard
+        that already existed for the translucent parts. Any failure here
+        leaves the plain-lit renderer in place rather than taking the view
+        down; set ``CASTSIM_UI_PBR=0`` to skip it entirely.
+        """
+        if os.environ.get("CASTSIM_UI_PBR", "1") == "0":
+            return
+        try:
+            self.render_window.SetMultiSamples(0)  # FXAA does the anti-aliasing
+            env = make_environment_texture()
+            self.renderer.UseImageBasedLightingOn()
+            self.renderer.SetEnvironmentTexture(env, True)
+            self.renderer.UseSphericalHarmonicsOff()
+            if should_use_depth_peeling():
+                self.renderer.SetUseDepthPeeling(1)
+                self.renderer.SetMaximumNumberOfPeels(6)
+                self.renderer.SetOcclusionRatio(0.05)
+            self.renderer.SetUseSSAO(True)
+            self.renderer.SSAOBlurOn()
+            self.renderer.SetSSAOKernelSize(48)
+            self.renderer.UseFXAAOn()
+            self._pbr_enabled = True
+        except Exception as exc:  # pragma: no cover - driver dependent
+            logger.warning("PBR render setup failed; using plain lighting", context={"error": str(exc)})
+            self._pbr_enabled = False
+
+    def _configure_ssao(self):
+        """SSAO radius and bias scale with the model, so re-derive them on load."""
+        if not getattr(self, "_pbr_enabled", False) or not self.model_bounds:
+            return
+        b = self.model_bounds
+        diag = float(np.sqrt((b[1] - b[0]) ** 2 + (b[3] - b[2]) ** 2 + (b[5] - b[4]) ** 2)) or 1.0
+        self.renderer.SetSSAORadius(0.05 * diag)
+        self.renderer.SetSSAOBias(0.001 * diag)
+
+    def _pbr_surface(self, prop, metallic: float = 0.45, roughness: float = 0.5):
+        """Apply the shared surface material to an actor property."""
+        if getattr(self, "_pbr_enabled", False):
+            prop.SetInterpolationToPBR()
+            prop.SetMetallic(metallic)
+            prop.SetRoughness(roughness)
+        else:
+            prop.SetInterpolationToPhong()
+            prop.SetSpecular(0.3)
+            prop.SetSpecularPower(20)
+
     def _init_cross_section_planes(self):
         """Initialize cutting planes for X, Y, Z axes"""
         for axis in ['X', 'Y', 'Z']:
@@ -1571,36 +1544,27 @@ class CastingVisualizer(QWidget):
     
     def _apply_cross_section_clipping(self):
         """Apply clipping to all actors using enabled cutting planes"""
-        # Collect enabled planes
         enabled_planes = [p for p in self.cross_section_planes.values() if p.enabled]
-        
+
+        if self.result_surface is not None:
+            # Caps are cut from the volume on each plane; the envelope and the
+            # painted skins are clipped like everything else.
+            self.result_surface.set_section_planes([p.get_plane() for p in enabled_planes])
+            if enabled_planes:
+                for actor in self.result_surface.actors_for_clipping():
+                    self._clip_actor(actor, enabled_planes)
+
         if not enabled_planes:
             return
-        
-        # Apply clipping to shrinkage actor
-        if self.shrinkage_actor:
-            self._clip_actor(self.shrinkage_actor, enabled_planes)
-        
-        # Apply to other analysis actors
-        if self.hotspot_actor:
-            self._clip_actor(self.hotspot_actor, enabled_planes)
-        if self.niyama_actor:
-            self._clip_actor(self.niyama_actor, enabled_planes)
-        if self.fraction_liquid_actor:
-            self._clip_actor(self.fraction_liquid_actor, enabled_planes)
-        if self.fill_time_actor:
-            self._clip_actor(self.fill_time_actor, enabled_planes)
-        if self.fill_animation_actor:
-            self._clip_actor(self.fill_animation_actor, enabled_planes)
 
         # Apply to mesh actor
         if self.mesh_actor:
             self._clip_actor(self.mesh_actor, enabled_planes)
-        
+
         # Apply to part actors
         for actor in self.part_actors.values():
             self._clip_actor(actor, enabled_planes)
-    
+
     def _clip_actor(self, actor: vtk.vtkActor, planes: List[CrossSectionPlane]):
         """Apply clipping planes to an actor"""
         if not planes or not actor:
@@ -1619,10 +1583,11 @@ class CastingVisualizer(QWidget):
     
     def _remove_cross_section_clipping(self):
         """Remove all clipping from actors"""
-        actors = [self.shrinkage_actor, self.hotspot_actor, self.niyama_actor,
-                  self.fraction_liquid_actor, self.fill_time_actor,
-                  self.fill_animation_actor, self.mesh_actor]
+        actors = [self.mesh_actor]
         actors.extend(self.part_actors.values())
+        if self.result_surface is not None:
+            actors.extend(self.result_surface.actors_for_clipping())
+            self.result_surface.set_section_planes([])
         
         for actor in actors:
             if actor and actor.GetMapper():
@@ -1935,9 +1900,7 @@ class CastingVisualizer(QWidget):
         """Install the feedmod layer using ``current_shrinkage_data``."""
         if not self._feed_modulus_leader_enabled:
             return
-        if self.shrinkage_actor is None or self.current_shrinkage_data is None:
-            return
-        if self._shrinkage_displayed_voxel_indices is None:
+        if self.current_shrinkage_data is None or self.result_surface is None or self.result_surface.view is None:
             return
 
         def _resolver(voxel_index: int) -> Optional[LeaderCallout]:
@@ -1952,18 +1915,15 @@ class CastingVisualizer(QWidget):
 
         self._inspector_layer = InspectorLayer(
             mode="feed_modulus",
-            pick_actor=self.shrinkage_actor,
-            displayed_voxel_indices=self._shrinkage_displayed_voxel_indices,
-            cells_per_glyph=self._shrinkage_cells_per_glyph,
+            pick_actors=self.result_surface.pick_actors(),
+            voxel_at=self.result_surface.voxel_at,
             resolver=_resolver,
         )
 
     def _install_shrink_inspector(self) -> None:
         """Install the shrink/porosity layer using registered data."""
         data = getattr(self, "_shrink_inspector_data", None)
-        if data is None or self.shrinkage_actor is None:
-            return
-        if self._shrinkage_displayed_voxel_indices is None:
+        if data is None or self.result_surface is None or self.result_surface.view is None:
             return
 
         from core.defect_regions import extract_pocket_at, format_pocket_volume_label
@@ -1990,17 +1950,16 @@ class CastingVisualizer(QWidget):
 
         self._inspector_layer = InspectorLayer(
             mode="shrinkage",
-            pick_actor=self.shrinkage_actor,
-            displayed_voxel_indices=self._shrinkage_displayed_voxel_indices,
-            cells_per_glyph=self._shrinkage_cells_per_glyph,
+            pick_actors=self.result_surface.pick_actors(),
+            voxel_at=self.result_surface.voxel_at,
             resolver=_resolver,
         )
 
     def _refresh_active_inspector(self) -> None:
         """Reinstall the active inspector after a geometry rebuild.
 
-        Called from ``load_shrinkage`` / ``update_shrinkage_threshold`` so the
-        displayed-voxel-indices pointer matches the current actor. If a mode
+        Called after every result load / threshold change so the pick list
+        matches the actors currently on screen. If a mode
         is already installed the data is refreshed in place; otherwise the
         call installs the mode whose intent flag is currently set.
         """
@@ -2181,117 +2140,15 @@ class CastingVisualizer(QWidget):
         self._animation_frames = []
     
     def _refresh_current_visualization(self):
-        """Refresh the current visualization with new colormap settings"""
-        # Re-apply colors to current shrinkage data
-        if self.current_shrinkage_data is not None:
-            # Clear cache to force rebuild with new colormap
-            self._reset_shrinkage_cache()
-        if self.current_hotspot_data is not None:
-            self._hotspot_cache.clear()
-        if self.current_niyama_data is not None:
-            self._niyama_cache.clear()
-
-    def _reset_shrinkage_cache(self) -> None:
-        """Invalidate cached shrinkage geometry after data or palette changes."""
-        with self._shrinkage_cache_lock:
-            self._shrinkage_cache_generation += 1
-            self._shrinkage_cache.clear()
-            self._pending_shrinkage_thresholds.clear()
-        self._shrinkage_cache_built = False
-
-    def _clear_result_caches(self) -> None:
-        """Release cached polydata for all result visualization modes."""
-        self._reset_shrinkage_cache()
-        self._hotspot_cache.clear()
-        self._niyama_cache.clear()
-        self._hot_tear_cache.clear()
-        self._sand_burn_in_cache.clear()
-        self._gas_porosity_cache.clear()
-        self._fraction_liquid_cache.clear()
-        self._fraction_liquid_cache_point_count = 0
-        self._fill_time_cache.clear()
-        self._fill_time_cache_point_count = 0
-        self._fill_animation_cache.clear()
-        self._fill_animation_cache_point_count = 0
-
-    def _store_fraction_liquid_cache(self, key: int, polydata: vtk.vtkPolyData) -> None:
-        """Store a rendered fraction-liquid frame under an LRU, point-budgeted cache."""
-        if key in self._fraction_liquid_cache:
-            self._fraction_liquid_cache.move_to_end(key)
+        """Re-paint the current result after a colormap or scale change."""
+        surface = getattr(self, "result_surface", None)
+        if surface is None or surface.view is None:
             return
-
-        self._fraction_liquid_cache[key] = polydata
-        self._fraction_liquid_cache_point_count += polydata.GetNumberOfPoints()
-
-        while (
-            len(self._fraction_liquid_cache) > self.FRACTION_LIQUID_CACHE_MAX_FRAMES
-            or self._fraction_liquid_cache_point_count > self.FRACTION_LIQUID_CACHE_MAX_POINTS
-        ) and len(self._fraction_liquid_cache) > 1:
-            _, oldest = self._fraction_liquid_cache.popitem(False)  # oldest entry
-            self._fraction_liquid_cache_point_count -= oldest.GetNumberOfPoints()
-
-    def _store_fill_time_cache(self, key: int, polydata: vtk.vtkPolyData) -> None:
-        """Store a rendered fill-time frame under an LRU, point-budgeted cache."""
-        if key in self._fill_time_cache:
-            self._fill_time_cache.move_to_end(key)
-            return
-
-        self._fill_time_cache[key] = polydata
-        self._fill_time_cache_point_count += polydata.GetNumberOfPoints()
-
-        while (
-            len(self._fill_time_cache) > self.FRACTION_LIQUID_CACHE_MAX_FRAMES
-            or self._fill_time_cache_point_count > self.FRACTION_LIQUID_CACHE_MAX_POINTS
-        ) and len(self._fill_time_cache) > 1:
-            _, oldest = self._fill_time_cache.popitem(False)  # oldest entry
-            self._fill_time_cache_point_count -= oldest.GetNumberOfPoints()
-
-    def _store_fill_animation_cache(self, key: int, polydata: vtk.vtkPolyData) -> None:
-        """Store a rendered fill-animation frame under an LRU, point-budgeted cache."""
-        if key in self._fill_animation_cache:
-            self._fill_animation_cache.move_to_end(key)
-            return
-
-        self._fill_animation_cache[key] = polydata
-        self._fill_animation_cache_point_count += polydata.GetNumberOfPoints()
-
-        while (
-            len(self._fill_animation_cache) > self.FRACTION_LIQUID_CACHE_MAX_FRAMES
-            or self._fill_animation_cache_point_count > self.FRACTION_LIQUID_CACHE_MAX_POINTS
-        ) and len(self._fill_animation_cache) > 1:
-            _, oldest = self._fill_animation_cache.popitem(False)  # oldest entry
-            self._fill_animation_cache_point_count -= oldest.GetNumberOfPoints()
-
-    def _get_shrinkage_threshold_levels(self, current_threshold: float) -> List[float]:
-        """Return nearby threshold levels that should be pre-built."""
-        return self._get_bounded_threshold_levels(current_threshold)
-
-    def _get_bounded_threshold_levels(self, current_threshold: float) -> List[float]:
-        """Return at most a few thresholds nearest to the current slider value."""
-        current_key = round(current_threshold, 2)
-        levels = sorted(
-            (
-                round(t, 2)
-                for t in self._cache_threshold_levels
-                if round(t, 2) != current_key
-            ),
-            key=lambda t: (abs(t - current_threshold), t),
-        )
-        return levels[:self.MAX_CACHED_THRESHOLD_LEVELS]
-
-    def _display_voxel_count(
-        self,
-        values: np.ndarray,
-        threshold: float,
-        base_mask: Optional[np.ndarray] = None,
-    ) -> int:
-        """Count displayed voxels for direct cutoff visualizations."""
-        mask = values >= threshold
-        if base_mask is not None:
-            mask = np.asarray(base_mask, dtype=bool) & mask
-        return int(np.count_nonzero(apply_display_mask(self, mask)))
-
-    # ==================== Component (part) display filtering ====================
+        view = surface.view
+        if view.mode in ("shrinkage",) or view.mode.startswith("gas_"):
+            name = "defect_industry" if view.mode.startswith("gas_") else None
+            view.palette = self._colormap_palette(name)
+        surface.show(**surface._view_kwargs())
 
     def _apply_display_mask(self, mask: np.ndarray) -> np.ndarray:
         """AND the review-time voxel display mask into a builder's selection mask."""
@@ -2305,17 +2162,17 @@ class CastingVisualizer(QWidget):
         return bool(model_visible is not False) and part_id not in hidden
 
     def set_voxel_display_mask(self, mask: Optional[np.ndarray]) -> None:
-        """Install the per-voxel display mask (True = drawable) and drop caches.
+        """Install the per-voxel display mask (True = drawable).
 
-        Every cached polydata was built under the previous mask, so all
-        result caches are invalidated. The caller re-runs the current result
-        visualization afterwards; this method does not redraw.
+        The result renderer re-scatters the current result under the new
+        mask; the caller may also re-run the visualization. Does not render.
         """
         if mask is None:
             self._voxel_display_mask = None
         else:
             self._voxel_display_mask = np.ascontiguousarray(mask, dtype=bool)
-        self._clear_result_caches()
+        if self.result_surface is not None:
+            self.result_surface.set_display_mask(self._voxel_display_mask)
 
     def voxel_display_mask(self) -> Optional[np.ndarray]:
         """The installed per-voxel display mask, or None when nothing is hidden."""
@@ -2338,60 +2195,21 @@ class CastingVisualizer(QWidget):
         """Show every component skin and drop the voxel display mask."""
         self._hidden_part_ids.clear()
         self._voxel_display_mask = None
-        self._clear_result_caches()
+        if self.result_surface is not None:
+            self.result_surface.set_display_mask(None)
         self._apply_part_actor_visibility()
         self.render_window.Render()
 
     def _apply_part_actor_visibility(self) -> None:
         """Part skin visible = master Show Model flag AND not hidden for review."""
+        surface = getattr(self, "result_surface", None)
+        if surface is not None:
+            surface.set_hidden_parts(set(getattr(self, "_hidden_part_ids", set())))
+        # A part whose painted twin is on screen hides its own ghost actor.
+        painted = surface.painted_part_ids() if surface is not None else set()
         for part_id, actor in self.part_actors.items():
-            actor.SetVisibility(self._part_actor_should_show(part_id))
+            actor.SetVisibility(self._part_actor_should_show(part_id) and part_id not in painted)
 
-    def _should_cache_threshold(
-        self,
-        values: np.ndarray,
-        threshold: float,
-        base_mask: Optional[np.ndarray] = None,
-    ) -> bool:
-        """Skip cached polydata for thresholds that would retain large geometry."""
-        return self._display_voxel_count(values, threshold, base_mask) <= self.MAX_CACHED_DISPLAY_VOXELS
-
-    def _cache_polydata(
-        self,
-        cache: Dict[float, vtk.vtkPolyData],
-        key: float,
-        polydata: Optional[vtk.vtkPolyData],
-    ) -> None:
-        if polydata is None:
-            return
-        cached = vtk.vtkPolyData()
-        cached.DeepCopy(polydata)
-        cache[key] = cached
-
-    def _build_shrinkage_cache_entries(
-        self,
-        voxel_centers: np.ndarray,
-        voxel_sizes: np.ndarray,
-        shrinkage_intensity: np.ndarray,
-        levels: List[float]
-    ) -> Dict[float, vtk.vtkPolyData]:
-        """Build shrinkage cache entries in a worker thread."""
-        built_entries: Dict[float, vtk.vtkPolyData] = {}
-        for thresh in levels:
-            if not self._should_cache_threshold(shrinkage_intensity, thresh):
-                continue
-            polydata = self._build_shrinkage_geometry_fast(
-                voxel_centers,
-                voxel_sizes,
-                shrinkage_intensity,
-                thresh
-            )
-            if polydata is not None:
-                cached = vtk.vtkPolyData()
-                cached.DeepCopy(polydata)
-                built_entries[thresh] = cached
-        return built_entries
-    
     def _add_axes(self):
         """Add coordinate axes to scene in bottom right corner"""
         # Create orientation widget for bottom right
@@ -2469,9 +2287,7 @@ class CastingVisualizer(QWidget):
         property = self.mesh_actor.GetProperty()
         property.SetColor(0.7, 0.75, 0.8)  # Slightly darker blue-grey
         property.SetOpacity(0.35)  # 35% opacity (more visible)
-        property.SetInterpolationToPhong()
-        property.SetSpecular(0.3)
-        property.SetSpecularPower(20)
+        self._pbr_surface(property)
         
         if should_use_depth_peeling():
             self.renderer.SetUseDepthPeeling(True)
@@ -2486,6 +2302,7 @@ class CastingVisualizer(QWidget):
         
         # Store bounds for camera presets
         self.model_bounds = self.mesh_actor.GetBounds()
+        self._configure_ssao()
         
         # Reset camera
         self.renderer.ResetCamera()
@@ -2494,1932 +2311,254 @@ class CastingVisualizer(QWidget):
             self._update_parallel_scale()
         self.render_window.Render()
     
-    def load_shrinkage(self, voxel_centers: np.ndarray,
-                      voxel_sizes: np.ndarray,
-                      shrinkage_intensity: np.ndarray,
-                      threshold: float = 0.3):
+    # ==================== Result overlays (surface renderer) ====================
+    #
+    # Every load_* below hands the per-voxel values to ResultSurfaceRenderer,
+    # which paints them on the casting skin, contours the threshold envelope
+    # and cuts painted section caps. The signatures are the ones the main
+    # window has always called; only the drawing changed.
+
+    def set_result_mesh(self, voxel_mesh) -> bool:
+        """Register the voxel mesh a result set belongs to (once per run).
+
+        Builds the dense lattice the surface renderer paints from. Part types
+        decide which cells count as metal for painting. Idempotent for the
+        same mesh object.
         """
-        Load and display shrinkage regions using optimized batch rendering.
-        Pre-builds geometry cache for fast threshold slider updates.
-
-        Args:
-            voxel_centers: Nx3 array of voxel centers
-            voxel_sizes: N array of voxel sizes
-            shrinkage_intensity: N array of shrinkage intensity (0-1)
-            threshold: Minimum risk as 0-1 fraction (0.7 = 70%-100% risk)
-        """
-        # Remove old shrinkage actor
-        if self.shrinkage_actor is not None:
-            self.renderer.RemoveActor(self.shrinkage_actor)
-
-        # Store data for cache building
-        self.current_shrinkage_data = (voxel_centers, voxel_sizes, shrinkage_intensity)
-
-        # Clear old result caches when loading new data
-        self._clear_result_caches()
-
-        # Build geometry for current threshold using optimized method
-        polydata = self._build_shrinkage_geometry_fast(
-            voxel_centers, voxel_sizes, shrinkage_intensity, threshold
+        if self.result_surface is None or voxel_mesh is None or getattr(voxel_mesh, "voxel_centers", None) is None:
+            return False
+        centers = np.asarray(voxel_mesh.voxel_centers)
+        key = (id(voxel_mesh), int(len(centers)))
+        if key == self._result_lattice_key and self.result_surface.lattice is not None:
+            return True
+        sizes = getattr(voxel_mesh, "voxel_sizes", None)
+        part_types = getattr(voxel_mesh, "voxel_part_types", None)
+        ok = self.result_surface.set_voxels(
+            centers,
+            None if sizes is None else np.asarray(sizes),
+            None if part_types is None else np.asarray(part_types),
         )
+        self._result_lattice_key = key if ok else None
+        if ok and self._voxel_display_mask is not None:
+            self.result_surface.set_display_mask(self._voxel_display_mask)
+        self._configure_ssao()
+        return ok
 
-        if polydata is None or polydata.GetNumberOfPoints() == 0:
-            print("No shrinkage voxels to display")
-            self._shrinkage_displayed_voxel_indices = None
-            self._refresh_active_inspector()
+    def _ensure_result_lattice(self, voxel_centers: np.ndarray, voxel_sizes: np.ndarray) -> bool:
+        """Lazy fallback when the caller never registered the mesh."""
+        if self.result_surface is None:
+            return False
+        key = (id(voxel_centers), int(len(voxel_centers)))
+        if self.result_surface.lattice is not None and self._result_lattice_key is not None:
+            if self._result_lattice_key[1] == int(len(voxel_centers)):
+                return True
+        ok = self.result_surface.set_voxels(np.asarray(voxel_centers), np.asarray(voxel_sizes), None)
+        self._result_lattice_key = key if ok else None
+        if ok and self._voxel_display_mask is not None:
+            self.result_surface.set_display_mask(self._voxel_display_mask)
+        self._configure_ssao()
+        return ok
+
+    def _colormap_palette(self, colormap: Optional[str] = None):
+        """Palette callable for the surface renderer: normalised value -> RGB."""
+        name = colormap or self._current_colormap
+        lo, hi = self._color_scale_min, self._color_scale_max
+
+        def _palette(t: np.ndarray) -> np.ndarray:
+            return apply_colormap_to_array(np.asarray(t, dtype=np.float32), name, lo, hi)
+
+        return _palette
+
+    def _show_result(self, mode: str, voxel_centers, voxel_sizes, values, iso, palette, **kwargs) -> bool:
+        if not self._ensure_result_lattice(voxel_centers, voxel_sizes):
+            print("Result lattice unavailable; nothing drawn")
+            return False
+        ok = self.result_surface.show(mode, np.asarray(values, dtype=np.float32), iso=float(iso), palette=palette, **kwargs)
+        self._apply_cross_section_clipping()
+        self._apply_part_actor_visibility()
+        self._refresh_active_inspector()
+        self.render_window.Render()
+        return ok
+
+    def _set_result_iso(self, iso: float) -> None:
+        if self.result_surface is None or self.result_surface.view is None:
             return
-
-        # Capture source voxel indices for the inspector (per-glyph)
-        mask = np.asarray(shrinkage_intensity, dtype=np.float32) >= float(threshold)
-        mask = apply_display_mask(self, mask)
-        self._shrinkage_displayed_voxel_indices = np.where(mask)[0].astype(np.int32)
-        self._shrinkage_cells_per_glyph = 6  # vtkCubeSource emits 6 quad faces
-
-        # Create mapper and actor
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputData(polydata)
-        mapper.SetScalarModeToUsePointData()
-
-        self.shrinkage_actor = vtk.vtkActor()
-        self.shrinkage_actor.SetMapper(mapper)
-
-        # Set appearance
-        prop = self.shrinkage_actor.GetProperty()
-        prop.SetOpacity(0.5)
-        prop.SetInterpolationToFlat()
-
-        self.renderer.AddActor(self.shrinkage_actor)
+        self.result_surface.set_iso(float(iso))
+        self._apply_cross_section_clipping()
+        self._refresh_active_inspector()
         self.render_window.Render()
 
-        # Clear any existing feed modulus leader (voxel positions are now invalid)
+    # -- threshold modes ------------------------------------------------------
+
+    def load_shrinkage(self, voxel_centers: np.ndarray, voxel_sizes: np.ndarray,
+                       shrinkage_intensity: np.ndarray, threshold: float = 0.3,
+                       vmin: float = 0.0, vmax: float = 1.0):
+        """Shrinkage / porosity risk (also feed modulus, in inches, via vmin/vmax)."""
+        self.current_shrinkage_data = (voxel_centers, voxel_sizes, shrinkage_intensity)
         if self.feed_modulus_leader:
             self.feed_modulus_leader.clear()
+        self._show_result("shrinkage", voxel_centers, voxel_sizes, shrinkage_intensity, threshold,
+                          self._colormap_palette(), vmin=vmin, vmax=vmax)
 
-        # Reinstall the active inspector with the new displayed indices
-        self._refresh_active_inspector()
+    def update_shrinkage_threshold(self, threshold: float):
+        if self.current_shrinkage_data is None:
+            return
+        self._set_result_iso(threshold)
 
-        # Count voxels displayed
-        num_displayed = polydata.GetNumberOfCells() // 6  # Each cube has 6 faces
-        print(f"Displayed {num_displayed:,} shrinkage voxels")
-
-        # Pre-build cache for nearby threshold levels in background
-        self._prebuild_cache_async(voxel_centers, voxel_sizes, shrinkage_intensity, threshold)
-    
-    def _build_shrinkage_geometry_fast(self, voxel_centers: np.ndarray,
-                                        voxel_sizes: np.ndarray,
-                                        shrinkage_intensity: np.ndarray,
-                                        threshold: float) -> Optional[vtk.vtkPolyData]:
-        """
-        Build shrinkage visualization geometry using optimized vtkGlyph3D.
-        Uses NumPy vectorization and VTK numpy_support for zero-copy data transfer.
-        Supports custom colormaps.
-        
-        Args:
-            voxel_centers: Nx3 array of voxel centers
-            voxel_sizes: N array of voxel sizes
-            shrinkage_intensity: N array of shrinkage intensity (0-1)
-            threshold: Minimum risk as 0-1 fraction (0.7 = 70%-100% risk)
-            
-        Returns:
-            VTK polydata with colored cubes, or None if no voxels to display
-        """
-        # Shrinkage uses direct risk cutoff: 70% means show 0.70-1.00 risk voxels.
-        mask = apply_display_mask(self, shrinkage_intensity >= threshold)
-        filtered_centers = voxel_centers[mask]
-        filtered_sizes = voxel_sizes[mask]
-        filtered_intensities = shrinkage_intensity[mask]
-        
-        n_voxels = len(filtered_centers)
-        if n_voxels == 0:
-            return None
-        
-        # Use numpy_support for zero-copy data transfer to VTK
-        # Ensure contiguous float32 array for VTK compatibility
-        centers_f32 = np.ascontiguousarray(filtered_centers, dtype=np.float32)
-        vtk_points_array = numpy_support.numpy_to_vtk(centers_f32, deep=True, array_type=vtk.VTK_FLOAT)
-        vtk_points_array.SetNumberOfComponents(3)
-        
-        points = vtk.vtkPoints()
-        points.SetData(vtk_points_array)
-        
-        # Create scale array using numpy_support (cube size * 0.8)
-        scaled_sizes = np.ascontiguousarray(filtered_sizes * 0.8, dtype=np.float32)
-        vtk_scales = numpy_support.numpy_to_vtk(scaled_sizes, deep=True, array_type=vtk.VTK_FLOAT)
-        vtk_scales.SetName("Scales")
-        
-        # Create color array using current colormap
-        color_array = apply_colormap_to_array(
-            filtered_intensities, 
-            self._current_colormap,
-            self._color_scale_min,
-            self._color_scale_max
-        )
-        
-        vtk_colors = numpy_support.numpy_to_vtk(
-            np.ascontiguousarray(color_array), deep=True, array_type=vtk.VTK_UNSIGNED_CHAR
-        )
-        vtk_colors.SetName("Colors")
-        vtk_colors.SetNumberOfComponents(3)
-        
-        # Create polydata with points
-        pointsPolydata = vtk.vtkPolyData()
-        pointsPolydata.SetPoints(points)
-        pointsPolydata.GetPointData().SetScalars(vtk_colors)
-        pointsPolydata.GetPointData().AddArray(vtk_scales)
-        
-        # Create cube source for glyph (single cube used as template)
-        cubeSource = vtk.vtkCubeSource()
-        cubeSource.SetXLength(1.0)
-        cubeSource.SetYLength(1.0)
-        cubeSource.SetZLength(1.0)
-        cubeSource.Update()
-        
-        # Use vtkGlyph3D for batch rendering - stamps cube at each point
-        glyph3D = vtk.vtkGlyph3D()
-        glyph3D.SetSourceConnection(cubeSource.GetOutputPort())
-        glyph3D.SetInputData(pointsPolydata)
-        glyph3D.SetScaleModeToScaleByScalar()
-        glyph3D.SetInputArrayToProcess(0, 0, 0, 0, "Scales")
-        glyph3D.SetColorModeToColorByScalar()
-        glyph3D.Update()
-        
-        return glyph3D.GetOutput()
-    
-    def _prebuild_cache_async(self, voxel_centers: np.ndarray,
-                               voxel_sizes: np.ndarray, 
-                               shrinkage_intensity: np.ndarray,
-                               current_threshold: float):
-        """
-        Pre-build geometry cache for threshold levels near current value.
-        This enables instant threshold slider updates.
-        
-        Args:
-            voxel_centers: Voxel center positions
-            voxel_sizes: Voxel sizes
-            shrinkage_intensity: Intensity values
-            current_threshold: Current threshold to build around
-        """
-        with self._shrinkage_cache_lock:
-            generation = self._shrinkage_cache_generation
-            levels_to_cache = [
-                t for t in self._get_shrinkage_threshold_levels(current_threshold)
-                if t not in self._shrinkage_cache and t not in self._pending_shrinkage_thresholds
-                and self._should_cache_threshold(shrinkage_intensity, t)
-            ]
-            if not levels_to_cache:
-                return
-            self._pending_shrinkage_thresholds.update(levels_to_cache)
-
-        future = self._cache_executor.submit(
-            self._build_shrinkage_cache_entries,
-            voxel_centers,
-            voxel_sizes,
-            shrinkage_intensity,
-            levels_to_cache
-        )
-
-        def _cache_done(completed_future):
-            try:
-                built_entries = completed_future.result()
-            except Exception as exc:
-                logger.warning(
-                    "Background shrinkage cache build failed",
-                    context={"error": str(exc)}
-                )
-                built_entries = {}
-
-            with self._shrinkage_cache_lock:
-                self._pending_shrinkage_thresholds.difference_update(levels_to_cache)
-                if generation != self._shrinkage_cache_generation:
-                    return
-                self._shrinkage_cache.update(built_entries)
-                if self._shrinkage_cache:
-                    self._shrinkage_cache_built = True
-
-        future.add_done_callback(_cache_done)
-    
-    def _prebuild_hotspot_cache(self, voxel_centers: np.ndarray,
-                                 voxel_sizes: np.ndarray,
-                                 hotspot_intensity: np.ndarray,
-                                 current_threshold: float):
-        """Pre-build hotspot geometry cache for nearby threshold levels"""
-        levels_to_cache = [
-            t for t in self._get_bounded_threshold_levels(current_threshold)
-            if t not in self._hotspot_cache
-            and self._should_cache_threshold(hotspot_intensity, t)
-        ]
-        
-        for thresh in levels_to_cache:
-            polydata = self._build_hotspot_geometry(
-                voxel_centers, voxel_sizes, hotspot_intensity, thresh
-            )
-            self._cache_polydata(self._hotspot_cache, thresh, polydata)
-    
-    def _prebuild_niyama_cache(self, voxel_centers: np.ndarray,
-                                voxel_sizes: np.ndarray,
-                                niyama_values: np.ndarray,
-                                defect_risk: np.ndarray,
-                                current_threshold: float):
-        """Pre-build Niyama geometry cache for nearby threshold levels"""
-        levels_to_cache = [
-            t for t in self._get_bounded_threshold_levels(current_threshold)
-            if t not in self._niyama_cache
-            and self._should_cache_threshold(defect_risk, t)
-        ]
-        
-        for thresh in levels_to_cache:
-            polydata = self._build_niyama_geometry(
-                voxel_centers, voxel_sizes, niyama_values, defect_risk, thresh
-            )
-            self._cache_polydata(self._niyama_cache, thresh, polydata)
-
-    def load_hotspots(self, voxel_centers: np.ndarray,
-                      voxel_sizes: np.ndarray,
-                      hotspot_intensity: np.ndarray,
-                      threshold: float = 0.5):
-        """
-        Load and display hot spot regions using orange-yellow color gradient.
-        Hot spots are areas that solidify last and may have feeding issues.
-        
-        Args:
-            voxel_centers: Nx3 array of voxel centers
-            voxel_sizes: N array of voxel sizes
-            hotspot_intensity: N array of hot spot intensity (0-1)
-            threshold: Minimum intensity as 0-1 fraction (0.7 = 70%-100%)
-        """
-        # Remove old hotspot actor
-        if self.hotspot_actor is not None:
-            self.renderer.RemoveActor(self.hotspot_actor)
-        
-        # Store data for cache building and threshold updates
+    def load_hotspots(self, voxel_centers: np.ndarray, voxel_sizes: np.ndarray,
+                      hotspot_intensity: np.ndarray, threshold: float = 0.5):
+        """Hot spots: yellow (mild) to red (last to freeze)."""
         self.current_hotspot_data = (voxel_centers, voxel_sizes, hotspot_intensity)
-        
-        # Clear stale result caches when switching modes or loading new data
-        self._clear_result_caches()
-        
-        # Build geometry for current threshold
-        polydata = self._build_hotspot_geometry(
-            voxel_centers, voxel_sizes, hotspot_intensity, threshold
-        )
-        
-        if polydata is None or polydata.GetNumberOfPoints() == 0:
-            print("No hot spot voxels to display")
-            return
-        
-        # Create mapper and actor
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputData(polydata)
-        mapper.SetScalarModeToUsePointData()
-        
-        self.hotspot_actor = vtk.vtkActor()
-        self.hotspot_actor.SetMapper(mapper)
-        
-        # Set appearance
-        prop = self.hotspot_actor.GetProperty()
-        prop.SetOpacity(0.6)
-        prop.SetInterpolationToFlat()
-        
-        self.renderer.AddActor(self.hotspot_actor)
-        self.render_window.Render()
-        
-        # Count voxels displayed
-        num_displayed = polydata.GetNumberOfCells() // 6
-        print(f"Displayed {num_displayed:,} hot spot voxels")
-        
-        # Pre-build cache for nearby threshold levels
-        self._prebuild_hotspot_cache(voxel_centers, voxel_sizes, hotspot_intensity, threshold)
-    
-    def _build_hotspot_geometry(self, voxel_centers: np.ndarray,
-                                 voxel_sizes: np.ndarray,
-                                 hotspot_intensity: np.ndarray,
-                                 threshold: float) -> Optional[vtk.vtkPolyData]:
-        """
-        Build hot spot visualization geometry.
-        Color gradient: Yellow (low intensity) -> Orange -> Red (high intensity)
-        
-        Args:
-            voxel_centers: Nx3 array of voxel centers
-            voxel_sizes: N array of voxel sizes
-            hotspot_intensity: N array of hot spot intensity (0-1)
-            threshold: Top percentage as 0-1 fraction (0.2 = top 20%)
-            
-        Returns:
-            VTK polydata with colored cubes
-        """
-        # Direct intensity cutoff: 70% means show 0.70-1.00.
-        mask = apply_display_mask(self, hotspot_intensity >= threshold)
-        filtered_centers = voxel_centers[mask]
-        filtered_sizes = voxel_sizes[mask]
-        filtered_intensities = hotspot_intensity[mask]
-        
-        n_voxels = len(filtered_centers)
-        if n_voxels == 0:
-            return None
-        
-        # Create VTK points
-        centers_f32 = np.ascontiguousarray(filtered_centers, dtype=np.float32)
-        vtk_points_array = numpy_support.numpy_to_vtk(centers_f32, deep=True, array_type=vtk.VTK_FLOAT)
-        vtk_points_array.SetNumberOfComponents(3)
-        
-        points = vtk.vtkPoints()
-        points.SetData(vtk_points_array)
-        
-        # Create scale array
-        scaled_sizes = np.ascontiguousarray(filtered_sizes * 0.8, dtype=np.float32)
-        vtk_scales = numpy_support.numpy_to_vtk(scaled_sizes, deep=True, array_type=vtk.VTK_FLOAT)
-        vtk_scales.SetName("Scales")
-        
-        # Create color array: Yellow (255,255,0) -> Orange (255,165,0) -> Red (255,0,0)
-        clamped_intensity = np.clip(filtered_intensities, 0, 1)
-        color_array = np.zeros((n_voxels, 3), dtype=np.uint8)
-        color_array[:, 0] = 255  # Red always 255
-        # Green decreases with intensity: 255 at low, 0 at high
-        color_array[:, 1] = (255 * (1 - clamped_intensity)).astype(np.uint8)
-        # Blue stays 0
-        
-        vtk_colors = numpy_support.numpy_to_vtk(
-            np.ascontiguousarray(color_array), deep=True, array_type=vtk.VTK_UNSIGNED_CHAR
-        )
-        vtk_colors.SetName("Colors")
-        vtk_colors.SetNumberOfComponents(3)
-        
-        # Create polydata with points
-        pointsPolydata = vtk.vtkPolyData()
-        pointsPolydata.SetPoints(points)
-        pointsPolydata.GetPointData().SetScalars(vtk_colors)
-        pointsPolydata.GetPointData().AddArray(vtk_scales)
-        
-        # Create cube source for glyph
-        cubeSource = vtk.vtkCubeSource()
-        cubeSource.SetXLength(1.0)
-        cubeSource.SetYLength(1.0)
-        cubeSource.SetZLength(1.0)
-        cubeSource.Update()
-        
-        # Use vtkGlyph3D for batch rendering
-        glyph3D = vtk.vtkGlyph3D()
-        glyph3D.SetSourceConnection(cubeSource.GetOutputPort())
-        glyph3D.SetInputData(pointsPolydata)
-        glyph3D.SetScaleModeToScaleByScalar()
-        glyph3D.SetInputArrayToProcess(0, 0, 0, 0, "Scales")
-        glyph3D.SetColorModeToColorByScalar()
-        glyph3D.Update()
-        
-        return glyph3D.GetOutput()
-    
-    def load_niyama(self, voxel_centers: np.ndarray,
-                    voxel_sizes: np.ndarray,
-                    niyama_values: np.ndarray,
-                    defect_risk: np.ndarray,
-                    threshold: float = 0.5):
-        """
-        Load and display Niyama criterion results.
-        Low Niyama (high defect risk) shown in red, high Niyama (low risk) in blue.
-        
-        Args:
-            voxel_centers: Nx3 array of voxel centers
-            voxel_sizes: N array of voxel sizes
-            niyama_values: N array of Niyama criterion values (G/sqrt(R))
-            defect_risk: N array of defect risk (0-1), where 1 = high risk
-            threshold: Minimum defect risk as 0-1 fraction (0.7 = 70%-100%)
-        """
-        # Remove old niyama actor
-        if self.niyama_actor is not None:
-            self.renderer.RemoveActor(self.niyama_actor)
-        
-        # Store data for cache building and threshold updates
-        self.current_niyama_data = (voxel_centers, voxel_sizes, niyama_values, defect_risk)
-        
-        # Clear stale result caches when switching modes or loading new data
-        self._clear_result_caches()
-        
-        # Build geometry for current threshold
-        polydata = self._build_niyama_geometry(
-            voxel_centers, voxel_sizes, niyama_values, defect_risk, threshold
-        )
-        
-        if polydata is None or polydata.GetNumberOfPoints() == 0:
-            print("No Niyama defect risk voxels to display")
-            return
-        
-        # Create mapper and actor
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputData(polydata)
-        mapper.SetScalarModeToUsePointData()
-        
-        self.niyama_actor = vtk.vtkActor()
-        self.niyama_actor.SetMapper(mapper)
-        
-        # Set appearance
-        prop = self.niyama_actor.GetProperty()
-        prop.SetOpacity(0.6)
-        prop.SetInterpolationToFlat()
-        
-        self.renderer.AddActor(self.niyama_actor)
-        self.render_window.Render()
-        
-        # Count voxels displayed
-        num_displayed = polydata.GetNumberOfCells() // 6
-        print(f"Displayed {num_displayed:,} Niyama defect risk voxels")
-        
-        # Pre-build cache for nearby threshold levels
-        self._prebuild_niyama_cache(voxel_centers, voxel_sizes, niyama_values, defect_risk, threshold)
-    
-    def _build_niyama_geometry(self, voxel_centers: np.ndarray,
-                                voxel_sizes: np.ndarray,
-                                niyama_values: np.ndarray,
-                                defect_risk: np.ndarray,
-                                threshold: float) -> Optional[vtk.vtkPolyData]:
-        """
-        Build Niyama visualization geometry.
-        Color gradient: Blue (low risk) -> Cyan -> Yellow -> Orange -> Red (high risk)
-        
-        Args:
-            voxel_centers: Nx3 array of voxel centers
-            voxel_sizes: N array of voxel sizes
-            niyama_values: N array of Niyama values
-            defect_risk: N array of defect risk (0-1)
-            threshold: Top percentage as 0-1 fraction (0.2 = top 20%)
-            
-        Returns:
-            VTK polydata with colored cubes
-        """
-        # Direct risk cutoff: 70% means show 0.70-1.00.
-        mask = apply_display_mask(self, defect_risk >= threshold)
-        filtered_centers = voxel_centers[mask]
-        filtered_sizes = voxel_sizes[mask]
-        filtered_risk = defect_risk[mask]
-        
-        n_voxels = len(filtered_centers)
-        if n_voxels == 0:
-            return None
-        
-        # Create VTK points
-        centers_f32 = np.ascontiguousarray(filtered_centers, dtype=np.float32)
-        vtk_points_array = numpy_support.numpy_to_vtk(centers_f32, deep=True, array_type=vtk.VTK_FLOAT)
-        vtk_points_array.SetNumberOfComponents(3)
-        
-        points = vtk.vtkPoints()
-        points.SetData(vtk_points_array)
-        
-        # Create scale array
-        scaled_sizes = np.ascontiguousarray(filtered_sizes * 0.8, dtype=np.float32)
-        vtk_scales = numpy_support.numpy_to_vtk(scaled_sizes, deep=True, array_type=vtk.VTK_FLOAT)
-        vtk_scales.SetName("Scales")
-        
-        # Create color array using blue-cyan-yellow-red gradient based on risk
-        # High risk = red (255,0,0), Low risk = blue (0,0,255)
-        clamped_risk = np.clip(filtered_risk, 0, 1)
-        color_array = np.zeros((n_voxels, 3), dtype=np.uint8)
-        
-        # Blue-to-red gradient through cyan and yellow
-        # 0.0-0.33: Blue to Cyan (increase G)
-        # 0.33-0.66: Cyan to Yellow (R up, B down)
-        # 0.66-1.0: Yellow to Red (G down)
-        for i, risk in enumerate(clamped_risk):
-            if risk < 0.33:
-                # Blue to Cyan
-                t = risk / 0.33
-                color_array[i] = [0, int(255 * t), 255]
-            elif risk < 0.66:
-                # Cyan to Yellow
-                t = (risk - 0.33) / 0.33
-                color_array[i] = [int(255 * t), 255, int(255 * (1 - t))]
-            else:
-                # Yellow to Red
-                t = (risk - 0.66) / 0.34
-                color_array[i] = [255, int(255 * (1 - t)), 0]
-        
-        vtk_colors = numpy_support.numpy_to_vtk(
-            np.ascontiguousarray(color_array), deep=True, array_type=vtk.VTK_UNSIGNED_CHAR
-        )
-        vtk_colors.SetName("Colors")
-        vtk_colors.SetNumberOfComponents(3)
-        
-        # Create polydata with points
-        pointsPolydata = vtk.vtkPolyData()
-        pointsPolydata.SetPoints(points)
-        pointsPolydata.GetPointData().SetScalars(vtk_colors)
-        pointsPolydata.GetPointData().AddArray(vtk_scales)
-        
-        # Create cube source for glyph
-        cubeSource = vtk.vtkCubeSource()
-        cubeSource.SetXLength(1.0)
-        cubeSource.SetYLength(1.0)
-        cubeSource.SetZLength(1.0)
-        cubeSource.Update()
-        
-        # Use vtkGlyph3D for batch rendering
-        glyph3D = vtk.vtkGlyph3D()
-        glyph3D.SetSourceConnection(cubeSource.GetOutputPort())
-        glyph3D.SetInputData(pointsPolydata)
-        glyph3D.SetScaleModeToScaleByScalar()
-        glyph3D.SetInputArrayToProcess(0, 0, 0, 0, "Scales")
-        glyph3D.SetColorModeToColorByScalar()
-        glyph3D.Update()
-        
-        return glyph3D.GetOutput()
-    
-    def load_fraction_liquid(self, voxel_centers: np.ndarray,
-                             voxel_sizes: np.ndarray,
-                             fraction_liquid: np.ndarray,
-                             threshold: float = 0.01,
-                             cache_key: Optional[int] = None):
-        """
-        Load and display fraction liquid visualization.
-        Shows currently liquid regions during solidification.
-        
-        Args:
-            voxel_centers: Nx3 array of voxel centers
-            voxel_sizes: N array of voxel sizes
-            fraction_liquid: N array of liquid fraction (0-1)
-            threshold: Minimum liquid fraction to display
-            cache_key: Deterministic slider frame value used to reuse the
-                previously rendered geometry for the same frame. When None the
-                geometry is always rebuilt.
-        """
-        # Remove old fraction liquid actor
-        if self.fraction_liquid_actor is not None:
-            self.renderer.RemoveActor(self.fraction_liquid_actor)
-        
-        # Store data
-        self.current_fraction_liquid_data = (voxel_centers, voxel_sizes, fraction_liquid)
-        
-        # Build geometry (or reuse the cached polydata for this frame)
-        polydata = None
-        if cache_key is not None and cache_key in self._fraction_liquid_cache:
-            polydata = self._fraction_liquid_cache[cache_key]
-            self._fraction_liquid_cache.move_to_end(cache_key)
-        else:
-            polydata = self._build_fraction_liquid_geometry(
-                voxel_centers, voxel_sizes, fraction_liquid, threshold
-            )
-            if (
-                polydata is not None
-                and cache_key is not None
-                and polydata.GetNumberOfPoints() > 0
-            ):
-                self._store_fraction_liquid_cache(cache_key, polydata)
-        
-        if polydata is None or polydata.GetNumberOfPoints() == 0:
-            print("No liquid voxels to display")
-            return
-        
-        # Create mapper and actor
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputData(polydata)
-        mapper.SetScalarModeToUsePointData()
-        
-        self.fraction_liquid_actor = vtk.vtkActor()
-        self.fraction_liquid_actor.SetMapper(mapper)
-        
-        # Set appearance - semi-transparent
-        prop = self.fraction_liquid_actor.GetProperty()
-        prop.SetOpacity(0.5)
-        prop.SetInterpolationToFlat()
-        
-        self.renderer.AddActor(self.fraction_liquid_actor)
-        self.render_window.Render()
-        
-        # Count voxels displayed (throttled; the playback path prints per tick)
-        self._fraction_liquid_load_count += 1
-        if self._fraction_liquid_load_count % self.FRACTION_LIQUID_LOAD_PRINT_INTERVAL == 0:
-            num_displayed = polydata.GetNumberOfCells() // 6
-            print(f"Displayed {num_displayed:,} liquid voxels")
-    
-    def _build_fraction_liquid_geometry(self, voxel_centers: np.ndarray,
-                                         voxel_sizes: np.ndarray,
-                                         fraction_liquid: np.ndarray,
-                                         threshold: float) -> Optional[vtk.vtkPolyData]:
-        """
-        Build fraction liquid visualization geometry.
-        
-        Foundry physics color convention:
-        - YELLOW/ORANGE = liquid metal (molten, hot - like glowing steel)
-        - TRANSPARENT = solid metal (cooled, no longer visible)
-        
-        The slider shows solidification progression:
-        - Left (t=0): All liquid (yellow) - just poured
-        - Right (t=max): All solid (transparent) - fully solidified
-        
-        Solidification follows foundry physics:
-        - Edge-inward: Surfaces solidify first (contact with mold)
-        - Bottom-up: Lower sections solidify faster (density/gravity)
-        - Hot spots: Interior thick sections stay liquid longest (shrinkage risk)
-        
-        Args:
-            voxel_centers: Nx3 array of voxel centers
-            voxel_sizes: N array of voxel sizes
-            fraction_liquid: N array of liquid fraction (0=solid, 1=liquid)
-            threshold: Minimum liquid fraction to display (solid voxels hidden)
-            
-        Returns:
-            VTK polydata with colored cubes (only liquid voxels shown)
-        """
-        # Filter voxels by threshold - only show liquid voxels (solid becomes transparent)
-        mask = apply_display_mask(self, fraction_liquid > threshold)
-        filtered_centers = voxel_centers[mask]
-        filtered_sizes = voxel_sizes[mask]
-        filtered_liquid = fraction_liquid[mask]
-        
-        n_voxels = len(filtered_centers)
-        if n_voxels == 0:
-            return None
-        
-        # Create VTK points
-        centers_f32 = np.ascontiguousarray(filtered_centers, dtype=np.float32)
-        vtk_points_array = numpy_support.numpy_to_vtk(centers_f32, deep=True, array_type=vtk.VTK_FLOAT)
-        vtk_points_array.SetNumberOfComponents(3)
-        
-        points = vtk.vtkPoints()
-        points.SetData(vtk_points_array)
-        
-        # Create scale array
-        scaled_sizes = np.ascontiguousarray(filtered_sizes * 0.8, dtype=np.float32)
-        vtk_scales = numpy_support.numpy_to_vtk(scaled_sizes, deep=True, array_type=vtk.VTK_FLOAT)
-        vtk_scales.SetName("Scales")
-        
-        # Create color array: Yellow/Orange gradient for liquid metal
-        # Foundry convention: molten metal glows yellow-orange like hot steel
-        # High liquid fraction = bright yellow (fully molten)
-        # Low liquid fraction = darker orange (mushy zone, about to solidify)
-        clamped_liquid = np.clip(filtered_liquid, 0, 1)
-        color_array = np.zeros((n_voxels, 3), dtype=np.uint8)
-        # R: High for all liquid (yellow-orange base)
-        color_array[:, 0] = (200 + 55 * clamped_liquid).astype(np.uint8)  # 200-255
-        # G: Varies with liquid fraction (yellow when high, orange when low)
-        color_array[:, 1] = (100 + 155 * clamped_liquid).astype(np.uint8)  # 100-255
-        # B: Low (no blue in molten metal)
-        color_array[:, 2] = (30 * clamped_liquid).astype(np.uint8)  # 0-30
-        
-        vtk_colors = numpy_support.numpy_to_vtk(
-            np.ascontiguousarray(color_array), deep=True, array_type=vtk.VTK_UNSIGNED_CHAR
-        )
-        vtk_colors.SetName("Colors")
-        vtk_colors.SetNumberOfComponents(3)
-        
-        # Create polydata with points
-        pointsPolydata = vtk.vtkPolyData()
-        pointsPolydata.SetPoints(points)
-        pointsPolydata.GetPointData().SetScalars(vtk_colors)
-        pointsPolydata.GetPointData().AddArray(vtk_scales)
-        
-        # Create cube source for glyph
-        cubeSource = vtk.vtkCubeSource()
-        cubeSource.SetXLength(1.0)
-        cubeSource.SetYLength(1.0)
-        cubeSource.SetZLength(1.0)
-        cubeSource.Update()
-        
-        # Use vtkGlyph3D for batch rendering
-        glyph3D = vtk.vtkGlyph3D()
-        glyph3D.SetSourceConnection(cubeSource.GetOutputPort())
-        glyph3D.SetInputData(pointsPolydata)
-        glyph3D.SetScaleModeToScaleByScalar()
-        glyph3D.SetInputArrayToProcess(0, 0, 0, 0, "Scales")
-        glyph3D.SetColorModeToColorByScalar()
-        glyph3D.Update()
-
-        return glyph3D.GetOutput()
-
-    def load_fill_time(self, voxel_centers: np.ndarray,
-                        voxel_sizes: np.ndarray,
-                        fill_time: np.ndarray,
-                        time_threshold: float,
-                        max_fill_time_s: float,
-                        cache_key: Optional[int] = None):
-        """
-        Load and display the Fill Time visualization.
-
-        Shows metal arrival progress as the mold fills: voxels the pour has
-        reached by ``time_threshold`` render colored by how early they
-        arrived; voxels the fill never reaches (misruns) always render in
-        :data:`FILL_TIME_MISRUN_COLOR`, regardless of the slider position --
-        that is the whole point of surfacing them.
-
-        Args:
-            voxel_centers: Nx3 array of voxel centers.
-            voxel_sizes: N array of voxel sizes.
-            fill_time: N array of per-voxel arrival time in seconds, with -1
-                marking metal the fill never reached and NaN marking a voxel
-                that is not metal (mold, core, chill) and so cannot fill.
-            time_threshold: Sweep position in seconds. Voxels with
-                ``0 <= fill_time <= time_threshold`` are shown, colored by
-                arrival time; later voxels are hidden until the sweep
-                reaches them.
-            max_fill_time_s: The full-timeline fill time (slider maximum),
-                used to normalize the arrival-time color ramp so its span
-                does not shift as the sweep moves.
-            cache_key: Deterministic slider frame value used to reuse the
-                previously rendered geometry for the same frame. When None
-                the geometry is always rebuilt.
-        """
-        if self.fill_time_actor is not None:
-            self.renderer.RemoveActor(self.fill_time_actor)
-
-        self.current_fill_time_data = (voxel_centers, voxel_sizes, fill_time, max_fill_time_s)
-
-        polydata = None
-        if cache_key is not None and cache_key in self._fill_time_cache:
-            polydata = self._fill_time_cache[cache_key]
-            self._fill_time_cache.move_to_end(cache_key)
-        else:
-            polydata = self._build_fill_time_geometry(
-                voxel_centers, voxel_sizes, fill_time, time_threshold, max_fill_time_s
-            )
-            if (
-                polydata is not None
-                and cache_key is not None
-                and polydata.GetNumberOfPoints() > 0
-            ):
-                self._store_fill_time_cache(cache_key, polydata)
-
-        if polydata is None or polydata.GetNumberOfPoints() == 0:
-            print("No fill-time voxels to display")
-            return
-
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputData(polydata)
-        mapper.SetScalarModeToUsePointData()
-
-        self.fill_time_actor = vtk.vtkActor()
-        self.fill_time_actor.SetMapper(mapper)
-
-        prop = self.fill_time_actor.GetProperty()
-        prop.SetOpacity(0.85)
-        prop.SetInterpolationToFlat()
-
-        self.renderer.AddActor(self.fill_time_actor)
-        self.render_window.Render()
-
-        self._fill_time_load_count += 1
-        if self._fill_time_load_count % self.FRACTION_LIQUID_LOAD_PRINT_INTERVAL == 0:
-            num_displayed = polydata.GetNumberOfCells() // 6
-            print(f"Displayed {num_displayed:,} fill-time voxels")
-
-    def _build_fill_time_geometry(self, voxel_centers: np.ndarray,
-                                   voxel_sizes: np.ndarray,
-                                   fill_time: np.ndarray,
-                                   time_threshold: float,
-                                   max_fill_time_s: float) -> Optional[vtk.vtkPolyData]:
-        """
-        Build Fill Time visualization geometry.
-
-        Color convention:
-        - Neutral grey (``FILL_TIME_MISRUN_COLOR``) = the fill never reached
-          this voxel (misrun). Always shown, independent of the sweep.
-          Non-metal voxels are NaN rather than -1 and are dropped from the
-          view altogether -- a chill is not a misrun, and colouring it grey
-          would report a defect that does not exist.
-        - Blue -> red ramp = arrival time, early to late. This is the
-          conventional "flow front" palette (see e.g. commercial fill
-          plots): dark blue fills first, red fills last, so the eye reads
-          the sweep as a wavefront moving through the casting.
-
-        Args:
-            voxel_centers: Nx3 array of voxel centers.
-            voxel_sizes: N array of voxel sizes.
-            fill_time: N array of arrival time in seconds; -1 = misrun,
-                NaN = not metal (excluded from the view entirely).
-            time_threshold: Only arrived-by voxels (0 <= fill_time <=
-                time_threshold) are included, alongside every misrun voxel.
-            max_fill_time_s: Full-timeline max, for a ramp that does not
-                rescale as the sweep advances.
-
-        Returns:
-            VTK polydata with colored cubes, or None if nothing to show.
-        """
-        fill_time = np.asarray(fill_time, dtype=np.float64)
-        misrun_mask = fill_time < 0.0
-        arrived_mask = (~misrun_mask) & (fill_time <= time_threshold)
-        mask = apply_display_mask(self, misrun_mask | arrived_mask)
-
-        filtered_centers = voxel_centers[mask]
-        filtered_sizes = voxel_sizes[mask]
-        filtered_times = fill_time[mask]
-        filtered_misrun = misrun_mask[mask]
-
-        n_voxels = len(filtered_centers)
-        if n_voxels == 0:
-            return None
-
-        centers_f32 = np.ascontiguousarray(filtered_centers, dtype=np.float32)
-        vtk_points_array = numpy_support.numpy_to_vtk(centers_f32, deep=True, array_type=vtk.VTK_FLOAT)
-        vtk_points_array.SetNumberOfComponents(3)
-
-        points = vtk.vtkPoints()
-        points.SetData(vtk_points_array)
-
-        scaled_sizes = np.ascontiguousarray(filtered_sizes * 0.85, dtype=np.float32)
-        vtk_scales = numpy_support.numpy_to_vtk(scaled_sizes, deep=True, array_type=vtk.VTK_FLOAT)
-        vtk_scales.SetName("Scales")
-
-        # Blue (early) -> red (late) ramp for arrived voxels; flat neutral
-        # grey for misruns, overriding whatever the ramp math would give.
-        safe_max = max_fill_time_s if max_fill_time_s > 0.0 else 1.0
-        normalized = np.clip(filtered_times / safe_max, 0.0, 1.0)
-        color_array = np.zeros((n_voxels, 3), dtype=np.uint8)
-        color_array[:, 0] = (20 + 235 * normalized).astype(np.uint8)   # R: low->high
-        color_array[:, 1] = (60 + 40 * (1.0 - np.abs(normalized - 0.5) * 2)).astype(np.uint8)  # G: small mid bump
-        color_array[:, 2] = (235 - 215 * normalized).astype(np.uint8)  # B: high->low
-
-        misrun_rgb = (np.array(FILL_TIME_MISRUN_COLOR, dtype=np.float32) * 255.0).astype(np.uint8)
-        color_array[filtered_misrun] = misrun_rgb
-
-        vtk_colors = numpy_support.numpy_to_vtk(
-            np.ascontiguousarray(color_array), deep=True, array_type=vtk.VTK_UNSIGNED_CHAR
-        )
-        vtk_colors.SetName("Colors")
-        vtk_colors.SetNumberOfComponents(3)
-
-        pointsPolydata = vtk.vtkPolyData()
-        pointsPolydata.SetPoints(points)
-        pointsPolydata.GetPointData().SetScalars(vtk_colors)
-        pointsPolydata.GetPointData().AddArray(vtk_scales)
-
-        cubeSource = vtk.vtkCubeSource()
-        cubeSource.SetXLength(1.0)
-        cubeSource.SetYLength(1.0)
-        cubeSource.SetZLength(1.0)
-        cubeSource.Update()
-
-        glyph3D = vtk.vtkGlyph3D()
-        glyph3D.SetSourceConnection(cubeSource.GetOutputPort())
-        glyph3D.SetInputData(pointsPolydata)
-        glyph3D.SetScaleModeToScaleByScalar()
-        glyph3D.SetInputArrayToProcess(0, 0, 0, 0, "Scales")
-        glyph3D.SetColorModeToColorByScalar()
-        glyph3D.Update()
-
-        return glyph3D.GetOutput()
-
-    def load_fill_animation(self, voxel_centers: np.ndarray,
-                             voxel_sizes: np.ndarray,
-                             fill_fraction: np.ndarray,
-                             speed_m_s: np.ndarray,
-                             max_speed: float,
-                             cache_key: Optional[int] = None):
-        """
-        Load and display the Fill Animation visualization.
-
-        Plays back the mold-filling solver's own transient state -- a
-        industry-standard advancing free surface -- rather than sweeping a
-        threshold over a single precomputed arrival-time scalar the way Fill
-        Time does. Each call renders one playback frame.
-
-        Args:
-            voxel_centers: Nx3 array of voxel centers.
-            voxel_sizes: N array of voxel sizes.
-            fill_fraction: N array of per-voxel metal content for this
-                frame, 0 (empty) to 1 (full). See FillFrame in
-                core/filling_stage.py.
-            speed_m_s: N array of per-voxel velocity magnitude for this
-                frame, metres per second.
-            max_speed: Maximum speed over the WHOLE animation (every frame),
-                used to normalize the color ramp so its span does not shift
-                frame to frame -- a per-frame rescale would make a steady
-                stream of metal appear to speed up and slow down.
-            cache_key: Deterministic playback frame index used to reuse the
-                previously rendered geometry for the same frame. When None
-                the geometry is always rebuilt.
-        """
-        if self.fill_animation_actor is not None:
-            self.renderer.RemoveActor(self.fill_animation_actor)
-
-        self.current_fill_animation_data = (voxel_centers, voxel_sizes, speed_m_s, max_speed)
-
-        polydata = None
-        if cache_key is not None and cache_key in self._fill_animation_cache:
-            polydata = self._fill_animation_cache[cache_key]
-            self._fill_animation_cache.move_to_end(cache_key)
-        else:
-            polydata = self._build_fill_animation_geometry(
-                voxel_centers, voxel_sizes, fill_fraction, speed_m_s, max_speed
-            )
-            if (
-                polydata is not None
-                and cache_key is not None
-                and polydata.GetNumberOfPoints() > 0
-            ):
-                self._store_fill_animation_cache(cache_key, polydata)
-
-        if polydata is None or polydata.GetNumberOfPoints() == 0:
-            print("No fill-animation voxels to display")
-            return
-
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputData(polydata)
-        mapper.SetScalarModeToUsePointData()
-
-        self.fill_animation_actor = vtk.vtkActor()
-        self.fill_animation_actor.SetMapper(mapper)
-
-        prop = self.fill_animation_actor.GetProperty()
-        prop.SetOpacity(0.85)
-        prop.SetInterpolationToFlat()
-
-        self.renderer.AddActor(self.fill_animation_actor)
-        self.render_window.Render()
-
-        self._fill_animation_load_count += 1
-        if self._fill_animation_load_count % self.FRACTION_LIQUID_LOAD_PRINT_INTERVAL == 0:
-            num_displayed = polydata.GetNumberOfCells() // 6
-            print(f"Displayed {num_displayed:,} fill-animation voxels")
-
-    def _build_fill_animation_geometry(self, voxel_centers: np.ndarray,
-                                        voxel_sizes: np.ndarray,
-                                        fill_fraction: np.ndarray,
-                                        speed_m_s: np.ndarray,
-                                        max_speed: float) -> Optional[vtk.vtkPolyData]:
-        """
-        Build Fill Animation visualization geometry for one playback frame.
-
-        Unlike Fill Time's threshold sweep over a single static field, each
-        call here renders one frame of the filling solver's own transient
-        state -- the metal actually flowing in, not a precomputed scalar.
-
-        Color convention:
-        - Only voxels with fill_fraction > FILL_ANIMATION_WETTED_THRESHOLD
-          are drawn (see that constant's comment for why zero is the wrong
-          cutoff).
-        - Blue -> cyan -> yellow -> red ramp = flow speed, slow to fast.
-          Same four stops as the 'niyama' entry in COLOR_MAPS. Normalized
-          against max_speed, the maximum over the WHOLE animation rather
-          than this frame -- see load_fill_animation for why.
-
-        Args:
-            voxel_centers: Nx3 array of voxel centers.
-            voxel_sizes: N array of voxel sizes.
-            fill_fraction: N array of per-voxel metal content this frame,
-                0 (empty) to 1 (full).
-            speed_m_s: N array of per-voxel velocity magnitude this frame,
-                metres per second.
-            max_speed: Whole-animation maximum speed, for a ramp that does
-                not rescale as playback advances.
-
-        Returns:
-            VTK polydata with colored cubes, or None if nothing passes the
-            wetted threshold.
-        """
-        fill_fraction = np.asarray(fill_fraction, dtype=np.float64)
-        mask = apply_display_mask(self, fill_fraction > FILL_ANIMATION_WETTED_THRESHOLD)
-
-        filtered_centers = voxel_centers[mask]
-        filtered_sizes = voxel_sizes[mask]
-        filtered_speed = np.asarray(speed_m_s, dtype=np.float64)[mask]
-
-        n_voxels = len(filtered_centers)
-        if n_voxels == 0:
-            return None
-
-        centers_f32 = np.ascontiguousarray(filtered_centers, dtype=np.float32)
-        vtk_points_array = numpy_support.numpy_to_vtk(centers_f32, deep=True, array_type=vtk.VTK_FLOAT)
-        vtk_points_array.SetNumberOfComponents(3)
-
-        points = vtk.vtkPoints()
-        points.SetData(vtk_points_array)
-
-        scaled_sizes = np.ascontiguousarray(filtered_sizes * 0.85, dtype=np.float32)
-        vtk_scales = numpy_support.numpy_to_vtk(scaled_sizes, deep=True, array_type=vtk.VTK_FLOAT)
-        vtk_scales.SetName("Scales")
-
-        # Blue (slow) -> cyan -> yellow -> red (fast), normalized against the
-        # whole-animation max so a steady stream of metal reads as a steady
-        # color rather than drifting as the sweep progresses.
-        safe_max = max_speed if max_speed > 0.0 else 1.0
-        normalized = np.clip(filtered_speed / safe_max, 0.0, 1.0)
-        ramp_stops = (0.0, 0.33, 0.66, 1.0)
-        color_array = np.zeros((n_voxels, 3), dtype=np.uint8)
-        color_array[:, 0] = np.interp(normalized, ramp_stops, (0, 0, 255, 255)).astype(np.uint8)
-        color_array[:, 1] = np.interp(normalized, ramp_stops, (0, 255, 255, 0)).astype(np.uint8)
-        color_array[:, 2] = np.interp(normalized, ramp_stops, (255, 255, 0, 0)).astype(np.uint8)
-
-        vtk_colors = numpy_support.numpy_to_vtk(
-            np.ascontiguousarray(color_array), deep=True, array_type=vtk.VTK_UNSIGNED_CHAR
-        )
-        vtk_colors.SetName("Colors")
-        vtk_colors.SetNumberOfComponents(3)
-
-        pointsPolydata = vtk.vtkPolyData()
-        pointsPolydata.SetPoints(points)
-        pointsPolydata.GetPointData().SetScalars(vtk_colors)
-        pointsPolydata.GetPointData().AddArray(vtk_scales)
-
-        cubeSource = vtk.vtkCubeSource()
-        cubeSource.SetXLength(1.0)
-        cubeSource.SetYLength(1.0)
-        cubeSource.SetZLength(1.0)
-        cubeSource.Update()
-
-        glyph3D = vtk.vtkGlyph3D()
-        glyph3D.SetSourceConnection(cubeSource.GetOutputPort())
-        glyph3D.SetInputData(pointsPolydata)
-        glyph3D.SetScaleModeToScaleByScalar()
-        glyph3D.SetInputArrayToProcess(0, 0, 0, 0, "Scales")
-        glyph3D.SetColorModeToColorByScalar()
-        glyph3D.Update()
-
-        return glyph3D.GetOutput()
+        self._show_result("hotspot", voxel_centers, voxel_sizes, hotspot_intensity, threshold,
+                          palette_hotspot, vmin=0.0, vmax=1.0)
 
     def update_hotspot_threshold(self, threshold: float):
-        """Update hot spot visualization threshold"""
         if self.current_hotspot_data is None:
             return
-        
-        voxel_centers, voxel_sizes, intensities = self.current_hotspot_data
-        
-        # Round threshold to cache key
-        cache_key = round(threshold, 2)
-        
-        # Check cache
-        if cache_key in self._hotspot_cache:
-            polydata = self._hotspot_cache[cache_key]
-        else:
-            polydata = self._build_hotspot_geometry(
-                voxel_centers, voxel_sizes, intensities, threshold
-            )
-        
-        # Remove old actor
-        if self.hotspot_actor is not None:
-            self.renderer.RemoveActor(self.hotspot_actor)
-        
-        if polydata is None or polydata.GetNumberOfPoints() == 0:
-            print("No hot spots at this threshold")
-            self.render_window.Render()
-            return
-        
-        # Create mapper and actor
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputData(polydata)
-        mapper.SetScalarModeToUsePointData()
-        
-        self.hotspot_actor = vtk.vtkActor()
-        self.hotspot_actor.SetMapper(mapper)
-        
-        prop = self.hotspot_actor.GetProperty()
-        prop.SetOpacity(0.6)
-        prop.SetInterpolationToFlat()
-        
-        self.renderer.AddActor(self.hotspot_actor)
-        self.render_window.Render()
-        
-        num_displayed = polydata.GetNumberOfCells() // 6
-        print(f"Displayed {num_displayed:,} hot spot voxels")
-        
-        # Pre-build nearby thresholds for smoother slider movement
-        self._prebuild_hotspot_cache(voxel_centers, voxel_sizes, intensities, threshold)
-    
+        self._set_result_iso(threshold)
+
+    def load_niyama(self, voxel_centers: np.ndarray, voxel_sizes: np.ndarray,
+                    niyama_values: np.ndarray, defect_risk: np.ndarray, threshold: float = 0.5):
+        """Niyama defect risk: blue (safe) through cyan and yellow to red."""
+        self.current_niyama_data = (voxel_centers, voxel_sizes, niyama_values, defect_risk)
+        self._show_result("niyama", voxel_centers, voxel_sizes, defect_risk, threshold,
+                          palette_niyama, vmin=0.0, vmax=1.0)
+
     def update_niyama_threshold(self, threshold: float):
-        """Update Niyama visualization threshold"""
         if self.current_niyama_data is None:
             return
-        
-        voxel_centers, voxel_sizes, niyama_values, defect_risk = self.current_niyama_data
-        
-        # Round threshold to cache key
-        cache_key = round(threshold, 2)
-        
-        # Check cache
-        if cache_key in self._niyama_cache:
-            polydata = self._niyama_cache[cache_key]
-        else:
-            polydata = self._build_niyama_geometry(
-                voxel_centers, voxel_sizes, niyama_values, defect_risk, threshold
-            )
-        
-        # Remove old actor
-        if self.niyama_actor is not None:
-            self.renderer.RemoveActor(self.niyama_actor)
-        
-        if polydata is None or polydata.GetNumberOfPoints() == 0:
-            print("No Niyama defect risk at this threshold")
-            self.render_window.Render()
-            return
-        
-        # Create mapper and actor
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputData(polydata)
-        mapper.SetScalarModeToUsePointData()
-        
-        self.niyama_actor = vtk.vtkActor()
-        self.niyama_actor.SetMapper(mapper)
-        
-        prop = self.niyama_actor.GetProperty()
-        prop.SetOpacity(0.6)
-        prop.SetInterpolationToFlat()
-        
-        self.renderer.AddActor(self.niyama_actor)
-        self.render_window.Render()
-        
-        num_displayed = polydata.GetNumberOfCells() // 6
-        print(f"Displayed {num_displayed:,} Niyama defect risk voxels")
-        
-        # Pre-build nearby thresholds for smoother slider movement
-        self._prebuild_niyama_cache(voxel_centers, voxel_sizes, niyama_values, defect_risk, threshold)
-    
-    def load_hot_tear(self, voxel_centers: np.ndarray,
-                      voxel_sizes: np.ndarray,
-                      hot_tear_risk: np.ndarray,
-                      hot_tear_zones: np.ndarray,
-                      threshold: float = 0.1):
-        """
-        Load and display hot tear risk zones.
-        Uses cyan-purple color scheme to distinguish from shrinkage (red) and hotspots (orange).
-        
-        Args:
-            voxel_centers: Nx3 array of voxel centers
-            voxel_sizes: N array of voxel sizes
-            hot_tear_risk: N array of hot tear risk (0-1)
-            hot_tear_zones: N boolean array of hot tear zone voxels
-            threshold: Top percentage as 0-1 fraction (within hot tear zones)
-        """
-        # Remove old hot tear actor
-        if self.hot_tear_actor is not None:
-            self.renderer.RemoveActor(self.hot_tear_actor)
-        
-        # Store data for cache building and threshold updates
+        self._set_result_iso(threshold)
+
+    def load_hot_tear(self, voxel_centers: np.ndarray, voxel_sizes: np.ndarray,
+                      hot_tear_risk: np.ndarray, hot_tear_zones: np.ndarray, threshold: float = 0.1):
+        """Hot tear risk inside the physics-eligible zones: cyan to magenta."""
         self.current_hot_tear_data = (voxel_centers, voxel_sizes, hot_tear_risk, hot_tear_zones)
-        
-        # Clear stale result caches when switching modes or loading new data
-        self._clear_result_caches()
-        
-        # Build geometry for current threshold
-        polydata = self._build_hot_tear_geometry(
-            voxel_centers, voxel_sizes, hot_tear_risk, hot_tear_zones, threshold
-        )
-        
-        if polydata is None or polydata.GetNumberOfPoints() == 0:
-            print("No hot tear risk voxels to display")
-            return
-        
-        # Create mapper and actor
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputData(polydata)
-        mapper.SetScalarModeToUsePointData()
-        
-        self.hot_tear_actor = vtk.vtkActor()
-        self.hot_tear_actor.SetMapper(mapper)
-        
-        # Set appearance
-        prop = self.hot_tear_actor.GetProperty()
-        prop.SetOpacity(0.7)
-        prop.SetInterpolationToFlat()
-        
-        self.renderer.AddActor(self.hot_tear_actor)
-        self.render_window.Render()
-        
-        # Count voxels displayed
-        num_displayed = polydata.GetNumberOfCells() // 6
-        print(f"Displayed {num_displayed:,} hot tear risk voxels")
-        
-        # Pre-build cache for nearby threshold levels
-        self._prebuild_hot_tear_cache(voxel_centers, voxel_sizes, hot_tear_risk, hot_tear_zones, threshold)
-    
-    def _build_hot_tear_geometry(self, voxel_centers: np.ndarray,
-                                  voxel_sizes: np.ndarray,
-                                  hot_tear_risk: np.ndarray,
-                                  hot_tear_zones: np.ndarray,
-                                  threshold: float) -> Optional[vtk.vtkPolyData]:
-        """
-        Build hot tear visualization geometry.
-        Color gradient: Cyan (low risk) -> Purple -> Magenta (high risk)
-        This distinguishes from shrinkage (red) and hotspots (orange).
-        
-        Args:
-            voxel_centers: Nx3 array of voxel centers
-            voxel_sizes: N array of voxel sizes
-            hot_tear_risk: N array of hot tear risk (0-1)
-            hot_tear_zones: N boolean array of hot tear zone voxels
-            threshold: Minimum hot tear risk as 0-1 fraction (within zones)
-            
-        Returns:
-            VTK polydata with colored cubes
-        """
-        # Apply direct cutoff within physics-derived eligible zones.
-        mask = apply_display_mask(self, hot_tear_zones & (hot_tear_risk >= threshold))
-        filtered_centers = voxel_centers[mask]
-        filtered_sizes = voxel_sizes[mask]
-        filtered_risk = hot_tear_risk[mask]
-        
-        n_voxels = len(filtered_centers)
-        if n_voxels == 0:
-            return None
-        
-        # Create VTK points
-        centers_f32 = np.ascontiguousarray(filtered_centers, dtype=np.float32)
-        vtk_points_array = numpy_support.numpy_to_vtk(centers_f32, deep=True, array_type=vtk.VTK_FLOAT)
-        vtk_points_array.SetNumberOfComponents(3)
-        
-        points = vtk.vtkPoints()
-        points.SetData(vtk_points_array)
-        
-        # Create scale array
-        scaled_sizes = np.ascontiguousarray(filtered_sizes * 0.85, dtype=np.float32)
-        vtk_scales = numpy_support.numpy_to_vtk(scaled_sizes, deep=True, array_type=vtk.VTK_FLOAT)
-        vtk_scales.SetName("Scale")
-        
-        # Create polydata for glyph source centers
-        point_polydata = vtk.vtkPolyData()
-        point_polydata.SetPoints(points)
-        point_polydata.GetPointData().AddArray(vtk_scales)
-        point_polydata.GetPointData().SetActiveScalars("Scale")
-        
-        # Create colors (Cyan -> Purple -> Magenta gradient)
-        colors = vtk.vtkUnsignedCharArray()
-        colors.SetNumberOfComponents(3)
-        colors.SetName("Colors")
-        
-        # Normalize risk values relative to the filtered set for better color spread
-        # This ensures we use the full color gradient even if absolute values are low
-        min_risk = np.min(filtered_risk)
-        max_risk = np.max(filtered_risk)
-        risk_range = max_risk - min_risk if max_risk > min_risk else 1.0
-        
-        for risk in filtered_risk:
-            # Normalize risk relative to the displayed voxels' range
-            t = (risk - min_risk) / risk_range
-            t = min(max(t, 0.0), 1.0)  # Clamp to 0-1
-            
-            # Cyan (0, 255, 255) -> Purple (128, 0, 255) -> Magenta (255, 0, 255)
-            if t < 0.5:
-                # Cyan to Purple
-                t2 = t * 2  # 0-1 for first half
-                r = int(128 * t2)
-                g = int(255 * (1 - t2))
-                b = 255
-            else:
-                # Purple to Magenta
-                t2 = (t - 0.5) * 2  # 0-1 for second half
-                r = int(128 + 127 * t2)
-                g = 0
-                b = 255
-            
-            colors.InsertNextTuple3(r, g, b)
-        
-        point_polydata.GetPointData().AddArray(colors)
-        
-        # Create cube source
-        cube = vtk.vtkCubeSource()
-        cube.SetXLength(1.0)
-        cube.SetYLength(1.0)
-        cube.SetZLength(1.0)
-        
-        # Use glyph3D for instanced rendering
-        glyph3D = vtk.vtkGlyph3D()
-        glyph3D.SetSourceConnection(cube.GetOutputPort())
-        glyph3D.SetInputData(point_polydata)
-        glyph3D.SetScaleModeToScaleByScalar()
-        glyph3D.SetColorModeToColorByScalar()
-        glyph3D.Update()
-        
-        return glyph3D.GetOutput()
-    
-    def _prebuild_hot_tear_cache(self, voxel_centers, voxel_sizes, hot_tear_risk, hot_tear_zones, current_threshold):
-        """Pre-build geometry for nearby threshold levels"""
-        nearby_thresholds = self._get_bounded_threshold_levels(current_threshold)
-        
-        for thresh in nearby_thresholds:
-            cache_key = round(thresh, 2)
-            if (
-                cache_key not in self._hot_tear_cache
-                and self._should_cache_threshold(hot_tear_risk, cache_key, hot_tear_zones)
-            ):
-                polydata = self._build_hot_tear_geometry(
-                    voxel_centers, voxel_sizes, hot_tear_risk, hot_tear_zones, thresh
-                )
-                self._cache_polydata(self._hot_tear_cache, cache_key, polydata)
-    
+        self._show_result("hot_tear", voxel_centers, voxel_sizes, hot_tear_risk, threshold,
+                          palette_hot_tear, vmin=0.0, vmax=1.0,
+                          valid=np.asarray(hot_tear_zones, dtype=bool))
+
     def update_hot_tear_threshold(self, threshold: float):
-        """Update hot tear visualization threshold"""
         if self.current_hot_tear_data is None:
             return
-        
-        voxel_centers, voxel_sizes, hot_tear_risk, hot_tear_zones = self.current_hot_tear_data
-        
-        # Round threshold to cache key
-        cache_key = round(threshold, 2)
-        
-        # Check cache
-        if cache_key in self._hot_tear_cache:
-            polydata = self._hot_tear_cache[cache_key]
-        else:
-            polydata = self._build_hot_tear_geometry(
-                voxel_centers, voxel_sizes, hot_tear_risk, hot_tear_zones, threshold
-            )
-        
-        # Remove old actor
-        if self.hot_tear_actor is not None:
-            self.renderer.RemoveActor(self.hot_tear_actor)
-        
-        if polydata is None or polydata.GetNumberOfPoints() == 0:
-            print("No hot tear risk at this threshold")
-            self.render_window.Render()
-            return
-        
-        # Create mapper and actor
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputData(polydata)
-        mapper.SetScalarModeToUsePointData()
-        
-        self.hot_tear_actor = vtk.vtkActor()
-        self.hot_tear_actor.SetMapper(mapper)
-        
-        prop = self.hot_tear_actor.GetProperty()
-        prop.SetOpacity(0.7)
-        prop.SetInterpolationToFlat()
-        
-        self.renderer.AddActor(self.hot_tear_actor)
-        self.render_window.Render()
-        
-        num_displayed = polydata.GetNumberOfCells() // 6
-        print(f"Displayed {num_displayed:,} hot tear risk voxels")
-        
-        # Pre-build nearby thresholds for smoother slider movement
-        self._prebuild_hot_tear_cache(voxel_centers, voxel_sizes, hot_tear_risk, hot_tear_zones, threshold)
-    
-    # ==================== SAND BURN-IN VISUALIZATION ====================
-    
-    def load_sand_burn_in(self, voxel_centers: np.ndarray,
-                          voxel_sizes: np.ndarray,
-                          sand_burn_in_risk: np.ndarray,
-                          sand_burn_in_zones: np.ndarray,
+        self._set_result_iso(threshold)
+
+    def load_sand_burn_in(self, voxel_centers: np.ndarray, voxel_sizes: np.ndarray,
+                          sand_burn_in_risk: np.ndarray, sand_burn_in_zones: np.ndarray,
                           threshold: float = 0.2):
-        """
-        Load and display sand burn-in visualization (surface defect zones).
-        
-        Sand burn-in is a surface defect where molten metal penetrates the sand mold.
-        Only surface voxels are analyzed, so we use a warm color gradient to indicate
-        surface damage severity.
-        
-        Color gradient: Tan (low) -> Orange -> Deep Brown (high risk)
-        This color scheme evokes burned/scorched sand appearance.
-        
-        Args:
-            voxel_centers: Nx3 array of voxel centers
-            voxel_sizes: N array of voxel sizes
-            sand_burn_in_risk: N array of sand burn-in risk (0-1)
-            sand_burn_in_zones: N boolean array of sand burn-in zone voxels
-            threshold: Top percentage as 0-1 fraction (within sand burn-in zones)
-        """
-        try:
-            # Validate input arrays
-            if voxel_centers is None or len(voxel_centers) == 0:
-                logger.warning("load_sand_burn_in called with empty voxel_centers")
-                print("Warning: No voxel data for sand burn-in visualization")
-                return
-            
-            if sand_burn_in_risk is None or sand_burn_in_zones is None:
-                logger.warning("load_sand_burn_in called with missing risk/zones data")
-                print("Warning: Sand burn-in risk data not available")
-                return
-            
-            # Remove old sand burn-in actor
-            if self.sand_burn_in_actor is not None:
-                self.renderer.RemoveActor(self.sand_burn_in_actor)
-            
-            # Store data for cache building and threshold updates
-            self.current_sand_burn_in_data = (voxel_centers, voxel_sizes, sand_burn_in_risk, sand_burn_in_zones)
-            
-            # Clear stale result caches when switching modes or loading new data
-            self._clear_result_caches()
-            
-            # Build geometry for current threshold
-            polydata = self._build_sand_burn_in_geometry(
-                voxel_centers, voxel_sizes, sand_burn_in_risk, sand_burn_in_zones, threshold
-            )
-            
-            if polydata is None or polydata.GetNumberOfPoints() == 0:
-                print("No sand burn-in risk voxels to display")
-                return
-            
-            # Create mapper and actor
-            mapper = vtk.vtkPolyDataMapper()
-            mapper.SetInputData(polydata)
-            mapper.SetScalarModeToUsePointData()
-            
-            self.sand_burn_in_actor = vtk.vtkActor()
-            self.sand_burn_in_actor.SetMapper(mapper)
-            
-            # Set appearance
-            prop = self.sand_burn_in_actor.GetProperty()
-            prop.SetOpacity(0.8)  # Slightly higher opacity for surface defects
-            prop.SetInterpolationToFlat()
-            
-            self.renderer.AddActor(self.sand_burn_in_actor)
-            self.render_window.Render()
-            
-            # Count voxels displayed
-            num_displayed = polydata.GetNumberOfCells() // 6
-            print(f"Displayed {num_displayed:,} sand burn-in risk voxels")
-            
-            # Pre-build cache for nearby threshold levels
-            self._prebuild_sand_burn_in_cache(voxel_centers, voxel_sizes, sand_burn_in_risk, sand_burn_in_zones, threshold)
-            
-        except Exception as e:
-            logger.error(
-                f"Failed to load sand burn-in visualization: {e}",
-                exc_info=True,
-                context={
-                    'n_voxels': len(voxel_centers) if voxel_centers is not None else 0,
-                    'threshold': threshold
-                }
-            )
-            print(f"Error loading sand burn-in visualization: {e}")
-    
-    def _build_sand_burn_in_geometry(self, voxel_centers: np.ndarray,
-                                      voxel_sizes: np.ndarray,
-                                      sand_burn_in_risk: np.ndarray,
-                                      sand_burn_in_zones: np.ndarray,
-                                      threshold: float) -> Optional[vtk.vtkPolyData]:
-        """
-        Build sand burn-in visualization geometry.
-        Color gradient: Tan (low risk) -> Orange -> Deep Brown (high risk)
-        This evokes the appearance of burned/scorched sand on casting surfaces.
-        
-        Args:
-            voxel_centers: Nx3 array of voxel centers
-            voxel_sizes: N array of voxel sizes
-            sand_burn_in_risk: N array of sand burn-in risk (0-1)
-            sand_burn_in_zones: N boolean array of sand burn-in zone voxels
-            threshold: Minimum sand burn-in risk as 0-1 fraction (within zones)
-            
-        Returns:
-            VTK polydata with colored cubes, or None if no voxels to display
-        """
-        try:
-            # Apply direct cutoff within burn-in eligibility zones.
-            mask = apply_display_mask(self, sand_burn_in_zones & (sand_burn_in_risk >= threshold))
-            filtered_centers = voxel_centers[mask]
-            filtered_sizes = voxel_sizes[mask]
-            filtered_risk = sand_burn_in_risk[mask]
-            
-            n_voxels = len(filtered_centers)
-            if n_voxels == 0:
-                return None
-            
-            # Create VTK points
-            centers_f32 = np.ascontiguousarray(filtered_centers, dtype=np.float32)
-            vtk_points_array = numpy_support.numpy_to_vtk(centers_f32, deep=True, array_type=vtk.VTK_FLOAT)
-            vtk_points_array.SetNumberOfComponents(3)
-            
-            points = vtk.vtkPoints()
-            points.SetData(vtk_points_array)
-            
-            # Create scale array
-            scaled_sizes = np.ascontiguousarray(filtered_sizes * 0.85, dtype=np.float32)
-            vtk_scales = numpy_support.numpy_to_vtk(scaled_sizes, deep=True, array_type=vtk.VTK_FLOAT)
-            vtk_scales.SetName("Scale")
-            
-            # Create polydata for glyph source centers
-            point_polydata = vtk.vtkPolyData()
-            point_polydata.SetPoints(points)
-            point_polydata.GetPointData().AddArray(vtk_scales)
-            point_polydata.GetPointData().SetActiveScalars("Scale")
-            
-            # Create colors (Tan -> Orange -> Deep Brown gradient)
-            colors = vtk.vtkUnsignedCharArray()
-            colors.SetNumberOfComponents(3)
-            colors.SetName("Colors")
-            
-            # Normalize risk values relative to the filtered set for better color spread
-            min_risk = np.min(filtered_risk)
-            max_risk = np.max(filtered_risk)
-            risk_range = max_risk - min_risk if max_risk > min_risk else 1.0
-            
-            for risk in filtered_risk:
-                # Normalize risk relative to the displayed voxels' range
-                t = (risk - min_risk) / risk_range
-                t = min(max(t, 0.0), 1.0)  # Clamp to 0-1
-                
-                # Tan (210, 180, 140) -> Orange (255, 140, 0) -> Deep Brown (139, 69, 19)
-                if t < 0.5:
-                    # Tan to Orange
-                    t2 = t * 2  # 0-1 for first half
-                    r = int(210 + (255 - 210) * t2)
-                    g = int(180 + (140 - 180) * t2)
-                    b = int(140 + (0 - 140) * t2)
-                else:
-                    # Orange to Deep Brown
-                    t2 = (t - 0.5) * 2  # 0-1 for second half
-                    r = int(255 + (139 - 255) * t2)
-                    g = int(140 + (69 - 140) * t2)
-                    b = int(0 + (19 - 0) * t2)
-                
-                colors.InsertNextTuple3(r, g, b)
-            
-            point_polydata.GetPointData().AddArray(colors)
-            
-            # Create cube source
-            cube = vtk.vtkCubeSource()
-            cube.SetXLength(1.0)
-            cube.SetYLength(1.0)
-            cube.SetZLength(1.0)
-            
-            # Use glyph3D for instanced rendering
-            glyph3D = vtk.vtkGlyph3D()
-            glyph3D.SetSourceConnection(cube.GetOutputPort())
-            glyph3D.SetInputData(point_polydata)
-            glyph3D.SetScaleModeToScaleByScalar()
-            glyph3D.SetColorModeToColorByScalar()
-            glyph3D.Update()
-            
-            return glyph3D.GetOutput()
-            
-        except Exception as e:
-            logger.error(
-                f"Failed to build sand burn-in geometry: {e}",
-                exc_info=True,
-                context={
-                    'n_voxels': len(voxel_centers) if voxel_centers is not None else 0,
-                    'threshold': threshold
-                }
-            )
-            return None
-    
-    def _prebuild_sand_burn_in_cache(self, voxel_centers, voxel_sizes, sand_burn_in_risk, sand_burn_in_zones, current_threshold):
-        """Pre-build geometry for nearby threshold levels"""
-        nearby_thresholds = self._get_bounded_threshold_levels(current_threshold)
-        
-        for thresh in nearby_thresholds:
-            cache_key = round(thresh, 2)
-            if (
-                cache_key not in self._sand_burn_in_cache
-                and self._should_cache_threshold(sand_burn_in_risk, cache_key, sand_burn_in_zones)
-            ):
-                polydata = self._build_sand_burn_in_geometry(
-                    voxel_centers, voxel_sizes, sand_burn_in_risk, sand_burn_in_zones, thresh
-                )
-                self._cache_polydata(self._sand_burn_in_cache, cache_key, polydata)
-    
+        """Sand burn-in risk on the mold contact zones: tan, orange, brown."""
+        self.current_sand_burn_in_data = (voxel_centers, voxel_sizes, sand_burn_in_risk, sand_burn_in_zones)
+        self._show_result("sand_burn_in", voxel_centers, voxel_sizes, sand_burn_in_risk, threshold,
+                          palette_sand_burn_in, vmin=0.0, vmax=1.0,
+                          valid=np.asarray(sand_burn_in_zones, dtype=bool))
+
     def update_sand_burn_in_threshold(self, threshold: float):
-        """Update sand burn-in visualization threshold"""
-        try:
-            if self.current_sand_burn_in_data is None:
-                return
-            
-            voxel_centers, voxel_sizes, sand_burn_in_risk, sand_burn_in_zones = self.current_sand_burn_in_data
-            
-            # Round threshold to cache key
-            cache_key = round(threshold, 2)
-            
-            # Check cache
-            if cache_key in self._sand_burn_in_cache:
-                polydata = self._sand_burn_in_cache[cache_key]
-            else:
-                polydata = self._build_sand_burn_in_geometry(
-                    voxel_centers, voxel_sizes, sand_burn_in_risk, sand_burn_in_zones, threshold
-                )
-            
-            # Remove old actor
-            if self.sand_burn_in_actor is not None:
-                self.renderer.RemoveActor(self.sand_burn_in_actor)
-            
-            if polydata is None or polydata.GetNumberOfPoints() == 0:
-                print("No sand burn-in risk at this threshold")
-                self.render_window.Render()
-                return
-            
-            # Create mapper and actor
-            mapper = vtk.vtkPolyDataMapper()
-            mapper.SetInputData(polydata)
-            mapper.SetScalarModeToUsePointData()
-            
-            self.sand_burn_in_actor = vtk.vtkActor()
-            self.sand_burn_in_actor.SetMapper(mapper)
-            
-            prop = self.sand_burn_in_actor.GetProperty()
-            prop.SetOpacity(0.8)
-            prop.SetInterpolationToFlat()
-            
-            self.renderer.AddActor(self.sand_burn_in_actor)
-            self.render_window.Render()
-            
-            num_displayed = polydata.GetNumberOfCells() // 6
-            print(f"Displayed {num_displayed:,} sand burn-in risk voxels")
-            
-            # Pre-build nearby thresholds for smoother slider movement
-            self._prebuild_sand_burn_in_cache(voxel_centers, voxel_sizes, sand_burn_in_risk, sand_burn_in_zones, threshold)
-            
-        except Exception as e:
-            logger.error(
-                f"Failed to update sand burn-in threshold: {e}",
-                exc_info=True,
-                context={'threshold': threshold}
-            )
-            print(f"Error updating sand burn-in threshold: {e}")
+        if self.current_sand_burn_in_data is None:
+            return
+        self._set_result_iso(threshold)
 
-    # ──────────────────────────────────────────────────────────────
-    # Gas Porosity Visualization
-    # ──────────────────────────────────────────────────────────────
-
-    def load_gas_porosity(self, voxel_centers: np.ndarray,
-                          voxel_sizes: np.ndarray,
-                          intensities: np.ndarray,
-                          threshold: float = 0.1,
-                          mode: str = "gas_porosity"):
-        """
-        Load and display gas porosity visualization.
-
-        Three sub-modes: gas_generation, gas_entrapment, gas_porosity.
-        Uses the industry-standard defect colormap (green-yellow-orange-red).
-        """
-        try:
-            if voxel_centers is None or len(voxel_centers) == 0:
-                logger.warning("load_gas_porosity called with empty voxel_centers")
-                print("Warning: No voxel data for gas porosity visualization")
-                return
-            if intensities is None:
-                logger.warning("load_gas_porosity called with missing intensity data")
-                print("Warning: Gas porosity intensity data not available")
-                return
-
-            if self.gas_porosity_actor is not None:
-                self.renderer.RemoveActor(self.gas_porosity_actor)
-
-            self.current_gas_porosity_data = (voxel_centers, voxel_sizes, intensities, mode)
-
-            self._clear_result_caches()
-
-            polydata = self._build_gas_porosity_geometry(
-                voxel_centers, voxel_sizes, intensities, threshold, mode
-            )
-
-            if polydata is None or polydata.GetNumberOfPoints() == 0:
-                print("No gas porosity risk voxels to display")
-                return
-
-            mapper = vtk.vtkPolyDataMapper()
-            mapper.SetInputData(polydata)
-            mapper.SetScalarModeToUsePointData()
-
-            self.gas_porosity_actor = vtk.vtkActor()
-            self.gas_porosity_actor.SetMapper(mapper)
-
-            prop = self.gas_porosity_actor.GetProperty()
-            prop.SetOpacity(0.75)
-            prop.SetInterpolationToFlat()
-
-            self.renderer.AddActor(self.gas_porosity_actor)
-            self.render_window.Render()
-
-            num_displayed = polydata.GetNumberOfCells() // 6
-            print(f"Displayed {num_displayed:,} gas porosity voxels")
-
-            self._prebuild_gas_porosity_cache(
-                voxel_centers, voxel_sizes, intensities, threshold, mode
-            )
-
-        except Exception as e:
-            logger.error(
-                f"Failed to load gas porosity visualization: {e}",
-                exc_info=True,
-                context={
-                    'n_voxels': len(voxel_centers) if voxel_centers is not None else 0,
-                    'threshold': threshold,
-                    'mode': mode,
-                }
-            )
-            print(f"Error loading gas porosity visualization: {e}")
-
-    def _build_gas_porosity_geometry(self, voxel_centers: np.ndarray,
-                                      voxel_sizes: np.ndarray,
-                                      intensities: np.ndarray,
-                                      threshold: float,
-                                      mode: str) -> Optional[vtk.vtkPolyData]:
-        """Build gas porosity visualization geometry with defect_industry colors."""
-        try:
-            mask = apply_display_mask(self, intensities >= threshold)
-            filtered_centers = voxel_centers[mask]
-            filtered_sizes = voxel_sizes[mask]
-            filtered_intensities = intensities[mask]
-
-            n_voxels = len(filtered_centers)
-            if n_voxels == 0:
-                return None
-
-            centers_f32 = np.ascontiguousarray(filtered_centers, dtype=np.float32)
-            vtk_points_array = numpy_support.numpy_to_vtk(
-                centers_f32, deep=True, array_type=vtk.VTK_FLOAT
-            )
-            vtk_points_array.SetNumberOfComponents(3)
-
-            points = vtk.vtkPoints()
-            points.SetData(vtk_points_array)
-
-            scaled_sizes = np.ascontiguousarray(filtered_sizes * 0.85, dtype=np.float32)
-            vtk_scales = numpy_support.numpy_to_vtk(
-                scaled_sizes, deep=True, array_type=vtk.VTK_FLOAT
-            )
-            vtk_scales.SetName("Scale")
-
-            point_polydata = vtk.vtkPolyData()
-            point_polydata.SetPoints(points)
-            point_polydata.GetPointData().AddArray(vtk_scales)
-            point_polydata.GetPointData().SetActiveScalars("Scale")
-
-            colors = vtk.vtkUnsignedCharArray()
-            colors.SetNumberOfComponents(3)
-            colors.SetName("Colors")
-
-            min_int = np.min(filtered_intensities)
-            max_int = np.max(filtered_intensities)
-            int_range = max_int - min_int if max_int > min_int else 1.0
-
-            for v in filtered_intensities:
-                t = (v - min_int) / int_range
-                t = min(max(t, 0.0), 1.0)
-                r, g, b = get_color_for_value(t, 'defect_industry')
-                colors.InsertNextTuple3(r, g, b)
-
-            point_polydata.GetPointData().AddArray(colors)
-
-            cube = vtk.vtkCubeSource()
-            cube.SetXLength(1.0)
-            cube.SetYLength(1.0)
-            cube.SetZLength(1.0)
-
-            glyph3D = vtk.vtkGlyph3D()
-            glyph3D.SetSourceConnection(cube.GetOutputPort())
-            glyph3D.SetInputData(point_polydata)
-            glyph3D.SetScaleModeToScaleByScalar()
-            glyph3D.SetColorModeToColorByScalar()
-            glyph3D.Update()
-
-            return glyph3D.GetOutput()
-
-        except Exception as e:
-            logger.error(
-                f"Failed to build gas porosity geometry: {e}",
-                exc_info=True,
-                context={
-                    'n_voxels': len(voxel_centers) if voxel_centers is not None else 0,
-                    'threshold': threshold,
-                    'mode': mode,
-                }
-            )
-            return None
-
-    def _prebuild_gas_porosity_cache(self, voxel_centers, voxel_sizes,
-                                      intensities, current_threshold, mode):
-        """Pre-build geometry for nearby threshold levels."""
-        nearby_thresholds = self._get_bounded_threshold_levels(current_threshold)
-        for thresh in nearby_thresholds:
-            cache_key = (round(thresh, 2), mode)
-            if (
-                cache_key not in self._gas_porosity_cache
-                and self._should_cache_threshold(intensities, round(thresh, 2))
-            ):
-                polydata = self._build_gas_porosity_geometry(
-                    voxel_centers, voxel_sizes, intensities, thresh, mode
-                )
-                self._cache_polydata(self._gas_porosity_cache, cache_key, polydata)
+    def load_gas_porosity(self, voxel_centers: np.ndarray, voxel_sizes: np.ndarray,
+                          intensities: np.ndarray, threshold: float = 0.1, mode: str = "gas_porosity"):
+        """Gas generation / entrapment / porosity in the industry-standard palette."""
+        self.current_gas_porosity_data = (voxel_centers, voxel_sizes, intensities, mode)
+        self._show_result(mode, voxel_centers, voxel_sizes, intensities, threshold,
+                          self._colormap_palette("defect_industry"), vmin=0.0, vmax=1.0)
 
     def update_gas_porosity_threshold(self, threshold: float):
-        """Update gas porosity visualization threshold."""
-        try:
-            if self.current_gas_porosity_data is None:
-                return
+        if self.current_gas_porosity_data is None:
+            return
+        self._set_result_iso(threshold)
 
-            voxel_centers, voxel_sizes, intensities, mode = self.current_gas_porosity_data
+    # -- time modes -------------------------------------------------------------
 
-            cache_key = (round(threshold, 2), mode)
+    def load_fraction_liquid(self, voxel_centers: np.ndarray, voxel_sizes: np.ndarray,
+                             fraction_liquid: np.ndarray, threshold: float = 0.01,
+                             cache_key: Optional[int] = None):
+        """One solidification frame: molten paint on liquid metal, a glowing
+        front at 50 % liquid, steel where the metal has frozen."""
+        self.current_fraction_liquid_data = (voxel_centers, voxel_sizes, fraction_liquid)
+        fl = np.asarray(fraction_liquid, dtype=np.float32)
+        self._show_result("fraction_liquid", voxel_centers, voxel_sizes, fl, 0.5, palette_liquid,
+                          vmin=0.0, vmax=1.0, paint_mask=fl > float(threshold), glow=True)
 
-            if cache_key in self._gas_porosity_cache:
-                polydata = self._gas_porosity_cache[cache_key]
-            else:
-                polydata = self._build_gas_porosity_geometry(
-                    voxel_centers, voxel_sizes, intensities, threshold, mode
-                )
+    def load_fill_time(self, voxel_centers: np.ndarray, voxel_sizes: np.ndarray,
+                       fill_time: np.ndarray, time_threshold: float, max_fill_time_s: float,
+                       cache_key: Optional[int] = None):
+        """Mold filling swept to ``time_threshold``: arrived metal painted by
+        arrival time (blue early, red late), misruns grey, the front glowing.
 
-            if self.gas_porosity_actor is not None:
-                self.renderer.RemoveActor(self.gas_porosity_actor)
+        ``fill_time`` marks a misrun with -1 and a non-metal voxel with NaN.
+        """
+        self.current_fill_time_data = (voxel_centers, voxel_sizes, fill_time)
+        ft = np.asarray(fill_time, dtype=np.float32)
+        finite = np.isfinite(ft)
+        misrun = finite & (ft < 0.0)
+        arrived = finite & (ft >= 0.0) & (ft <= float(time_threshold))
+        safe_max = float(max_fill_time_s) if max_fill_time_s > 0.0 else 1.0
+        # Misruns never arrive: push them past the sweep so the front ignores them.
+        sweep_values = np.where(misrun, safe_max * 10.0, ft)
+        misrun_rgb = tuple(int(round(c * 255)) for c in FILL_TIME_MISRUN_COLOR)
+        self._show_result("fill_time", voxel_centers, voxel_sizes, sweep_values, float(time_threshold),
+                          palette_fill_time, vmin=0.0, vmax=safe_max, valid=finite,
+                          paint_mask=arrived, glow=True,
+                          flat_paint={"misrun": (misrun, misrun_rgb)})
 
-            if polydata is None or polydata.GetNumberOfPoints() == 0:
-                print("No gas porosity risk at this threshold")
-                self.render_window.Render()
-                return
+    def load_fill_animation(self, voxel_centers: np.ndarray, voxel_sizes: np.ndarray,
+                            fill_fraction: np.ndarray, speed_m_s: np.ndarray, max_speed: float,
+                            cache_key: Optional[int] = None):
+        """One filling frame: wetted metal painted by flow speed, the free
+        surface glowing at the wetted threshold."""
+        self.current_fill_animation_data = (voxel_centers, voxel_sizes, fill_fraction, speed_m_s)
+        ff = np.asarray(fill_fraction, dtype=np.float32)
+        safe_max = float(max_speed) if max_speed > 0.0 else 1.0
+        self._show_result("fill_animation", voxel_centers, voxel_sizes, ff, FILL_ANIMATION_WETTED_THRESHOLD,
+                          palette_fill_speed, vmin=0.0, vmax=1.0,
+                          paint_mask=ff > FILL_ANIMATION_WETTED_THRESHOLD,
+                          paint_values=np.asarray(speed_m_s, dtype=np.float32), paint_min=0.0, paint_max=safe_max,
+                          glow=True)
 
-            mapper = vtk.vtkPolyDataMapper()
-            mapper.SetInputData(polydata)
-            mapper.SetScalarModeToUsePointData()
+    # -- style / visibility ---------------------------------------------------------
 
-            self.gas_porosity_actor = vtk.vtkActor()
-            self.gas_porosity_actor.SetMapper(mapper)
+    def set_result_style(self, style: str) -> None:
+        """'surface' paints the skin, 'envelope' shows the isosurface in a ghost shell, 'both' does both."""
+        if self.result_surface is None:
+            return
+        self.result_surface.set_style(style)
+        self._apply_part_actor_visibility()
+        self._refresh_active_inspector()
+        self.render_window.Render()
 
-            prop = self.gas_porosity_actor.GetProperty()
-            prop.SetOpacity(0.75)
-            prop.SetInterpolationToFlat()
-
-            self.renderer.AddActor(self.gas_porosity_actor)
-            self.render_window.Render()
-
-            num_displayed = polydata.GetNumberOfCells() // 6
-            print(f"Displayed {num_displayed:,} gas porosity voxels")
-
-            self._prebuild_gas_porosity_cache(
-                voxel_centers, voxel_sizes, intensities, threshold, mode
-            )
-
-        except Exception as e:
-            logger.error(
-                f"Failed to update gas porosity threshold: {e}",
-                exc_info=True,
-                context={'threshold': threshold}
-            )
-            print(f"Error updating gas porosity threshold: {e}")
+    def result_style(self) -> str:
+        return self.result_surface.style if self.result_surface is not None else "envelope"
 
     def hide_all_analysis(self):
-        """Hide all analysis visualization actors"""
-        if self.shrinkage_actor is not None:
-            self.shrinkage_actor.SetVisibility(False)
-        if self.hotspot_actor is not None:
-            self.hotspot_actor.SetVisibility(False)
-        if self.niyama_actor is not None:
-            self.niyama_actor.SetVisibility(False)
-        if self.hot_tear_actor is not None:
-            self.hot_tear_actor.SetVisibility(False)
-        if self.sand_burn_in_actor is not None:
-            self.sand_burn_in_actor.SetVisibility(False)
-        if self.gas_porosity_actor is not None:
-            self.gas_porosity_actor.SetVisibility(False)
-        if self.fraction_liquid_actor is not None:
-            self.fraction_liquid_actor.SetVisibility(False)
-        if self.fill_time_actor is not None:
-            self.fill_time_actor.SetVisibility(False)
-        if self.fill_animation_actor is not None:
-            self.fill_animation_actor.SetVisibility(False)
+        """Hide the result overlay (model stays)."""
+        if self.result_surface is not None:
+            self.result_surface.set_visible(False)
+            self._apply_part_actor_visibility()
         self.render_window.Render()
 
     def show_analysis(self, analysis_type: str):
-        """Show a specific analysis visualization and hide others"""
-        # Hide all first
-        self.hide_all_analysis()
-
-        # Show the requested one
-        if analysis_type == "shrinkage" and self.shrinkage_actor is not None:
-            self.shrinkage_actor.SetVisibility(True)
-        elif analysis_type == "hotspots" and self.hotspot_actor is not None:
-            self.hotspot_actor.SetVisibility(True)
-        elif analysis_type == "niyama" and self.niyama_actor is not None:
-            self.niyama_actor.SetVisibility(True)
-        elif analysis_type == "hot_tear" and self.hot_tear_actor is not None:
-            self.hot_tear_actor.SetVisibility(True)
-        elif analysis_type == "sand_burn_in" and self.sand_burn_in_actor is not None:
-            self.sand_burn_in_actor.SetVisibility(True)
-        elif analysis_type == "fraction_liquid" and self.fraction_liquid_actor is not None:
-            self.fraction_liquid_actor.SetVisibility(True)
-        elif analysis_type == "fill_time" and self.fill_time_actor is not None:
-            self.fill_time_actor.SetVisibility(True)
-        elif analysis_type == "fill_animation" and self.fill_animation_actor is not None:
-            self.fill_animation_actor.SetVisibility(True)
-
+        """Show the result overlay again (one result is loaded at a time)."""
+        if self.result_surface is not None:
+            self.result_surface.set_visible(True)
+            self._apply_part_actor_visibility()
         self.render_window.Render()
 
     def clear_visualization(self):
-        """Clear all visualization"""
+        """Clear all visualization: model, parts and the result overlay."""
         if self.mesh_actor is not None:
             self.renderer.RemoveActor(self.mesh_actor)
             self.mesh_actor = None
-        
+
         # Clear all part actors
         for actor in self.part_actors.values():
             self.renderer.RemoveActor(actor)
         self.part_actors.clear()
-        
-        if self.shrinkage_actor is not None:
-            self.renderer.RemoveActor(self.shrinkage_actor)
-            self.shrinkage_actor = None
-        
-        if self.hotspot_actor is not None:
-            self.renderer.RemoveActor(self.hotspot_actor)
-            self.hotspot_actor = None
-        
-        if self.niyama_actor is not None:
-            self.renderer.RemoveActor(self.niyama_actor)
-            self.niyama_actor = None
-        
-        if self.hot_tear_actor is not None:
-            self.renderer.RemoveActor(self.hot_tear_actor)
-            self.hot_tear_actor = None
-        
-        if self.sand_burn_in_actor is not None:
-            self.renderer.RemoveActor(self.sand_burn_in_actor)
-            self.sand_burn_in_actor = None
-        
-        if self.fraction_liquid_actor is not None:
-            self.renderer.RemoveActor(self.fraction_liquid_actor)
-            self.fraction_liquid_actor = None
 
-        if self.fill_time_actor is not None:
-            self.renderer.RemoveActor(self.fill_time_actor)
-            self.fill_time_actor = None
-
-        if self.fill_animation_actor is not None:
-            self.renderer.RemoveActor(self.fill_animation_actor)
-            self.fill_animation_actor = None
-
-        # Clear all cached result geometry
-        self._clear_result_caches()
+        if self.result_surface is not None:
+            self.result_surface.clear()
+            self.result_surface.clear_skins()
+        self._result_lattice_key = None
         # The voxel array is about to change; the hidden component ids are
         # kept so the main window can rebuild the mask for the next mesh.
         self._voxel_display_mask = None
@@ -4430,69 +2569,32 @@ class CastingVisualizer(QWidget):
         self.current_niyama_data = None
         self.current_hot_tear_data = None
         self.current_sand_burn_in_data = None
+        self.current_gas_porosity_data = None
         self.current_fraction_liquid_data = None
         self.current_fill_time_data = None
         self.current_fill_animation_data = None
 
-        self.render_window.Render()
-    
-    def clear_result_actors(self):
-        """Clear only the result visualization actors (shrinkage, hotspot, niyama, hot tear, sand burn-in, fraction liquid).
-
-        This keeps the mesh/part actors intact but removes all analysis overlays.
-        Call this when switching between visualization modes.
-        """
-        if self.shrinkage_actor is not None:
-            self.renderer.RemoveActor(self.shrinkage_actor)
-            self.shrinkage_actor = None
-
-        if self.hotspot_actor is not None:
-            self.renderer.RemoveActor(self.hotspot_actor)
-            self.hotspot_actor = None
-
-        if self.niyama_actor is not None:
-            self.renderer.RemoveActor(self.niyama_actor)
-            self.niyama_actor = None
-
-        if self.hot_tear_actor is not None:
-            self.renderer.RemoveActor(self.hot_tear_actor)
-            self.hot_tear_actor = None
-
-        if self.sand_burn_in_actor is not None:
-            self.renderer.RemoveActor(self.sand_burn_in_actor)
-            self.sand_burn_in_actor = None
-
-        if self.gas_porosity_actor is not None:
-            self.renderer.RemoveActor(self.gas_porosity_actor)
-            self.gas_porosity_actor = None
-
-        if self.fraction_liquid_actor is not None:
-            self.renderer.RemoveActor(self.fraction_liquid_actor)
-            self.fraction_liquid_actor = None
-
-        if self.fill_time_actor is not None:
-            self.renderer.RemoveActor(self.fill_time_actor)
-            self.fill_time_actor = None
-
-        if self.fill_animation_actor is not None:
-            self.renderer.RemoveActor(self.fill_animation_actor)
-            self.fill_animation_actor = None
-
-        self._clear_result_caches()
-
-        # The actor is gone, so any cached per-glyph index pointer and the
-        # currently-installed inspector are stale. We deliberately keep the
-        # intent flags (``_feed_modulus_leader_enabled``,
-        # ``_shrink_inspector_data``) so the next ``load_shrinkage`` call
-        # can reinstall the appropriate inspector layer.
-        self._shrinkage_displayed_voxel_indices = None
-        self._shrinkage_cells_per_glyph = 6
         self._inspector_layer = None
         if self.feed_modulus_leader is not None:
             self.feed_modulus_leader.clear()
 
         self.render_window.Render()
-    
+
+    def clear_result_actors(self):
+        """Remove the result overlay but keep the model and part actors.
+
+        Call this when switching between visualization modes. The inspector
+        intent flags (``_feed_modulus_leader_enabled``, ``_shrink_inspector_data``)
+        are kept so the next load reinstalls the appropriate layer.
+        """
+        if self.result_surface is not None:
+            self.result_surface.clear()
+        self._apply_part_actor_visibility()
+        self._inspector_layer = None
+        if self.feed_modulus_leader is not None:
+            self.feed_modulus_leader.clear()
+        self.render_window.Render()
+
     def load_part(self, part_id: str, vertices: np.ndarray, faces: np.ndarray, 
                   color: Optional[Tuple[float, float, float]] = None,
                   opacity: float = 0.35) -> vtk.vtkActor:
@@ -4556,9 +2658,7 @@ class CastingVisualizer(QWidget):
         prop = actor.GetProperty()
         prop.SetColor(*color)
         prop.SetOpacity(opacity)
-        prop.SetInterpolationToPhong()
-        prop.SetSpecular(0.3)
-        prop.SetSpecularPower(20)
+        self._pbr_surface(prop)
         
         if should_use_depth_peeling():
             self.renderer.SetUseDepthPeeling(True)
@@ -4651,15 +2751,18 @@ class CastingVisualizer(QWidget):
         self.part_actors.clear()
         
         # Load each part
+        skins = []
         for i, part in enumerate(part_manager.get_all_parts()):
             if part.visible:
                 color = part.color if part.color else self.PART_COLORS[i % len(self.PART_COLORS)]
-                self.load_part(
-                    part.id,
-                    part.get_vertices(),
-                    part.get_faces(),
-                    color=color
-                )
+                vertices = part.get_vertices()
+                faces = part.get_faces()
+                self.load_part(part.id, vertices, faces, color=color)
+                skins.append((part.id, vertices, faces, part.part_type))
+        # The result renderer paints on its own subdivided copy of the metal skins.
+        if self.result_surface is not None:
+            self.result_surface.set_skins(skins)
+        self._configure_ssao()
         
         # Reset camera to show all parts
         self.renderer.ResetCamera()
@@ -4674,87 +2777,6 @@ class CastingVisualizer(QWidget):
             )
         self.render_window.Render()
     
-    def update_shrinkage_threshold(self, threshold: float):
-        """
-        Update shrinkage visualization threshold - optimized with caching.
-        Uses pre-built geometry when available for instant updates.
-
-        Args:
-            threshold: New threshold (0-1)
-        """
-        if self.current_shrinkage_data is None:
-            return
-
-        voxel_centers, voxel_sizes, intensities = self.current_shrinkage_data
-
-        # Round threshold to cache key (1% increments)
-        cache_key = round(threshold, 2)
-
-        # Check if we have cached geometry
-        with self._shrinkage_cache_lock:
-            polydata = self._shrinkage_cache.get(cache_key)
-
-        if polydata is None:
-            # Build geometry (will be fast with glyph3D)
-            polydata = self._build_shrinkage_geometry_fast(
-                voxel_centers, voxel_sizes, intensities, threshold
-            )
-
-        # Remove old actor
-        if self.shrinkage_actor is not None:
-            self.renderer.RemoveActor(self.shrinkage_actor)
-
-        if polydata is None or polydata.GetNumberOfPoints() == 0:
-            print("No shrinkage voxels at this threshold")
-            self._shrinkage_displayed_voxel_indices = None
-            self.render_window.Render()
-            # Clear the leader on threshold change so the user re-clicks.
-            if self._inspector_layer is not None and self._inspector_layer.mode == "shrinkage":
-                self._inspector_layer = None
-            if self.feed_modulus_leader is not None:
-                self.feed_modulus_leader.clear()
-            return
-
-        # Refresh the displayed voxel indices for the inspector
-        mask = np.asarray(intensities, dtype=np.float32) >= float(threshold)
-        mask = apply_display_mask(self, mask)
-        self._shrinkage_displayed_voxel_indices = np.where(mask)[0].astype(np.int32)
-        self._shrinkage_cells_per_glyph = 6
-
-        # Clear the previous shrink/porosity leader so the user re-clicks
-        # with the new threshold. Pocket identity can change at the new
-        # threshold, so the previous label would point at a stale region.
-        if self._inspector_layer is not None and self._inspector_layer.mode == "shrinkage":
-            self._inspector_layer = None
-        if self.feed_modulus_leader is not None:
-            self.feed_modulus_leader.clear()
-
-        # Create mapper and actor
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputData(polydata)
-        mapper.SetScalarModeToUsePointData()
-
-        self.shrinkage_actor = vtk.vtkActor()
-        self.shrinkage_actor.SetMapper(mapper)
-
-        prop = self.shrinkage_actor.GetProperty()
-        prop.SetOpacity(0.5)
-        prop.SetInterpolationToFlat()
-
-        self.renderer.AddActor(self.shrinkage_actor)
-        self.render_window.Render()
-
-        # Reinstall the active inspector with the new displayed indices so
-        # the next click on a defect voxel reports the updated pocket.
-        self._refresh_active_inspector()
-
-        # Count voxels displayed
-        num_displayed = polydata.GetNumberOfCells() // 6
-        print(f"Displayed {num_displayed:,} shrinkage voxels")
-
-        # Pre-build nearby thresholds in cache for smoother slider movement
-        self._prebuild_cache_async(voxel_centers, voxel_sizes, intensities, threshold)
-    
     def toggle_mesh_visibility(self, visible: bool):
         """Master model toggle: the legacy combined mesh and every part skin."""
         self._model_visible = bool(visible)
@@ -4764,10 +2786,11 @@ class CastingVisualizer(QWidget):
         self.render_window.Render()
     
     def toggle_shrinkage_visibility(self, visible: bool):
-        """Toggle shrinkage visibility"""
-        if self.shrinkage_actor is not None:
-            self.shrinkage_actor.SetVisibility(visible)
-            self.render_window.Render()
+        """Show or hide the result overlay ("Show Results")."""
+        if self.result_surface is not None:
+            self.result_surface.set_visible(bool(visible))
+            self._apply_part_actor_visibility()
+        self.render_window.Render()
     
     def export_screenshot(self, filepath: str):
         """Export current view as image"""
@@ -4880,9 +2903,4 @@ class CastingVisualizer(QWidget):
         self.set_camera_view('iso')
 
     def closeEvent(self, event):
-        """Shut down background workers when the widget is closed."""
-        try:
-            self._cache_executor.shutdown(wait=False, cancel_futures=True)
-        except TypeError:
-            self._cache_executor.shutdown(wait=False)
         super().closeEvent(event)

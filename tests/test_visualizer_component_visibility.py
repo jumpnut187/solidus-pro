@@ -57,6 +57,25 @@ class _ActorStub:
         return _method
 
 
+class _SurfaceStub:
+    """Records what the visualizer forwards to the result renderer."""
+
+    def __init__(self):
+        self.mask = "unset"
+        self.hidden = set()
+        self.view = None
+        self.style = "envelope"
+
+    def set_display_mask(self, mask):
+        self.mask = mask
+
+    def set_hidden_parts(self, hidden):
+        self.hidden = set(hidden)
+
+    def painted_part_ids(self):
+        return set()
+
+
 class _DummySignal:
     def emit(self, *args, **kwargs):
         return None
@@ -95,22 +114,7 @@ class ComponentVisibilityTests(unittest.TestCase):
         viz._model_visible = True
         viz.part_actors = {}
         viz.mesh_actor = None
-        viz._shrinkage_cache = {}
-        viz._shrinkage_cache_built = False
-        viz._shrinkage_cache_lock = threading.Lock()
-        viz._shrinkage_cache_generation = 0
-        viz._pending_shrinkage_thresholds = set()
-        viz._hotspot_cache = {}
-        viz._niyama_cache = {}
-        viz._hot_tear_cache = {}
-        viz._sand_burn_in_cache = {}
-        viz._gas_porosity_cache = {}
-        viz._fraction_liquid_cache = OrderedDict()
-        viz._fraction_liquid_cache_point_count = 0
-        viz._fill_time_cache = OrderedDict()
-        viz._fill_time_cache_point_count = 0
-        viz._fill_animation_cache = OrderedDict()
-        viz._fill_animation_cache_point_count = 0
+        viz.result_surface = _SurfaceStub()
         viz.renderer = _DummyVTKClass()
         viz.render_window = _DummyVTKClass()
         return viz
@@ -176,27 +180,19 @@ class ComponentVisibilityTests(unittest.TestCase):
         selection = np.array([False, True])
         np.testing.assert_array_equal(viz._apply_display_mask(selection), selection)
 
-    def test_setting_mask_invalidates_cached_geometry(self) -> None:
+    def test_mask_and_hidden_parts_are_forwarded_to_the_result_renderer(self) -> None:
         viz = self._bare_visualizer()
-        viz._shrinkage_cache[0.5] = _DummyVTKClass()
-        viz._hotspot_cache[0.5] = _DummyVTKClass()
-        viz._fill_time_cache[3] = _DummyVTKClass()
-        viz._fill_time_cache_point_count = 12
+        viz.part_actors = {"riser": _ActorStub()}
 
-        viz.set_voxel_display_mask(np.ones(4, dtype=bool))
+        viz.set_voxel_display_mask(np.array([True, False]))
+        np.testing.assert_array_equal(viz.result_surface.mask, np.array([True, False]))
 
-        self.assertEqual(viz._shrinkage_cache, {})
-        self.assertEqual(viz._hotspot_cache, {})
-        self.assertEqual(viz._fill_time_cache, {})
-        self.assertEqual(viz._fill_time_cache_point_count, 0)
+        viz.set_component_hidden("riser", True)
+        self.assertEqual(viz.result_surface.hidden, {"riser"})
 
-    def test_display_voxel_count_respects_mask(self) -> None:
-        viz = self._bare_visualizer()
-        values = np.array([0.9, 0.9, 0.9, 0.1], dtype=np.float32)
-        self.assertEqual(viz._display_voxel_count(values, 0.5), 3)
-
-        viz.set_voxel_display_mask(np.array([True, False, True, True]))
-        self.assertEqual(viz._display_voxel_count(values, 0.5), 2)
+        viz.clear_hidden_components()
+        self.assertIsNone(viz.result_surface.mask)
+        self.assertEqual(viz.result_surface.hidden, set())
 
 
 if __name__ == "__main__":

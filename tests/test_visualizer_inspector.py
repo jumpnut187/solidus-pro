@@ -112,6 +112,29 @@ class _RecordingPicker:
         return self.picked_pos
 
 
+class _StubSurface:
+    """Stand-in for ResultSurfaceRenderer: one pick actor, a programmed voxel hit."""
+
+    def __init__(self, actor, voxel_index: int = 0) -> None:
+        self.actor = actor
+        self.view = object()          # "a result is loaded"
+        self.voxel_index = voxel_index
+        self.style = "envelope"
+        self.hidden = set()
+
+    def pick_actors(self):
+        return [self.actor]
+
+    def voxel_at(self, position):
+        return self.voxel_index
+
+    def set_hidden_parts(self, hidden):
+        self.hidden = set(hidden)
+
+    def painted_part_ids(self):
+        return set()
+
+
 class _RecordingInteractor:
     def __init__(self) -> None:
         self.event_pos = (0, 0)
@@ -236,25 +259,12 @@ class InspectorRoutingTests(unittest.TestCase):
 
     def _bare_visualizer(self):
         viz = self.viz.CastingVisualizer.__new__(self.viz.CastingVisualizer)
-        viz._cache_threshold_levels = [i / 100.0 for i in range(1, 101)]
-        viz._shrinkage_cache = {}
-        viz._shrinkage_cache_built = False
-        viz._shrinkage_cache_lock = threading.Lock()
-        viz._shrinkage_cache_generation = 0
-        viz._pending_shrinkage_thresholds = set()
-        viz._cache_executor = _ImmediateExecutor()
-        viz._hotspot_cache = {}
-        viz._niyama_cache = {}
-        viz._hot_tear_cache = {}
-        viz._sand_burn_in_cache = {}
-        viz._gas_porosity_cache = {}
         viz.shrinkage_actor = _RecordingActor()
-        viz.hotspot_actor = None
-        viz.niyama_actor = None
-        viz.hot_tear_actor = None
-        viz.sand_burn_in_actor = None
-        viz.gas_porosity_actor = None
-        viz.fraction_liquid_actor = None
+        viz.result_surface = _StubSurface(viz.shrinkage_actor)
+        viz._result_lattice_key = None
+        viz.part_actors = {}
+        viz._hidden_part_ids = set()
+        viz._model_visible = True
         viz.model_bounds = (0.0, 10.0, 0.0, 10.0, 0.0, 10.0)
         viz._cross_section_enabled = False
         viz.cross_section_planes = {}
@@ -264,8 +274,6 @@ class InspectorRoutingTests(unittest.TestCase):
         viz._feed_modulus_leader_enabled = False
         viz._inspector_layer = None
         viz._shrink_inspector_data = None
-        viz._shrinkage_displayed_voxel_indices = None
-        viz._shrinkage_cells_per_glyph = 6
         viz._animation_frames = []
         viz._is_recording = False
         viz._interactor_initialized = True
@@ -286,14 +294,11 @@ class InspectorRoutingTests(unittest.TestCase):
             seen_voxel_indices.append(picked_voxel_index)
             return LeaderCallout(text=label, anchor_position=anchor)
 
-        viz._shrinkage_displayed_voxel_indices = np.array(
-            [voxel_index, voxel_index + 1, voxel_index + 2], dtype=np.int32
-        )
+        viz.result_surface.voxel_index = voxel_index
         viz._inspector_layer = InspectorLayer(
             mode="shrinkage",
-            pick_actor=viz.shrinkage_actor,
-            displayed_voxel_indices=viz._shrinkage_displayed_voxel_indices,
-            cells_per_glyph=6,
+            pick_actors=viz.result_surface.pick_actors(),
+            voxel_at=viz.result_surface.voxel_at,
             resolver=resolver,
         )
         viz._seen_voxel_indices = seen_voxel_indices
@@ -306,7 +311,7 @@ class InspectorRoutingTests(unittest.TestCase):
             label="Shrink pocket: 0.125 in^3",
             anchor=(2.0, 0.0, 0.0),
         )
-        # Picker returns cell_id = 12 -> glyph_index = 12 // 6 = 2 -> voxel_index = 44
+        # Any cell hit resolves through the surface's world position -> voxel map.
         picker = _RecordingPicker(cell_id=12)
         with mock.patch.object(self.viz.vtk, "vtkCellPicker", lambda: picker):
             viz.interactor.event_pos = (123, 456)
@@ -314,8 +319,7 @@ class InspectorRoutingTests(unittest.TestCase):
         self.assertEqual(picker.pick_calls, 1)
         self.assertEqual(picker.pick_list, [viz.shrinkage_actor])
         self.assertTrue(picker.from_list)
-        # The third glyph in displayed_voxel_indices -> index 2 -> voxel_index 44
-        self.assertEqual(viz._seen_voxel_indices, [44])
+        self.assertEqual(viz._seen_voxel_indices, [42])
         self.assertEqual(viz.feed_modulus_leader.last_callout.text,
                          "Shrink pocket: 0.125 in^3")
 
@@ -350,18 +354,17 @@ class InspectorRoutingTests(unittest.TestCase):
         def resolver(_voxel_index: int):
             return None
 
-        viz._shrinkage_displayed_voxel_indices = np.array([7], dtype=np.int32)
+        viz.result_surface.voxel_index = 7
         viz._inspector_layer = self.viz.InspectorLayer(
             mode="shrinkage",
-            pick_actor=viz.shrinkage_actor,
-            displayed_voxel_indices=viz._shrinkage_displayed_voxel_indices,
-            cells_per_glyph=6,
+            pick_actors=viz.result_surface.pick_actors(),
+            voxel_at=viz.result_surface.voxel_at,
             resolver=resolver,
         )
         viz.feed_modulus_leader.last_callout = types.SimpleNamespace(
             text="stale", anchor_position=(0, 0, 0),
         )
-        picker = _RecordingPicker(cell_id=0)  # glyph 0 -> voxel 7
+        picker = _RecordingPicker(cell_id=0)  # any hit -> voxel 7
         with mock.patch.object(self.viz.vtk, "vtkCellPicker", lambda: picker):
             viz._on_left_button_press(None, None)
         self.assertIsNone(viz.feed_modulus_leader.last_callout)
@@ -395,26 +398,12 @@ class ShrinkInspectorLifecycleTests(unittest.TestCase):
 
     def _bare_visualizer(self):
         viz = self.viz.CastingVisualizer.__new__(self.viz.CastingVisualizer)
-        viz._cache_threshold_levels = [i / 100.0 for i in range(1, 101)]
-        viz._shrinkage_cache = {}
-        viz._shrinkage_cache_built = False
-        viz._shrinkage_cache_lock = threading.Lock()
-        viz._shrinkage_cache_generation = 0
-        viz._pending_shrinkage_thresholds = set()
-        viz._cache_executor = _ImmediateExecutor()
-        viz._hotspot_cache = {}
-        viz._niyama_cache = {}
-        viz._hot_tear_cache = {}
-        viz._sand_burn_in_cache = {}
-        viz._gas_porosity_cache = {}
         viz.shrinkage_actor = _RecordingActor()
-        viz.hotspot_actor = None
-        viz.niyama_actor = None
-        viz.hot_tear_actor = None
-        viz.sand_burn_in_actor = None
-        viz.sand_burn_in_actor = None
-        viz.gas_porosity_actor = None
-        viz.fraction_liquid_actor = None
+        viz.result_surface = _StubSurface(viz.shrinkage_actor)
+        viz._result_lattice_key = None
+        viz.part_actors = {}
+        viz._hidden_part_ids = set()
+        viz._model_visible = True
         viz.model_bounds = (0.0, 10.0, 0.0, 10.0, 0.0, 10.0)
         viz._cross_section_enabled = False
         viz.cross_section_planes = {}
@@ -424,8 +413,6 @@ class ShrinkInspectorLifecycleTests(unittest.TestCase):
         viz._feed_modulus_leader_enabled = False
         viz._inspector_layer = None
         viz._shrink_inspector_data = None
-        viz._shrinkage_displayed_voxel_indices = None
-        viz._shrinkage_cells_per_glyph = 6
         viz._animation_frames = []
         viz._is_recording = False
         viz._interactor_initialized = True
@@ -458,7 +445,6 @@ class ShrinkInspectorLifecycleTests(unittest.TestCase):
         viz = self._bare_visualizer()
         mesh = self._stub_mesh()
         display = np.array([0.0, 0.0, 0.9], dtype=np.float32)
-        viz._shrinkage_displayed_voxel_indices = np.array([0, 1, 2], dtype=np.int32)
         viz.set_shrink_inspector_data(
             display_intensity=display,
             mesh=mesh,
@@ -481,7 +467,6 @@ class ShrinkInspectorLifecycleTests(unittest.TestCase):
         viz = self._bare_visualizer()
         mesh = self._stub_mesh()
         display = np.array([0.4, 0.6, 0.9], dtype=np.float32)
-        viz._shrinkage_displayed_voxel_indices = np.array([0, 1, 2], dtype=np.int32)
         viz.set_shrink_inspector_data(
             display_intensity=display,
             mesh=mesh,
@@ -499,7 +484,6 @@ class ShrinkInspectorLifecycleTests(unittest.TestCase):
     def test_shrink_data_disables_feedmod_intent(self) -> None:
         viz = self._bare_visualizer()
         viz._feed_modulus_leader_enabled = True
-        viz._shrinkage_displayed_voxel_indices = np.array([0, 1, 2], dtype=np.int32)
         viz.set_shrink_inspector_data(
             display_intensity=np.array([0.0, 0.0, 0.9], dtype=np.float32),
             mesh=self._stub_mesh(),
@@ -512,7 +496,6 @@ class ShrinkInspectorLifecycleTests(unittest.TestCase):
 
     def test_enable_feedmod_disables_shrink_intent(self) -> None:
         viz = self._bare_visualizer()
-        viz._shrinkage_displayed_voxel_indices = np.array([0, 1, 2], dtype=np.int32)
         viz.set_shrink_inspector_data(
             display_intensity=np.array([0.0, 0.0, 0.9], dtype=np.float32),
             mesh=self._stub_mesh(),
@@ -531,9 +514,6 @@ class ShrinkInspectorLifecycleTests(unittest.TestCase):
         sizes = np.ones(2, dtype=np.float32)
         values = np.array([0.25, 0.50], dtype=np.float32)
         viz.current_shrinkage_data = (centers, sizes, values)
-        viz.shrinkage_actor = _RecordingActor()
-        viz._shrinkage_displayed_voxel_indices = np.array([0, 1], dtype=np.int32)
-        viz._shrinkage_cells_per_glyph = 6
         viz.enable_feed_modulus_leader(True)
         self.assertIsNotNone(viz._inspector_layer)
         self.assertEqual(viz._inspector_layer.mode, "feed_modulus")

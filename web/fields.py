@@ -111,56 +111,18 @@ _NON_NEGATIVE_ONLY_MODES = frozenset({"fill_time"})
 
 _QUANT_MAX = 255.0
 
-#: Largest lattice this module will build, in cells.
-#:
-#: The lattice is derived from the extent of the voxel centers, so a run whose
-#: voxels lie on a long diagonal at a fine voxel size implies a box far larger
-#: than the metal in it: 4,000 voxels along the diagonal of a 15 inch envelope
-#: at 0.05 inch is 27 million cells and roughly 330 MB just for the Euclidean
-#: distance transform's index arrays. Unbounded, the first grid request for
-#: such a run takes the process down and every retry does it again.
-#:
-#: 64 million cells is about 64 MB for the mask and 256 MB of transient EDT
-#: indices -- comfortably past any real casting on this hardware, and short of
-#: the runs that cannot work at all.
-MAX_LATTICE_CELLS = 64_000_000
-
-
-class LatticeTooLargeError(ValueError):
-    """The derived lattice is larger than this module will build.
-
-    Carries the numbers the message needs so the web layer can turn it into
-    something a user can act on, rather than a stack trace.
-    """
-
-    def __init__(self, dims: Tuple[int, int, int], spacing: float) -> None:
-        self.dims = dims
-        self.spacing = spacing
-        self.cell_count = int(dims[0]) * int(dims[1]) * int(dims[2])
-        super().__init__(
-            f"Result lattice would be {dims[0]} x {dims[1]} x {dims[2]} "
-            f"({self.cell_count:,} cells) at {spacing:g} in; "
-            f"the limit is {MAX_LATTICE_CELLS:,}."
-        )
-
-
-# --------------------------------------------------------------------------
-# Grid model
-# --------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Lattice:
-    """The uniform voxel lattice a run was solved on."""
-
-    dims: Tuple[int, int, int]
-    origin: Tuple[float, float, float]
-    spacing: float
-
-    @property
-    def cell_count(self) -> int:
-        nx, ny, nz = self.dims
-        return int(nx) * int(ny) * int(nz)
+# The lattice itself, its size guard and the scatter/fill live in
+# core.dense_grid so the desktop renderer shares them. Re-exported under the
+# names this module always had.
+from core.dense_grid import (  # noqa: E402
+    MAX_LATTICE_CELLS,
+    Lattice,
+    LatticeTooLargeError,
+    derive_lattice,
+    flat_indices as _flat_indices,
+    nearest_known_map as _nearest_known_map,
+    scatter_and_fill as _scatter_and_fill,
+)
 
 
 @dataclass
@@ -225,139 +187,12 @@ class FieldGrids:
 # --------------------------------------------------------------------------
 
 
-def derive_lattice(centers: np.ndarray, sizes: Optional[np.ndarray] = None) -> Lattice:
-    """
-    Recover the uniform lattice the sparse centers were sampled from.
-
-    Raises :class:`LatticeTooLargeError` when the extent and the voxel size
-    imply more than :data:`MAX_LATTICE_CELLS`. The check is on the cell count
-    computed from the dimensions, before anything is allocated, because the
-    failure this guards against is an allocation.
-
-    Follows the pattern in ``core.surface_extraction._build_scalar_volume``:
-    the unique coordinate values along each axis are the lattice planes. The
-    spacing is taken from the per-voxel size when it is uniform (it always is
-    for a run at ``base_voxel_size``) and from the median inter-plane gap
-    otherwise, and ``dims`` comes from the extent rather than the number of
-    unique values -- an axis can have an entirely empty plane in the middle of
-    the casting, and counting occupied planes would silently shear the grid.
-    """
-    if centers.size == 0:
-        return Lattice(dims=(1, 1, 1), origin=(0.0, 0.0, 0.0), spacing=1.0)
-
-    spacing = 0.0
-    if sizes is not None and sizes.size:
-        finite = sizes[np.isfinite(sizes) & (sizes > 0.0)]
-        if finite.size:
-            spacing = float(np.median(finite))
-
-    if spacing <= 0.0:
-        gaps: List[float] = []
-        for axis in range(3):
-            unique = np.unique(np.round(centers[:, axis].astype(np.float64), 6))
-            if unique.size >= 2:
-                diffs = np.diff(unique)
-                positive = diffs[diffs > 1e-9]
-                if positive.size:
-                    gaps.append(float(np.min(positive)))
-        spacing = float(np.min(gaps)) if gaps else 1.0
-
-    origin: List[float] = []
-    dims: List[int] = []
-    for axis in range(3):
-        column = centers[:, axis].astype(np.float64)
-        low = float(np.min(column))
-        high = float(np.max(column))
-        origin.append(low)
-        dims.append(int(round((high - low) / spacing)) + 1)
-
-    shape = (dims[0], dims[1], dims[2])
-    if dims[0] * dims[1] * dims[2] > MAX_LATTICE_CELLS:
-        raise LatticeTooLargeError(shape, float(spacing))
-
-    return Lattice(
-        dims=shape,
-        origin=(origin[0], origin[1], origin[2]),
-        spacing=float(spacing),
-    )
-
-
-def _flat_indices(centers: np.ndarray, lattice: Lattice) -> np.ndarray:
-    """Map voxel centers onto flat, x-fastest cell indices."""
-    nx, ny, nz = lattice.dims
-    ox, oy, oz = lattice.origin
-    spacing = lattice.spacing
-    ix = np.clip(np.rint((centers[:, 0].astype(np.float64) - ox) / spacing), 0, nx - 1).astype(np.int64)
-    iy = np.clip(np.rint((centers[:, 1].astype(np.float64) - oy) / spacing), 0, ny - 1).astype(np.int64)
-    iz = np.clip(np.rint((centers[:, 2].astype(np.float64) - oz) / spacing), 0, nz - 1).astype(np.int64)
-    return ix + nx * (iy + ny * iz)
-
-
-def _nearest_known_map(known: np.ndarray, lattice: Lattice) -> np.ndarray:
-    """
-    For every cell, the flat index of the nearest cell where ``known`` is true.
-
-    ``known`` is a flat, x-fastest boolean grid. The Euclidean distance
-    transform is the expensive part of building a sidecar, so the map derived
-    from the occupancy mask is computed once and reused for every scalar field;
-    only a mode defined on a strict subset of the metal pays for a second one.
-    """
-    nx, ny, nz = lattice.dims
-    volume = np.asarray(known, dtype=bool).reshape((nz, ny, nx))
-    unknown = ~volume
-    if not np.any(unknown):
-        return np.arange(lattice.cell_count, dtype=np.int64)
-    if np.all(unknown):
-        return np.zeros(lattice.cell_count, dtype=np.int64)
-
-    # distance_transform_edt measures distance to the nearest ZERO of its
-    # input, so the "unknown" grid is what goes in: the feature it walks
-    # towards is a known cell.
-    indices = ndimage.distance_transform_edt(unknown, return_distances=False, return_indices=True)
-    kz, ky, kx = indices  # each (nz, ny, nx)
-    flat = kx.astype(np.int64) + nx * (ky.astype(np.int64) + ny * kz.astype(np.int64))
-    return np.asarray(flat, dtype=np.int64).reshape(-1)
-
-
 def _quantize(dense: np.ndarray, minimum: float, maximum: float) -> np.ndarray:
     span = maximum - minimum
     if span <= 0.0:
         return np.zeros(dense.shape, dtype=np.uint8)
     scaled = (dense.astype(np.float64) - minimum) / span
     return np.clip(np.rint(scaled * _QUANT_MAX), 0.0, _QUANT_MAX).astype(np.uint8)
-
-
-def _scatter_and_fill(
-    values: np.ndarray,
-    cell_indices: np.ndarray,
-    sample_mask: np.ndarray,
-    nearest: np.ndarray,
-    lattice: Lattice,
-) -> np.ndarray:
-    """
-    Scatter sparse per-voxel values onto the dense lattice, then fill the rest.
-
-    ``sample_mask`` selects which voxels carry a usable value (a misrun voxel
-    in ``fill_time`` does not). Cells with no value take the value of the
-    nearest cell that has one -- via ``nearest``, which is computed once
-    against the occupancy mask, plus a second, mode-specific pass in the rarer
-    case where a mode is undefined on some *occupied* cells.
-    """
-    cell_count = lattice.cell_count
-    dense = np.zeros(cell_count, dtype=np.float32)
-    known = np.zeros(cell_count, dtype=bool)
-    if not np.any(sample_mask):
-        return dense
-
-    dense[cell_indices[sample_mask]] = values[sample_mask]
-    known[cell_indices[sample_mask]] = True
-
-    filled: np.ndarray = dense[nearest]
-    if np.all(known[nearest]):
-        return filled
-
-    mode_nearest = _nearest_known_map(known, lattice)
-    return np.asarray(dense[mode_nearest], dtype=np.float32)
 
 
 def build_field_grids(
