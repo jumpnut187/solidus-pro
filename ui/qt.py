@@ -88,7 +88,27 @@ from PySide6.QtWidgets import (
     QWidgetAction,
 )
 
+
+def is_checked(state: object) -> bool:
+    """True when a ``QCheckBox.stateChanged`` payload means "checked".
+
+    Qt 6 trap: ``stateChanged`` emits a plain ``int`` (2), but ``Qt.Checked``
+    is a ``Qt.CheckState`` enum member and ``2 == Qt.Checked`` is ``False``
+    under PySide6. Every ``state == Qt.Checked`` handler therefore read as
+    unchecked on both edges. ``QListWidgetItem.checkState()`` returns the enum,
+    so both shapes are accepted here.
+    """
+    if state == Qt.Checked:
+        return True
+    checked_value = getattr(Qt.Checked, "value", 2)
+    try:
+        return int(state) == int(checked_value)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return False
+
+
 __all__ = [
+    "is_checked",
     # QtCore
     "QFileSystemWatcher",
     "QObject",

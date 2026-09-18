@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ui.qt import (
+    is_checked,
     QAbstractItemView,
     QBrush,
     QCheckBox,
@@ -401,7 +402,7 @@ class PartsDialog(DraggableDialog):
             )
             open_top_cb.setProperty("part_id", part_id)
             open_top_cb.stateChanged.connect(
-                lambda state, pid=part_id: self._on_open_top_changed(pid, state == Qt.Checked)
+                lambda state, pid=part_id: self._on_open_top_changed(pid, is_checked(state))
             )
 
             cb_container = QWidget()

@@ -56,6 +56,7 @@ from ui.qt import (
     QWidgetAction,
     Qt,
     Signal,
+    is_checked,
 )
 import json
 import sys
@@ -891,7 +892,7 @@ class VisualizationDialog(DraggableDialog):
     
     def _on_plane_toggle(self, axis: str, state: int):
         """Handle plane enable/disable"""
-        enabled = state == Qt.Checked
+        enabled = is_checked(state)
 
         # Enable/disable slider
         slider = getattr(self, f"{axis.lower()}_plane_slider")
@@ -918,7 +919,7 @@ class VisualizationDialog(DraggableDialog):
     
     def _on_direction_changed(self, axis: str, state: int):
         """Handle flip direction change"""
-        direction = -1 if state == Qt.Checked else 1
+        direction = -1 if is_checked(state) else 1
         setattr(self, f"{axis.lower()}_direction", direction)
 
         # Re-emit with new direction if plane is currently enabled
@@ -954,7 +955,7 @@ class VisualizationDialog(DraggableDialog):
     
     def _on_legend_toggle(self, state: int):
         """Handle legend show/hide"""
-        self.show_legend_changed.emit(state == Qt.Checked)
+        self.show_legend_changed.emit(is_checked(state))
     
     def get_colormap(self) -> str:
         """Get current colormap key"""
@@ -1454,7 +1455,7 @@ class LogViewerDialog(QDialog):
     
     def _toggle_auto_refresh(self, state):
         """Toggle auto-refresh timer"""
-        if state == Qt.Checked:
+        if is_checked(state):
             self._auto_refresh_timer.start(2000)  # Refresh every 2 seconds
         else:
             self._auto_refresh_timer.stop()
@@ -6718,11 +6719,11 @@ class MainWindow(QMainWindow):
     
     def _toggle_mesh_visibility(self, state):
         """Toggle mesh visibility"""
-        self.visualizer.toggle_mesh_visibility(state == Qt.Checked)
+        self.visualizer.toggle_mesh_visibility(is_checked(state))
     
     def _toggle_shrinkage_visibility(self, state):
         """Toggle shrinkage visibility"""
-        self.visualizer.toggle_shrinkage_visibility(state == Qt.Checked)
+        self.visualizer.toggle_shrinkage_visibility(is_checked(state))
     
     # ==================== NEW VISUALIZATION FEATURE HANDLERS ====================
     
