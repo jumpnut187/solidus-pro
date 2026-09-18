@@ -18,7 +18,7 @@ import numpy as np
 
 from core.part_manager import PART_TYPE_CHILL
 from core.surrogate.conditioning import Conditioning, build_conditioning_vector
-from core.surrogate.fields import PART_TYPE_DIVISOR, GridMeta, encode_channels, encode_field
+from core.surrogate.fields import CHANNELS, PART_TYPE_DIVISOR, GridMeta, encode_channels, encode_field
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEFAULT_DATASET_DIR = os.path.join(PROJECT_ROOT, "data", "surrogate_dataset")
@@ -34,6 +34,10 @@ MAX_END_BEFORE_START_FRACTION = 0.01
 #: a 17 in part carry end times of 0.01-0.3 s, i.e. an aborted solve; no real
 #: casting in this catalog finishes solidifying in under a second.
 MIN_MEDIAN_END_S = 1.0
+#: Index of the chill_boost channel in :data:`core.surrogate.fields.CHANNELS`.
+CHILL_BOOST_CHANNEL = CHANNELS.index("chill_boost")
+#: Channel-5 values at or below this count as "no chill boost" (encoded 1.0).
+ZERO_BOOST_TOL = 1e-6
 
 #: ``(path, reason)`` pairs skipped by the most recent :func:`load_dataset` call.
 _LAST_LOAD_SKIPS: List[Tuple[str, str]] = []
@@ -95,8 +99,14 @@ def capture_run(
         if solidification_times is None or getattr(engine, "solidification_start_times", None) is None:
             return None
 
-        chill_boost = getattr(engine, "_chill_boost", None)
-        if chill_boost is None:
+        # Never read ``engine._chill_boost`` here: the loop decays it to 1.0
+        # by the end of a run (air gap + saturation), which would zero the
+        # chill channel in every record.  Use the geometry-only t=0 field,
+        # matching what the surrogate pipeline feeds the model at inference.
+        initial_fn = getattr(engine, "compute_initial_chill_influence", None)
+        if callable(initial_fn):
+            chill_boost = initial_fn()
+        else:
             chill_boost = engine._calculate_chill_influence()
         riser_slowdown = engine._calculate_riser_influence()
 
@@ -173,20 +183,37 @@ def active_cell_mask(channels: np.ndarray) -> np.ndarray:
     return occupied & ~chill
 
 
+def chill_cell_mask(channels: np.ndarray) -> np.ndarray:
+    """Flat mask of occupied grid cells encoded as chill."""
+    channels = np.asarray(channels)
+    occupied = channels[0].reshape(-1) > 0.5
+    chill = np.abs(channels[1].reshape(-1) - PART_TYPE_CHILL / PART_TYPE_DIVISOR) < CHILL_CHANNEL_TOL
+    return occupied & chill
+
+
 def validate_record(record: Dict[str, Any]) -> Optional[str]:
     """Return a skip reason for an unusable record, or ``None`` when it is fine.
 
     Checks run on active (occupied, non-chill) cells:
       * ``no_active_cells`` -- occupancy grid is empty
+      * ``chill_present_but_zero_boost`` -- the record has chill cells but the
+        chill_boost channel is zero on every active cell (captured from the
+        decayed end-of-run boost instead of the t=0 field; the model would
+        learn that chills do nothing)
       * ``nonfinite_end`` / ``nonfinite_start`` / ``nonfinite_local`` -- NaN or inf
       * ``no_positive_end`` -- no active cell has end > 0
       * ``median_end_nonpositive`` -- median active end <= 0
       * ``median_end_below_1s`` -- median active end < ``MIN_MEDIAN_END_S``
       * ``end_before_start_gt_1pct`` -- end < start on > 1% of active cells
     """
-    active = active_cell_mask(record["channels"])
+    channels = np.asarray(record["channels"])
+    active = active_cell_mask(channels)
     if not np.any(active):
         return "no_active_cells"
+    if np.any(chill_cell_mask(channels)):
+        boost = channels[CHILL_BOOST_CHANNEL].reshape(-1)[active]
+        if not np.any(boost > ZERO_BOOST_TOL):
+            return "chill_present_but_zero_boost"
     end = np.asarray(record["end"], dtype=np.float32).reshape(-1)[active]
     start = np.asarray(record["start"], dtype=np.float32).reshape(-1)[active]
     local = np.asarray(record["local"], dtype=np.float32).reshape(-1)[active]

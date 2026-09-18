@@ -1902,6 +1902,54 @@ class SolidificationEngine:
 
         return self._chill_boost
 
+    def compute_initial_chill_influence(self) -> np.ndarray:
+        """
+        Chill boost at t=0 with every voxel liquid, independent of engine state.
+
+        ``_chill_boost`` is rewritten every step by ``_update_dynamic_chill_boost``
+        and decays to 1.0 (air gap + saturation) by the end of a run.  Surrogate
+        training captures run after the loop, so they must use this geometry-only
+        field, which matches what the surrogate pipeline computes at inference.
+        Does not modify ``self.time``, ``voxel_states`` or ``_chill_boost``.
+        """
+        n_voxels = len(self.mesh.voxel_centers)
+        chill_indices = self._get_chill_voxel_indices()
+        if len(chill_indices) == 0:
+            return np.ones(n_voxels, dtype=np.float32)
+
+        if self._chill_centers is None or self._chill_influence_thicknesses is None:
+            # Populate the cached chill geometry without disturbing the dynamic
+            # boost array the loop may still be using.
+            saved_boost = self._chill_boost
+            saved_time = self.time
+            saved_states = np.array(self.mesh.voxel_states, copy=True)
+            try:
+                self.time = 0.0
+                self.mesh.voxel_states[:] = 0.0
+                result = np.asarray(self._calculate_chill_influence(), dtype=np.float32).copy()
+            finally:
+                self.time = saved_time
+                self.mesh.voxel_states[:] = saved_states
+                self._chill_boost = saved_boost
+            return result
+
+        cp = self.analysis_options.solidification_params.chill
+        max_chill_boost = cp.max_chill_boost
+        voxel_centers = np.ascontiguousarray(self.mesh.voxel_centers, dtype=np.float32)
+        liquid_states = np.zeros(n_voxels, dtype=np.float32)
+        if self.mesh.voxel_part_types is not None:
+            part_types = np.ascontiguousarray(self.mesh.voxel_part_types, dtype=np.int32)
+        else:
+            part_types = np.zeros(n_voxels, dtype=np.int32)
+
+        return np.asarray(
+            compute_dynamic_chill_boost_parallel(
+                voxel_centers, self._chill_centers, self._chill_influence_thicknesses,
+                liquid_states, part_types, 0.0, max_chill_boost
+            ),
+            dtype=np.float32,
+        )
+
     def _update_dynamic_chill_boost(self):
         """Update the chill boost array based on current simulation time and progress."""
         if self._chill_centers is None:

@@ -160,6 +160,10 @@ class RecordValidationTests(unittest.TestCase):
         rec["channels"][1].reshape(-1)[chill_idx] = 2.0 / PART_TYPE_DIVISOR
         rec["end"][chill_idx] = 0.0
         rec["start"][chill_idx] = 0.0
+        # A record with chills must also carry chill_boost on the cast cells;
+        # a zero channel is rejected as a decayed end-of-run capture.
+        self.assertEqual(validate_record(rec), "chill_present_but_zero_boost")
+        rec["channels"][5].reshape(-1)[active_idx[-2:]] = 0.5
         self.assertIsNone(validate_record(rec))
 
 

@@ -55,6 +55,17 @@ def _material_factor(raw: Dict[str, float]) -> float:
     return float(math.sqrt((WCB_DIFFUSIVITY / diffusivity) * (latent / WCB_LATENT)))
 
 
+def _decode_chill_boost(channel: np.ndarray, log6: float) -> np.ndarray:
+    """Invert ``fields.encode_channels`` channel 5 back to the chill boost factor.
+
+    The encoder stores ``log1p(boost - 1) / log(6) == log(boost) / log(6)``, so
+    the inverse is ``exp(c * log(6))``.  An earlier ``expm1`` decode returned
+    ``boost - 1`` and, after the ``>= 1`` clamp, read every boost in [1, 2] as
+    exactly 1.0 (no chill effect) and under-read everything above it by one.
+    """
+    return np.maximum(np.exp(np.asarray(channel, dtype=np.float64) * log6), 1.0)
+
+
 def _mushy_fraction(raw: Dict[str, float]) -> float:
     liquidus = float(raw.get("liquidus_temp", 1450.0))
     solidus = float(raw.get("solidus_temp", 1400.0))
@@ -195,8 +206,7 @@ class NumpyDemoModel(SurrogateModel):
         active = c[0] > 0.5
         mod_in = c[3] * float(raw.get("max_dim", 10.0))
         surf_in = c[2] * float(raw.get("max_dim", 10.0))
-        chill_in = np.expm1(c[5] * _LOG6)
-        chill_in = np.maximum(chill_in, 1.0)
+        chill_in = _decode_chill_boost(c[5], _LOG6)
         riser_in = np.maximum(c[6], 0.15)
         height = c[4]
 
@@ -289,8 +299,7 @@ class NumpyWeightsModel(SurrogateModel):
         active = c[0] > 0.5
         mod_in = c[3] * max_dim
         surf_in = c[2] * max_dim
-        chill_in = np.expm1(c[5] * _LOG6)
-        chill_in = np.maximum(chill_in, 1.0)
+        chill_in = _decode_chill_boost(c[5], _LOG6)
         riser_in = np.maximum(c[6], 1e-6)
         height = np.clip(c[4], 0.0, 1.0)
 

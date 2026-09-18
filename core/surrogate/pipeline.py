@@ -219,7 +219,8 @@ def run_surrogate_pipeline(
 
     # Geometry-derived input channels (no physics loop required).
     engine._calculate_feeding_distances()
-    chill_boost = engine._calculate_chill_influence()
+    # Same t=0 geometry-only field ``capture_run`` records at training time.
+    chill_boost = engine.compute_initial_chill_influence()
     riser_slowdown = engine._calculate_riser_influence()
     engine._chill_boost = chill_boost
     engine._air_gap_slowdown = np.ones(len(voxel_mesh.voxel_centers), dtype=np.float32)
