@@ -16,13 +16,34 @@ export function formatCount(value: number): string {
   return Math.round(value).toLocaleString();
 }
 
-/** Seconds as `m:ss.s`, or `s.s` under a minute — how a pour is actually read. */
-export function formatSeconds(seconds: number): string {
+/**
+ * Simulated time, for every clock readout in the shell.
+ *
+ * Always seconds, to one decimal, with thousands separators. The transport
+ * used to read `0.0 s / 15:09.6` while the legend beside it read
+ * `0 s of 910 s`: two styles and two roundings of the same instant. Seconds
+ * win because everything this time is compared against is in seconds -- the
+ * legend's ticks, a probed solidification time, the Chvorinov statistics --
+ * and a readout in another unit cannot be read against them at a glance.
+ * Rounding before formatting keeps a value just above zero from being shown
+ * in exponent form by `formatNumber`.
+ */
+export function formatDuration(seconds: number): string {
   if (!Number.isFinite(seconds)) return '--';
-  if (seconds < 60) return `${seconds.toFixed(1)} s`;
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds - minutes * 60;
-  return `${minutes}:${rest < 10 ? '0' : ''}${rest.toFixed(1)}`;
+  return `${formatNumber(Math.round(seconds * 10) / 10, 1)} s`;
+}
+
+/**
+ * Seconds at a 0..1 playback position, the way the viewport seeks.
+ *
+ * `FrameStack.seek` walks the recorded times linearly from the first frame to
+ * the last, so the clock has to start from the first frame's time as well;
+ * scaling the last time alone disagrees with the picture whenever a run does
+ * not start its record at zero.
+ */
+export function playbackSeconds(progress: number, startSeconds: number, endSeconds: number): number {
+  const clamped = Math.min(Math.max(progress, 0), 1);
+  return startSeconds + clamped * (endSeconds - startSeconds);
 }
 
 /**

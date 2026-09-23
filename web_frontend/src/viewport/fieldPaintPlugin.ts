@@ -21,15 +21,17 @@
  * (`CUSTOM_FRAGMENT_UPDATE_ALBEDO` does not exist in the PBR shader; it is a
  * standard-material marker.)
  */
-import {
-  Constants,
-  MaterialPluginBase,
-  RawTexture,
-  RawTexture3D,
-  Texture,
-  Vector3
-} from '@babylonjs/core';
-import type { AbstractEngine, Material, Scene, SubMesh, UniformBuffer } from '@babylonjs/core';
+import { Constants } from '@babylonjs/core/Engines/constants';
+import { MaterialPluginBase } from '@babylonjs/core/Materials/materialPluginBase';
+import { RawTexture } from '@babylonjs/core/Materials/Textures/rawTexture';
+import { RawTexture3D } from '@babylonjs/core/Materials/Textures/rawTexture3D';
+import { Texture } from '@babylonjs/core/Materials/Textures/texture';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector';
+import type { AbstractEngine } from '@babylonjs/core/Engines/abstractEngine';
+import type { Material } from '@babylonjs/core/Materials/material';
+import type { UniformBuffer } from '@babylonjs/core/Materials/uniformBuffer';
+import type { SubMesh } from '@babylonjs/core/Meshes/subMesh';
+import type { Scene } from '@babylonjs/core/scene';
 
 /** Mask byte for cast metal: the engine's CAST code (0) plus one. */
 export const CAST_MASK_CODE = 1;

@@ -30,8 +30,19 @@ import {
   useRef,
   useState
 } from 'react';
-import { Color3, PointerEventTypes, Plane, Tools, Vector3 } from '@babylonjs/core';
-import type { Mesh, PBRMaterial } from '@babylonjs/core';
+import { PointerEventTypes } from '@babylonjs/core/Events/pointerEvents';
+import { Color3 } from '@babylonjs/core/Maths/math.color';
+import { Plane } from '@babylonjs/core/Maths/math.plane';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector';
+import { Tools } from '@babylonjs/core/Misc/tools';
+import type { PickingInfo } from '@babylonjs/core/Collisions/pickingInfo';
+import type { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial';
+import type { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh';
+import type { Mesh } from '@babylonjs/core/Meshes/mesh';
+import type { Scene } from '@babylonjs/core/scene';
+// Attaches `Tools.CreateScreenshotUsingRenderTargetAsync`, which the sized
+// screenshot path calls. `Tools` alone does not carry it.
+import '@babylonjs/core/Misc/screenshotTools';
 
 import { sampleColormap } from '../lib/colormaps';
 import { fetchEnvelope, isAbortError, type EnvelopeData } from '../lib/gridApi';
@@ -47,6 +58,7 @@ import {
   type ViewportProps
 } from '../lib/viewState';
 import type { ProjectPart } from '../lib/api';
+import { PART_TYPES } from '../lib/partTypes';
 import { Annotations } from './annotations';
 import { drawAxesGizmo } from './axesGizmo';
 import { CameraController, unionBounds, type Bounds } from './cameraController';
@@ -60,7 +72,8 @@ import {
 } from './fieldPaintPlugin';
 import { createPourMarker } from './markers';
 import { applyPartAppearance, syncPartMeshes, type PartEntry } from './partMeshes';
-import { SECTION_AXES, SectionCaps, type SectionAxis } from './sectionCaps';
+import { pickVisibleAll } from './picking';
+import { SECTION_AXES, SectionCaps, isSectionCap, type SectionAxis } from './sectionCaps';
 import {
   createOriginAxes,
   createViewportScene,
@@ -70,6 +83,62 @@ import {
 
 /** A pointerup further than this from its pointerdown was a camera drag, not a click. */
 const CLICK_DRAG_THRESHOLD_PX = 4;
+
+/**
+ * A click this soon after the last one, and this close to it, is the second
+ * half of a double-click rather than a click of its own.
+ *
+ * 300 ms is Babylon's own `InputManager.DoubleClickDelay`, which is what
+ * decides when it emits POINTERDOUBLETAP; matching it means a click is
+ * swallowed exactly when the double-tap that follows it is real. Babylon does
+ * not check distance between the two presses, so the radius is ours: two
+ * quick clicks on different points are a measurement, not a double-click.
+ */
+const DOUBLE_CLICK_MS = 300;
+const DOUBLE_CLICK_RADIUS_PX = 6;
+
+/**
+ * The shortest distance a measurement may span, in inches.
+ *
+ * Two picks on the same pixel give a distance of zero, which is never what
+ * was meant; the second click is ignored instead and the start stays put.
+ */
+const MIN_MEASURE_DISTANCE_IN = 1e-4;
+
+/**
+ * The status line between a measurement's two clicks.
+ *
+ * The first click only drops a small marker, and without this the tool gave no
+ * sign it was waiting for anything. Escape leaves the tool, which the tool
+ * effect below treats as cancelling the measurement.
+ */
+const MEASURE_SECOND_POINT_HINT = 'Click the second point (Esc to cancel)';
+
+/**
+ * The largest share of the main thread that hover picking may take.
+ *
+ * A pick tests the ray against every triangle of every part whose bounds it
+ * crosses. On the 586,000-triangle ring casting that is 7 ms, the same as
+ * Babylon's own `scene.pick`, and one of those every frame at 120 Hz took
+ * 85 percent of the thread. Spacing picks by their own measured cost keeps
+ * hover to this share: on that casting the cursor trails the pointer by about
+ * 30 ms at worst, and on a small model it still updates every frame.
+ */
+const HOVER_PICK_DUTY = 0.25;
+
+/**
+ * The canvas cursor for a tool, given whether the pointer is over something a
+ * click would act on.
+ *
+ * Select shows a hand over a part it would select and the plain arrow
+ * elsewhere. The picking tools show a crosshair only over a surface they can
+ * land on, so the cursor itself says whether a click will hit before it is
+ * made -- over a section's cut-away half, say, which is empty space.
+ */
+function cursorFor(tool: ViewportProps['tool'], overPart: boolean, overSurface: boolean): string {
+  if (tool === 'select') return overPart ? 'pointer' : 'default';
+  return overSurface ? 'crosshair' : 'default';
+}
 
 /** Playback advances the scrubber this far per second at 1x speed. */
 const PLAYBACK_PERCENT_PER_SECOND = 12;
@@ -298,6 +367,10 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
   const boundsRef = useRef<Bounds | null>(null);
   const pourMarkerRef = useRef<Mesh | null>(null);
   const measurePendingRef = useRef<Vector3 | null>(null);
+  /** Whether the status line is showing MEASURE_SECOND_POINT_HINT, so only that is cleared. */
+  const measureHintRef = useRef(false);
+  /** Asks the hover pick to run again on the next frame, e.g. after the tool changes. */
+  const refreshHoverRef = useRef<(() => void) | null>(null);
   const contourRef = useRef<ContourClient | null>(null);
   /** A scene teardown waiting to see whether this is an unmount or a remount. */
   const teardownRef = useRef<{ timer: number } | null>(null);
@@ -309,6 +382,18 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
   // latest props through this ref rather than closing over a stale render.
   const propsRef = useRef(props);
   propsRef.current = props;
+
+  /**
+   * Take the measure hint off the status line, if it is the one showing.
+   *
+   * The status line is shared with the loaders, so a cleared measurement must
+   * not blank a "Loading field..." that arrived while it was pending.
+   */
+  const clearMeasureHint = useCallback(() => {
+    if (!measureHintRef.current) return;
+    measureHintRef.current = false;
+    propsRef.current.onStatus(null);
+  }, []);
 
   const { projectId, resultsAvailable, resultsVersion, view, ortho, parts, selectedPartId, tool } = props;
 
@@ -580,7 +665,9 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
         scene: viewport.scene,
         parts: partEntriesRef.current,
         contour: () => contourRef.current,
-        resources: () => resourcesRef.current
+        resources: () => resourcesRef.current,
+        // What a click at these render-pixel coordinates would land on.
+        pick: (x: number, y: number) => pickModel(viewport.scene, x, y)
       };
     }
 
@@ -590,22 +677,39 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       );
     }
 
-    let pointerDownAt: { x: number; y: number } | null = null;
+    let pointerDownAt: { x: number; y: number; button: number } | null = null;
+    /** The last primary click that reached `handleClick`, for double-click detection. */
+    let lastClick: { x: number; y: number; time: number } | null = null;
+    /** Set by the POINTERUP that completes a double-click; read by the POINTERDOUBLETAP after it. */
+    let doubleClicked = false;
     const pointerObserver = viewport.scene.onPointerObservable.add((info) => {
       const scene = viewport.scene;
+      // Only the primary button acts on the model. The right button pans and
+      // the middle one is the camera's too; letting their release count as a
+      // click selected parts and dropped probe, measure and pour points
+      // wherever a pan happened to start.
+      const button = info.event.button;
       if (info.type === PointerEventTypes.POINTERDOWN) {
-        pointerDownAt = { x: scene.pointerX, y: scene.pointerY };
+        pointerDownAt = { x: scene.pointerX, y: scene.pointerY, button };
         return;
       }
       if (info.type === PointerEventTypes.POINTERDOUBLETAP) {
-        const pick = scene.pick(scene.pointerX, scene.pointerY, (mesh) => mesh.name.startsWith('part-'));
-        if (pick?.hit && pick.pickedPoint) camera.focusOn(pick.pickedPoint);
+        const wasDoubleClick = doubleClicked;
+        doubleClicked = false;
+        // Focus is a Select gesture. In the picking tools a double-click is
+        // two attempts at one point, and flying the camera in between them
+        // moved the model out from under the cursor.
+        if (button !== 0 || !wasDoubleClick || propsRef.current.tool !== 'select') return;
+        const pick = pickModel(scene);
+        if (pick) camera.focusOn(pick.point);
         return;
       }
       if (info.type !== PointerEventTypes.POINTERUP) return;
 
       const downAt = pointerDownAt;
       pointerDownAt = null;
+      doubleClicked = false;
+      if (button !== 0 || (downAt && downAt.button !== 0)) return;
       if (downAt) {
         const travelled = Math.hypot(scene.pointerX - downAt.x, scene.pointerY - downAt.y);
         // An orbit begins and ends in this same handler; only a pointerup
@@ -613,22 +717,90 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
         // and measure tools out of the way of the camera.
         if (travelled > CLICK_DRAG_THRESHOLD_PX) return;
       }
+
+      // Babylon reports a double-click as two POINTERUPs and then a
+      // POINTERDOUBLETAP. The first click has already acted; the second must
+      // not act again, or measure records a zero-length span and probe and
+      // pour fire twice on the same spot.
+      const now = performance.now();
+      const previous = lastClick;
+      if (
+        previous &&
+        now - previous.time < DOUBLE_CLICK_MS &&
+        Math.hypot(scene.pointerX - previous.x, scene.pointerY - previous.y) <= DOUBLE_CLICK_RADIUS_PX
+      ) {
+        lastClick = null;
+        doubleClicked = true;
+        return;
+      }
+      lastClick = { x: scene.pointerX, y: scene.pointerY, time: now };
       handleClick();
     });
+
+    /**
+     * Whether a section cap is drawn at this point.
+     *
+     * The cap is a quad well over the size of the assembly whose shader
+     * discards wherever the occupancy grid holds no metal (`discardOutside`),
+     * so a ray meeting the quad only meets the cut face where the same grid,
+     * read at the same nearest cell, says there is metal. With no results
+     * loaded the placeholder mask reads empty and the cap draws nothing, so
+     * nothing on it is hit either.
+     */
+    const capDrawnAt = (point: Vector3): boolean => {
+      const resources = resourcesRef.current;
+      if (!resources) return false;
+      const cell = resources.cellIndexAt(point.x, point.y, point.z);
+      return cell >= 0 && resources.mask[cell] !== 0;
+    };
+
+    /**
+     * What the pointer is on, as the user sees it.
+     *
+     * Parts and cut faces both count: a cut face is the one place the
+     * interior field is on screen, so probe, measure and pour must be able to
+     * land on it. It is not a part, though, and `partId` for a hit on it is
+     * the part it cuts -- the first part surface the ray meets beyond the
+     * face, which for a point inside the metal is the wall of the body that
+     * contains it. Selecting that part is what a click on its cut face
+     * means; deselecting everything, which the alternative of "no part"
+     * would do, reads as the click having missed. That wall is seen from the
+     * inside, so the search for it must not cull back faces the way the
+     * visibility search does.
+     */
+    const pickModel = (
+      scene: Scene,
+      x = scene.pointerX,
+      y = scene.pointerY
+    ): { hit: PickingInfo; point: Vector3; partId: string | null; onCap: boolean } | null => {
+      const [hit] = pickVisibleAll(scene, x, y, {
+        predicate: (mesh) => isPartMesh(mesh) || isSectionCap(mesh),
+        accept: (candidate) =>
+          !isSectionCap(candidate.pickedMesh) ||
+          (candidate.pickedPoint !== null && capDrawnAt(candidate.pickedPoint))
+      });
+      if (!hit?.pickedPoint) return null;
+      if (!isSectionCap(hit.pickedMesh)) {
+        return { hit, point: hit.pickedPoint, partId: partIdOf(hit.pickedMesh), onCap: false };
+      }
+      const owner = pickVisibleAll(scene, x, y, {
+        predicate: isPartMesh,
+        cullBackFaces: false
+      }).find((candidate) => candidate.distance >= hit.distance);
+      return { hit, point: hit.pickedPoint, partId: partIdOf(owner?.pickedMesh), onCap: true };
+    };
 
     const handleClick = () => {
       const scene = viewport.scene;
       const current = propsRef.current;
-      const pick = scene.pick(scene.pointerX, scene.pointerY, (mesh) => mesh.name.startsWith('part-'));
-      const partId = pick?.pickedMesh?.name.startsWith('part-')
-        ? pick.pickedMesh.name.slice('part-'.length)
-        : null;
+      const pick = pickModel(scene);
+      const partId = pick?.partId ?? null;
 
       if (current.tool === 'pour') {
-        if (!pick?.hit || !pick.pickedPoint) return;
-        const normal = pick.getNormal(true, true);
+        if (!pick) return;
+        const normal = pick.hit.getNormal(true, true);
         current.onPourPicked({
-          point: [pick.pickedPoint.x, pick.pickedPoint.y, pick.pickedPoint.z],
+          point: [pick.point.x, pick.point.y, pick.point.z],
           normal: normal ? [normal.x, normal.y, normal.z] : null,
           partId
         });
@@ -636,15 +808,15 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       }
 
       if (current.tool === 'probe') {
-        if (!pick?.hit || !pick.pickedPoint) {
+        if (!pick) {
           sceneRef.current?.annotations.clearProbe();
           current.onProbe(null);
           return;
         }
-        const reading = probeAt(pick.pickedPoint, partId);
+        const reading = probeAt(pick.point, partId);
         const unit = reading.unit ? ` ${reading.unit}` : '';
         sceneRef.current?.annotations.showProbe(
-          pick.pickedPoint,
+          pick.point,
           reading.value === null ? 'no data' : `${formatReading(reading.value)}${unit}`
         );
         current.onProbe(reading);
@@ -652,16 +824,23 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       }
 
       if (current.tool === 'measure') {
-        if (!pick?.hit || !pick.pickedPoint) return;
+        if (!pick) return;
         const start = measurePendingRef.current;
         if (!start) {
-          measurePendingRef.current = pick.pickedPoint.clone();
-          sceneRef.current?.annotations.showMeasureStart(pick.pickedPoint);
+          measurePendingRef.current = pick.point.clone();
+          sceneRef.current?.annotations.showMeasureStart(pick.point);
+          measureHintRef.current = true;
+          current.onStatus(MEASURE_SECOND_POINT_HINT);
           return;
         }
-        const end = pick.pickedPoint.clone();
-        measurePendingRef.current = null;
+        const end = pick.point.clone();
         const distanceIn = Vector3.Distance(start, end);
+        if (distanceIn < MIN_MEASURE_DISTANCE_IN) return;
+        measurePendingRef.current = null;
+        if (measureHintRef.current) {
+          measureHintRef.current = false;
+          current.onStatus(null);
+        }
         sceneRef.current?.annotations.showMeasurement(start, end, distanceIn);
         current.onMeasure({
           start: [start.x, start.y, start.z],
@@ -690,6 +869,12 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
 
       const cell = resources.cellIndexAt(point.x, point.y, point.z);
       if (cell < 0 || resources.mask[cell] === 0) return reading;
+      // A cut face with no part surface behind it still has metal under it,
+      // and the mask knows which kind.
+      if (reading.partType === null) {
+        const maskType = resources.meta.partTypes?.find((entry) => entry.code === resources.mask[cell])?.id;
+        reading.partType = PART_TYPES.find((type) => type.id === maskType)?.id ?? null;
+      }
 
       if (isFrameMode(mode)) {
         const stack = resources.stack(mode);
@@ -708,6 +893,74 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       if (gizmoRef.current) drawAxesGizmo(gizmoRef.current, viewport.camera);
     };
     viewport.scene.onBeforeRenderObservable.add(drawGizmo);
+
+    // Hover: the cursor says what a click would land on before it is made.
+    //
+    // Babylon's own cursor handling writes its default cursor back on every
+    // pointer move, so it is switched off and the cursor is set here alone.
+    // A pick is a ray against every part's triangles, so it is never made per
+    // pointer event -- a mouse reports several of those per frame. Events only
+    // mark the hover stale; at most one pick is then made per rendered frame,
+    // none while a button is held (that pointer is orbiting or panning, and
+    // what it is over does not matter until it lets go), and none at all while
+    // nothing moves.
+    viewport.scene.doNotHandleCursors = true;
+    /** Where the pointer is over the canvas, in `scene.pointerX` space; null once it leaves. */
+    let hoverAt: { x: number; y: number } | null = null;
+    let hoverStale = false;
+    let buttonsDown = false;
+    let shownCursor = '';
+    /** Earliest time the next hover pick may run; see HOVER_PICK_DUTY. */
+    let nextHoverPickAt = 0;
+    /** Picks made for hover, for the local debug handle's throttling check. */
+    let hoverPicks = 0;
+    const hoverObserver = viewport.scene.onPointerObservable.add((info) => {
+      const scene = viewport.scene;
+      if (info.type === PointerEventTypes.POINTERMOVE) {
+        buttonsDown = (info.event as PointerEvent).buttons !== 0;
+        hoverAt = { x: scene.pointerX, y: scene.pointerY };
+        hoverStale = true;
+      } else if (info.type === PointerEventTypes.POINTERDOWN) {
+        buttonsDown = true;
+      } else if (info.type === PointerEventTypes.POINTERUP) {
+        buttonsDown = (info.event as PointerEvent).buttons !== 0;
+        hoverStale = true;
+      } else if (info.type === PointerEventTypes.POINTERWHEEL) {
+        hoverStale = true;
+      }
+    });
+    // The model moves under a still pointer too: a zoom, a preset, inertia.
+    const viewObserver = viewport.camera.onViewMatrixChangedObservable.add(() => {
+      hoverStale = true;
+    });
+    const leaveCanvas = () => {
+      hoverAt = null;
+      hoverStale = false;
+    };
+    canvas.addEventListener('pointerleave', leaveCanvas);
+    refreshHoverRef.current = () => {
+      hoverStale = true;
+    };
+    const updateHover = () => {
+      if (!hoverStale || buttonsDown || !hoverAt) return;
+      // Still stale when skipped, so the pick happens on the first frame the
+      // budget allows and the cursor catches up with a pointer that stopped.
+      const startedAt = performance.now();
+      if (startedAt < nextHoverPickAt) return;
+      hoverStale = false;
+      hoverPicks += 1;
+      const pick = pickModel(viewport.scene, hoverAt.x, hoverAt.y);
+      nextHoverPickAt = startedAt + (performance.now() - startedAt) / HOVER_PICK_DUTY;
+      const cursor = cursorFor(propsRef.current.tool, Boolean(pick?.partId), pick !== null);
+      if (cursor === shownCursor) return;
+      shownCursor = cursor;
+      canvas.style.cursor = cursor;
+    };
+    viewport.scene.onBeforeRenderObservable.add(updateHover);
+    if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+      const debug = (window as unknown as { __viewportDebug?: Record<string, unknown> }).__viewportDebug;
+      if (debug) debug.hoverPicks = () => hoverPicks;
+    }
 
     viewport.engine.runRenderLoop(() => viewport.scene.render());
 
@@ -740,7 +993,12 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       window.clearTimeout(aoTimer);
       resizeObserver.disconnect();
       viewport.scene.onPointerObservable.remove(pointerObserver);
+      viewport.scene.onPointerObservable.remove(hoverObserver);
+      viewport.camera.onViewMatrixChangedObservable.remove(viewObserver);
       viewport.scene.onBeforeRenderObservable.removeCallback(drawGizmo);
+      viewport.scene.onBeforeRenderObservable.removeCallback(updateHover);
+      canvas.removeEventListener('pointerleave', leaveCanvas);
+      refreshHoverRef.current = null;
       contourRef.current?.dispose();
       contourRef.current = null;
       resourcesRef.current?.dispose();
@@ -847,7 +1105,10 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     if (!refs) return;
     measurePendingRef.current = null;
     refs.annotations.clearAll();
-  }, [tool]);
+    clearMeasureHint();
+    // The cursor is the tool's, so a still pointer needs it re-derived.
+    refreshHoverRef.current?.();
+  }, [tool, clearMeasureHint]);
 
   // ---------------------------------------------------------------------
   // Pour marker
@@ -1228,11 +1489,13 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       setCamera: (preset) => sceneRef.current?.camera.goTo(preset),
       clearMeasurements: () => {
         measurePendingRef.current = null;
+        clearMeasureHint();
         sceneRef.current?.annotations.clearMeasurements();
       },
       defectVolumeIn3: () => defectVolume()
     }),
-    []
+    // `clearMeasureHint` reads only refs and never changes identity.
+    [clearMeasureHint]
   );
 
   /**
@@ -1288,6 +1551,16 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     </div>
   );
 });
+
+const PART_NAME_PREFIX = 'part-';
+
+function isPartMesh(mesh: AbstractMesh): boolean {
+  return mesh.name.startsWith(PART_NAME_PREFIX);
+}
+
+function partIdOf(mesh: AbstractMesh | null | undefined): string | null {
+  return mesh && isPartMesh(mesh) ? mesh.name.slice(PART_NAME_PREFIX.length) : null;
+}
 
 function applyEnvelope(mesh: EnvelopeMesh, envelope: EnvelopeData): void {
   mesh.setGeometry({

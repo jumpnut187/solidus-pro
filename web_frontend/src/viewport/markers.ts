@@ -1,6 +1,10 @@
 /** Scene markers that are not part geometry: the pour location. */
-import { Color3, DynamicTexture, Mesh, MeshBuilder, StandardMaterial } from '@babylonjs/core';
-import type { Scene } from '@babylonjs/core';
+import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial';
+import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture';
+import { Color3 } from '@babylonjs/core/Maths/math.color';
+import { Mesh } from '@babylonjs/core/Meshes/mesh';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder';
+import type { Scene } from '@babylonjs/core/scene';
 
 /**
  * The metal-entry point, as a sphere with a billboarded label.

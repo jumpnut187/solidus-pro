@@ -1,6 +1,7 @@
 import { Camera, FlameKindling, FolderOpen, Play, Plus, Save, Square } from 'lucide-react';
 
 import { Menu } from './Menu';
+import { DEFAULT_PROJECT_NAME } from '../lib/defaults';
 import { shortcutFor } from '../lib/shortcuts';
 import type { JobState } from '../hooks/useSimulationJob';
 
@@ -64,7 +65,7 @@ export function TopBar({
         value={projectName}
         aria-label="Project name"
         title={projectName}
-        placeholder="Untitled Casting"
+        placeholder={DEFAULT_PROJECT_NAME}
         onChange={(event) => onProjectNameChange(event.target.value)}
       />
 
@@ -93,7 +94,10 @@ export function TopBar({
           type="button"
           className="btn btn-ghost btn-sm"
           onClick={onSaveProjectAs}
-          title="Save a copy under a new name and switch to it. Parts and settings are copied; results stay with the original."
+          title={
+            `Save a copy under a new name and switch to it (${shortcutFor('Save project as')}). ` +
+            'Parts and settings are copied; results stay with the original.'
+          }
         >
           Save As
         </button>

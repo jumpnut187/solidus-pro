@@ -7,8 +7,13 @@
  * through the camera's view matrix by hand is a dozen lines and avoids all
  * three problems.
  */
-import { Vector3 } from '@babylonjs/core';
-import type { ArcRotateCamera } from '@babylonjs/core';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector';
+import type { ArcRotateCamera } from '@babylonjs/core/Cameras/arcRotateCamera';
+
+import { viewportDeviceRatio } from './sceneSetup';
+
+/** The gizmo's size in CSS pixels when the stylesheet has not laid it out yet. */
+const FALLBACK_CSS_SIZE = 96;
 
 const AXES: Array<{ direction: Vector3; color: string; label: string }> = [
   { direction: new Vector3(1, 0, 0), color: '#ff5b52', label: 'X' },
@@ -20,7 +25,20 @@ export function drawAxesGizmo(canvas: HTMLCanvasElement, camera: ArcRotateCamera
   const context = canvas.getContext('2d');
   if (!context) return;
 
-  const size = canvas.width;
+  // Drawn in CSS pixels onto a backing store at the viewport's own density,
+  // so the gizmo is as sharp as the casting beside it. A backing store the
+  // size of the CSS box was stretched 2x on a Retina display and blurred.
+  // Sized from the laid-out content box, which is what the backing store is
+  // stretched over; the stylesheet's border sits outside it.
+  const size = canvas.clientWidth || FALLBACK_CSS_SIZE;
+  const ratio = viewportDeviceRatio();
+  const backing = Math.round(size * ratio);
+  if (canvas.width !== backing || canvas.height !== backing) {
+    canvas.width = backing;
+    canvas.height = backing;
+  }
+  context.setTransform(backing / size, 0, 0, backing / size, 0, 0);
+
   const center = size / 2;
   const radius = size * 0.32;
   context.clearRect(0, 0, size, size);

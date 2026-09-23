@@ -1,6 +1,7 @@
 import { AlertTriangle, Upload, X } from 'lucide-react';
 
 import { formatCount, formatNumber } from '../lib/format';
+import { shortcutFor } from '../lib/shortcuts';
 import { RESULT_MODE_LABELS, type GridMeta, type MeasureResult, type ProbeReading } from '../lib/viewState';
 import type { Toast } from '../hooks/useToasts';
 
@@ -158,8 +159,10 @@ export function EmptyState({ onAddParts }: { onAddParts: () => void }) {
         <button type="button" className="btn btn-primary" onClick={onAddParts}>
           Add parts
         </button>
-        <span className="chip">Cmd/Ctrl+O</span>
-        <span className="chip">F5 to run</span>
+        {/* From the shortcut table, so the chips name the modifier this
+            platform actually uses and cannot drift from the handler. */}
+        <span className="chip">{shortcutFor('Add CAD parts')}</span>
+        <span className="chip">{shortcutFor('Run simulation')} to run</span>
       </div>
     </div>
   );

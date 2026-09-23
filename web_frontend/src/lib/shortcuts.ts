@@ -28,8 +28,16 @@ export const SHORTCUT_GROUPS: { group: string; items: ShortcutSpec[] }[] = [
     group: 'Project',
     items: [
       { keys: `${MOD_KEY} + O`, description: 'Add CAD parts' },
-      { keys: `${MOD_KEY} + Shift + S`, description: 'Save project' },
-      { keys: `${MOD_KEY} + S`, description: 'Export screenshot' }
+      // Save is on the key every other application puts it on. It used to
+      // take a screenshot, so the one accelerator people press without
+      // thinking produced a PNG instead of saving their work.
+      { keys: `${MOD_KEY} + S`, description: 'Save project' },
+      { keys: `${MOD_KEY} + Shift + S`, description: 'Save project as' },
+      // A bare letter rather than a modified one: the browsers reserve most
+      // modifier combinations (Cmd/Ctrl+P prints, Cmd/Ctrl+Shift+P opens a
+      // private window in Firefox), and a single key is still guarded
+      // against typing by the text-entry check.
+      { keys: 'P', description: 'Export screenshot' }
     ]
   },
   {

@@ -68,9 +68,29 @@ export const meshDefaults = {
   refinement: 3
 };
 
+/** The name a project carries until something better is known. */
+export const DEFAULT_PROJECT_NAME = 'Untitled Casting';
+
+/** Whether a project still has the placeholder name rather than a real one. */
+export function isPlaceholderProjectName(name: string | null | undefined): boolean {
+  const trimmed = (name ?? '').trim();
+  return trimmed === '' || trimmed === DEFAULT_PROJECT_NAME;
+}
+
+/**
+ * A project name taken from a CAD file name: `C:\parts\bracket.stl` becomes
+ * `bracket`. Returns null for a name with nothing left after the extension,
+ * so the caller keeps the placeholder rather than naming a project `.stl`.
+ */
+export function projectNameFromFile(fileName: string): string | null {
+  const base = fileName.split(/[\\/]/).pop() ?? '';
+  const stem = base.replace(/\.[^.]*$/, '').trim();
+  return stem || null;
+}
+
 export function defaultSettings(): ProjectSettings {
   return {
-    name: 'Untitled Casting',
+    name: DEFAULT_PROJECT_NAME,
     alloy: 'WCB',
     voxel_size: meshDefaults.voxelSize,
     refinement_level: meshDefaults.refinement,

@@ -8,8 +8,11 @@
  * metal and air stays a hard edge. Filtering the mask would produce a
  * half-voxel band of half-painted fragments all the way around the casting.
  */
-import { Constants, RawTexture, RawTexture3D, Texture } from '@babylonjs/core';
-import type { Scene } from '@babylonjs/core';
+import { Constants } from '@babylonjs/core/Engines/constants';
+import { RawTexture } from '@babylonjs/core/Materials/Textures/rawTexture';
+import { RawTexture3D } from '@babylonjs/core/Materials/Textures/rawTexture3D';
+import { Texture } from '@babylonjs/core/Materials/Textures/texture';
+import type { Scene } from '@babylonjs/core/scene';
 
 import { colormapLut } from '../lib/colormaps';
 import type { ColormapId } from '../lib/viewState';

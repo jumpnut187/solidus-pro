@@ -42,7 +42,18 @@ import {
   type RiserRecommendation
 } from './lib/api';
 import { arrangeGrid, arrangeLine, DUPLICATE_OFFSET, type Axis } from './lib/arrange';
-import { analysisDefaults, buildSolidificationDefaults, defaultSettings, loadStoredSettings, meshDefaults, performanceDefaults, saveStoredSettings } from './lib/defaults';
+import {
+  analysisDefaults,
+  buildSolidificationDefaults,
+  DEFAULT_PROJECT_NAME,
+  defaultSettings,
+  isPlaceholderProjectName,
+  loadStoredSettings,
+  meshDefaults,
+  performanceDefaults,
+  projectNameFromFile,
+  saveStoredSettings
+} from './lib/defaults';
 import { formatCount } from './lib/format';
 import { inferPartType } from './lib/partTypes';
 import {
@@ -348,12 +359,20 @@ export function App() {
     if (stored) void openProject(stored, { silent: true });
   }, [openProject]);
 
-  const ensureProject = useCallback(async (): Promise<string> => {
+  /**
+   * The project row for the current session, created on first need.
+   *
+   * `nextSettings` is for a caller that has just changed the settings in the
+   * same event: the state update has not landed yet, so without it the row
+   * would be written from the previous render's settings.
+   */
+  const ensureProject = useCallback(async (nextSettings?: ProjectSettings): Promise<string> => {
+    const payload = nextSettings ?? settings;
     if (projectId) {
-      await api.updateProject(projectId, settings);
+      await api.updateProject(projectId, payload);
       return projectId;
     }
-    const created = await api.createProject(settings);
+    const created = await api.createProject(payload);
     skipAutosave.current = true;
     setProjectId(created.id);
     void refreshProjects();
@@ -400,7 +419,7 @@ export function App() {
     setPromptRequest({
       title: 'Save As',
       label: 'New project name',
-      initialValue: `${settings.name ?? 'Untitled Casting'} (copy)`,
+      initialValue: `${settings.name || DEFAULT_PROJECT_NAME} (copy)`,
       confirmLabel: 'Save a copy',
       hint: 'Copies the parts and every setting. Results stay with the original.',
       onSubmit: (name) => {
@@ -431,7 +450,23 @@ export function App() {
       setUploading(true);
       notify(`Uploading ${accepted.length} file${accepted.length === 1 ? '' : 's'}...`);
       try {
-        const target = await ensureProject();
+        // Every project used to be "Untitled Casting", which made the project
+        // list a column of identical rows. The first part added to a project
+        // that still has the placeholder name names it: the casting's own file
+        // is the name a foundry already uses for the job, and taking it here
+        // costs no extra dialog. A cast body is preferred over a riser or sprue
+        // dropped alongside it. A name the user has typed is never replaced,
+        // and neither is a project that already has parts.
+        let named: ProjectSettings | undefined;
+        if (parts.length === 0 && isPlaceholderProjectName(settings.name)) {
+          const source = accepted.find((file) => inferPartType(file.name) === 'cast') ?? accepted[0];
+          const fromFile = projectNameFromFile(source.name);
+          if (fromFile) {
+            named = { ...settings, name: fromFile };
+            setSettings(named);
+          }
+        }
+        const target = await ensureProject(named);
         const uploaded = await api.uploadFiles(accepted);
         const added: ProjectPart[] = [];
         for (const file of uploaded.files) {
@@ -465,7 +500,7 @@ export function App() {
         setUploading(false);
       }
     },
-    [ensureProject, fail, notify, refreshProjects, succeed, warn]
+    [ensureProject, fail, notify, parts.length, refreshProjects, settings, succeed, warn]
   );
 
   const updatePart = useCallback(
@@ -887,6 +922,7 @@ export function App() {
     },
     screenshot: () => void takeScreenshot(),
     saveProject: () => void saveProject(),
+    saveProjectAs,
     fitCamera: () => viewportRef.current?.setCamera('fit'),
     helpGuide: () => setModal('help'),
     shortcuts: () => setModal('shortcuts'),

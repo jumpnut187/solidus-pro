@@ -8,8 +8,15 @@
  * object again, and translucency is something the user asks for rather than
  * something the result mode imposes.
  */
-import { Color3, Mesh, PBRMaterial, VertexData } from '@babylonjs/core';
-import type { Scene } from '@babylonjs/core';
+import { Material } from '@babylonjs/core/Materials/material';
+import { Color3 } from '@babylonjs/core/Maths/math.color';
+import { Mesh } from '@babylonjs/core/Meshes/mesh';
+import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData';
+import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial';
+import type { Scene } from '@babylonjs/core/scene';
+// Registers the scene component behind `mesh.renderOutline`, the selection
+// outline. Without it the property is set and nothing draws.
+import '@babylonjs/core/Rendering/outlineRenderer';
 
 import type { ProjectPart } from '../lib/api';
 import { FieldPaintPluginMaterial } from './fieldPaintPlugin';
@@ -123,8 +130,16 @@ function createPartMesh(
   const vertexData = new VertexData();
   vertexData.positions = positions;
   vertexData.indices = indices;
+  // STL triangles wind counter-clockwise seen from outside, and the scene is
+  // right-handed. Babylon's defaults assume the opposite on both counts: it
+  // treats clockwise as the front face and computes left-handed normals. With
+  // those defaults the near, outward faces were culled and the far walls were
+  // drawn from the inside with inward normals, so the casting read as an
+  // x-ray of itself -- risers with no tops, and the colour on screen came
+  // from the far wall while a probe read the near one.
+  mesh.sideOrientation = Material.CounterClockWiseSideOrientation;
   const normals: number[] = [];
-  VertexData.ComputeNormals(positions, indices, normals);
+  VertexData.ComputeNormals(positions, indices, normals, { useRightHandedSystem: true });
   vertexData.normals = normals;
   vertexData.applyToMesh(mesh);
 

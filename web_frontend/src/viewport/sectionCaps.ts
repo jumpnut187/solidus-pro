@@ -19,8 +19,13 @@
  * exactly on it, where the sign of the clip distance is whatever rounding
  * says.
  */
-import { Color3, Mesh, MeshBuilder, PBRMaterial } from '@babylonjs/core';
-import type { Plane, Scene } from '@babylonjs/core';
+import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial';
+import { Color3 } from '@babylonjs/core/Maths/math.color';
+import { Mesh } from '@babylonjs/core/Meshes/mesh';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder';
+import type { Plane } from '@babylonjs/core/Maths/math.plane';
+import type { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh';
+import type { Scene } from '@babylonjs/core/scene';
 
 import type { Bounds } from './cameraController';
 import { FieldPaintPluginMaterial } from './fieldPaintPlugin';
@@ -28,6 +33,13 @@ import { FieldPaintPluginMaterial } from './fieldPaintPlugin';
 export type SectionAxis = 'x' | 'y' | 'z';
 
 export const SECTION_AXES: readonly SectionAxis[] = ['x', 'y', 'z'];
+
+const CAP_NAME_PREFIX = 'section-cap-';
+
+/** Whether a picked mesh is one of the cut faces rather than a part. */
+export function isSectionCap(mesh: AbstractMesh | null | undefined): boolean {
+  return Boolean(mesh?.name.startsWith(CAP_NAME_PREFIX));
+}
 
 export type CapEntry = {
   mesh: Mesh;
@@ -58,11 +70,15 @@ export class SectionCaps {
     if (existing) return existing;
 
     const mesh = MeshBuilder.CreatePlane(
-      `section-cap-${axis}`,
+      `${CAP_NAME_PREFIX}${axis}`,
       { size: 1, sideOrientation: Mesh.DOUBLESIDE },
       this._scene
     );
-    mesh.isPickable = false;
+    // Pickable because the cut face is what a probe on a section is for: it
+    // is the only place the interior field is on screen. The quad is far
+    // larger than the metal it shows, so a hit on it only counts where the
+    // occupancy grid says the shader drew it -- see `ResultsViewport`.
+    mesh.isPickable = true;
 
     const material = new PBRMaterial(`section-cap-${axis}-mat`, this._scene);
     material.backFaceCulling = false;

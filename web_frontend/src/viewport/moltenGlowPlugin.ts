@@ -27,8 +27,12 @@
  * caller leaves it at -- this compiles to a no-op and the envelope shades
  * exactly as it did before.
  */
-import { MaterialPluginBase } from '@babylonjs/core';
-import type { AbstractEngine, Material, Scene, SubMesh, UniformBuffer } from '@babylonjs/core';
+import { MaterialPluginBase } from '@babylonjs/core/Materials/materialPluginBase';
+import type { AbstractEngine } from '@babylonjs/core/Engines/abstractEngine';
+import type { Material } from '@babylonjs/core/Materials/material';
+import type { UniformBuffer } from '@babylonjs/core/Materials/uniformBuffer';
+import type { SubMesh } from '@babylonjs/core/Meshes/subMesh';
+import type { Scene } from '@babylonjs/core/scene';
 
 const GLOW_UNIFORMS = ['moltenGlowStrength'];
 

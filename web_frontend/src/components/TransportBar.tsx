@@ -1,6 +1,6 @@
 import { Pause, Play, Repeat, SkipBack, SkipForward } from 'lucide-react';
 
-import { formatSeconds } from '../lib/format';
+import { formatDuration, playbackSeconds } from '../lib/format';
 import { isSweepMode, isTimeMode, type GridMeta, type ResultViewState } from '../lib/viewState';
 
 export type TransportBarProps = {
@@ -43,6 +43,21 @@ function sweepMaxSeconds(meta: GridMeta | null, view: ResultViewState): number {
 }
 
 /**
+ * The recorded frame nearest a time.
+ *
+ * By time, not by an even split of the slider: frames crowd together early in
+ * a solidification run and spread out late, so an even split named frame 40
+ * while the viewport, which seeks by time, was showing frame 70.
+ */
+function nearestFrame(times: number[], seconds: number): number {
+  let best = 0;
+  for (let index = 1; index < times.length; index += 1) {
+    if (Math.abs(times[index] - seconds) < Math.abs(times[best] - seconds)) best = index;
+  }
+  return best;
+}
+
+/**
  * Playback for the time-resolved modes.
  *
  * The percentage is the source of truth (it is what `ResultViewState` carries
@@ -63,10 +78,11 @@ export function TransportBar({
 
   const times = sweep ? [] : frameTimes(meta, view);
   const frameCount = times.length;
+  const startTime = sweep || !frameCount ? 0 : times[0];
   const maxTime = sweep ? sweepMaxSeconds(meta, view) : frameCount ? times[frameCount - 1] : 0;
   const percent = Math.min(100, Math.max(0, view.timePercent));
-  const currentSeconds = maxTime * (percent / 100);
-  const frameIndex = frameCount ? Math.min(frameCount - 1, Math.round((percent / 100) * (frameCount - 1))) : 0;
+  const currentSeconds = playbackSeconds(percent / 100, startTime, maxTime);
+  const frameIndex = nearestFrame(times, currentSeconds);
   const stepPercent = sweep ? SWEEP_STEP_PERCENT : frameCount > 1 ? 100 / (frameCount - 1) : 5;
 
   const step = (direction: -1 | 1) => {
@@ -120,7 +136,7 @@ export function TransportBar({
       </div>
 
       <span className="transport-time">
-        {maxTime > 0 ? `${formatSeconds(currentSeconds)} / ${formatSeconds(maxTime)}` : `${percent.toFixed(0)}%`}
+        {maxTime > 0 ? `${formatDuration(currentSeconds)} / ${formatDuration(maxTime)}` : `${percent.toFixed(0)}%`}
       </span>
 
       <span

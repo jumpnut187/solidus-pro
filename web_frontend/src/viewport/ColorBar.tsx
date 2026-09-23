@@ -17,6 +17,7 @@ import { useEffect, useState } from 'react';
 import './viewport.css';
 
 import { gradientCss } from '../lib/colormaps';
+import { formatDuration, playbackSeconds } from '../lib/format';
 import { formatFieldValue } from './formatValue';
 import {
   RESULT_MODE_LABELS,
@@ -215,10 +216,12 @@ function TimeReadout({ view, meta }: Pick<ColorBarProps, 'view'> & { meta: NonNu
     start = times[0];
     end = times[times.length - 1];
   }
-  const seconds = start + (view.timePercent / 100) * (end - start);
+  // The same clock and the same formatter as the transport bar, so the two
+  // readouts of one instant cannot disagree in value or in style.
+  const seconds = playbackSeconds(view.timePercent / 100, start, end);
   return (
     <p className="vp-colorbar-time">
-      {formatFieldValue(seconds)} s <span className="vp-colorbar-time-total">of {formatFieldValue(end)} s</span>
+      {formatDuration(seconds)} <span className="vp-colorbar-time-total">of {formatDuration(end)}</span>
     </p>
   );
 }

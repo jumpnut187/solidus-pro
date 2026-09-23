@@ -11,7 +11,11 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    sourcemap: true
+    // Off rather than 'hidden'. Flask serves every file under dist/ as-is
+    // (see web/app_factory.py), so a hidden map is still one guessable URL
+    // away and publishes the whole frontend source. `vite` dev keeps its
+    // own in-memory maps for debugging.
+    sourcemap: false
   }
 });
 

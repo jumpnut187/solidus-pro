@@ -14,8 +14,12 @@
  * is coloured by the value it actually encloses, sampled server-side, while
  * the surface around it is coloured per fragment.
  */
-import { Color3, Mesh, PBRMaterial, VertexBuffer, VertexData } from '@babylonjs/core';
-import type { Scene } from '@babylonjs/core';
+import { VertexBuffer } from '@babylonjs/core/Buffers/buffer';
+import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial';
+import { Color3 } from '@babylonjs/core/Maths/math.color';
+import { Mesh } from '@babylonjs/core/Meshes/mesh';
+import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData';
+import type { Scene } from '@babylonjs/core/scene';
 
 import { sampleColormap } from '../lib/colormaps';
 import { FieldPaintPluginMaterial } from './fieldPaintPlugin';

@@ -8,7 +8,9 @@
  * first time their mode is selected and then cached, so switching back and
  * forth between two modes costs one request each, not one per switch.
  */
-import type { RawTexture, RawTexture3D, Scene } from '@babylonjs/core';
+import type { RawTexture } from '@babylonjs/core/Materials/Textures/rawTexture';
+import type { RawTexture3D } from '@babylonjs/core/Materials/Textures/rawTexture3D';
+import type { Scene } from '@babylonjs/core/scene';
 
 import { fetchFieldGrid, fetchFrames, fetchGridMeta, fetchMaskGrid, fetchSkinGrid } from '../lib/gridApi';
 import type { ColormapId, GridMeta, ResultModeId } from '../lib/viewState';

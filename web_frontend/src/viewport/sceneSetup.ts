@@ -12,22 +12,25 @@
  * A single soft key light is kept on top of the environment only to hold the
  * silhouette apart from the background.
  */
-import {
-  ArcRotateCamera,
-  Color3,
-  Color4,
-  CubeTexture,
-  DefaultRenderingPipeline,
-  DirectionalLight,
-  Engine,
-  HemisphericLight,
-  ImageProcessingConfiguration,
-  Mesh,
-  MeshBuilder,
-  Scene,
-  SSAO2RenderingPipeline,
-  Vector3
-} from '@babylonjs/core';
+import { ArcRotateCamera } from '@babylonjs/core/Cameras/arcRotateCamera';
+import { Engine } from '@babylonjs/core/Engines/engine';
+import { DirectionalLight } from '@babylonjs/core/Lights/directionalLight';
+import { HemisphericLight } from '@babylonjs/core/Lights/hemisphericLight';
+import { ImageProcessingConfiguration } from '@babylonjs/core/Materials/imageProcessingConfiguration';
+import { CubeTexture } from '@babylonjs/core/Materials/Textures/cubeTexture';
+import { Color3, Color4 } from '@babylonjs/core/Maths/math.color';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder';
+import { DefaultRenderingPipeline } from '@babylonjs/core/PostProcesses/RenderPipeline/Pipelines/defaultRenderingPipeline';
+import { SSAO2RenderingPipeline } from '@babylonjs/core/PostProcesses/RenderPipeline/Pipelines/ssao2RenderingPipeline';
+import { Scene } from '@babylonjs/core/scene';
+import type { ArcRotateCameraKeyboardMoveInput } from '@babylonjs/core/Cameras/Inputs/arcRotateCameraKeyboardMoveInput';
+import type { Mesh } from '@babylonjs/core/Meshes/mesh';
+// SSAO2 renders its depth and normals through the pre-pass renderer and calls
+// `scene.enablePrePassRenderer()`, which only exists once this component is
+// registered. The pipeline module registers the geometry-buffer component
+// but not this one.
+import '@babylonjs/core/Rendering/prePassRendererSceneComponent';
 
 export const ENVIRONMENT_URL = '/environments/studio.env';
 
@@ -57,6 +60,7 @@ export function createViewportScene(canvas: HTMLCanvasElement): ViewportScene {
     preserveDrawingBuffer: true,
     powerPreference: 'high-performance'
   });
+  const stopTrackingDeviceRatio = trackDeviceRatio(engine);
 
   const scene = new Scene(engine);
   scene.clearColor = BACKGROUND;
@@ -95,11 +99,55 @@ export function createViewportScene(canvas: HTMLCanvasElement): ViewportScene {
   camera.upVector = new Vector3(0, 0, 1);
   camera.lowerRadiusLimit = 0.05;
   camera.upperRadiusLimit = 8000;
-  camera.wheelDeltaPercentage = 0.05;
-  camera.panningSensibility = 120;
+  // Orbit and wheel zoom share this one inertia. At Babylon's default 0.9 an
+  // orbit kept turning for another quarter of the drag after the mouse was
+  // released (23 degrees after a 91 degree drag), so the view settled
+  // somewhere the user had not put it. 0.7 keeps a short, smooth settle
+  // without the overshoot.
+  camera.inertia = 0.7;
+  // Every input's step is summed over the inertia's decay, 1 / (1 - inertia)
+  // times over, so dropping it from 0.9 to 0.7 would have cut every orbit,
+  // wheel tick and arrow key to a third of its travel. Each is scaled back by
+  // that factor so the controls cover the same ground as before and only the
+  // coast after release is shorter.
+  const inertiaCompensation = (1 - 0.9) / (1 - camera.inertia);
+  camera.angularSensibilityX = 1000 * inertiaCompensation;
+  camera.angularSensibilityY = 1000 * inertiaCompensation;
+  camera.wheelDeltaPercentage = 0.05 / inertiaCompensation;
+  const keyboard = camera.inputs.attached.keyboard as ArcRotateCameraKeyboardMoveInput | undefined;
+  if (keyboard) {
+    keyboard.angularSpeed = 0.01 / inertiaCompensation;
+    keyboard.zoomingSensibility = 25 * inertiaCompensation;
+    // Keyboard panning had the camera's 0.9 panning inertia behind it, ten
+    // times over, and now has none.
+    keyboard.panningSensibility = 50 / 10;
+  }
+  // The wheel zooms toward the point under the cursor rather than toward the
+  // middle of the screen: zooming in on a riser should not slide it off to
+  // the side. See `CameraController` for the hit plane this relies on.
+  camera.zoomToMouseLocation = true;
+  // Panning stops when the mouse stops. With inertia the model slid on after
+  // release, so it never ended up under the cursor that dragged it. The
+  // sensibility itself depends on the zoom and is kept current by
+  // `CameraController`.
+  camera.panningInertia = 0;
   camera.minZ = 0.01;
   camera.maxZ = 40000;
-  camera.attachControl(canvas, true);
+  // The camera owns the events it acts on. Attached with `noPreventDefault`
+  // it zoomed the model *and* let the same wheel event scroll the page, and a
+  // trackpad pinch -- which Chrome and Firefox deliver as a ctrl+wheel --
+  // zoomed the whole application along with the casting. Claiming the events
+  // also has the canvas take focus on pointerdown, which is what gives the
+  // arrow keys to the camera rather than to whatever was focused before.
+  camera.attachControl(canvas, false);
+
+  // Safari reports a pinch as its own non-standard gesture events rather than
+  // as a ctrl+wheel, and zooms the page on them unless they are refused. No
+  // camera input listens for them, so refusing them only keeps the page still;
+  // the wheel and a two-finger scroll zoom the model as before.
+  const refuseGesture = (event: Event) => event.preventDefault();
+  const gestureEvents = ['gesturestart', 'gesturechange', 'gestureend'] as const;
+  for (const name of gestureEvents) canvas.addEventListener(name, refuseGesture, { passive: false });
 
   const pipeline = new DefaultRenderingPipeline('viewport-pipeline', true, scene, [camera]);
   pipeline.fxaaEnabled = true;
@@ -132,6 +180,8 @@ export function createViewportScene(canvas: HTMLCanvasElement): ViewportScene {
     pipeline,
     layoutFloor,
     dispose: () => {
+      stopTrackingDeviceRatio();
+      for (const name of gestureEvents) canvas.removeEventListener(name, refuseGesture);
       environment.dispose();
       floor?.dispose();
       pipeline.dispose();
@@ -139,6 +189,57 @@ export function createViewportScene(canvas: HTMLCanvasElement): ViewportScene {
       engine.dispose();
     }
   };
+}
+
+/**
+ * The most device pixels rendered per CSS pixel.
+ *
+ * At 1 a Retina display drew the casting at half its resolution and let the
+ * browser stretch it, which is what made every edge soft. 2 is what the
+ * displays this runs on actually have; a 3x phone panel would pay 2.25 times
+ * the fill of 2x for a difference nobody sees on a casting at arm's length.
+ */
+const MAX_DEVICE_RATIO = 2;
+
+/**
+ * The pixel density the viewport renders at: the display's, capped. Exported
+ * so the 2D overlays drawn beside the canvas stay as sharp as it.
+ */
+export function viewportDeviceRatio(): number {
+  return Math.min(window.devicePixelRatio || 1, MAX_DEVICE_RATIO);
+}
+
+/**
+ * Render at the display's pixel density, capped, and follow it when it changes.
+ *
+ * Done here rather than with the engine's own `adaptToDeviceRatio`, which
+ * applies its cap only at construction: on a later change it multiplies the
+ * old scaling level by the ratio of old to new density, so moving the window
+ * from a 2x screen to a 3x one would render at 3x regardless. The density
+ * changes when the window moves between monitors and when the page is
+ * zoomed, and moving monitors does not resize the canvas, so the container's
+ * resize observer never hears of it.
+ *
+ * Checked at the start of every frame rather than through a `resolution`
+ * media query. The query is the usual way, but it matches one exact density
+ * and has to be re-armed on every change, and Chrome's device emulation --
+ * what the screenshot harness drives -- changes the density without firing
+ * it at all. One property read per frame is cheaper than being wrong.
+ *
+ * Pointer coordinates are unaffected: Babylon keeps `scene.pointerX` in CSS
+ * pixels and divides by the scaling level when it builds a picking ray.
+ *
+ * Returns the function that stops tracking.
+ */
+function trackDeviceRatio(engine: Engine): () => void {
+  const apply = () => {
+    const level = 1 / viewportDeviceRatio();
+    // Resizes the drawing buffer, and every post-process with it.
+    if (engine.getHardwareScalingLevel() !== level) engine.setHardwareScalingLevel(level);
+  };
+  apply();
+  const observer = engine.onBeginFrameObservable.add(apply);
+  return () => engine.onBeginFrameObservable.remove(observer);
 }
 
 /**
