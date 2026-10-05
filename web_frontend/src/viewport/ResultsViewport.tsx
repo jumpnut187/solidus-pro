@@ -71,7 +71,7 @@ import {
   FieldPaintPluginMaterial
 } from './fieldPaintPlugin';
 import { createPourMarker } from './markers';
-import { applyPartAppearance, syncPartMeshes, type PartEntry } from './partMeshes';
+import { applyPartAppearance, setPartClipPlanes, syncPartMeshes, type PartEntry } from './partMeshes';
 import { pickVisibleAll } from './picking';
 import { SECTION_AXES, SectionCaps, isSectionCap, type SectionAxis } from './sectionCaps';
 import {
@@ -530,9 +530,7 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
 
     for (const entry of entries.values()) {
       applyPaint(entry.plugin, paintSurface ? 1 : 0);
-      entry.material.clipPlane = planes.x;
-      entry.material.clipPlane2 = planes.y;
-      entry.material.clipPlane3 = planes.z;
+      setPartClipPlanes(entry, planes.x, planes.y, planes.z);
     }
 
     // Caps are painted whatever the style: the point of cutting a casting
@@ -598,8 +596,10 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       // Only reached when a surface arrives without per-vertex scalars.
       flatColor: METAL_COLOR,
       alpha: 1,
-      metallic: molten ? 0.1 : 0.35,
-      roughness: molten ? 0.55 : 0.5,
+      // Dielectric and satin like the parts (CAD look); the molten front
+      // keeps a little sheen so the pool still reads as liquid.
+      metallic: molten ? 0.1 : 0.0,
+      roughness: molten ? 0.55 : 0.65,
       glow: molten ? MOLTEN_GLOW : 0
     });
     // Bloom is what carries the glow past the edge of the mesh into the
@@ -1069,8 +1069,16 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     // grey that carries no field does not compete with what is inside it the
     // way a painted one did, so the defect envelopes get the same readable
     // 35 percent the fronts already had rather than near-invisibility.
-    const cap =
-      style === 'envelope'
+    //
+    // The ghost cap exists so an envelope can be seen THROUGH the shell, so
+    // it applies only while a result is on screen. Before a run (or with
+    // results hidden) the parts are solid bodies in their own colours, the way
+    // a CAD viewer draws them; ghosting them at 35 percent made an unsolved
+    // casting look like glass and showed every hidden edge through it.
+    const resultsShowing = view.showResults && resultsAvailable;
+    const cap = !resultsShowing
+      ? 1
+      : style === 'envelope'
         ? ENVELOPE_SHELL_OPACITY
         : style === 'both'
           ? BOTH_SHELL_OPACITY
@@ -1080,7 +1088,7 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       opacity: Math.min(requested, cap),
       showModel: view.showModel,
       assemblySize: boundsRef.current?.size ?? 1,
-      neutralGhost: style === 'envelope',
+      neutralGhost: resultsShowing && style === 'envelope',
       // A ghost shell must not claim the depth buffer ahead of the envelope
       // it is supposed to be showing.
       depthPrePass: !wantsEnvelope(style)
@@ -1096,6 +1104,7 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     view.style,
     view.mode,
     view.showResults,
+    resultsAvailable,
     paint
   ]);
 

@@ -10,6 +10,8 @@
  */
 import { Material } from '@babylonjs/core/Materials/material';
 import { Color3 } from '@babylonjs/core/Maths/math.color';
+import type { Plane } from '@babylonjs/core/Maths/math.plane';
+import { LinesMesh } from '@babylonjs/core/Meshes/linesMesh';
 import { Mesh } from '@babylonjs/core/Meshes/mesh';
 import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData';
 import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial';
@@ -19,6 +21,7 @@ import type { Scene } from '@babylonjs/core/scene';
 import '@babylonjs/core/Rendering/outlineRenderer';
 
 import type { ProjectPart } from '../lib/api';
+import { buildCreasedGeometry } from './creaseGeometry';
 import { FieldPaintPluginMaterial } from './fieldPaintPlugin';
 
 /**
@@ -38,19 +41,34 @@ export const PART_COLORS: Record<string, [number, number, number]> = {
   gate: [0.15, 0.45, 0.6]
 };
 
-/** Roughness and metallic per part type: a sand core should not look like steel. */
+/**
+ * Roughness and metallic per part type, CAD style.
+ *
+ * Every part is a DIELECTRIC with a satin finish, the way SolidWorks and the
+ * other CAD viewers draw a model: colour comes from the diffuse term and the
+ * only highlight is a soft one from the headlight. The previous metallic
+ * 0.75-0.85 at roughness 0.28-0.35 made the casting a mirror of the studio
+ * environment -- a metal has almost no diffuse term, so what reached the eye
+ * was reflections, not the part -- and read as chrome. A sand core is still
+ * rougher than a machined chill, so the finish still says which body is which.
+ */
 const PART_FINISH: Record<string, { metallic: number; roughness: number }> = {
-  cast: { metallic: 0.75, roughness: 0.35 },
-  riser: { metallic: 0.35, roughness: 0.6 },
-  riser_post: { metallic: 0.4, roughness: 0.55 },
-  chill: { metallic: 0.85, roughness: 0.28 },
-  core: { metallic: 0.0, roughness: 0.85 },
-  pour_cup: { metallic: 0.2, roughness: 0.7 },
-  sprue: { metallic: 0.35, roughness: 0.55 },
-  runner: { metallic: 0.35, roughness: 0.55 },
+  cast: { metallic: 0.0, roughness: 0.62 },
+  riser: { metallic: 0.0, roughness: 0.7 },
+  riser_post: { metallic: 0.0, roughness: 0.7 },
+  chill: { metallic: 0.0, roughness: 0.55 },
+  core: { metallic: 0.0, roughness: 0.9 },
+  pour_cup: { metallic: 0.0, roughness: 0.75 },
+  sprue: { metallic: 0.0, roughness: 0.7 },
+  runner: { metallic: 0.0, roughness: 0.7 },
   filter: { metallic: 0.0, roughness: 0.9 },
-  gate: { metallic: 0.4, roughness: 0.5 }
+  gate: { metallic: 0.0, roughness: 0.7 }
 };
+
+/** Feature-edge lines ("shaded with edges"): near-black, like a CAD viewer. */
+const EDGE_COLOR = new Color3(0.06, 0.07, 0.08);
+const EDGE_ALPHA_OPAQUE = 0.85;
+const EDGE_ALPHA_GHOST = 0.35;
 
 const SELECTION_COLOR = new Color3(1, 0.78, 0.2);
 
@@ -75,6 +93,8 @@ export type PartEntry = {
   mesh: Mesh;
   material: PBRMaterial;
   plugin: FieldPaintPluginMaterial;
+  /** Feature edges, parented to `mesh`; null when the part has none. */
+  edges: LinesMesh | null;
   /** Identifies the triangles currently uploaded, so a swap is detectable. */
   geometryKey: string;
 };
@@ -127,31 +147,73 @@ function createPartMesh(
   if (!positions?.length || !indices?.length) return null;
 
   const mesh = new Mesh(`part-${part.id}`, scene);
+  // Crease-angle normals, not ComputeNormals' all-faces average: see
+  // creaseGeometry.ts for the starburst shading the average produced on flat
+  // faces that meet a bore or a chamfer.
+  const creased = buildCreasedGeometry(positions, indices);
   const vertexData = new VertexData();
-  vertexData.positions = positions;
-  vertexData.indices = indices;
+  vertexData.positions = creased.positions;
+  vertexData.indices = creased.indices;
   // STL triangles wind counter-clockwise seen from outside, and the scene is
   // right-handed. Babylon's defaults assume the opposite on both counts: it
   // treats clockwise as the front face and computes left-handed normals. With
   // those defaults the near, outward faces were culled and the far walls were
   // drawn from the inside with inward normals, so the casting read as an
   // x-ray of itself -- risers with no tops, and the colour on screen came
-  // from the far wall while a probe read the near one.
+  // from the far wall while a probe read the near one. The crease normals
+  // point out of a counter-clockwise face, as `ComputeNormals` does with
+  // `useRightHandedSystem`.
   mesh.sideOrientation = Material.CounterClockWiseSideOrientation;
-  const normals: number[] = [];
-  VertexData.ComputeNormals(positions, indices, normals, { useRightHandedSystem: true });
-  vertexData.normals = normals;
+  vertexData.normals = creased.normals;
   vertexData.applyToMesh(mesh);
 
   const material = new PBRMaterial(`part-mat-${part.id}`, scene);
   material.backFaceCulling = true;
   material.enableSpecularAntiAliasing = true;
+  // Pushed back a hair in depth so the feature edges drawn exactly on it win
+  // the depth test instead of stitching in and out of the surface.
+  material.zOffset = 1;
   const plugin = createPlugin(material);
   mesh.material = material;
   mesh.outlineColor = SELECTION_COLOR;
   mesh.outlineWidth = 0.02;
 
-  return { mesh, material, plugin, geometryKey: geometryKey(part) };
+  // Named outside the `part-` prefix on purpose: picking identifies a part
+  // by that prefix and does not consult `isPickable`.
+  let edges: LinesMesh | null = null;
+  if (creased.edgeSegments.length > 0) {
+    edges = new LinesMesh(`edges-${part.id}`, scene, mesh);
+    const segmentCount = creased.edgeSegments.length / 6;
+    const lineIndices = new Uint32Array(segmentCount * 2);
+    for (let i = 0; i < lineIndices.length; i += 1) lineIndices[i] = i;
+    const lineData = new VertexData();
+    lineData.positions = creased.edgeSegments;
+    lineData.indices = lineIndices;
+    lineData.applyToMesh(edges);
+    edges.color = EDGE_COLOR;
+    edges.alpha = EDGE_ALPHA_OPAQUE;
+    edges.isPickable = false;
+  }
+
+  return { mesh, material, plugin, edges, geometryKey: geometryKey(part) };
+}
+
+/** Section planes on a part's surface AND its edges, so a cut cuts both. */
+export function setPartClipPlanes(
+  entry: PartEntry,
+  x: Plane | null,
+  y: Plane | null,
+  z: Plane | null
+): void {
+  entry.material.clipPlane = x;
+  entry.material.clipPlane2 = y;
+  entry.material.clipPlane3 = z;
+  const lineMaterial = entry.edges?.material;
+  if (lineMaterial) {
+    lineMaterial.clipPlane = x;
+    lineMaterial.clipPlane2 = y;
+    lineMaterial.clipPlane3 = z;
+  }
 }
 
 export type PartAppearance = {
@@ -225,6 +287,9 @@ export function applyPartAppearance(
     const scale = part.scale || 1;
     mesh.scaling.set(scale, scale, scale);
     mesh.setEnabled(appearance.showModel && part.visible !== false);
+    if (entry.edges) {
+      entry.edges.alpha = translucent ? EDGE_ALPHA_GHOST : EDGE_ALPHA_OPAQUE;
+    }
 
     // Selection reads as an outline rather than as an emissive tint: tinting
     // the surface is indistinguishable from a hot region of the result field,

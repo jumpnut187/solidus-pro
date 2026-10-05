@@ -6,11 +6,15 @@
  * vertical, and converting at the render boundary would mean converting back
  * for every pick and every probe.
  *
- * Lighting is image-based. A casting is a specular metal object, and what
- * makes one read as metal is the environment reflected in it -- three
- * directional lights give a plastic look no amount of roughness tuning fixes.
- * A single soft key light is kept on top of the environment only to hold the
- * silhouette apart from the background.
+ * Lighting is CAD-style, the way SolidWorks draws a model: a HEADLIGHT that
+ * follows the camera (so the face you are looking at is always lit and the
+ * shading reads the geometry, not a fixed studio), a sky/ground hemispheric
+ * fill for the faces turned away, and only a weak studio environment for
+ * soft ambient. The environment used to be the main light, at full strength
+ * through an ACES curve, onto metallic parts -- the casting came out as a
+ * chrome mirror of the studio and the reflections were brighter than the
+ * part. Results are read off the surface colour, so the surface has to show
+ * its colour, not its surroundings.
  */
 import { ArcRotateCamera } from '@babylonjs/core/Cameras/arcRotateCamera';
 import { Engine } from '@babylonjs/core/Engines/engine';
@@ -46,6 +50,12 @@ export type ViewportScene = {
 
 const BACKGROUND = new Color4(0.055, 0.062, 0.074, 1);
 
+/** Studio environment as soft ambient only (was 1.0, the main light). */
+export const CAD_ENVIRONMENT_INTENSITY = 0.3;
+/** Headlight offset from the view direction: from above and to the left. */
+const HEADLIGHT_ELEVATION = 0.35;
+const HEADLIGHT_SIDE = 0.2;
+
 /** How far past the model the floor reaches, as a multiple of its longest edge. */
 const FLOOR_EXTENT_FACTOR = 1.25;
 const FLOOR_MAJOR_ALPHA = 0.3;
@@ -65,17 +75,21 @@ export function createViewportScene(canvas: HTMLCanvasElement): ViewportScene {
   const scene = new Scene(engine);
   scene.clearColor = BACKGROUND;
   scene.useRightHandedSystem = true;
+  // ACES stays (the colormap stops are authored against it) but at a neutral
+  // exposure and contrast: the old 1.15 / 1.1 pushed every highlight toward
+  // white and is half of what made the casting look polished.
   scene.imageProcessingConfiguration.toneMappingEnabled = true;
   scene.imageProcessingConfiguration.toneMappingType = ImageProcessingConfiguration.TONEMAPPING_ACES;
-  scene.imageProcessingConfiguration.exposure = 1.15;
-  scene.imageProcessingConfiguration.contrast = 1.1;
+  scene.imageProcessingConfiguration.exposure = 1.0;
+  scene.imageProcessingConfiguration.contrast = 1.0;
 
-  // The environment is a light source, not scenery: it lights the casting but
-  // the background stays the flat dark ground the UI is designed against.
+  // The environment is ambient only: enough to keep the shadowed side from
+  // going flat black, not enough to show up as reflections. The background
+  // stays the flat dark ground the UI is designed against.
   const environment = CubeTexture.CreateFromPrefilteredData(ENVIRONMENT_URL, scene);
   environment.name = 'studio-environment';
   scene.environmentTexture = environment;
-  scene.environmentIntensity = 1.0;
+  scene.environmentIntensity = CAD_ENVIRONMENT_INTENSITY;
 
   // Analytic lights as well as the environment, and not only for taste.
   // A metallic PBR surface has almost no diffuse term, so with the
@@ -86,14 +100,20 @@ export function createViewportScene(canvas: HTMLCanvasElement): ViewportScene {
   // mode for the one view the whole application exists to show, so the fill
   // below guarantees a lit object and the environment refines it.
   const fill = new HemisphericLight('fill', new Vector3(0.15, -0.3, 1), scene);
-  fill.intensity = 0.65;
+  fill.intensity = 0.55;
   fill.diffuse = new Color3(0.95, 0.96, 1);
-  fill.groundColor = new Color3(0.28, 0.3, 0.34);
+  fill.groundColor = new Color3(0.36, 0.38, 0.42);
+  // A hemispheric light's specular is a second, fixed highlight: off.
+  fill.specular = Color3.Black();
 
+  // The headlight. Its direction is re-aimed every frame from the camera
+  // (below), coming from just above and to the left of the eye, so orbiting
+  // the part never leaves the visible side in the dark. Specular is low: CAD
+  // shading has a soft sheen, not a hot spot.
   const key = new DirectionalLight('key', new Vector3(-0.4, 0.45, -0.8), scene);
-  key.intensity = 1.1;
-  key.diffuse = new Color3(1, 0.98, 0.94);
-  key.specular = new Color3(0.7, 0.7, 0.7);
+  key.intensity = 1.35;
+  key.diffuse = new Color3(1, 1, 1);
+  key.specular = new Color3(0.18, 0.18, 0.18);
 
   const camera = new ArcRotateCamera('camera', -Math.PI / 4, Math.PI / 3, 40, Vector3.Zero(), scene);
   camera.upVector = new Vector3(0, 0, 1);
@@ -148,6 +168,19 @@ export function createViewportScene(canvas: HTMLCanvasElement): ViewportScene {
   const refuseGesture = (event: Event) => event.preventDefault();
   const gestureEvents = ['gesturestart', 'gesturechange', 'gestureend'] as const;
   for (const name of gestureEvents) canvas.addEventListener(name, refuseGesture, { passive: false });
+
+  // Re-aim the headlight from the camera each frame: forward, tipped down a
+  // little and across a little, in the camera's own frame.
+  const aimHeadlight = () => {
+    const forward = camera.getForwardRay(1).direction;
+    const right = Vector3.Cross(forward, camera.upVector).normalize();
+    const camUp = Vector3.Cross(right, forward).normalize();
+    key.direction = forward
+      .add(camUp.scale(-HEADLIGHT_ELEVATION))
+      .add(right.scale(HEADLIGHT_SIDE))
+      .normalize();
+  };
+  scene.onBeforeRenderObservable.add(aimHeadlight);
 
   const pipeline = new DefaultRenderingPipeline('viewport-pipeline', true, scene, [camera]);
   pipeline.fxaaEnabled = true;
