@@ -26,10 +26,19 @@
  * Sketch lines are drawn in rendering group 1, after the model with depth
  * cleared, so a sketch on a plane through the middle of the casting is not
  * hidden inside it.
+ *
+ * The mouse works the way SOLIDWORKS and Onshape sketchers do: while
+ * sketching the left button only draws -- click-click, or press, drag and
+ * release -- and the view turns on the middle button (or Shift + left, for a
+ * trackpad), pans on the right and zooms on the wheel. Typing a number while
+ * a shape is being drawn sets its size; typing one right after sets the new
+ * entity's dimension. In the feature stage the direction arrow sits on the
+ * end face and is dragged to set the depth.
  */
 import type { ArcRotateCamera } from '@babylonjs/core/Cameras/arcRotateCamera';
 import type { Camera } from '@babylonjs/core/Cameras/camera';
-import { PointerEventTypes, type PointerInfo } from '@babylonjs/core/Events/pointerEvents';
+import { Constants } from '@babylonjs/core/Engines/constants';
+import { PointerEventTypes, type PointerInfo, type PointerInfoPre } from '@babylonjs/core/Events/pointerEvents';
 import { Material } from '@babylonjs/core/Materials/material';
 import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial';
 import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial';
@@ -59,6 +68,7 @@ import {
   planeFrame,
   planeLabel,
   planeThroughPoint,
+  pointInContours,
   sketchDimensions,
   sketchProfiles,
   sketchToWorld,
@@ -121,9 +131,13 @@ const PREVIEW_PLANE_COLOR = new Color3(1, 0.62, 0.2);
 const CHOSEN_PLANE_COLOR = new Color3(0.3, 0.85, 0.55);
 const PREVIEW_OK = new Color3(0.98, 0.78, 0.25);
 const PREVIEW_BAD = new Color3(0.95, 0.3, 0.3);
+/** The material an extrude cut removes. */
+const PREVIEW_CUT = new Color3(0.9, 0.22, 0.42);
 const ARROW_LINE = new Color3(1, 0.78, 0.25);
 const MEASURE_LINE = new Color3(1, 0.62, 0.15);
 const MEASURE_HOVER = new Color3(0.45, 0.8, 1);
+const REGION_SELECTED = new Color3(0.3, 0.62, 1);
+const REGION_OPEN = new Color3(0.7, 0.76, 0.86);
 
 type Draft =
   | { tool: 'rectangle' | 'centerRectangle' | 'circle' | 'polygon'; first: Vec2 }
@@ -135,7 +149,7 @@ type Draft =
 type SnapKind = 'point' | 'grid' | 'free' | 'horizontal' | 'vertical';
 type Snap = { point: Vec2; kind: SnapKind };
 
-type Label = { element: HTMLElement; anchor: Vec3 };
+type Label = { element: HTMLElement; anchor: Vec3; spec?: DimensionSpec };
 
 type PlaneQuad = { key: string; plane: SketchPlane; frame: PlaneFrame; center: Vec2; half: number; mesh: Mesh };
 
@@ -174,6 +188,9 @@ export class SketchOverlay {
   private _snapMarker: Mesh | null = null;
 
   // Feature stage
+  private _regionMeshes: Mesh[] = [];
+  private _regionLines: LinesMesh | null = null;
+  private _hoverRegion = -1;
   private _preview: Mesh | null = null;
   private _previewEdges: LinesMesh | null = null;
   private _arrow: Mesh | null = null;
@@ -187,6 +204,7 @@ export class SketchOverlay {
   private readonly _hintMaterial: StandardMaterial;
   private readonly _measureFaceMaterial: StandardMaterial;
   private readonly _previewMaterial: PBRMaterial;
+  private readonly _cutPreviewMaterial: PBRMaterial;
 
   private _labels: Label[] = [];
   private _dimLabels: Label[] = [];
@@ -196,12 +214,26 @@ export class SketchOverlay {
 
   private _draft: Draft | null = null;
   private _cursor: Snap | null = null;
-  private _pointerDown: { x: number; y: number; button: number } | null = null;
+  /**
+   * The button press in progress. `orbit`: Shift + left, which turns the view
+   * and draws nothing. `startedDraft`: the press placed a shape's first point,
+   * so a release without a drag is the first click of click-click.
+   */
+  private _pointerDown: { x: number; y: number; button: number; orbit: boolean; startedDraft: boolean } | null = null;
+  /** The size being typed for the shape being drawn. */
+  private _numeric: { box: HTMLDivElement; input: HTMLInputElement } | null = null;
+  /** The feature stage's depth arrow: where it is, and the drag in progress. */
+  private _depthHandle: { origin: Vector3; dir: Vector3; base: Vector3; tip: Vector3; midplane: boolean } | null = null;
+  private _depthDrag: { last: number } | null = null;
+  /** A selection box being dragged out, from where the press was (CSS pixels). */
+  private _box: { x0: number; y0: number; additive: boolean; element: HTMLDivElement | null } | null = null;
+  private _depthLabel: Label | null = null;
   private _drag: Drag | null = null;
   private _dirtyRubber = false;
   private _dirtyLabels = true;
   private _dirtyHover = false;
   private readonly _pointerObserver: Observer<PointerInfo>;
+  private readonly _prePointerObserver: Observer<PointerInfoPre>;
   private readonly _renderObserver: Observer<Scene>;
   private readonly _viewObserver: Observer<Camera>;
   private readonly _onKey: (event: KeyboardEvent) => void;
@@ -246,12 +278,33 @@ export class SketchOverlay {
     this._previewMaterial.transparencyMode = PBRMaterial.PBRMATERIAL_ALPHABLEND;
     this._previewMaterial.needDepthPrePass = true;
 
+    // What a cut removes lies inside the bodies it cuts, so it is drawn with
+    // the depth test off: after the model (it is transparent) and over it.
+    // Not in rendering group 1 with the sketch lines: a PBR mesh there is
+    // drawn into the ambient-occlusion pre-pass targets without writing
+    // them, which WebGL rejects on every frame.
+    this._cutPreviewMaterial = new PBRMaterial('sketch-cut-preview-mat', this._scene);
+    this._cutPreviewMaterial.albedoColor = PREVIEW_CUT;
+    this._cutPreviewMaterial.metallic = 0;
+    this._cutPreviewMaterial.roughness = 0.6;
+    this._cutPreviewMaterial.alpha = 0.55;
+    this._cutPreviewMaterial.backFaceCulling = true;
+    this._cutPreviewMaterial.sideOrientation = Material.CounterClockWiseSideOrientation;
+    this._cutPreviewMaterial.transparencyMode = PBRMaterial.PBRMATERIAL_ALPHABLEND;
+    this._cutPreviewMaterial.depthFunction = Constants.ALWAYS;
+    this._cutPreviewMaterial.disableDepthWrite = true;
+
     this._readout = document.createElement('div');
     this._readout.className = 'sketch-readout';
     this._readout.hidden = true;
     this._layer.appendChild(this._readout);
 
     this._pointerObserver = this._scene.onPointerObservable.add((info) => this._onPointer(info));
+    // Before the camera sees a press, decide whether it may turn the view.
+    this._prePointerObserver = this._scene.onPrePointerObservable.add((info) => {
+      const event = info.event as PointerEvent;
+      this._syncCameraButtons(event.button === 0 && event.shiftKey);
+    }, PointerEventTypes.POINTERDOWN);
     this._renderObserver = this._scene.onBeforeRenderObservable.add(() => this._beforeRender());
     this._viewObserver = this._camera.onViewMatrixChangedObservable.add(() => {
       this._dirtyLabels = true;
@@ -269,6 +322,7 @@ export class SketchOverlay {
   setState(state: ModelingViewState | null): void {
     const previous = this._state;
     this._state = state;
+    this._syncCameraButtons(false);
     if (!state) {
       this._draft = null;
       this._cursor = null;
@@ -281,7 +335,10 @@ export class SketchOverlay {
       previous.stage !== state.stage ||
       previous.purpose !== state.purpose ||
       JSON.stringify(previous.plane) !== JSON.stringify(state.plane);
-    if (previous?.tool !== state.tool || state.stage !== 'sketch') this._draft = null;
+    if (previous?.tool !== state.tool || state.stage !== 'sketch') {
+      this._draft = null;
+      this._closeNumeric();
+    }
     if (planeChanged) {
       this._rebuildAll();
       return;
@@ -295,16 +352,27 @@ export class SketchOverlay {
       this._clearPlaneStage();
       this._buildPlaneStage();
     }
-    if (previous.entities !== state.entities || previous.selectedEntityId !== state.selectedEntityId) {
+    if (previous.entities !== state.entities || previous.selectedEntityIds !== state.selectedEntityIds) {
       this._rebuildEntities();
     }
-    if (previous.preview !== state.preview || previous.direction !== state.direction) this._rebuildPreview();
+    if (
+      previous.preview !== state.preview ||
+      previous.direction !== state.direction ||
+      previous.extrudeDepth?.value !== state.extrudeDepth?.value ||
+      previous.extrudeDepth?.midplane !== state.extrudeDepth?.midplane
+    ) {
+      this._rebuildPreview();
+    }
     if (previous.measure !== state.measure) this._rebuildMeasure();
+    if (previous.regions !== state.regions) this._rebuildRegions();
     this._dirtyRubber = true;
   }
 
   dispose(): void {
     this._scene.onPointerObservable.remove(this._pointerObserver);
+    this._scene.onPrePointerObservable.remove(this._prePointerObserver);
+    this._state = null;
+    this._syncCameraButtons(false);
     this._scene.onBeforeRenderObservable.remove(this._renderObserver);
     this._camera.onViewMatrixChangedObservable.remove(this._viewObserver);
     window.removeEventListener('keydown', this._onKey);
@@ -313,7 +381,21 @@ export class SketchOverlay {
     this._hintMaterial.dispose();
     this._measureFaceMaterial.dispose();
     this._previewMaterial.dispose();
+    this._cutPreviewMaterial.dispose();
     this._readout.remove();
+  }
+
+  /**
+   * Which buttons turn the view. While sketching the left button belongs to
+   * the sketch, as it does in SOLIDWORKS and Onshape: a drag that was meant
+   * to size a circle used to swing the camera instead, leaving the sketch
+   * seen edge-on with nothing drawn. Shift + left still turns it, for a
+   * trackpad with no middle button.
+   */
+  private _syncCameraButtons(orbitWithLeft: boolean): void {
+    const pointers = this._camera.inputs.attached.pointers as unknown as { buttons: number[] } | undefined;
+    if (!pointers) return;
+    pointers.buttons = this._state?.stage === 'sketch' && !orbitWithLeft ? [1, 2] : [0, 1, 2];
   }
 
   // -------------------------------------------------------------------------
@@ -360,10 +442,21 @@ export class SketchOverlay {
     this._previewEdges = null;
     this._arrow?.dispose();
     this._arrow = null;
+    this._clearDepthLabel();
+    this._depthHandle = null;
+    this._closeNumeric();
+    this._clearRegions();
+    this._box?.element?.remove();
+    this._box = null;
     this._clearMeasure();
     this._clearMeasureHover();
     this._clearDimLabels();
     this._readout.hidden = true;
+  }
+
+  private _clearDepthLabel(): void {
+    this._depthLabel?.element.remove();
+    this._depthLabel = null;
   }
 
   private _clearDimLabels(): void {
@@ -387,6 +480,7 @@ export class SketchOverlay {
     }
     this._buildSketchPlane();
     this._rebuildEntities();
+    this._rebuildRegions();
     this._rebuildPreview();
     this._dirtyRubber = true;
     this._dirtyLabels = true;
@@ -599,7 +693,7 @@ export class SketchOverlay {
       const path = entityPath(entity);
       if (path.points.length < 2) continue;
       const points = path.closed ? [...path.points, path.points[0]] : path.points;
-      const selected = entity.id === state.selectedEntityId;
+      const selected = state.selectedEntityIds.includes(entity.id);
       if (entity.construction) {
         // Dashed, as construction geometry is drawn: 7 px on, 5 px off.
         for (const dash of dashes(points, 7 / ppu, 5 / ppu)) (selected ? groups.selected : groups.construction).push(toWorld(dash));
@@ -616,11 +710,29 @@ export class SketchOverlay {
       }
     }
     const colors = { normal: SKETCH_LINE, selected: SELECTED_LINE, construction: CONSTRUCTION_LINE };
+    const thinLines: Vector3[][] = [];
+    const thinColors: Color4[][] = [];
     for (const [key, lines] of Object.entries(groups) as Array<[keyof typeof colors, Vector3[][]]>) {
+      const color = Color4.FromColor3(colors[key], 1);
+      for (const line of lines) {
+        thinLines.push(line);
+        thinColors.push(line.map(() => color));
+      }
       const mesh = createFatLines(`sketch-entities-${key}`, lines, colors[key], key === 'construction' ? 1.5 : 2.25, this._scene);
       if (!mesh) continue;
       mesh.renderingGroupId = 1;
       this._entities.push(mesh);
+    }
+    // A one-pixel copy under the wide lines, drawn by the plain line shader
+    // the grid and the dimension lines use. Where the wide lines draw it is
+    // hidden under them; where a GPU fails to draw them the sketch is still
+    // on screen rather than reduced to its dimension labels.
+    if (thinLines.length) {
+      // With vertex alpha, like the grid, so it shares the grid's compiled shader.
+      const thin = MeshBuilder.CreateLineSystem('sketch-entities-thin', { lines: thinLines, colors: thinColors, useVertexAlpha: true }, this._scene);
+      thin.renderingGroupId = 1;
+      thin.isPickable = false;
+      this._entities.push(thin);
     }
 
     // Open contour ends, as SOLIDWORKS marks them: small red squares.
@@ -649,7 +761,7 @@ export class SketchOverlay {
     }
     // Driving dimensions: a thin line for the span and a label to type into.
     const gap = Math.max(16 / ppu, 0.05);
-    const dims = sketchDimensions(state.entities, state.selectedEntityId, gap);
+    const dims = sketchDimensions(state.entities, this._primarySelection(), gap);
     const dimLines: Vector3[][] = [];
     const dimColors: Color4[][] = [];
     for (const spec of dims) {
@@ -673,7 +785,7 @@ export class SketchOverlay {
         this._beginEdit(spec, element);
       });
       this._layer.appendChild(element);
-      this._dimLabels.push({ element, anchor: sketchToWorld(frame, spec.anchor) });
+      this._dimLabels.push({ element, anchor: sketchToWorld(frame, spec.anchor), spec });
     }
     if (dimLines.length) {
       this._dimLines = MeshBuilder.CreateLineSystem('sketch-dim-lines', { lines: dimLines, colors: dimColors, useVertexAlpha: true }, this._scene);
@@ -683,13 +795,14 @@ export class SketchOverlay {
     this._dirtyLabels = true;
   }
 
-  private _beginEdit(spec: DimensionSpec, element: HTMLElement): void {
+  /** Turn a dimension label into an input. `typed` starts it with that text, as when a number is typed. */
+  private _beginEdit(spec: DimensionSpec, element: HTMLElement, typed?: string): void {
     if (!this._state) return;
     const input = document.createElement('input');
     input.className = 'sketch-dim-input';
     input.type = 'text';
     input.inputMode = 'decimal';
-    input.value = formatInches(spec.value);
+    input.value = typed ?? formatInches(spec.value);
     input.style.left = element.style.left;
     input.style.top = element.style.top;
     element.replaceWith(input);
@@ -697,7 +810,8 @@ export class SketchOverlay {
     if (label) label.element = input;
     this._editing = { spec, input };
     input.focus();
-    input.select();
+    if (typed === undefined) input.select();
+    else input.setSelectionRange(input.value.length, input.value.length);
     let done = false;
     const finish = (commit: boolean) => {
       if (done) return;
@@ -731,6 +845,8 @@ export class SketchOverlay {
     this._previewEdges = null;
     this._arrow?.dispose();
     this._arrow = null;
+    this._clearDepthLabel();
+    this._depthHandle = null;
     if (!state || state.stage !== 'feature') return;
 
     const preview = state.preview;
@@ -743,8 +859,12 @@ export class SketchOverlay {
       data.indices = creased.indices;
       data.normals = creased.normals;
       data.applyToMesh(mesh);
-      this._previewMaterial.albedoColor = preview.ok ? PREVIEW_OK : PREVIEW_BAD;
-      mesh.material = this._previewMaterial;
+      if (preview.cut && preview.ok) {
+        mesh.material = this._cutPreviewMaterial;
+      } else {
+        this._previewMaterial.albedoColor = preview.ok ? PREVIEW_OK : PREVIEW_BAD;
+        mesh.material = this._previewMaterial;
+      }
       mesh.isPickable = false;
       this._preview = mesh;
       if (creased.edgeSegments.length) {
@@ -754,8 +874,9 @@ export class SketchOverlay {
           lines.push([new Vector3(e[i], e[i + 1], e[i + 2]), new Vector3(e[i + 3], e[i + 4], e[i + 5])]);
         }
         this._previewEdges = MeshBuilder.CreateLineSystem('sketch-preview-edges', { lines }, this._scene);
-        this._previewEdges.color = new Color3(0.35, 0.25, 0.05);
+        this._previewEdges.color = preview.cut ? new Color3(0.45, 0.05, 0.15) : new Color3(0.35, 0.25, 0.05);
         this._previewEdges.isPickable = false;
+        if (preview.cut) this._previewEdges.renderingGroupId = 1;
       }
     }
 
@@ -763,9 +884,15 @@ export class SketchOverlay {
     const direction = state.direction;
     if (frame && direction && state.entities.length) {
       const centroid = sketchCentroid(state.entities);
-      const base = toVector(sketchToWorld(frame, centroid));
-      const length = Math.max(this._extent() * 0.25, 1);
+      const origin = toVector(sketchToWorld(frame, centroid));
       const dir = new Vector3(direction[0], direction[1], direction[2]).normalize();
+      // With a depth to set, the arrow stands on the end face, the way the
+      // SOLIDWORKS and Onshape extrude manipulators do, and dragging it sets
+      // the depth. Otherwise it starts at the sketch and only shows the way.
+      const depth = state.extrudeDepth;
+      const endOffset = depth ? (depth.midplane ? depth.value / 2 : depth.value) : 0;
+      const base = origin.add(dir.scale(endOffset));
+      const length = Math.max(this._extent() * 0.25, 1);
       const tip = base.add(dir.scale(length));
       const side = Vector3.Cross(dir, new Vector3(frame.u[0], frame.u[1], frame.u[2])).normalize();
       const across = side.lengthSquared() > 0.5 ? side : new Vector3(frame.v[0], frame.v[1], frame.v[2]);
@@ -777,12 +904,177 @@ export class SketchOverlay {
           [base, tip],
           [back.add(across.scale(head * 0.5)), tip, back.subtract(across.scale(head * 0.5))]
         ],
-        ARROW_LINE,
-        3,
+        this._depthDrag ? SELECTED_LINE : ARROW_LINE,
+        this._depthDrag ? 4 : 3,
         this._scene
       );
       if (this._arrow) this._arrow.renderingGroupId = 1;
+      if (depth) {
+        this._depthHandle = { origin, dir, base, tip, midplane: depth.midplane };
+        const element = document.createElement('button');
+        element.type = 'button';
+        element.className = 'sketch-dim sketch-depth';
+        element.textContent = `${depth.midplane ? 'Total ' : ''}${formatInches(depth.value)} in`;
+        element.title = 'Drag the arrow to set the depth, or click to type it';
+        element.addEventListener('pointerdown', (event) => event.stopPropagation());
+        element.addEventListener('click', (event) => {
+          event.stopPropagation();
+          this._editDepth(element, depth.value);
+        });
+        this._layer.appendChild(element);
+        this._depthLabel = { element, anchor: [tip.x, tip.y, tip.z] };
+      }
     }
+    this._dirtyLabels = true;
+  }
+
+  // -------------------------------------------------------------------------
+  // Regions
+  // -------------------------------------------------------------------------
+
+  private _clearRegions(): void {
+    for (const mesh of this._regionMeshes) mesh.dispose(false, true);
+    this._regionMeshes = [];
+    this._regionLines?.dispose();
+    this._regionLines = null;
+    this._hoverRegion = -1;
+  }
+
+  /**
+   * The sketch's regions in the feature stage, each a click target: the
+   * ones the feature uses filled, the others outlined, the one under the
+   * pointer lit -- Onshape's region picking. The fills sit on the sketch
+   * plane, pulled toward the eye like the face hint; their outlines are drawn
+   * over the model, so a region under the preview body is still found.
+   */
+  private _rebuildRegions(): void {
+    this._clearRegions();
+    const state = this._state;
+    const frame = this._frame;
+    if (!state || !frame || state.stage !== 'feature' || !state.regions) return;
+    const outlines: Vector3[][] = [];
+    const colors: Color4[][] = [];
+    state.regions.forEach((region, index) => {
+      const positions: number[] = [];
+      for (let i = 0; i < region.triangles.length; i += 2) {
+        positions.push(...sketchToWorld(frame, [region.triangles[i], region.triangles[i + 1]]));
+      }
+      const mesh = new Mesh(`sketch-region-${index}`, this._scene);
+      const data = new VertexData();
+      data.positions = positions;
+      data.indices = Array.from({ length: positions.length / 3 }, (_, i) => i);
+      data.applyToMesh(mesh);
+      const material = flatMaterial(`sketch-region-${index}-mat`, region.selected ? REGION_SELECTED : REGION_OPEN, 0, this._scene);
+      material.disableDepthWrite = true;
+      material.zOffset = -2;
+      material.zOffsetUnits = -8;
+      mesh.material = material;
+      mesh.isPickable = false;
+      this._regionMeshes.push(mesh);
+      const color = region.selected ? Color4.FromColor3(REGION_SELECTED, 0.9) : Color4.FromColor3(REGION_OPEN, 0.55);
+      for (const contour of region.contours) {
+        const line = [...contour, contour[0]].map((point) => toVector(sketchToWorld(frame, point)));
+        outlines.push(line);
+        colors.push(line.map(() => color));
+      }
+    });
+    if (outlines.length) {
+      this._regionLines = MeshBuilder.CreateLineSystem('sketch-region-lines', { lines: outlines, colors, useVertexAlpha: true }, this._scene);
+      this._regionLines.renderingGroupId = 1;
+      this._regionLines.isPickable = false;
+    }
+    this._paintRegions();
+  }
+
+  private _paintRegions(): void {
+    const regions = this._state?.regions ?? [];
+    this._regionMeshes.forEach((mesh, index) => {
+      const material = mesh.material as StandardMaterial;
+      const selected = regions[index]?.selected;
+      const hover = index === this._hoverRegion;
+      material.alpha = selected ? (hover ? 0.5 : 0.34) : hover ? 0.22 : 0.05;
+    });
+  }
+
+  /** The region under the pointer, by index, or -1. */
+  private _regionAtPointer(): number {
+    const regions = this._state?.regions;
+    if (!regions?.length) return -1;
+    const raw = this._pointerOnPlane();
+    if (!raw) return -1;
+    return regions.findIndex((region) => pointInContours(region.contours, raw));
+  }
+
+  /** Type the depth into the label at the arrow's tip. */
+  private _editDepth(element: HTMLElement, value: number): void {
+    const input = document.createElement('input');
+    input.className = 'sketch-dim-input';
+    input.type = 'text';
+    input.inputMode = 'decimal';
+    input.value = formatInches(value);
+    input.style.left = element.style.left;
+    input.style.top = element.style.top;
+    element.replaceWith(input);
+    if (this._depthLabel) this._depthLabel.element = input;
+    input.focus();
+    input.select();
+    let done = false;
+    const finish = (commit: boolean) => {
+      if (done) return;
+      done = true;
+      const next = commit ? evaluateLength(input.value) : null;
+      if (next !== null && next > 1e-4 && Math.abs(next - value) > 1e-9) {
+        this._emit({ type: 'depthChanged', depth: next });
+      } else {
+        this._rebuildPreview();
+      }
+    };
+    input.addEventListener('keydown', (event) => {
+      event.stopPropagation();
+      if (event.key === 'Enter') finish(true);
+      else if (event.key === 'Escape') finish(false);
+    });
+    input.addEventListener('blur', () => finish(true));
+    input.addEventListener('pointerdown', (event) => event.stopPropagation());
+  }
+
+  /** Whether the pointer is on the depth arrow, within a few pixels. */
+  private _onDepthHandle(): boolean {
+    const handle = this._depthHandle;
+    if (!handle) return false;
+    const a = this._project([handle.base.x, handle.base.y, handle.base.z]);
+    const b = this._project([handle.tip.x, handle.tip.y, handle.tip.z]);
+    if (!a || !b) return false;
+    // An arrow pointing at the eye is a dot over the sketch; it is not a
+    // handle then, or it would swallow clicks on the region under it.
+    if (Math.hypot(b.x - a.x, b.y - a.y) < 14) return false;
+    // Both in CSS pixels: `_project` scales the render size back down.
+    const p: Vec2 = [this._scene.pointerX, this._scene.pointerY];
+    return segmentDistance(p, [a.x, a.y], [b.x, b.y]) <= 10;
+  }
+
+  /**
+   * The depth for the pointer during an arrow drag: where the pointer's ray
+   * passes closest to the extrude's axis, snapped to a quarter of the grid
+   * step (a few pixels) unless Alt is held.
+   */
+  private _depthAtPointer(free: boolean): number | null {
+    const handle = this._depthHandle;
+    if (!handle) return null;
+    const { origin, direction } = this._ray();
+    const w0 = handle.origin.subtract(origin);
+    const a = Vector3.Dot(handle.dir, handle.dir);
+    const b = Vector3.Dot(handle.dir, direction);
+    const c = Vector3.Dot(direction, direction);
+    const d = Vector3.Dot(handle.dir, w0);
+    const e = Vector3.Dot(direction, w0);
+    const denom = a * c - b * b;
+    if (Math.abs(denom) < 1e-9) return null;
+    const t = (b * e - c * d) / denom;
+    let depth = handle.midplane ? 2 * t : t;
+    const step = (this._gridStep || 0.125) / 4;
+    if (!free) depth = Math.round(depth / step) * step;
+    return Math.max(depth, free ? 1e-3 : step);
   }
 
   // -------------------------------------------------------------------------
@@ -925,7 +1217,8 @@ export class SketchOverlay {
   }
 
   private _placeLabels(): void {
-    for (const label of [...this._labels, ...this._dimLabels, ...this._measureLabels]) {
+    const depth = this._depthLabel ? [this._depthLabel] : [];
+    for (const label of [...this._labels, ...this._dimLabels, ...this._measureLabels, ...depth]) {
       const at = this._project(label.anchor);
       if (!at) {
         label.element.style.display = 'none';
@@ -1014,20 +1307,59 @@ export class SketchOverlay {
       case PointerEventTypes.POINTERMOVE:
         this._onMove(event);
         break;
-      case PointerEventTypes.POINTERDOWN:
-        this._pointerDown = { x: scene.pointerX, y: scene.pointerY, button: event.button };
-        if (event.button === 0) this._maybeStartDrag();
+      case PointerEventTypes.POINTERDOWN: {
+        const orbit = state.stage === 'sketch' && event.button === 0 && event.shiftKey;
+        const down = { x: scene.pointerX, y: scene.pointerY, button: event.button, orbit, startedDraft: false };
+        this._pointerDown = down;
+        if (event.button !== 0 || orbit) break;
+        if (state.stage === 'feature' && this._onDepthHandle()) {
+          // The arrow is held: the view must not turn with it.
+          this._camera.detachControl();
+          this._depthDrag = { last: state.extrudeDepth?.value ?? 0 };
+          this._rebuildPreview();
+          break;
+        }
+        this._maybeStartDrag(event);
+        // A press places a shape's first point, so the shape can be drawn by
+        // dragging to the second and releasing, as well as by two clicks.
+        if (state.stage === 'sketch' && isDrawingTool(state.tool) && !this._draft) {
+          this._closeNumeric();
+          this._onClick(event);
+          down.startedDraft = this._draft !== null;
+        }
         break;
+      }
       case PointerEventTypes.POINTERUP: {
         const down = this._pointerDown;
         this._pointerDown = null;
         this._dirtyHover = true;
+        if (this._depthDrag) {
+          this._depthDrag = null;
+          this._camera.attachControl(this._canvas, false);
+          this._rebuildPreview();
+          break;
+        }
         if (this._drag) {
           this._endDrag();
           break;
         }
-        if (event.button !== 0 || !down || down.button !== 0) break;
-        if (Math.hypot(scene.pointerX - down.x, scene.pointerY - down.y) > CLICK_DRAG_THRESHOLD_PX) break;
+        if (this._box && this._endBox()) break;
+        if (event.button !== 0 || !down || down.button !== 0 || down.orbit) break;
+        const moved = Math.hypot(scene.pointerX - down.x, scene.pointerY - down.y) > CLICK_DRAG_THRESHOLD_PX;
+        if (state.stage === 'sketch' && isDrawingTool(state.tool)) {
+          // The release of the press that started the shape: with no drag it
+          // is the first of two clicks, and the shape waits for the second.
+          if (down.startedDraft && !moved) break;
+          const dragged = down.startedDraft && moved;
+          this._onClick(event);
+          // A line dragged out is one line, as in SOLIDWORKS; clicks chain.
+          if (dragged && (state.tool === 'line' || state.tool === 'centerline')) {
+            this._draft = null;
+            this._dirtyRubber = true;
+          }
+          break;
+        }
+        if (moved) break;
         this._onClick(event);
         break;
       }
@@ -1045,6 +1377,26 @@ export class SketchOverlay {
   private _onMove(event: PointerEvent): void {
     const state = this._state;
     if (!state) return;
+    if (state.stage === 'feature') {
+      if (this._depthDrag) {
+        const depth = this._depthAtPointer(event.altKey);
+        if (depth !== null && Math.abs(depth - this._depthDrag.last) > 1e-9) {
+          this._depthDrag.last = depth;
+          this._emit({ type: 'depthChanged', depth });
+        }
+        return;
+      }
+      if (!this._pointerDown) {
+        const onHandle = this._onDepthHandle();
+        const region = onHandle ? -1 : this._regionAtPointer();
+        if (region !== this._hoverRegion) {
+          this._hoverRegion = region;
+          this._paintRegions();
+        }
+        this._canvas.style.cursor = onHandle ? 'grab' : region >= 0 ? 'pointer' : '';
+      }
+      return;
+    }
     if (state.stage === 'plane' || state.stage === 'measure' || (state.stage === 'sketch' && state.tool === 'convert')) {
       // Picked once per frame at most, not per pointer event: a pick is a
       // ray against every triangle of the casting.
@@ -1073,6 +1425,7 @@ export class SketchOverlay {
       this._drag.moved = true;
       this._previewDrag();
     }
+    if (this._box) this._updateBox();
     if (state.tool === 'select') {
       const end = this._endAt(raw);
       this._canvas.style.cursor = end ? 'crosshair' : this._entityAt(raw) ? 'move' : 'default';
@@ -1103,6 +1456,7 @@ export class SketchOverlay {
     }
     if (cursor.kind === 'horizontal') text += '   ─ Horizontal';
     if (cursor.kind === 'vertical') text += '   │ Vertical';
+    if (this._numericPrompt() && !this._numeric) text += '   · type a size';
     this._readout.hidden = false;
     this._readout.textContent = `${text}  in`;
   }
@@ -1194,6 +1548,12 @@ export class SketchOverlay {
       this._emit({ type: 'measurePicked', pick: this._pickMeasure(this._scene.pointerX, this._scene.pointerY) });
       return;
     }
+    if (state.stage === 'feature') {
+      // A click on a region adds it to the profile or takes it out.
+      const raw = state.regions ? this._pointerOnPlane() : null;
+      if (raw && this._regionAtPointer() >= 0) this._emit({ type: 'regionToggled', point: raw });
+      return;
+    }
     if (state.stage !== 'sketch') return;
 
     if (state.tool === 'convert') {
@@ -1209,10 +1569,25 @@ export class SketchOverlay {
     const point = snap.point;
 
     if (state.tool === 'select') {
-      this._emit({ type: 'entitySelected', id: this._entityAt(raw)?.id ?? null });
+      const hit = this._entityAt(raw);
+      if (addsToSelection(event)) {
+        // Ctrl- or Cmd-click adds an entity to the selection or takes it out.
+        if (hit) {
+          const ids = state.selectedEntityIds;
+          this._emit({ type: 'entitySelected', ids: ids.includes(hit.id) ? ids.filter((id) => id !== hit.id) : [...ids, hit.id] });
+        }
+      } else {
+        this._emit({ type: 'entitySelected', ids: hit ? [hit.id] : [] });
+      }
       return;
     }
+    this._applyPoint(point, snap.kind);
+  }
 
+  /** Place the next point of the shape the current tool is drawing. */
+  private _applyPoint(point: Vec2, snapKind: SnapKind): void {
+    const state = this._state;
+    if (!state || state.stage !== 'sketch') return;
     const draft = this._draft;
     switch (state.tool) {
       case 'line':
@@ -1235,12 +1610,12 @@ export class SketchOverlay {
             x2: point[0],
             y2: point[1],
             ...(construction ? { construction } : {}),
-            ...(exactly && snap.kind !== 'free' ? { relation: exactly } : {})
+            ...(exactly && snapKind !== 'free' ? { relation: exactly } : {})
           }
         });
         // The chain ends where it closes on itself or meets another end, the
         // way the Line tool stops when a contour closes.
-        const closes = distance2(point, draft.chainStart) <= COINCIDENT_TOL || (snap.kind === 'point' && this._isEnd(point));
+        const closes = distance2(point, draft.chainStart) <= COINCIDENT_TOL || (snapKind === 'point' && this._isEnd(point));
         this._draft = closes || construction ? null : { ...draft, start: point };
         break;
       }
@@ -1350,7 +1725,7 @@ export class SketchOverlay {
   }
 
   /** The entity whose outline is nearest the point, or the smallest closed one containing it. */
-  private _entityAt(point: Vec2): SketchEntity | null {
+  private _entityAt(point: Vec2, outlineOnly = false): SketchEntity | null {
     const state = this._state;
     if (!state) return null;
     const tolerance = SELECT_RADIUS_PX / this._pixelsPerUnit();
@@ -1367,7 +1742,7 @@ export class SketchOverlay {
           best = entity;
         }
       }
-      if (path.closed && pointInPolygon(point, path.points)) {
+      if (!outlineOnly && path.closed && pointInPolygon(point, path.points)) {
         const area = Math.abs(polygonArea(path.points));
         if (!inside || area < inside.area) inside = { entity, area };
       }
@@ -1394,7 +1769,12 @@ export class SketchOverlay {
   // Dragging
   // -------------------------------------------------------------------------
 
-  private _maybeStartDrag(): void {
+  /**
+   * A press with the Select tool: on an end it drags the end, on a line it
+   * drags the selection (or the line, if it was not selected), and anywhere
+   * else it starts a selection box.
+   */
+  private _maybeStartDrag(event: PointerEvent): void {
     const state = this._state;
     if (!state || state.stage !== 'sketch' || state.tool !== 'select') return;
     const raw = this._pointerOnPlane();
@@ -1405,16 +1785,88 @@ export class SketchOverlay {
       this._drag = { kind: 'end', id: end.id, end: end.end, original: state.entities, moved: false };
       return;
     }
-    const entity = this._entityAt(raw);
-    if (!entity) return;
-    // The camera orbits on a left drag; while a sketch entity is held it
-    // must not, or the entity and the view would move together.
+    // Only the line itself is a handle: pressing inside a circle starts a
+    // box, as it does in SOLIDWORKS and Onshape.
+    const entity = this._entityAt(raw, true);
+    if (!entity) {
+      this._box = { x0: this._scene.pointerX, y0: this._scene.pointerY, additive: addsToSelection(event), element: null };
+      return;
+    }
     this._camera.detachControl();
+    const selected = state.selectedEntityIds;
+    const moving = selected.includes(entity.id) ? selected : addsToSelection(event) ? [...selected, entity.id] : [entity.id];
     // A line or arc drags the whole chain it is joined into, so a contour
     // drawn with the Line tool moves as one shape.
-    const ids = entityEnds(entity) ? connectedIds(state.entities, entity.id) : new Set([entity.id]);
+    const ids = new Set<string>();
+    for (const id of moving) {
+      const item = state.entities.find((candidate) => candidate.id === id);
+      if (!item) continue;
+      for (const joined of entityEnds(item) ? connectedIds(state.entities, id) : [id]) ids.add(joined);
+    }
     this._drag = { kind: 'entities', ids, start: this._snap(raw, false).point, original: state.entities, moved: false };
-    if (state.selectedEntityId !== entity.id) this._emit({ type: 'entitySelected', id: entity.id });
+    if (moving !== selected) this._emit({ type: 'entitySelected', ids: moving });
+  }
+
+  /** The entity whose dimensions are shown and typed into: the selection, when it is one entity. */
+  private _primarySelection(): string | null {
+    const ids = this._state?.selectedEntityIds ?? [];
+    return ids.length === 1 ? ids[0] : null;
+  }
+
+  // -------------------------------------------------------------------------
+  // Box selection
+  // -------------------------------------------------------------------------
+
+  /** Draw the selection box from the press to the pointer. */
+  private _updateBox(): void {
+    const box = this._box;
+    if (!box) return;
+    const x = this._scene.pointerX;
+    const y = this._scene.pointerY;
+    if (!box.element) {
+      if (Math.hypot(x - box.x0, y - box.y0) <= CLICK_DRAG_THRESHOLD_PX) return;
+      box.element = document.createElement('div');
+      box.element.className = 'sketch-box';
+      this._layer.appendChild(box.element);
+    }
+    // Left to right selects what is wholly inside; right to left, anything
+    // the box touches -- SOLIDWORKS' window and crossing selection.
+    box.element.classList.toggle('is-crossing', x < box.x0);
+    box.element.style.left = `${Math.min(x, box.x0)}px`;
+    box.element.style.top = `${Math.min(y, box.y0)}px`;
+    box.element.style.width = `${Math.abs(x - box.x0)}px`;
+    box.element.style.height = `${Math.abs(y - box.y0)}px`;
+  }
+
+  /** Finish a selection box. Returns false when it was never dragged out (a click). */
+  private _endBox(): boolean {
+    const box = this._box;
+    this._box = null;
+    if (!box) return false;
+    if (!box.element) return false;
+    box.element.remove();
+    const state = this._state;
+    const frame = this._frame;
+    if (!state || !frame) return true;
+    const x1 = this._scene.pointerX;
+    const y1 = this._scene.pointerY;
+    const rect = { left: Math.min(box.x0, x1), right: Math.max(box.x0, x1), top: Math.min(box.y0, y1), bottom: Math.max(box.y0, y1) };
+    const crossing = x1 < box.x0;
+    const inside = (p: { x: number; y: number }) => p.x >= rect.left && p.x <= rect.right && p.y >= rect.top && p.y <= rect.bottom;
+    const hits: string[] = [];
+    for (const entity of state.entities) {
+      const path = entityPath(entity);
+      const points = (path.closed ? closed(path.points) : path.points).map((point) => this._project(sketchToWorld(frame, point)));
+      if (points.some((point) => !point)) continue;
+      const screen = points as Array<{ x: number; y: number }>;
+      const hit = crossing
+        ? screen.some(inside) || screen.some((p, i) => i > 0 && segmentCrossesRect(screen[i - 1], p, rect))
+        : screen.every(inside);
+      if (hit) hits.push(entity.id);
+    }
+    const ids = box.additive ? [...state.selectedEntityIds, ...hits.filter((id) => !state.selectedEntityIds.includes(id))] : hits;
+    this._emit({ type: 'entitySelected', ids });
+    return true;
   }
 
   /** The entities as the drag in progress would leave them. */
@@ -1533,6 +1985,142 @@ export class SketchOverlay {
   }
 
   // -------------------------------------------------------------------------
+  // Typed sizes
+  // -------------------------------------------------------------------------
+
+  /** What a number typed now sizes, for the shape being drawn, or null. */
+  private _numericPrompt(): string | null {
+    switch (this._draft?.tool) {
+      case 'line':
+      case 'centerline':
+        return 'Length';
+      case 'circle':
+      case 'polygon':
+        return 'Ø';
+      case 'rectangle':
+      case 'centerRectangle':
+        return 'W, H';
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * Open the size box beside the pointer, starting with the key that opened
+   * it: SOLIDWORKS' on-screen numeric input. The shape keeps following the
+   * pointer for its direction; Enter places it at the typed size.
+   */
+  private _openNumeric(typed: string): void {
+    const prompt = this._numericPrompt();
+    const cursor = this._cursor;
+    const frame = this._frame;
+    if (!prompt || !cursor || !frame) return;
+    this._closeNumeric();
+    const box = document.createElement('div');
+    box.className = 'sketch-numeric';
+    const label = document.createElement('span');
+    label.className = 'sketch-numeric-label';
+    label.textContent = prompt;
+    const input = document.createElement('input');
+    input.className = 'sketch-numeric-input';
+    input.type = 'text';
+    input.inputMode = 'decimal';
+    input.value = typed;
+    input.placeholder = prompt === 'W, H' ? 'width, height' : 'inches';
+    box.append(label, input);
+    const at = this._project(sketchToWorld(frame, cursor.point));
+    box.style.left = `${(at?.x ?? 0) + 18}px`;
+    box.style.top = `${(at?.y ?? 0) + 18}px`;
+    this._layer.appendChild(box);
+    this._numeric = { box, input };
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    input.addEventListener('keydown', (event) => {
+      event.stopPropagation();
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        this._commitNumeric();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        this._closeNumeric();
+      } else if (event.key === 'Tab' && prompt === 'W, H') {
+        event.preventDefault();
+        if (!input.value.includes(',')) input.value = `${input.value.trim()}, `;
+      }
+    });
+    input.addEventListener('input', () => box.classList.remove('is-invalid'));
+    input.addEventListener('blur', () => {
+      if (this._numeric?.input === input) this._closeNumeric();
+    });
+    input.addEventListener('pointerdown', (event) => event.stopPropagation());
+  }
+
+  private _closeNumeric(): void {
+    const numeric = this._numeric;
+    if (!numeric) return;
+    this._numeric = null;
+    numeric.box.remove();
+  }
+
+  /** Place the shape being drawn at the typed size, pointing the way the pointer is. */
+  private _commitNumeric(): void {
+    const numeric = this._numeric;
+    const draft = this._draft;
+    if (!numeric || !draft) {
+      this._closeNumeric();
+      return;
+    }
+    const parts = numeric.input.value
+      .split(/\s*[,x×]\s*/)
+      .filter((part) => part.trim().length > 0)
+      .map((part) => evaluateLength(part));
+    if (!parts.length || parts.some((value) => value === null || !(value > 1e-4))) {
+      numeric.box.classList.add('is-invalid');
+      return;
+    }
+    const [a, b = a] = parts as number[];
+    const at = this._cursor?.point ?? null;
+    const toward = (from: Vec2): Vec2 => {
+      const dx = (at?.[0] ?? from[0] + 1) - from[0];
+      const dy = (at?.[1] ?? from[1]) - from[1];
+      const length = Math.hypot(dx, dy);
+      return length > 1e-9 ? [dx / length, dy / length] : [1, 0];
+    };
+    const sign = (from: number, to: number | undefined) => (to !== undefined && to < from ? -1 : 1);
+    let point: Vec2 | null = null;
+    switch (draft.tool) {
+      case 'line':
+      case 'centerline': {
+        const u = toward(draft.start);
+        point = [draft.start[0] + u[0] * a, draft.start[1] + u[1] * a];
+        break;
+      }
+      case 'circle':
+      case 'polygon': {
+        const u = toward(draft.first);
+        point = [draft.first[0] + (u[0] * a) / 2, draft.first[1] + (u[1] * a) / 2];
+        break;
+      }
+      case 'rectangle':
+      case 'centerRectangle': {
+        const half = draft.tool === 'centerRectangle' ? 0.5 : 1;
+        point = [
+          draft.first[0] + sign(draft.first[0], at?.[0]) * a * half,
+          draft.first[1] + sign(draft.first[1], at?.[1]) * b * half
+        ];
+        break;
+      }
+      default:
+        break;
+    }
+    this._closeNumeric();
+    if (!point) return;
+    // A line typed along a horizontal or vertical inference keeps the relation.
+    const kind = this._cursor?.kind;
+    this._applyPoint(point, kind === 'horizontal' || kind === 'vertical' ? kind : 'free');
+  }
+
+  // -------------------------------------------------------------------------
   // Keyboard
   // -------------------------------------------------------------------------
 
@@ -1556,8 +2144,8 @@ export class SketchOverlay {
         this._dirtyRubber = true;
       } else if (state.tool !== 'select') {
         this._emit({ type: 'toolChanged', tool: 'select' });
-      } else if (state.selectedEntityId) {
-        this._emit({ type: 'entitySelected', id: null });
+      } else if (state.selectedEntityIds.length) {
+        this._emit({ type: 'entitySelected', ids: [] });
       }
       event.preventDefault();
       event.stopPropagation();
@@ -1565,9 +2153,27 @@ export class SketchOverlay {
       this._draft = null;
       this._dirtyRubber = true;
       event.preventDefault();
-    } else if ((event.key === 'Delete' || event.key === 'Backspace') && state.selectedEntityId && !this._draft) {
-      this._emit({ type: 'entityDeleted', id: state.selectedEntityId });
+    } else if ((event.key === 'Delete' || event.key === 'Backspace') && state.selectedEntityIds.length && !this._draft) {
+      this._emit({ type: 'entitiesDeleted', ids: state.selectedEntityIds });
       event.preventDefault();
+    } else if (event.key.toLowerCase() === 'a' && (event.metaKey || event.ctrlKey) && state.tool === 'select') {
+      this._emit({ type: 'entitySelected', ids: state.entities.map((entity) => entity.id) });
+      event.preventDefault();
+    } else if (/^[0-9.]$/.test(event.key) && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      // A number typed while a shape is drawn sizes it; typed right after,
+      // it sets the new entity's size dimension, as in Onshape.
+      if (this._numericPrompt()) {
+        this._openNumeric(event.key);
+        event.preventDefault();
+      } else if (!this._draft && this._primarySelection()) {
+        const primary = this._primarySelection();
+        const own = this._dimLabels.filter((entry) => entry.spec?.entityId === primary);
+        const label = own.find((entry) => entry.spec?.key !== 'cx' && entry.spec?.key !== 'cy') ?? own[0];
+        if (label?.spec) {
+          this._beginEdit(label.spec, label.element, event.key);
+          event.preventDefault();
+        }
+      }
     } else if (!event.metaKey && !event.ctrlKey && !event.altKey) {
       const tool = SHORTCUTS[event.key.toLowerCase()];
       if (tool) {
@@ -1576,6 +2182,46 @@ export class SketchOverlay {
       }
     }
   }
+}
+
+/** Ctrl, or Cmd on a Mac, adds to the selection. */
+function addsToSelection(event: PointerEvent): boolean {
+  return event.ctrlKey || event.metaKey;
+}
+
+/** Whether a screen segment passes through a rectangle (both ends may be outside it). */
+function segmentCrossesRect(
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+  rect: { left: number; right: number; top: number; bottom: number }
+): boolean {
+  // Clip the segment to the rectangle (Liang-Barsky); anything left crosses it.
+  let t0 = 0;
+  let t1 = 1;
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const edges: Array<[number, number]> = [
+    [-dx, a.x - rect.left],
+    [dx, rect.right - a.x],
+    [-dy, a.y - rect.top],
+    [dy, rect.bottom - a.y]
+  ];
+  for (const [p, q] of edges) {
+    if (Math.abs(p) < 1e-12) {
+      if (q < 0) return false;
+      continue;
+    }
+    const t = q / p;
+    if (p < 0) t0 = Math.max(t0, t);
+    else t1 = Math.min(t1, t);
+    if (t0 > t1) return false;
+  }
+  return true;
+}
+
+/** Every tool but Select and Convert Entities places points. */
+function isDrawingTool(tool: SketchTool): boolean {
+  return tool !== 'select' && tool !== 'convert';
 }
 
 /** Single-key sketch tool shortcuts. */

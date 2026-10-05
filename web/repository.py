@@ -136,11 +136,13 @@ def init_db(database_path: Path) -> None:
                 is_open_top INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 feature_json TEXT,
+                base_filepath TEXT,
                 FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
             )
             """
         )
         _ensure_column(db, "parts", "feature_json", "TEXT")
+        _ensure_column(db, "parts", "base_filepath", "TEXT")
         _backfill_part_names(db)
 
 
@@ -243,15 +245,20 @@ def get_project(database_path: Path, project_id: str) -> Optional[Dict[str, Any]
     return project
 
 
+#: ``ui_state`` keys only their own routes write (see ``web/routes_modeling.py``).
+ROUTE_OWNED_UI_STATE_KEYS = ("reference_planes", "cut_features")
+
+
 def update_project(database_path: Path, project_id: str, data: Dict[str, Any]) -> None:
     current = get_project(database_path, project_id)
     if current is None:
         return
     ui_state = _merge_pour_location(dict(data.get("ui_state", current["ui_state"]) or {}), data)
-    # Reference planes are written by their own route; a client that sends a
-    # ui_state without them must not erase them.
-    if "reference_planes" not in ui_state and "reference_planes" in current["ui_state"]:
-        ui_state["reference_planes"] = current["ui_state"]["reference_planes"]
+    # Reference planes and extrude cuts are written by their own routes; a
+    # client that sends a ui_state without them must not erase them.
+    for key in ROUTE_OWNED_UI_STATE_KEYS:
+        if key not in ui_state and key in current["ui_state"]:
+            ui_state[key] = current["ui_state"][key]
     with get_db_connection(database_path) as db:
         db.execute(
             """
@@ -307,6 +314,7 @@ def duplicate_project(
     project_id: str,
     name: str,
     part_filepaths: Dict[str, str],
+    base_filepaths: Optional[Dict[str, str]] = None,
 ) -> Optional[str]:
     """Copy a project's settings and parts into a new draft project.
 
@@ -318,7 +326,9 @@ def duplicate_project(
     reference. The caller duplicates the files on disk first, because two rows
     sharing one path would make deleting either project unlink geometry the
     other still needs (:func:`delete_project` unlinks what it finds).
-    Parts missing from the map keep the original path.
+    Parts missing from the map keep the original path. ``base_filepaths``
+    does the same for the pre-cut STL of a body an extrude cut has cut; a
+    cut body whose base was not copied keeps the original base path.
     """
     source = get_project(database_path, project_id)
     if source is None:
@@ -355,6 +365,11 @@ def duplicate_project(
         # New ids first, so a modeled feature that names another body (an
         # "up to body" extrude) can be pointed at that body's copy.
         id_map = {str(row["id"]): str(uuid.uuid4())[:8] for row in rows}
+        # The cuts in ui_state name the bodies they cut.
+        db.execute(
+            "UPDATE projects SET ui_state = ? WHERE id = ?",
+            (json.dumps(remap_cut_part_ids(source["ui_state"], id_map)), new_id),
+        )
         for row in rows:
             part = dict(row)
             feature = _loads_feature(part.get("feature_json"))
@@ -364,9 +379,9 @@ def duplicate_project(
                     id, project_id, name, part_type, filepath,
                     position_x, position_y, position_z,
                     rotation_x, rotation_y, rotation_z,
-                    scale, visible, is_open_top, feature_json
+                    scale, visible, is_open_top, feature_json, base_filepath
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     id_map[str(part["id"])],
@@ -384,6 +399,7 @@ def duplicate_project(
                     part["visible"],
                     part["is_open_top"],
                     _dumps_feature(remap_feature_part_ids(feature, id_map)),
+                    (base_filepaths or {}).get(str(part["id"]), part.get("base_filepath")),
                 ),
             )
     return new_id
@@ -391,8 +407,9 @@ def duplicate_project(
 
 def delete_project(database_path: Path, project_id: str) -> list[str]:
     with get_db_connection(database_path) as db:
-        rows = db.execute("SELECT filepath FROM parts WHERE project_id = ?", (project_id,)).fetchall()
+        rows = db.execute("SELECT filepath, base_filepath FROM parts WHERE project_id = ?", (project_id,)).fetchall()
         filepaths = [str(row["filepath"]) for row in rows]
+        filepaths += [str(row["base_filepath"]) for row in rows if row["base_filepath"]]
         artifact = db.execute("SELECT artifact_path FROM projects WHERE id = ?", (project_id,)).fetchone()
         if artifact is not None and artifact["artifact_path"]:
             filepaths.append(str(artifact["artifact_path"]))
@@ -506,11 +523,55 @@ def count_parts_using_file(database_path: Path, filepath: str) -> int:
     """How many part rows, in any project, reference this file.
 
     Duplicating a part in the browser reuses its file, so a file must not be
-    unlinked while another row still points at it.
+    unlinked while another row still points at it -- as its geometry or as
+    the pre-cut base of a body an extrude cut has cut.
     """
     with get_db_connection(database_path) as db:
-        row = db.execute("SELECT COUNT(*) AS n FROM parts WHERE filepath = ?", (filepath,)).fetchone()
+        row = db.execute(
+            "SELECT COUNT(*) AS n FROM parts WHERE filepath = ? OR base_filepath = ?",
+            (filepath, filepath),
+        ).fetchone()
     return int(row["n"]) if row else 0
+
+
+def set_part_geometry(
+    database_path: Path,
+    project_id: str,
+    part_id: str,
+    filepath: str,
+    base_filepath: Optional[str],
+) -> None:
+    """Point a part at new geometry, and at the STL it had before any cut.
+
+    Only the modeling routes call this, with paths they wrote or read from
+    the row themselves; ``base_filepath`` is not a client-writable field.
+    """
+    with get_db_connection(database_path) as db:
+        db.execute(
+            "UPDATE parts SET filepath = ?, base_filepath = ? WHERE id = ? AND project_id = ?",
+            (filepath, base_filepath, part_id, project_id),
+        )
+        db.execute("UPDATE projects SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (project_id,))
+
+
+def remap_cut_part_ids(ui_state: Any, id_map: Dict[str, str]) -> Dict[str, Any]:
+    """A copy of ``ui_state`` whose extrude cuts name the bodies in ``id_map``.
+
+    Each cut in ``cut_features`` lists the part ids it cuts. A copied project
+    gives every part a new id, so the list has to follow; ids missing from
+    the map are dropped, since they name bodies the copy does not have.
+    """
+    state = dict(ui_state) if isinstance(ui_state, dict) else {}
+    cuts = state.get("cut_features")
+    if not isinstance(cuts, list) or not id_map:
+        return state
+    remapped = []
+    for cut in cuts:
+        if isinstance(cut, dict) and isinstance(cut.get("partIds"), list):
+            cut = {**cut, "partIds": [id_map[pid] for pid in cut["partIds"] if pid in id_map]}
+        remapped.append(cut)
+    state["cut_features"] = remapped
+    return state
 
 
 def remap_feature_part_ids(
@@ -585,13 +646,22 @@ def update_part(
 
 
 def delete_part(database_path: Path, project_id: str, part_id: str) -> Optional[str]:
+    """Delete a part row and return its file path (see :func:`delete_part_files`)."""
+    files = delete_part_files(database_path, project_id, part_id)
+    return files[0] if files else None
+
+
+def delete_part_files(database_path: Path, project_id: str, part_id: str) -> list[str]:
+    """Delete a part row and return every file it named: its STL, then its pre-cut base."""
     with get_db_connection(database_path) as db:
         row = db.execute(
-            "SELECT filepath FROM parts WHERE id = ? AND project_id = ?",
+            "SELECT filepath, base_filepath FROM parts WHERE id = ? AND project_id = ?",
             (part_id, project_id),
         ).fetchone()
         db.execute("DELETE FROM parts WHERE id = ? AND project_id = ?", (part_id, project_id))
-    return str(row["filepath"]) if row else None
+    if row is None:
+        return []
+    return [str(row["filepath"])] + ([str(row["base_filepath"])] if row["base_filepath"] else [])
 
 
 def get_part(database_path: Path, project_id: str, part_id: str) -> Optional[Dict[str, Any]]:

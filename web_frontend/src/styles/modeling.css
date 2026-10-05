@@ -65,6 +65,65 @@
   box-shadow: 0 0 0 3px var(--accent-dim);
 }
 
+.sketch-box {
+  position: absolute;
+  border: 1px solid rgba(97, 168, 255, 0.95);
+  background: rgba(97, 168, 255, 0.1);
+  pointer-events: none;
+}
+
+/* Right to left: crossing selection, drawn dashed and green as SOLIDWORKS does. */
+.sketch-box.is-crossing {
+  border: 1px dashed rgba(77, 210, 140, 0.95);
+  background: rgba(77, 210, 140, 0.1);
+}
+
+.sketch-numeric {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 3px 4px 3px 8px;
+  border: 1px solid var(--border-focus);
+  border-radius: var(--radius-sm);
+  background: rgba(10, 13, 18, 0.94);
+  box-shadow: 0 0 0 3px var(--accent-dim), 0 6px 18px rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+
+.sketch-numeric.is-invalid {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px var(--danger-dim);
+}
+
+.sketch-numeric-label {
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.sketch-numeric-input {
+  width: 110px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+  color: var(--text);
+  font: inherit;
+  text-align: right;
+}
+
+.sketch-numeric-input:focus {
+  outline: none;
+  border-color: var(--border-focus);
+}
+
+.sketch-depth {
+  cursor: pointer;
+  transform: translate(10px, -50%);
+}
+
 .sketch-plane-label {
   position: absolute;
   transform: translate(4px, 4px);
@@ -162,6 +221,7 @@
 
 .model-commands {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--sp-3);
 }
 
@@ -516,6 +576,63 @@ li[aria-selected='true'] > .feature-node,
 .feature-row:hover .feature-node-hint,
 .feature-ref-plane .feature-node-hint {
   opacity: 1;
+}
+
+.type-chip-cut {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.pm-selection {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+
+.pm-selection span {
+  flex: 1 1 auto;
+}
+
+.pm-howto {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding-left: var(--sp-4);
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  line-height: 1.45;
+}
+
+.pm-scope-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pm-scope {
+  align-items: center;
+  font-size: var(--fs-sm);
+}
+
+.pm-scope-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pm-scope-removed {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
 }
 
 .pm-ref-list {

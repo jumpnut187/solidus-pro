@@ -10,6 +10,7 @@ import {
   Plus,
   RefreshCw,
   Ruler,
+  Scissors,
   Square,
   Trash2,
   X
@@ -22,15 +23,21 @@ import type { ModelingController } from '../../hooks/useModeling';
 import type { PartType, ProjectPart } from '../../lib/api';
 import { pickLabel } from '../../lib/modeling/measure';
 import {
+  CUT_END_CONDITIONS,
   END_CONDITIONS,
   arcEnds,
+  cutCandidates,
   entityLabel,
   featureOf,
   planeLabel,
   referencePlaneProblem,
+  regionSelected,
   sketchProblem,
   STANDARD_PLANES,
+  type CutEndCondition,
+  type CutFeature,
   type EndCondition,
+  type ExtrudeFeature,
   type SketchEntity
 } from '../../lib/modeling/types';
 import { PART_TYPES, partTypeColor, partTypeLabel } from '../../lib/partTypes';
@@ -55,7 +62,7 @@ export function ModelPanel(props: ModelPanelProps) {
   if (!session) return <FeatureTree {...props} />;
   if (session.stage === 'plane') return <PlaneManager {...props} />;
   if (session.stage === 'sketch') return <SketchManager {...props} />;
-  return <ExtrudeManager {...props} />;
+  return session.feature.kind === 'cut' ? <CutManager {...props} /> : <ExtrudeManager {...props} />;
 }
 
 // ---------------------------------------------------------------------------
@@ -64,9 +71,13 @@ export function ModelPanel(props: ModelPanelProps) {
 
 function FeatureTree({ modeling, parts, selectedPartId, onSelectPart, onRemovePart, onClose }: ModelPanelProps) {
   const imported = parts.filter((part) => !featureOf(part));
-  const modeled = parts
-    .filter((part) => featureOf(part))
-    .sort((a, b) => (featureOf(a)?.seq ?? 0) - (featureOf(b)?.seq ?? 0));
+  const modeled = parts.filter((part) => featureOf(part));
+  // Bodies and cuts in history order, the way the FeatureManager lists them.
+  const history: Array<{ seq: number; part: ProjectPart; cut?: never } | { seq: number; cut: CutFeature; part?: never }> = [
+    ...modeled.map((part) => ({ seq: featureOf(part)?.seq ?? 0, part })),
+    ...modeling.cutFeatures.map((cut) => ({ seq: cut.seq, cut }))
+  ].sort((a, b) => a.seq - b.seq);
+  const partIds = new Set(parts.map((part) => part.id));
   return (
     <SetupPanel title="Model" onClose={onClose}>
       <div className="model-commands">
@@ -74,12 +85,22 @@ function FeatureTree({ modeling, parts, selectedPartId, onSelectPart, onRemovePa
           <Plus size={14} />
           Extruded Boss
         </button>
+        <button
+          type="button"
+          className="btn"
+          disabled={!parts.some((part) => part.meshData)}
+          onClick={() => modeling.startCut()}
+          title="Sketch a profile and cut it out of the casting or any other body"
+        >
+          <Scissors size={13} />
+          Extruded Cut
+        </button>
+      </div>
+      <div className="model-commands">
         <button type="button" className="btn" onClick={() => modeling.startExtrude(undefined, 'faceExtrude')} title="Click a flat face and extrude it as it is">
           <Copy size={13} />
           Extrude Face
         </button>
-      </div>
-      <div className="model-commands">
         <button type="button" className="btn" onClick={() => modeling.startPlane()} title="Reference plane offset from a plane or face, or midway between two">
           <Layers2 size={13} />
           Plane
@@ -90,18 +111,19 @@ function FeatureTree({ modeling, parts, selectedPartId, onSelectPart, onRemovePa
         </button>
         <button
           type="button"
-          className="btn"
-          disabled={!modeled.length || modeling.rebuilding}
+          className="btn btn-icon"
+          aria-label="Rebuild"
+          disabled={(!modeled.length && !modeling.cutFeatures.length) || modeling.rebuilding}
           onClick={() => void modeling.rebuildAll()}
-          title="Rebuild every modeled body against the current assembly"
+          title="Rebuild every modeled body and cut against the current assembly"
         >
           <RefreshCw size={13} className={modeling.rebuilding ? 'spin' : undefined} />
-          Rebuild
         </button>
       </div>
       <p className="field-hint">
         Sketch on a plane or a face and extrude risers, chills, cores and gating. Up To Next makes a body stop on the
-        casting and take its shape; Extrude Face turns a face into a chill directly.
+        casting and take its shape; Extrude Face turns a face into a chill directly; Extruded Cut removes material
+        from the bodies you choose, the casting included.
       </p>
 
       <Group title="Feature tree">
@@ -165,7 +187,62 @@ function FeatureTree({ modeling, parts, selectedPartId, onSelectPart, onRemovePa
               </button>
             </li>
           ))}
-          {modeled.map((part) => {
+          {history.map((entry) => {
+            if (entry.cut) {
+              const cut = entry.cut;
+              const bodies = cut.partIds.filter((id) => partIds.has(id)).length;
+              return (
+                <li key={cut.id} role="treeitem" className="feature-item">
+                  <div className="feature-row">
+                    <button
+                      type="button"
+                      className="feature-node"
+                      onClick={() => modeling.editCut(cut.id, 'feature')}
+                      title="Edit the cut"
+                    >
+                      <Scissors size={13} />
+                      <span className="feature-node-name">{cut.name}</span>
+                      <span className="type-chip type-chip-cut">Cut</span>
+                    </button>
+                    <div className="feature-actions">
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-icon"
+                        title="Edit the cut"
+                        aria-label={`Edit ${cut.name}`}
+                        onClick={() => modeling.editCut(cut.id, 'feature')}
+                      >
+                        <Pencil size={12} />
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-icon"
+                        title="Delete the cut and restore the material it removed"
+                        aria-label={`Delete ${cut.name}`}
+                        disabled={modeling.rebuilding}
+                        onClick={() => void modeling.deleteCut(cut.id)}
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="feature-node feature-child"
+                    onClick={() => modeling.editCut(cut.id, 'sketch')}
+                    title="Edit the sketch"
+                  >
+                    <PenLine size={12} />
+                    <span>
+                      Sketch · {planeLabel(cut.sketch.plane)} · {cutEndConditionLabel(cut.endCondition)}
+                      {cut.endCondition === 'blind' || cut.endCondition === 'midplane' ? ` ${cut.depth.toFixed(3)} in` : ''} ·{' '}
+                      {bodies} {bodies === 1 ? 'body' : 'bodies'}
+                    </span>
+                  </button>
+                </li>
+              );
+            }
+            const part = entry.part;
             const feature = featureOf(part)!;
             return (
               <li key={part.id} role="treeitem" aria-selected={part.id === selectedPartId} className="feature-item">
@@ -225,6 +302,30 @@ function FeatureTree({ modeling, parts, selectedPartId, onSelectPart, onRemovePa
   );
 }
 
+/**
+ * Which regions of the sketch the feature uses. They are picked in the view,
+ * as in Onshape; this says how many and offers the way back to the default.
+ */
+function RegionsGroup({ modeling }: { modeling: ModelingController }) {
+  const regions = modeling.regions;
+  const session = modeling.session;
+  if (!session || !regions || (regions.length < 2 && !session.feature.regions)) return null;
+  const seeds = session.feature.regions;
+  const selected = regions.filter((region) => regionSelected(region, seeds)).length;
+  return (
+    <Group title="Regions">
+      <p className="pm-message">
+        {selected} of {regions.length} regions. Click regions in the view to add or remove them.
+      </p>
+      {seeds ? (
+        <button type="button" className="btn btn-sm" onClick={modeling.resetRegions} title="Use every region the sketch fills">
+          Use the whole sketch
+        </button>
+      ) : null}
+    </Group>
+  );
+}
+
 function TypeChip({ type }: { type: string }) {
   return (
     <span className="type-chip" style={{ borderColor: partTypeColor(type), color: partTypeColor(type) }}>
@@ -235,6 +336,10 @@ function TypeChip({ type }: { type: string }) {
 
 function endConditionLabel(id: EndCondition): string {
   return END_CONDITIONS.find((entry) => entry.id === id)?.label ?? id;
+}
+
+function cutEndConditionLabel(id: CutEndCondition): string {
+  return CUT_END_CONDITIONS.find((entry) => entry.id === id)?.label ?? id;
 }
 
 // ---------------------------------------------------------------------------
@@ -290,9 +395,14 @@ function ManagerShell({ children, footer }: { children: ReactNode; footer?: Reac
 
 function PlaneManager({ modeling }: ModelPanelProps) {
   const faceMode = modeling.session?.purpose === 'faceExtrude';
+  const cutting = modeling.session?.feature.kind === 'cut';
   return (
     <ManagerShell>
-      <ManagerHeader title={faceMode ? 'Extrude Face — select a face' : 'Extrude — choose a sketch plane'} okLabel="OK" onCancel={modeling.cancel} />
+      <ManagerHeader
+        title={faceMode ? 'Extrude Face — select a face' : cutting ? 'Cut-Extrude — choose a sketch plane' : 'Extrude — choose a sketch plane'}
+        okLabel="OK"
+        onCancel={modeling.cancel}
+      />
       <p className="pm-message">
         {faceMode
           ? 'Click a flat face of the model. Its outline, holes included, becomes the profile and the extrude starts from the face.'
@@ -336,7 +446,7 @@ function SketchManager({ modeling }: ModelPanelProps) {
         <div className="pm-foot-actions">
           <button type="button" className="btn btn-primary btn-block" disabled={Boolean(problem)} onClick={modeling.exitSketch}>
             <Check size={14} />
-            Exit Sketch → Extrude
+            {session.feature.kind === 'cut' ? 'Exit Sketch → Cut' : 'Exit Sketch → Extrude'}
           </button>
         </div>
       }
@@ -379,6 +489,15 @@ function SketchManager({ modeling }: ModelPanelProps) {
             </button>
           ))}
         </div>
+        <ul className="pm-howto">
+          <li>Click twice, or press and drag, to draw. Type a number while drawing to set the size.</li>
+          <li>
+            With Select, drag on empty space to box-select: left to right takes what is inside, right to left
+            what the box touches. Ctrl- or ⌘-click adds to the selection.
+          </li>
+          <li>Type a number right after drawing, or click a dimension, to change it.</li>
+          <li>Middle-drag or Shift-drag turns the view, right-drag pans, scroll zooms. Esc ends the tool.</li>
+        </ul>
         {session.tool === 'polygon' ? (
           <NumberField
             label="Polygon sides"
@@ -404,6 +523,23 @@ function SketchManager({ modeling }: ModelPanelProps) {
       </Group>
 
       <Group title={`Entities (${sketch.entities.length})`}>
+        {session.selectedEntityIds.length > 1 ? (
+          <div className="pm-selection">
+            <span>{session.selectedEntityIds.length} selected</span>
+            <button type="button" className="btn btn-sm" onClick={() => modeling.patchSession({ selectedEntityIds: [] })}>
+              Clear
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-danger"
+              onClick={() => modeling.deleteEntities(session.selectedEntityIds)}
+              title="Delete the selected entities (Del)"
+            >
+              <Trash2 size={12} />
+              Delete
+            </button>
+          </div>
+        ) : null}
         {sketch.entities.length === 0 ? (
           <p className="status-note">Draw a closed profile in the viewport. Click a dimension label to type its value.</p>
         ) : (
@@ -412,8 +548,8 @@ function SketchManager({ modeling }: ModelPanelProps) {
               <EntityEditor
                 key={entity.id}
                 entity={entity}
-                selected={entity.id === session.selectedEntityId}
-                onSelect={() => modeling.patchSession({ selectedEntityId: entity.id })}
+                selected={session.selectedEntityIds.includes(entity.id)}
+                onSelect={() => modeling.patchSession({ selectedEntityIds: [entity.id] })}
                 onChange={modeling.updateEntity}
                 onDelete={() => modeling.deleteEntity(entity.id)}
               />
@@ -750,7 +886,8 @@ function MeasureManager({ modeling }: ModelPanelProps) {
 
 function ExtrudeManager({ modeling, parts }: ModelPanelProps) {
   const session = modeling.session!;
-  const { feature, body } = session;
+  const feature = session.feature as ExtrudeFeature;
+  const body = session.body;
   const preview = modeling.preview;
   const ownId = session.editingPartId;
   const usesDepth = feature.endCondition === 'blind' || feature.endCondition === 'midplane';
@@ -787,6 +924,8 @@ function ExtrudeManager({ modeling, parts }: ModelPanelProps) {
       />
       <p className="pm-message">From {planeLabel(feature.sketch.plane)}</p>
 
+      <RegionsGroup modeling={modeling} />
+
       <Group title="Direction 1">
         <label className="field">
           <span className="field-label">End condition</span>
@@ -819,6 +958,7 @@ function ExtrudeManager({ modeling, parts }: ModelPanelProps) {
             unit="in"
             value={feature.depth}
             onCommit={(value) => value > 0 && modeling.patchFeature({ depth: value })}
+            hint="Or drag the arrow in the view. Hold Alt for no snapping."
           />
         ) : null}
         {feature.endCondition === 'upToBody' ? (
@@ -934,6 +1074,188 @@ function ExtrudeManager({ modeling, parts }: ModelPanelProps) {
             <div className="property-row">
               <span className="property-label">Triangles</span>
               <span className="property-value">{preview.body.triangles.toLocaleString()}</span>
+            </div>
+            {preview.body.warnings.map((warning) => (
+              <p key={warning} className="status-note status-note-info">
+                {warning}
+              </p>
+            ))}
+          </div>
+        ) : null}
+      </Group>
+    </ManagerShell>
+  );
+}
+
+function CutManager({ modeling, parts }: ModelPanelProps) {
+  const session = modeling.session!;
+  const feature = session.feature as CutFeature;
+  const preview = modeling.preview;
+  const usesDepth = feature.endCondition === 'blind' || feature.endCondition === 'midplane';
+  const candidates = cutCandidates(parts, feature);
+  const scope = new Set(feature.partIds);
+  const allSelected = candidates.length > 0 && candidates.every((part) => scope.has(part.id));
+  const removed = preview.status === 'ok' ? (preview.removed ?? {}) : {};
+  const okDisabled = preview.status !== 'ok' || !feature.name.trim();
+  const editing = session.editingCutId !== null;
+  const setScope = (ids: string[]) => modeling.patchFeature({ partIds: ids });
+
+  return (
+    <ManagerShell
+      footer={
+        <div className="pm-foot-actions">
+          <button type="button" className="btn" onClick={modeling.backToSketch}>
+            <PenLine size={13} />
+            Edit Sketch
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={okDisabled || modeling.committing}
+            onClick={() => void modeling.commit()}
+          >
+            <Check size={14} />
+            {modeling.committing ? 'Cutting...' : editing ? 'Update cut' : 'Cut'}
+          </button>
+        </div>
+      }
+    >
+      <ManagerHeader
+        title={editing ? `Edit ${feature.name}` : 'Cut-Extrude'}
+        okLabel="OK"
+        okDisabled={okDisabled}
+        busy={modeling.committing}
+        onOk={() => void modeling.commit()}
+        onCancel={modeling.cancel}
+      />
+      <p className="pm-message">From {planeLabel(feature.sketch.plane)}</p>
+
+      <RegionsGroup modeling={modeling} />
+
+      <Group title="Direction 1">
+        <label className="field">
+          <span className="field-label">End condition</span>
+          <select
+            className="select"
+            value={feature.endCondition}
+            onChange={(event) => modeling.patchFeature({ endCondition: event.target.value as CutEndCondition })}
+          >
+            {CUT_END_CONDITIONS.map((entry) => (
+              <option key={entry.id} value={entry.id}>
+                {entry.label}
+              </option>
+            ))}
+          </select>
+          <span className="field-hint">{CUT_END_CONDITIONS.find((entry) => entry.id === feature.endCondition)?.hint}</span>
+        </label>
+        {feature.endCondition === 'throughAllBoth' || feature.endCondition === 'midplane' ? null : (
+          <button
+            type="button"
+            className="btn btn-sm"
+            aria-pressed={feature.reverse}
+            onClick={() => modeling.patchFeature({ reverse: !feature.reverse })}
+            title="Reverse the cut direction"
+          >
+            <ArrowDownUp size={13} />
+            Reverse direction
+          </button>
+        )}
+        {usesDepth ? (
+          <NumberField
+            label={feature.endCondition === 'midplane' ? 'Total depth' : 'Depth'}
+            unit="in"
+            value={feature.depth}
+            onCommit={(value) => value > 0 && modeling.patchFeature({ depth: value })}
+            hint="Or drag the arrow in the view. Hold Alt for no snapping."
+          />
+        ) : null}
+        <div className="pm-inline">
+          <NumberField
+            compact
+            label="Draft"
+            unit="°"
+            value={feature.draftDeg}
+            onCommit={(value) => value >= 0 && value < 60 && modeling.patchFeature({ draftDeg: value })}
+          />
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={feature.draftOutward}
+              disabled={feature.draftDeg <= 0}
+              onChange={(event) => modeling.patchFeature({ draftOutward: event.target.checked })}
+            />
+            <span className="check-body">Draft outward</span>
+          </label>
+        </div>
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={feature.flipSide}
+            onChange={(event) => modeling.patchFeature({ flipSide: event.target.checked })}
+          />
+          <span className="check-body">
+            Flip side to cut
+            <span className="check-note">Removes the material outside the profile instead of inside it.</span>
+          </span>
+        </label>
+      </Group>
+
+      <Group title="Feature scope">
+        {candidates.length === 0 ? (
+          <p className="status-note">No body comes before this cut in the history.</p>
+        ) : (
+          <>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={allSelected}
+                onChange={(event) => setScope(event.target.checked ? candidates.map((part) => part.id) : [])}
+              />
+              <span className="check-body">All bodies</span>
+            </label>
+            <ul className="pm-scope-list">
+              {candidates.map((part) => (
+                <li key={part.id}>
+                  <label className="check pm-scope">
+                    <input
+                      type="checkbox"
+                      checked={scope.has(part.id)}
+                      onChange={(event) =>
+                        setScope(
+                          event.target.checked
+                            ? [...feature.partIds, part.id]
+                            : feature.partIds.filter((id) => id !== part.id)
+                        )
+                      }
+                    />
+                    <span className="pm-scope-name">{part.name}</span>
+                    <TypeChip type={part.part_type} />
+                    {removed[part.id] ? <span className="pm-scope-removed">−{removed[part.id].toFixed(3)} in³</span> : null}
+                  </label>
+                </li>
+              ))}
+            </ul>
+            <p className="field-hint">Only the checked bodies are cut. A body the cut misses is left as it is.</p>
+          </>
+        )}
+      </Group>
+
+      <Group title="Name">
+        <input className="input" value={feature.name} onChange={(event) => modeling.patchFeature({ name: event.target.value })} />
+      </Group>
+
+      <Group title="Preview">
+        {preview.status === 'building' ? <p className="status-note">Building...</p> : null}
+        {preview.status === 'error' ? <p className="status-note status-note-warning">{preview.error}</p> : null}
+        {preview.status === 'ok' ? (
+          <div className="property-sheet">
+            <div className="property-row">
+              <span className="property-label">Removed</span>
+              <span className="property-value">{preview.body.volume.toFixed(3)} in³</span>
+            </div>
+            <div className="property-row">
+              <span className="property-label">Bodies cut</span>
+              <span className="property-value">{Object.keys(removed).length}</span>
             </div>
             {preview.body.warnings.map((warning) => (
               <p key={warning} className="status-note status-note-info">

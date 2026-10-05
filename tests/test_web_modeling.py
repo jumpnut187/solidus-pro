@@ -166,6 +166,28 @@ class WebModelingTestCase(unittest.TestCase):
                 self.assertEqual(response.status_code, 400)
         self.assertEqual(list(self.upload_folder.iterdir()), [])
 
+    def test_rejects_a_body_that_is_not_closed_once_welded(self) -> None:
+        # One face missing: an open box.
+        box = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
+        open_box = {"vertices": box.vertices.reshape(-1).tolist(), "faces": box.faces[1:].reshape(-1).tolist()}
+        # Two boxes that share one edge: closed apart, but once the shared
+        # positions are welded that edge sits on four triangles -- what an
+        # extrude that ran into a seam between two bodies used to send.
+        a = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+        b = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+        b.apply_translation([1.0, 1.0, 0.0])
+        pinched = trimesh.util.concatenate([a, b])
+        pinched_mesh = {
+            "vertices": pinched.vertices.reshape(-1).tolist(),
+            "faces": pinched.faces.reshape(-1).tolist(),
+        }
+        for label, mesh in (("open", open_box), ("pinched", pinched_mesh)):
+            with self.subTest(label):
+                response = self._create(mesh=mesh)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("not a closed solid", response.get_json()["error"])
+        self.assertEqual(list(self.upload_folder.iterdir()), [])
+
     def test_unknown_project_and_part(self) -> None:
         response = self.client.post("/api/projects/nope/features", json={})
         self.assertEqual(response.status_code, 404)
@@ -219,6 +241,124 @@ class WebModelingTestCase(unittest.TestCase):
         self.assertEqual(self.client.put(url, json={"planes": "x"}).status_code, 400)
         self.assertEqual(self.client.put(url, json={"planes": [{"id": 1}]}).status_code, 400)
         self.assertEqual(self.client.put("/api/projects/nope/reference-planes", json={"planes": []}).status_code, 404)
+
+    # --- Extrude cuts --------------------------------------------------------
+
+    def _cut(self, part_id: str, mesh) -> dict:
+        return self.client.put(f"/api/projects/{self.project_id}/parts/{part_id}/cut", json={"mesh": mesh})
+
+    def test_cut_keeps_the_base_and_restore_gives_it_back(self) -> None:
+        created = self._create(name="Casting", part_type="cast").get_json()
+        part_id = created["id"]
+        original = created["part"]["filepath"]
+
+        response = self._cut(part_id, _box_mesh(size=1.0))
+        self.assertEqual(response.status_code, 200, response.get_json())
+        part = response.get_json()["part"]
+        self.assertEqual(part["base_filepath"], original)
+        self.assertNotEqual(part["filepath"], original)
+        self.assertAlmostEqual(part["mesh_data"]["volume"], 1.0, places=4)
+        first_cut = Path(part["filepath"])
+
+        # A second cut replaces the cut file and keeps the same base.
+        part = self._cut(part_id, _box_mesh(size=1.5)).get_json()["part"]
+        self.assertEqual(part["base_filepath"], original)
+        self.assertFalse(first_cut.exists())
+
+        base = self.client.get(f"/api/projects/{self.project_id}/parts/{part_id}/base-mesh").get_json()
+        self.assertAlmostEqual(base["mesh_data"]["volume"], 8.0, places=4)
+
+        second_cut = Path(part["filepath"])
+        part = self._cut(part_id, None).get_json()["part"]
+        self.assertEqual(part["filepath"], original)
+        self.assertIsNone(part["base_filepath"])
+        self.assertFalse(second_cut.exists())
+        self.assertAlmostEqual(part["mesh_data"]["volume"], 8.0, places=4)
+
+    def test_cut_rejects_bad_input(self) -> None:
+        part_id = self._create().get_json()["id"]
+        before = sorted(self.upload_folder.iterdir())
+        self.assertEqual(self.client.put(f"/api/projects/{self.project_id}/parts/{part_id}/cut", json={}).status_code, 400)
+        self.assertEqual(self._cut(part_id, {"vertices": [0, 0, 0], "faces": [0, 0, 0]}).status_code, 400)
+        self.assertEqual(self._cut("nope", None).status_code, 404)
+        self.assertEqual(sorted(self.upload_folder.iterdir()), before)
+
+    def test_feature_update_with_cut_mesh_stores_both(self) -> None:
+        created = self._create().get_json()
+        part_id = created["id"]
+        response = self.client.put(
+            f"/api/projects/{self.project_id}/features/{part_id}",
+            json={
+                "name": "Riser 1",
+                "part_type": "riser",
+                "feature": _feature(),
+                "mesh": _box_mesh(size=3.0),
+                "cut_mesh": _box_mesh(size=2.0),
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        part = response.get_json()["part"]
+        self.assertAlmostEqual(part["mesh_data"]["volume"], 8.0, places=4)
+        self.assertAlmostEqual(trimesh.load(part["base_filepath"], force="mesh").volume, 27.0, places=4)
+        self.assertFalse(Path(created["part"]["filepath"]).exists())
+
+        # Rebuilt without cuts: the old cut file and base both go.
+        old = [Path(part["filepath"]), Path(part["base_filepath"])]
+        part = self.client.put(
+            f"/api/projects/{self.project_id}/features/{part_id}",
+            json={"name": "Riser 1", "part_type": "riser", "feature": _feature(), "mesh": _box_mesh()},
+        ).get_json()["part"]
+        self.assertIsNone(part["base_filepath"])
+        self.assertFalse(any(path.exists() for path in old))
+
+    def test_deleting_a_cut_body_removes_its_base(self) -> None:
+        part_id = self._create().get_json()["id"]
+        part = self._cut(part_id, _box_mesh(size=1.0)).get_json()["part"]
+        files = [Path(part["filepath"]), Path(part["base_filepath"])]
+        self.client.delete(f"/api/projects/{self.project_id}/parts/{part_id}")
+        self.assertFalse(any(path.exists() for path in files))
+
+    def test_cut_list_round_trips_and_survives_a_settings_save(self) -> None:
+        part_id = self._create().get_json()["id"]
+        cuts = [
+            {
+                "version": 1,
+                "kind": "cut",
+                "id": "cut1",
+                "name": "Cut-Extrude1",
+                "seq": 2,
+                "sketch": {"plane": {"kind": "standard", "id": "top", "offset": 0}, "entities": []},
+                "endCondition": "throughAll",
+                "depth": 1,
+                "reverse": True,
+                "draftDeg": 0,
+                "draftOutward": False,
+                "flipSide": False,
+                "partIds": [part_id],
+            }
+        ]
+        url = f"/api/projects/{self.project_id}/cuts"
+        self.assertEqual(self.client.put(url, json={"cuts": cuts}).status_code, 200)
+        self.client.put(f"/api/projects/{self.project_id}", json={"name": "Renamed", "ui_state": {}})
+        project = self.client.get(f"/api/projects/{self.project_id}").get_json()["project"]
+        self.assertEqual(project["ui_state"]["cut_features"], cuts)
+
+        self.assertEqual(self.client.put(url, json={"cuts": "x"}).status_code, 400)
+        self.assertEqual(self.client.put(url, json={"cuts": [{"kind": "cut"}]}).status_code, 400)
+        self.assertEqual(self.client.put(url, json={"cuts": [{**cuts[0], "partIds": [1]}]}).status_code, 400)
+
+        # A duplicated project's cuts name the copied bodies, and the copy has
+        # its own base file.
+        self._cut(part_id, _box_mesh(size=1.0))
+        copy_id = self.client.post(f"/api/projects/{self.project_id}/duplicate", json={}).get_json()["id"]
+        copy = self.client.get(f"/api/projects/{copy_id}").get_json()
+        copied_part = copy["parts"][0]
+        self.assertEqual(copy["project"]["ui_state"]["cut_features"][0]["partIds"], [copied_part["id"]])
+        source = repo.get_part(self.database_path, self.project_id, part_id)
+        assert source is not None
+        self.assertTrue(copied_part["base_filepath"])
+        self.assertNotEqual(copied_part["base_filepath"], source["base_filepath"])
+        self.assertTrue(Path(copied_part["base_filepath"]).is_file())
 
     def test_old_database_gains_the_feature_column(self) -> None:
         legacy = Path(self.temp_dir.name) / "legacy.db"

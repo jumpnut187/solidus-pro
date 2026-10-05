@@ -143,6 +143,37 @@ export function DownsampledBanner({ onDismiss }: { onDismiss: () => void }) {
   );
 }
 
+/**
+ * The parts have changed since the results on screen were solved.
+ *
+ * The field is kept, because it is still the last answer anyone has, but it
+ * describes a model that no longer exists: a deleted riser is still in it,
+ * feeding the casting from where nothing is drawn. Not dismissible -- it goes
+ * away when the parts match the run again or a new run finishes.
+ */
+export function StaleResultsBanner({
+  changes,
+  onRun,
+  running
+}: {
+  changes: string;
+  onRun: () => void;
+  running: boolean;
+}) {
+  return (
+    <div className="canvas-banner" role="status">
+      <AlertTriangle size={14} aria-hidden="true" className="canvas-banner-icon" />
+      <span className="canvas-banner-text">
+        <b>Results are out of date.</b> {changes ? `${changes} since this run, so` : 'The parts changed since this run, so'}{' '}
+        the field shown is for a model that no longer exists. Run again to see results for these parts.
+      </span>
+      <button type="button" className="btn btn-sm" onClick={onRun} disabled={running}>
+        {running ? 'Running…' : 'Run'}
+      </button>
+    </div>
+  );
+}
+
 export function EmptyState({ onAddParts }: { onAddParts: () => void }) {
   return (
     <div className="empty-state">

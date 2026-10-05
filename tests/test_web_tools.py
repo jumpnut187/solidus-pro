@@ -448,6 +448,32 @@ class ProjectFileTests(WebToolsTestCase):
         self.assertEqual([part["name"] for part in repo.get_parts(self.database_path, body["id"])], ["cast"])
         self.assertEqual(json.loads(exported)["schema_version"], 2)
 
+    def test_import_points_cuts_at_the_imported_bodies(self) -> None:
+        import io
+        import json
+
+        source_id = self._create_project()
+        uploaded = self._upload("cast.stl")
+        part_id = self._add_part(source_id, uploaded, "cast")
+        cut = {"kind": "cut", "id": "c1", "name": "Cut-Extrude1", "seq": 1, "sketch": {}, "partIds": [part_id]}
+        repo.set_ui_state_key(self.database_path, source_id, "cut_features", [cut])
+        exported = self.client.get(f"/api/projects/{source_id}/export").get_data()
+        self.assertEqual(json.loads(exported)["parts"][0]["id"], part_id)
+
+        response = self.client.post(
+            "/api/projects/import",
+            data={
+                "project": (io.BytesIO(exported), "round.solidus-project.json"),
+                "files": (io.BytesIO(_cube_stl_bytes()), "cast.stl"),
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 201)
+        new_id = response.get_json()["id"]
+        imported_part = repo.get_parts(self.database_path, new_id)[0]
+        imported = repo.get_project(self.database_path, new_id)
+        self.assertEqual(imported["ui_state"]["cut_features"][0]["partIds"], [imported_part["id"]])
+
     def test_import_reports_parts_whose_files_were_not_supplied(self) -> None:
         import io
 

@@ -294,12 +294,18 @@ def _simulation_process_worker(
         from web.payloads import build_fork_artifact, write_artifact
         from web import repository as repo
 
+        from web.payloads import simulated_parts_snapshot
+
         artifact = build_fork_artifact(result)
         artifact_dir = Path(base_dir) / "web" / "static" / "temp" / "artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         artifact_path = artifact_dir / f"{sim_id}.json"
         write_artifact(artifact_path, artifact)
-        repo.mark_project_completed(db_path, sim_id, artifact["summary"], str(artifact_path))
+        # What was simulated, so the client can tell when the parts have
+        # changed since -- a deleted riser is otherwise still in the field it
+        # shows. Only in the project row: the artifact is the result itself.
+        summary = {**artifact["summary"], "simulated_parts": simulated_parts_snapshot(parts_data)}
+        repo.mark_project_completed(db_path, sim_id, summary, str(artifact_path))
 
         # The artifact is on disk and its path is in the database, so every
         # reader can find it. Keeping the parsed 50-180 MB copy in the Manager

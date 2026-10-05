@@ -34,7 +34,9 @@ export function ModelingToolbar({
           : 'Select a plane or a face'
         : session?.stage === 'sketch'
           ? 'Sketch'
-          : 'Boss-Extrude';
+          : session?.feature.kind === 'cut'
+            ? 'Cut-Extrude'
+            : 'Boss-Extrude';
 
   const planeSource =
     planeSession && planeSession.mode === 'offset' && planeSession.refs[0]
@@ -120,7 +122,7 @@ export function ModelingToolbar({
           <button
             type="button"
             className="confirm-ok"
-            title="Exit sketch and extrude"
+            title={session.feature.kind === 'cut' ? 'Exit sketch and cut' : 'Exit sketch and extrude'}
             aria-label="Exit sketch"
             disabled={Boolean(sketchProblem(session.feature.sketch.entities))}
             onClick={modeling.exitSketch}

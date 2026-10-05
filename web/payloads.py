@@ -75,6 +75,47 @@ def _build_mesh_data(mesh: trimesh.Trimesh) -> Dict[str, Any]:
     }
 
 
+#: The part fields a simulation depends on. A change to any of them after a
+#: run means the run no longer describes the model. Mirrored in the client's
+#: ``simulatedPartsKey`` (web_frontend/src/lib/resultsFreshness.ts).
+SIMULATED_PART_FIELDS = (
+    "id",
+    "filepath",
+    "part_type",
+    "visible",
+    "is_open_top",
+    "position_x",
+    "position_y",
+    "position_z",
+    "rotation_x",
+    "rotation_y",
+    "rotation_z",
+    "scale",
+)
+
+
+def simulated_parts_snapshot(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The parts a run was given, reduced to the fields the run depends on.
+
+    Stored in the run's summary. Hidden parts are listed with ``visible``
+    false rather than dropped, so un-hiding one also marks the run stale.
+    """
+    snapshot: List[Dict[str, Any]] = []
+    for part in parts:
+        entry: Dict[str, Any] = {}
+        for field in SIMULATED_PART_FIELDS:
+            value = part.get(field)
+            if field in ("visible", "is_open_top"):
+                value = bool(value if value is not None else field == "visible")
+            elif field.startswith(("position_", "rotation_")) or field == "scale":
+                value = float(value if value is not None else (1.0 if field == "scale" else 0.0))
+            else:
+                value = str(value or "")
+            entry[field] = value
+        snapshot.append(entry)
+    return snapshot
+
+
 def _sanitize_body_name(name: str) -> str:
     """Sanitize a CAD body name for safe use in a filename.
 

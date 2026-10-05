@@ -62,7 +62,7 @@ We use reference points to communicate quickly with each other.
 
 ### Tool Execution Protocol
 
-- **Available Tools:** [@apply] (primary coding subagent), [hound-mcp] (Web Fetch MCP Server), [pdf-mcp-server] (Document MCP RAG Tool).
+- **Available Tools:** [@apply] (primary coding subagent), [hound-mcp] (Web Fetch MCP Server), [pdf-mcp-server] (Document MCP RAG Tool), [codegraph] (code-intelligence knowledge graph, index at `codegraph/.codegraph/`).
 - **Execution Rules:**
   - Invoke retrieval tools to fetch relevant data before formulating responses.
   - Execute tool calls sequentially; evaluate the output of each call before proceeding to the next.
@@ -83,7 +83,30 @@ We use reference points to communicate quickly with each other.
 - Do not plan, outline, or self-critique before responding unless the task is multi-step code work.
 - Never restate the user's request back to them.
 
-### Guardrails & Fallbacks
+### CodeGraph (code intelligence)
+
+An index of this repo lives in `codegraph/.codegraph/`. Run the CLI from
+`codegraph/` with `node dist/bin/codegraph.js <cmd>` (alias `codegraph`).
+Re-index after structural changes (added/removed modules, moved boundaries):
+
+```bash
+cd codegraph
+node dist/bin/codegraph.js init ..      # full reindex of this repo (path is cwd's parent)
+# or, after a few changed files:
+node dist/bin/codegraph.js sync ..
+```
+
+Use it to find code before editing — cheaper than grepping for large/scope-wide
+questions:
+
+- `context "<task>"` — relevant symbols + relationships + code for a task.
+- `explore "<area>"` — a symbol's source and its caller/callee trail.
+- `query "name" --kind function` — symbol search (add `-j` for JSON).
+- `callers "sym"` / `callees "sym"` / `impact "sym"` — dependency + blast-radius.
+- `affected [files...]` — test files touched by a source change.
+- `files` — project file structure from the index.
+
+## Guardrails & Fallbacks
 
 - **Ambiguity:** If required information is missing, state assumptions briefly or ask a single concise clarifying question.
 - **Tool Failure:** If a tool fails, attempt one retry with adjusted parameters. If it fails again, explain the precise limitation clearly and suggest alternative next steps.
@@ -120,6 +143,7 @@ python -m compileall config core physics ui web   # syntax pass
 - `config/settings.py` is the settings singleton (`get_settings()`); config from `castsim.yaml`/`castsim.toml`, `~/.castsim/`, and `CASTSIM_*` env vars (highest priority).
 - Web: `web/app_factory.py` (factory), `web/routes.py` (API), `web/repository.py` (SQLite), `web/payloads.py` (Babylon payloads), `web/services/{fair_share,simulation_queue}.py` (concurrency policy). Frontend sources in `web_frontend/src/`.
 - Keep boundaries: pipeline logic in `core/`, formulas in `physics/`, desktop UI in `ui/`, web request/data layers in `web/`.
+- **Result rendering (both front ends) works on a dense lattice, not on voxel cubes.** `core/dense_grid.py` turns the engine's sparse voxels into a uniform x-fastest grid (occupancy mask, nearest-metal hole fill); `web/fields.py` builds the browser sidecar from it and `ui/result_surface.py` (`ResultSurfaceRenderer`, Qt-free) paints the field on a subdivided copy of each metal part's skin, contours the threshold envelope with `vtkFlyingEdges3D`, and cuts painted section caps trimmed to the CAD skin. `ui/visualizer.py` keeps the old `load_*` / `update_*_threshold` API and delegates to it; the result style (Envelope / Surface / Both) is a sidebar combo. Renderer is PBR + generated IBL + SSAO + FXAA (`CASTSIM_UI_PBR=0` falls back to plain lighting). Inspector clicks resolve a picked world position to a voxel through the lattice (`ResultSurfaceRenderer.voxel_at`), not through per-glyph indices.
 
 ## Surrogate model (Apple NPU)
 
@@ -143,7 +167,6 @@ python -m compileall config core physics ui web   # syntax pass
 - **Units are not uniform. There are three length zones** — see `physics/units.py`, which holds the conversions and the full explanation:
   - **inches** — geometry, mesh, moduli, feeding distances, UI, web, STL input. No mm conversion happens on import (older README/QUICKSTART claims of one are wrong).
   - **metres** — inside `physics/heat_transfer.py`. Diffusivity is m²/s, HTC is W/(m²·K), and `HeatTransferModel` takes `voxel_size` in metres.
-- **Result rendering (both front ends) works on a dense lattice, not on voxel cubes.** `core/dense_grid.py` turns the engine's sparse voxels into a uniform x-fastest grid (occupancy mask, nearest-metal hole fill); `web/fields.py` builds the browser sidecar from it and `ui/result_surface.py` (`ResultSurfaceRenderer`, Qt-free) paints the field on a subdivided copy of each metal part's skin, contours the threshold envelope with `vtkFlyingEdges3D`, and cuts painted section caps trimmed to the CAD skin. `ui/visualizer.py` keeps the old `load_*` / `update_*_threshold` API and delegates to it; the result style (Envelope / Surface / Both) is a sidebar combo. Renderer is PBR + generated IBL + SSAO + FXAA (`CASTSIM_UI_PBR=0` falls back to plain lighting). Inspector clicks resolve a picked world position to a voxel through the lattice (`ResultSurfaceRenderer.voxel_at`), not through per-glyph indices.
   - **mm** — Niyama output, reported as °C·√s/mm (`_least_squares_gradients_c_per_mm`).
   Material properties in `core/materials.py` are SI regardless of zone (Pa·s, kg/m³, gravity 9.81 m/s²), so any expression mixing a mesh length with a material property needs a conversion. Use `physics.units`; do not add another `0.0254` literal.
 - **New solvers should work internally in SI** and convert only at their boundary. Every standard correlation — CFL, Reynolds, Weber, Rayleigh, gravity head — assumes SI, and an inch-valued length in one of them yields a plausible wrong answer rather than an error.

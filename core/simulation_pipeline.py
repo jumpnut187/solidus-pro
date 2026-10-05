@@ -614,6 +614,9 @@ def prepare_mesh_and_geometry(
         bounds_to_use,
         show_progress=False,
         progress_callback=on_mesh_progress,
+        # The parts themselves, so a pocket they seal off between them is not
+        # filled as metal along with their interiors.
+        part_meshes=[mesh for mesh, _ in parts_with_types] or None,
     )
     if not success:
         raise SimulationError(

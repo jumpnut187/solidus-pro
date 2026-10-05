@@ -261,6 +261,101 @@ def _robust_contains_check_impl(mesh: trimesh.Trimesh, points: np.ndarray, toler
         return np.zeros(n_points, dtype=bool)
 
 
+#: Cells tested per filled region by :func:`_unfill_sealed_pockets`.
+_POCKET_SAMPLES = 64
+
+#: A filled region is kept when at least this share of its samples is inside
+#: a part. A part's own interior scores ~1.0 and a pocket between parts ~0.0;
+#: the low bar means only a region that is plainly outside every part is ever
+#: dropped.
+_POCKET_KEEP_FRACTION = 0.25
+
+
+def _unfill_sealed_pockets(
+    surface: np.ndarray,
+    filled: np.ndarray,
+    cell_points,
+    part_meshes: Sequence[trimesh.Trimesh],
+) -> Tuple[np.ndarray, int]:
+    """Undo the fill wherever it filled a pocket that no part contains.
+
+    ``voxelized()`` marks only the cells the surfaces pass through, and
+    ``fill()`` then fills every region those surfaces seal off from the
+    outside. On one part that region is the part's interior. On an assembly
+    it is also any pocket the parts enclose between them without filling it
+    -- a pad seated on a casting over the place a deleted riser used to be, a
+    gap closed in by a chill -- and every such pocket came out of the mesher
+    as cast metal: voxels inside no part, given the default CAST type.
+
+    Each region the fill added is a connected set of cells walled off by
+    surface cells, so the whole region is inside a given part or none of it
+    is. A few cells per region are tested against each part; a region whose
+    cells are outside every part is emptied. A part that is not watertight
+    cannot say what is inside it, so a region within its bounds is kept, as it
+    always was.
+
+    Args:
+        surface: Dense occupancy before the fill (the surface cells).
+        filled: Dense occupancy after the fill; not modified.
+        cell_points: Maps an ``(n, 3)`` array of cell indices to world points.
+        part_meshes: Every part, already in world coordinates.
+
+    Returns:
+        ``(occupancy, cells_removed)``.
+    """
+    from scipy import ndimage
+
+    meshes = [mesh for mesh in part_meshes if mesh is not None and len(mesh.faces) > 0]
+    added = filled & ~surface
+    if not meshes or not added.any():
+        return filled, 0
+
+    # Six-connected, as the fill itself is: two regions the fill treated as
+    # separate holes stay separate here.
+    labels, count = ndimage.label(added)
+    if count == 0:
+        return filled, 0
+
+    watertight = [mesh for mesh in meshes if mesh.is_watertight]
+    open_bounds = [np.asarray(mesh.bounds, dtype=np.float64) for mesh in meshes if not mesh.is_watertight]
+
+    regions = ndimage.find_objects(labels)
+    sample_index: List[np.ndarray] = []
+    sample_owner: List[np.ndarray] = []
+    for label, region in enumerate(regions, start=1):
+        if region is None:
+            continue
+        local = np.argwhere(labels[region] == label)
+        if len(local) > _POCKET_SAMPLES:
+            local = local[np.linspace(0, len(local) - 1, _POCKET_SAMPLES).astype(np.int64)]
+        offset = np.array([axis.start for axis in region], dtype=np.int64)
+        sample_index.append(local + offset)
+        sample_owner.append(np.full(len(local), label, dtype=np.int64))
+    indices = np.concatenate(sample_index)
+    owners = np.concatenate(sample_owner)
+    points = np.asarray(cell_points(indices), dtype=np.float64)
+
+    inside = np.zeros(len(points), dtype=bool)
+    for mesh in watertight:
+        lo, hi = np.asarray(mesh.bounds, dtype=np.float64)
+        candidates = np.flatnonzero(~inside & np.all((points >= lo) & (points <= hi), axis=1))
+        if len(candidates):
+            inside[candidates] = np.asarray(mesh.contains(points[candidates]), dtype=bool)
+    for lo, hi in open_bounds:
+        inside |= np.all((points >= lo) & (points <= hi), axis=1)
+
+    totals = np.bincount(owners, minlength=count + 1)
+    hits = np.bincount(owners, weights=inside, minlength=count + 1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        share = np.where(totals > 0, hits / np.maximum(totals, 1), 1.0)
+    pockets = np.flatnonzero((totals > 0) & (share < _POCKET_KEEP_FRACTION))
+    if not len(pockets):
+        return filled, 0
+    remove = np.isin(labels, pockets)
+    removed = int(np.count_nonzero(remove))
+    return filled & ~remove, removed
+
+
 def _part_assignment_contains_worker(part_key: str, mesh_path: str,
                                      chunk_idx: int, chunk_indices: np.ndarray,
                                      chunk_points: np.ndarray, tolerance: float) -> Tuple[int, np.ndarray]:
@@ -633,7 +728,8 @@ class AdaptiveVoxelMesh:
                 bounds: np.ndarray,
                 show_progress: bool = True,
                 progress_callback=None,
-                auto_adjust: bool = True) -> bool:
+                auto_adjust: bool = True,
+                part_meshes: Optional[Sequence[trimesh.Trimesh]] = None) -> bool:
         """
         Generate adaptive voxel mesh from trimesh object
         
@@ -643,6 +739,10 @@ class AdaptiveVoxelMesh:
             show_progress: Show progress information
             progress_callback: Optional callback(current, total, stage) for progress updates
             auto_adjust: Automatically adjust voxel size if it would exceed memory limits
+            part_meshes: The parts ``trimesh_obj`` was combined from, in world
+                coordinates. When given, a pocket the parts seal off between
+                them is left empty instead of filled as metal (see
+                :func:`_unfill_sealed_pockets`).
         
         Returns:
             True if successful
@@ -710,7 +810,7 @@ class AdaptiveVoxelMesh:
         if show_progress:
             print("\nStep 1: Creating initial uniform grid...")
         
-        initial_voxels = self._create_uniform_grid(trimesh_obj, progress_callback)
+        initial_voxels = self._create_uniform_grid(trimesh_obj, progress_callback, part_meshes=part_meshes)
 
         actual_voxel_count = len(initial_voxels)
         if actual_voxel_count > validation.max_allowed_voxels:
@@ -797,7 +897,8 @@ class AdaptiveVoxelMesh:
         logger.log_performance("Voxel mesh generation", 0, len(self.voxel_centers))  # Duration tracked elsewhere
         return True
     
-    def _create_uniform_grid(self, trimesh_obj: trimesh.Trimesh, progress_callback=None) -> Union[List[Dict], np.ndarray]:
+    def _create_uniform_grid(self, trimesh_obj: trimesh.Trimesh, progress_callback=None,
+                             part_meshes: Optional[Sequence[trimesh.Trimesh]] = None) -> Union[List[Dict], np.ndarray]:
         """Create initial uniform voxel grid - optimized using trimesh voxelization"""
         x_min, x_max = self.bounds[0]
         y_min, y_max = self.bounds[1]
@@ -846,12 +947,27 @@ class AdaptiveVoxelMesh:
         try:
             # trimesh.voxelized uses efficient ray-casting internally
             voxel_grid = trimesh_obj.voxelized(pitch=self.base_voxel_size)
+            surface = np.array(voxel_grid.matrix, dtype=bool) if part_meshes else None
             
             # Fill hollow regions (important for castings)
             voxel_grid = voxel_grid.fill()
             
             # Get voxel centers
-            voxel_points = np.asarray(voxel_grid.points, dtype=np.float32)
+            if surface is not None:
+                occupancy, removed = _unfill_sealed_pockets(
+                    surface,
+                    np.asarray(voxel_grid.matrix, dtype=bool),
+                    voxel_grid.indices_to_points,
+                    part_meshes,
+                )
+                if removed:
+                    print(f"  Left {removed:,} voxels empty: pockets sealed between parts but inside none")
+                    logger.info(f"Voxelization: {removed:,} filled voxels were inside no part and were removed")
+                voxel_points = np.asarray(
+                    voxel_grid.indices_to_points(np.argwhere(occupancy)), dtype=np.float32
+                )
+            else:
+                voxel_points = np.asarray(voxel_grid.points, dtype=np.float32)
             
             if progress_callback:
                 progress_callback(50, 100, 'voxelization')

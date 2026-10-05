@@ -10,13 +10,25 @@
  */
 import Module from 'manifold-3d';
 
-import { bodyFromMesh, buildExtrude, FeatureBuildError, partWorldMatrix, type KernelBody } from '../src/lib/modeling/kernel';
+import {
+  applyCuts,
+  bodyFromMesh,
+  buildExtrude,
+  FeatureBuildError,
+  partWorldMatrix,
+  previewCut,
+  sketchRegions,
+  type CutTarget,
+  type KernelBody
+} from '../src/lib/modeling/kernel';
 import { measure } from '../src/lib/modeling/measure';
 import {
   arcThrough,
+  defaultCut,
   defaultExtrude,
   moveEnd,
   parallelOffset,
+  pointInContours,
   replaceEntity,
   referencePlanePreview,
   resolveReferencePlane,
@@ -24,6 +36,7 @@ import {
   sketchProblem,
   sketchProfiles,
   withDimension,
+  type CutFeature,
   type ExtrudeFeature,
   type SketchEntity,
   type SketchPlane
@@ -122,6 +135,91 @@ console.log('up to next with draft');
   const out = buildExtrude(wasm, feature(top(12), [circle(0, 0, 4)], { endCondition: 'upToNext', reverse: true, draftDeg: 5, draftOutward: true }), [cast]);
   const run = 12 - (4 + Math.sqrt(25 - 4)); // where the widened edge meets the dome, roughly
   check('outward draft widens toward the casting', out.bbox.max[0] > 2.1 && out.bbox.max[0] < 2 + run * Math.tan((5 * Math.PI) / 180) + 0.05, String(out.bbox.max[0]));
+}
+
+console.log('watertight once stored (bodies across a seam between two bodies)');
+{
+  // What the server, the STL file and the voxelizer do to a body: weld
+  // positions equal to 8 decimals. Every edge must then be on two triangles.
+  const weldProblem = (positions: Float32Array, indices: Uint32Array): string | null => {
+    const ids = new Map<string, number>();
+    const remap = new Uint32Array(positions.length / 3);
+    for (let i = 0; i < remap.length; i += 1) {
+      const key = [0, 1, 2].map((k) => Math.round(positions[3 * i + k] * 1e8)).join();
+      remap[i] = ids.get(key) ?? i;
+      if (!ids.has(key)) ids.set(key, i);
+    }
+    const uses = new Map<string, number>();
+    for (let t = 0; t < indices.length; t += 3) {
+      const [a, b, c] = [remap[indices[t]], remap[indices[t + 1]], remap[indices[t + 2]]];
+      if (a === b || b === c || a === c) return 'collapsed triangle';
+      for (const [p, q] of [[a, b], [b, c], [c, a]]) {
+        const key = p < q ? `${p}_${q}` : `${q}_${p}`;
+        uses.set(key, (uses.get(key) ?? 0) + 1);
+      }
+    }
+    const bad = [...uses.values()].filter((n) => n !== 2).length;
+    return bad ? `${bad} edges not on exactly two triangles` : null;
+  };
+  const stored = (name: string, out: { positions: Float32Array; indices: Uint32Array }) =>
+    bodyFromMesh(wasm, name, name, out.positions, out.indices, identity);
+
+  // A riser stored before bodies were finished for storage: the dome's shape
+  // cut exactly, then rounded to float32, so it meets the dome at a seam of
+  // sub-micron gaps. Riser 2 in the report sat on the pipe beside one of these.
+  const legacyCut = wasm.CrossSection.circle(1.25, 64).translate([-0.75, 0.25]).extrude(10).translate([0, 0, 1]);
+  const legacyPieces = legacyCut.subtract(cast.manifold!).decompose();
+  const legacyTop = legacyPieces.find((piece) => piece.boundingBox().max[2] > 10.9)!;
+  const legacyMesh = legacyTop.getMesh();
+  const legacy = bodyFromMesh(wasm, 'legacy', 'Legacy riser', legacyMesh.vertProperties, legacyMesh.triVerts, identity);
+  for (const piece of legacyPieces) piece.delete();
+  legacyCut.delete();
+  check('legacy riser loads', legacy.manifold !== null, legacy.error ?? '');
+
+  const a = buildExtrude(wasm, feature(top(11), [circle(-0.75, 0.25, 2.5)], { endCondition: 'upToNext', reverse: true }), [cast]);
+  const bodyA = stored('a', a);
+  const b = buildExtrude(wasm, feature(top(11), [circle(1, 0.25, 2.5)], { endCondition: 'upToNext', reverse: true }), [cast, bodyA]);
+  const bodyB = stored('b', b);
+  check('riser beside a stored riser welds closed', weldProblem(b.positions, b.indices) === null, String(weldProblem(b.positions, b.indices)));
+  check('a stored riser overlaps the casting by a hair, not a seam', (() => {
+    const riser = new wasm.Manifold(new wasm.Mesh({ numProp: 3, vertProperties: a.positions, triVerts: a.indices }));
+    const overlap = riser.intersect(cast.manifold!).volume();
+    riser.delete();
+    return overlap > 0 && overlap < 1e-3;
+  })());
+
+  const scenes: Array<[string, KernelBody[], number]> = [
+    ['over the legacy riser seam', [cast, legacy], 12],
+    ['over the riser seam', [cast, bodyA], 12],
+    ['over two touching risers', [cast, bodyA, bodyB], 12]
+  ];
+  for (const [label, targets, plane] of scenes) {
+    let built = 0;
+    const failures: string[] = [];
+    for (const cx of [-1.5, -0.25, 0.5, 1.25]) {
+      for (const cy of [-0.75, 0.25, 1]) {
+        for (const shape of ['circle', 'square'] as const) {
+          const entity: SketchEntity =
+            shape === 'circle' ? circle(cx, cy, 2.25) : { id: 'r', type: 'rectangle', cx, cy, w: 2, h: 2, angle: 0 };
+          for (const trimOverlap of [true, false]) {
+            try {
+              const out = buildExtrude(wasm, feature(top(plane), [entity], { endCondition: 'upToNext', reverse: true, trimOverlap }), targets);
+              built += 1;
+              const problem = weldProblem(out.positions, out.indices);
+              if (problem) failures.push(`${shape} ${cx},${cy}: ${problem}`);
+              const back = stored('x', out);
+              if (!back.manifold) failures.push(`${shape} ${cx},${cy}: does not reload (${back.error})`);
+              back.manifold?.delete();
+            } catch (error) {
+              failures.push(`${shape} ${cx},${cy}: ${String(error)}`);
+            }
+          }
+        }
+      }
+    }
+    check(`up to next ${label}: ${built} bodies weld closed`, built === 48 && failures.length === 0, failures.slice(0, 3).join('; '));
+  }
+  for (const body of [legacy, bodyA, bodyB]) body.manifold?.delete();
 }
 
 console.log('trim overlap (blind chill pushed into the casting)');
@@ -288,6 +386,169 @@ console.log('measure');
     { kind: 'line', a: [0, 2, 0], b: [4, 2, 0], points: [], partName: null }
   ]);
   check('parallel edges distance', e?.rows[1].value === '2.0000 in' && e.rows[0].value === '0.00°', JSON.stringify(e?.rows));
+}
+
+console.log('sketch regions');
+{
+  const plane = top(0);
+  const sketchOf = (entities: SketchEntity[]) => ({ plane, entities });
+  // Two overlapping circles: two crescents and the lens between them.
+  const pair: SketchEntity[] = [
+    { id: 'a', type: 'circle', cx: 0, cy: 0, d: 4 },
+    { id: 'b', type: 'circle', cx: 2, cy: 0, d: 4 }
+  ];
+  const regions = sketchRegions(wasm, sketchOf(pair));
+  check('two overlapping circles make three regions', regions.length === 3, String(regions.length));
+  const lens = regions.find((region) => !region.inDefault);
+  check('the even-odd default leaves the lens out', regions.filter((region) => region.inDefault).length === 2 && lens !== undefined);
+  check('every seed lies in its own region only', regions.every((region) => regions.filter((other) => pointInContours(other.contours, region.seed)).length === 1 && pointInContours(region.contours, region.seed)));
+  check('regions carry triangles', regions.every((region) => region.triangles.length >= 18));
+  const areaSum = regions.reduce((sum, region) => sum + region.area, 0);
+  const extrude = (patch: Partial<ExtrudeFeature>) => buildExtrude(wasm, feature(plane, pair, { depth: 1, ...patch }), []);
+  const all = extrude({ regions: regions.map((region) => region.seed) });
+  check('all regions extrude the union', near(all.volume, areaSum, 1e-3), `${all.volume} vs ${areaSum}`);
+  const lensOnly = extrude({ regions: [lens!.seed] });
+  check('the lens alone', near(lensOnly.volume, lens!.area, 1e-4), `${lensOnly.volume} vs ${lens!.area}`);
+  const byDefault = extrude({});
+  check('no picks = even-odd', near(byDefault.volume, areaSum - lens!.area, 1e-3), String(byDefault.volume));
+  try {
+    extrude({ regions: [[40, 40]] });
+    check('refuses: picks outside every region', false);
+  } catch (error) {
+    check('refuses: picks outside every region', error instanceof FeatureBuildError && /picked regions/.test((error as Error).message), String(error));
+  }
+
+  // A circle in a rectangle: the ring and the disc, the disc a hole by default.
+  const ring = sketchRegions(wasm, sketchOf([
+    { id: 'r', type: 'rectangle', cx: 0, cy: 0, w: 6, h: 6, angle: 0 },
+    { id: 'c', type: 'circle', cx: 0, cy: 0, d: 2 }
+  ]));
+  check('rectangle with a circle: ring and disc', ring.length === 2 && ring.filter((region) => region.inDefault).length === 1);
+  const ringRegion = ring.find((region) => region.inDefault)!;
+  check('the ring keeps its hole', ringRegion.contours.length === 2 && !pointInContours(ringRegion.contours, [0, 0]));
+
+  // Lines: a square drawn with lines and split by a line across it.
+  const lines: SketchEntity[] = [
+    { id: 'l1', type: 'line', x1: 0, y1: 0, x2: 4, y2: 0 },
+    { id: 'l2', type: 'line', x1: 4, y1: 0, x2: 4, y2: 4 },
+    { id: 'l3', type: 'line', x1: 4, y1: 4, x2: 0, y2: 4 },
+    { id: 'l4', type: 'line', x1: 0, y1: 4, x2: 0, y2: 0 },
+    { id: 'l5', type: 'line', x1: 1, y1: 0, x2: 1, y2: 4 }
+  ];
+  const split = sketchRegions(wasm, sketchOf(lines));
+  check('a line across a square splits it in two', split.length === 2 && split.every((region) => region.inDefault), String(split.length));
+  const strip = split.find((region) => near(region.area, 4, 1e-6))!;
+  const stripOnly = buildExtrude(wasm, feature(plane, lines, { depth: 2, regions: [strip.seed] }), []);
+  check('one of the two extrudes alone', near(stripOnly.volume, 8, 1e-4), String(stripOnly.volume));
+
+  // A cut takes its regions the same way.
+  const slab = Manifold.cube([10, 10, 1]).translate([-5, -5, 0]);
+  const slabMesh = slab.getMesh();
+  const cutTarget: CutTarget = { name: 'Slab', positions: slabMesh.vertProperties, indices: slabMesh.triVerts, matrix: identity };
+  const lensCut = applyCuts(wasm, cutTarget, [
+    { ...defaultCut(5, top(2), 'Cut'), partIds: ['x'], sketch: { plane: top(2), entities: pair }, endCondition: 'throughAll', reverse: true, regions: [lens!.seed] }
+  ]);
+  check('a cut through the lens only', lensCut.changed && near(100 - lensCut.volume, lens!.area, 1e-3), lensCut.changed ? String(100 - lensCut.volume) : '');
+  slab.delete();
+}
+
+console.log('extrude cut');
+{
+  const cutOf = (plane: SketchPlane, entities: SketchEntity[], patch: Partial<CutFeature>): CutFeature => ({
+    ...defaultCut(5, plane, 'Cut-Extrude1'),
+    partIds: ['cast'],
+    ...patch,
+    sketch: { plane, entities }
+  });
+  const target = (matrix = identity): CutTarget => ({ name: 'Casting', positions: soup, indices: soupIdx, matrix });
+  const closed = (out: { positions: Float32Array; indices: Uint32Array }) => {
+    const back = bodyFromMesh(wasm, 'x', 'x', out.positions, out.indices, identity);
+    const ok = back.manifold !== null && back.manifold.status() === 'NoError';
+    back.manifold?.delete();
+    return ok;
+  };
+  const castVolume = castSolid.volume();
+  const refuses = (label: string, run: () => unknown, pattern: RegExp) => {
+    try {
+      run();
+      check(`refuses: ${label}`, false);
+    } catch (error) {
+      check(`refuses: ${label}`, error instanceof FeatureBuildError && pattern.test((error as Error).message), String(error));
+    }
+  };
+
+  // A d=2 hole straight down through the dome and the cylinder.
+  const hole = cutOf(top(12), [circle(0, 0, 2)], { endCondition: 'throughAll', reverse: true });
+  const expected = 2 * Math.PI * (2 + (125 - Math.pow(24, 1.5)) / 3);
+  const preview = previewCut(wasm, hole, [cast]);
+  check('preview removes the hole volume', near(preview.removed.cast, expected, expected * 0.01), `${preview.removed.cast} vs ${expected}`);
+  const holed = applyCuts(wasm, target(), [hole]);
+  check('through all cuts the body', holed.changed);
+  if (holed.changed) {
+    check('cut volume = body - removed', near(holed.volume, castVolume - preview.removed.cast, 1e-3), `${holed.volume}`);
+    check('cut body is closed once stored', closed(holed));
+    check('cut body keeps its outline', near(holed.bbox.min[2], 0, 1e-6) && near(holed.bbox.max[0] - holed.bbox.min[0], 10, 1e-3));
+  }
+
+  // The same hole on a casting placed and turned: the result stays in the
+  // casting's own frame, so the stored STL is the uploaded one, holed.
+  const moved = partWorldMatrix([10, -3, 2], [0, 0, 90], 1);
+  const movedHole = cutOf({ kind: 'standard', id: 'top', offset: 14 }, [circle(10, -3, 2)], { endCondition: 'throughAll', reverse: true });
+  const movedOut = applyCuts(wasm, target(moved), [movedHole]);
+  check(
+    'a placed body is cut in its own frame',
+    movedOut.changed && near(movedOut.volume, castVolume - preview.removed.cast, 1e-3) && near(movedOut.bbox.min[2], 0, 1e-6),
+    movedOut.changed ? `${movedOut.volume} ${JSON.stringify(movedOut.bbox)}` : 'unchanged'
+  );
+  const scaled = partWorldMatrix([0, 0, 0], [0, 0, 0], 2);
+  const scaledOut = applyCuts(wasm, target(scaled), [cutOf(top(30), [circle(0, 0, 4)], { endCondition: 'throughAll', reverse: true })]);
+  check(
+    'a scaled body is cut in its own frame',
+    scaledOut.changed && near(scaledOut.volume, castVolume - preview.removed.cast, expected * 0.01),
+    scaledOut.changed ? String(scaledOut.volume) : 'unchanged'
+  );
+
+  // Blind pocket up from the flat bottom: 2 x 2 x 1.
+  const pocket = applyCuts(wasm, target(), [cutOf(top(0), [{ id: 'r', type: 'rectangle', cx: 0, cy: 0, w: 2, h: 2, angle: 0 }], { endCondition: 'blind', depth: 1, reverse: false })]);
+  check('blind pocket removes w*h*d', pocket.changed && near(castVolume - pocket.volume, 4, 1e-3), pocket.changed ? String(castVolume - pocket.volume) : 'unchanged');
+
+  // Mid plane and Through All - Both from a plane inside the cylinder.
+  const cylinder = Manifold.cylinder(4, 5, 5, 96);
+  const cylMesh = cylinder.getMesh();
+  const cylTarget: CutTarget = { name: 'Cylinder', positions: cylMesh.vertProperties, indices: cylMesh.triVerts, matrix: identity };
+  const cylVolume = cylinder.volume();
+  const mid = applyCuts(wasm, cylTarget, [cutOf(top(2), [circle(0, 0, 2)], { endCondition: 'midplane', depth: 2 })]);
+  const holeArea = cylVolume / 4 / 25; // the tessellated circle's area per unit r^2
+  check('mid plane cuts both ways from the sketch', mid.changed && near(cylVolume - mid.volume, holeArea * 2, 0.02), mid.changed ? String(cylVolume - mid.volume) : 'unchanged');
+  check('a cut that stops inside leaves a void, and says so', mid.changed && closed(mid) && mid.warnings.some((w) => /enclosed void/.test(w)), JSON.stringify(mid.warnings));
+  const both = applyCuts(wasm, cylTarget, [cutOf(top(2), [circle(0, 0, 2)], { endCondition: 'throughAllBoth' })]);
+  check('through all both cuts the whole height', both.changed && near(cylVolume - both.volume, holeArea * 4, 0.03), both.changed ? String(cylVolume - both.volume) : 'unchanged');
+  const drafted = applyCuts(wasm, cylTarget, [cutOf(top(4), [circle(0, 0, 4)], { endCondition: 'blind', depth: 2, reverse: true, draftDeg: 10 })]);
+  // Inward draft: a cone frustum r 2 -> 2 - 2 tan(10 deg).
+  const r2 = 2 - 2 * Math.tan((10 * Math.PI) / 180);
+  const frustum = (Math.PI * 2 * (4 + 2 * r2 + r2 * r2)) / 3;
+  check('drafted cut tapers inward', drafted.changed && near(cylVolume - drafted.volume, frustum, frustum * 0.02), drafted.changed ? `${cylVolume - drafted.volume} vs ${frustum}` : 'unchanged');
+
+  // Flip side: keep only a d=4 core.
+  const flipped = applyCuts(wasm, cylTarget, [cutOf(top(2), [circle(0, 0, 4)], { endCondition: 'throughAllBoth', flipSide: true })]);
+  check('flip side keeps the inside of the profile', flipped.changed && near(flipped.volume, holeArea * 4 * 4, 0.1), flipped.changed ? String(flipped.volume) : 'unchanged');
+  if (flipped.changed) check('flipped cut is closed once stored', closed(flipped));
+
+  // Two cuts in history order, and cuts that miss.
+  const twice = applyCuts(wasm, cylTarget, [
+    cutOf(top(2), [circle(0, 0, 2)], { endCondition: 'throughAllBoth', seq: 7 }),
+    cutOf(top(2), [circle(3, 0, 1)], { endCondition: 'throughAllBoth', seq: 6 })
+  ]);
+  check('two cuts both apply', twice.changed && near(cylVolume - twice.volume, holeArea * 4 + holeArea * 4 * 0.25, 0.05), twice.changed ? String(cylVolume - twice.volume) : '');
+  const missed = applyCuts(wasm, cylTarget, [cutOf(top(10), [circle(0, 0, 2)], { endCondition: 'throughAll', reverse: false })]);
+  check('a cut pointing away leaves the body unchanged', !missed.changed);
+  const aside = applyCuts(wasm, cylTarget, [cutOf(top(10), [circle(20, 0, 2)], { endCondition: 'throughAll', reverse: true })]);
+  check('a cut beside the body leaves it unchanged', !aside.changed);
+
+  refuses('cut that removes the whole body', () => applyCuts(wasm, cylTarget, [cutOf(top(10), [circle(0, 0, 30)], { endCondition: 'throughAll', reverse: true })]), /removes all/);
+  refuses('preview that removes nothing', () => previewCut(wasm, cutOf(top(10), [circle(20, 0, 2)], { reverse: true }), [cast]), /removes no material/);
+  refuses('preview with no bodies selected', () => previewCut(wasm, cutOf(top(10), [circle(0, 0, 2)], { partIds: [] }), [cast]), /Select the bodies/);
+  cylinder.delete();
 }
 
 cast.manifold?.delete();

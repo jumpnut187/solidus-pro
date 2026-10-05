@@ -18,10 +18,12 @@
 import type { PartType, ProjectPart } from '../api';
 import type { MeasurePick, MeasureResult } from './measure';
 import type { SketchPlane } from './planes';
+import type { SketchRegion } from './regions';
 import { sketchProblem, type SketchEntity, type SketchTool } from './sketch';
-import type { Vec3 } from './vec';
+import type { Vec2, Vec3 } from './vec';
 
 export * from './planes';
+export * from './regions';
 export * from './sketch';
 export * from './vec';
 
@@ -71,7 +73,62 @@ export type ExtrudeFeature = {
   draftOutward: boolean;
   /** Cut the body back wherever it overlaps an earlier body. */
   trimOverlap: boolean;
+  /**
+   * The sketch regions to extrude, named by a point inside each (see
+   * `regions.ts`); null or absent for every region the even-odd rule fills.
+   */
+  regions?: Vec2[] | null;
 };
+
+/**
+ * SOLIDWORKS Cut-Extrude end conditions. A cut removes material, so the
+ * conditions that stop on a surface have nothing to offer it; Through All in
+ * both directions cuts a sketch on a mid plane clean through a casting.
+ */
+export type CutEndCondition = 'blind' | 'midplane' | 'throughAll' | 'throughAllBoth';
+
+export const CUT_END_CONDITIONS: { id: CutEndCondition; label: string; hint: string }[] = [
+  { id: 'blind', label: 'Blind', hint: 'A fixed depth from the sketch plane.' },
+  { id: 'throughAll', label: 'Through All', hint: 'Through every selected body in the cut direction.' },
+  { id: 'throughAllBoth', label: 'Through All - Both', hint: 'Through every selected body on both sides of the sketch.' },
+  { id: 'midplane', label: 'Mid Plane', hint: 'The depth split evenly either side of the sketch.' }
+];
+
+/**
+ * An extrude cut: a sketch swept into a tool solid that is subtracted from
+ * the bodies in its feature scope.
+ *
+ * A cut is not a body. Its definition lives in the project's `ui_state`
+ * (`cut_features`), and what it does lives in the STL of every body it cut:
+ * the server keeps each cut body's pre-cut STL as its base, so editing or
+ * deleting the cut rebuilds the body from that base and restores material.
+ * A body is cut only by cuts that come after it in the history.
+ */
+export type CutFeature = {
+  version: 1;
+  kind: 'cut';
+  id: string;
+  name: string;
+  seq: number;
+  sketch: Sketch;
+  endCondition: CutEndCondition;
+  /** Inches; used by blind and mid plane. */
+  depth: number;
+  /** Cut against the sketch normal instead of along it. */
+  reverse: boolean;
+  draftDeg: number;
+  /** Taper outward (the cut widens away from the sketch) instead of inward. */
+  draftOutward: boolean;
+  /** Remove the material outside the profile instead of inside it. */
+  flipSide: boolean;
+  /** The feature scope: the bodies this cut removes material from. */
+  partIds: string[];
+  /** The sketch regions to cut, as for an extrude; null for the even-odd default. */
+  regions?: Vec2[] | null;
+};
+
+/** Anything in the history: a body-making extrude or a cut. */
+export type ModelFeature = ExtrudeFeature | CutFeature;
 
 export type FeatureBody = {
   name: string;
@@ -95,14 +152,83 @@ export function defaultExtrude(seq: number, plane: SketchPlane): ExtrudeFeature 
   };
 }
 
+export function defaultCut(seq: number, plane: SketchPlane, name: string): CutFeature {
+  return {
+    version: 1,
+    kind: 'cut',
+    id: newCutId(),
+    name,
+    seq,
+    sketch: { plane, entities: [] },
+    endCondition: 'throughAll',
+    depth: 1,
+    reverse: true,
+    draftDeg: 0,
+    draftOutward: false,
+    flipSide: false,
+    partIds: []
+  };
+}
+
+let cutCounter = 0;
+export function newCutId(): string {
+  cutCounter += 1;
+  return `cut${Date.now().toString(36)}${cutCounter.toString(36)}`;
+}
+
+export function nextCutName(cuts: CutFeature[]): string {
+  const used = new Set(cuts.map((cut) => cut.name));
+  for (let n = 1; ; n += 1) {
+    const name = `Cut-Extrude${n}`;
+    if (!used.has(name)) return name;
+  }
+}
+
+/** The cut features stored in a project's `ui_state`, dropping anything malformed. */
+export function parseCutFeatures(value: unknown): CutFeature[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is CutFeature => {
+    if (!item || typeof item !== 'object') return false;
+    const candidate = item as Partial<CutFeature>;
+    return (
+      candidate.kind === 'cut' &&
+      typeof candidate.id === 'string' &&
+      typeof candidate.seq === 'number' &&
+      Array.isArray(candidate.partIds) &&
+      Boolean(candidate.sketch && Array.isArray(candidate.sketch.entities))
+    );
+  });
+}
+
+/** Where a body sits in the history: its extrude's seq, or 0 for an uploaded body. */
+export function bodySeq(part: ProjectPart): number {
+  return featureOf(part)?.seq ?? 0;
+}
+
+/** The cuts that remove material from `part`, in history order. */
+export function cutsOnPart(cuts: CutFeature[], part: ProjectPart): CutFeature[] {
+  const seq = bodySeq(part);
+  return cuts.filter((cut) => cut.seq > seq && cut.partIds.includes(part.id)).sort((a, b) => a.seq - b.seq);
+}
+
+/** The bodies a cut may have in its scope: every body that comes before it in the history. */
+export function cutCandidates(parts: ProjectPart[], cut: CutFeature): ProjectPart[] {
+  return parts.filter((part) => part.meshData && bodySeq(part) < cut.seq);
+}
+
 /** Why a feature cannot be built as it stands, or null. */
-export function featureProblem(feature: ExtrudeFeature): string | null {
+export function featureProblem(feature: ModelFeature): string | null {
   const sketch = sketchProblem(feature.sketch.entities);
   if (sketch) return sketch;
+  if (feature.regions && !feature.regions.length) return 'Select at least one region of the sketch.';
   if ((feature.endCondition === 'blind' || feature.endCondition === 'midplane') && !(feature.depth > 1e-4)) {
     return 'Depth must be above zero.';
   }
-  if (feature.endCondition === 'upToBody' && !feature.targetPartId) return 'Choose the body to extrude up to.';
+  if (feature.kind === 'cut') {
+    if (!feature.partIds.length) return 'Select the bodies to cut.';
+  } else if (feature.endCondition === 'upToBody' && !feature.targetPartId) {
+    return 'Choose the body to extrude up to.';
+  }
   if (!(feature.draftDeg >= 0 && feature.draftDeg < 60)) return 'Draft must be between 0 and 60 degrees.';
   return null;
 }
@@ -114,9 +240,10 @@ export function featureOf(part: ProjectPart): ExtrudeFeature | null {
   return feature.kind === 'extrude' && feature.sketch ? feature : null;
 }
 
-export function nextFeatureSeq(parts: ProjectPart[]): number {
+export function nextFeatureSeq(parts: ProjectPart[], cuts: CutFeature[] = []): number {
   let seq = 0;
   for (const part of parts) seq = Math.max(seq, featureOf(part)?.seq ?? 0);
+  for (const cut of cuts) seq = Math.max(seq, cut.seq);
   return seq + 1;
 }
 
@@ -164,12 +291,24 @@ export type ModelingViewState = {
   entities: SketchEntity[];
   tool: SketchTool;
   polygonSides: number;
-  selectedEntityId: string | null;
+  /** The selected sketch entities; the last one is the one its dimensions show for. */
+  selectedEntityIds: string[];
   snap: boolean;
-  /** The extrude being previewed, in world space; `ok` false draws it as an error. */
-  preview: { positions: Float32Array; indices: Uint32Array; ok: boolean } | null;
+  /**
+   * The extrude being previewed, in world space; `ok` false draws it as an
+   * error. For a cut it is the material the cut removes, drawn as `cut`.
+   */
+  preview: { positions: Float32Array; indices: Uint32Array; ok: boolean; cut?: boolean } | null;
   /** The direction the extrude grows in, drawn as an arrow in the feature stage. */
   direction: Vec3 | null;
+  /**
+   * The depth the feature stage's arrow sets by dragging, for end conditions
+   * that have one (blind and mid plane); null when the depth is not a number
+   * the user chooses.
+   */
+  extrudeDepth: { value: number; midplane: boolean } | null;
+  /** The sketch's regions in the feature stage, and which the feature uses. */
+  regions: Array<SketchRegion & { selected: boolean }> | null;
   /** The project's reference planes, drawn and pickable in the plane stage. */
   referencePlanes: { id: string; name: string; plane: SketchPlane }[];
   /** Planes the Plane property manager would create, drawn as a preview. */
@@ -183,11 +322,14 @@ export type ModelingViewState = {
 export type ModelingEvent =
   | { type: 'planePicked'; plane: SketchPlane; face: FaceOutline | null }
   | { type: 'entityCreated'; entity: SketchEntity }
-  | { type: 'entitySelected'; id: string | null }
+  | { type: 'entitySelected'; ids: string[] }
   | { type: 'entityChanged'; entity: SketchEntity }
   | { type: 'entitiesChanged'; entities: SketchEntity[] }
   | { type: 'entityDeleted'; id: string }
+  | { type: 'entitiesDeleted'; ids: string[] }
+  | { type: 'regionToggled'; point: Vec2 }
   | { type: 'toolChanged'; tool: SketchTool }
   | { type: 'convertFace'; face: FaceOutline }
-  | { type: 'measurePicked'; pick: MeasurePick | null };
+  | { type: 'measurePicked'; pick: MeasurePick | null }
+  | { type: 'depthChanged'; depth: number };
 

@@ -58,7 +58,13 @@ import {
 } from './lib/defaults';
 import { formatCount } from './lib/format';
 import { inferPartType } from './lib/partTypes';
-import { parseReferencePlanes, type ReferencePlane } from './lib/modeling/types';
+import {
+  describePartChanges,
+  simulatedPartsFromSummary,
+  simulatedPartsKey,
+  type SimulatedPart
+} from './lib/resultsFreshness';
+import { parseCutFeatures, parseReferencePlanes, type CutFeature, type ReferencePlane } from './lib/modeling/types';
 import {
   loadShellPrefs,
   loadStoredProjectId,
@@ -108,6 +114,7 @@ export function App() {
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [parts, setParts] = useState<ProjectPart[]>([]);
   const [referencePlanes, setReferencePlanes] = useState<ReferencePlane[]>([]);
+  const [cutFeatures, setCutFeatures] = useState<CutFeature[]>([]);
   const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
   const [materials, setMaterials] = useState<MaterialInfo[]>([]);
   const [hardware, setHardware] = useState<HardwareInfo | null>(null);
@@ -118,6 +125,8 @@ export function App() {
 
   const [resultsAvailable, setResultsAvailable] = useState(false);
   const [resultsVersion, setResultsVersion] = useState(0);
+  /** The parts the loaded run simulated; null when unknown (an older run) or no run. */
+  const [simulatedParts, setSimulatedParts] = useState<SimulatedPart[] | null>(null);
   const [gridMeta, setGridMeta] = useState<GridMeta | null>(null);
   const [viewportStatus, setViewportStatus] = useState<string | null>(null);
   const [probe, setProbe] = useState<ProbeReading | null>(null);
@@ -222,10 +231,22 @@ export function App() {
   useEffect(() => saveShellPrefs(shell), [shell]);
   useEffect(() => saveStoredProjectId(projectId), [projectId]);
 
+  const projectIdRef = useRef(projectId);
+  projectIdRef.current = projectId;
+
   const job = useSimulationJob({
-    onCompleted: () => {
+    onCompleted: (finishedId) => {
       setResultsAvailable(true);
       setResultsVersion((version) => version + 1);
+      // The run's record of what it simulated is in the project row; the parts
+      // on screen may already have changed while it ran.
+      setSimulatedParts(null);
+      api
+        .getProject(finishedId)
+        .then(({ project }) => {
+          if (projectIdRef.current === finishedId) setSimulatedParts(simulatedPartsFromSummary(project.summary));
+        })
+        .catch(() => undefined);
       patchView({ timePercent: 0, playing: false });
       succeed('Simulation complete.');
       // The project row is now `completed`; refresh so the list and the Open
@@ -310,11 +331,13 @@ export function App() {
         setProjectId(id);
         setParts([]);
         setReferencePlanes(parseReferencePlanes(project.ui_state?.reference_planes));
+        setCutFeatures(parseCutFeatures(project.ui_state?.cut_features));
         setSelectedPartId(storedParts[0]?.id ?? null);
         setGridMeta(null);
         setProbe(null);
         job.reset(project.status === 'completed' ? 'Results ready' : 'Ready');
         setResultsAvailable(project.status === 'completed');
+        setSimulatedParts(project.status === 'completed' ? simulatedPartsFromSummary(project.summary) : null);
         setResultsVersion((version) => version + 1);
         if (!options?.silent) succeed(`Opened "${project.name}".`);
 
@@ -408,6 +431,8 @@ export function App() {
     viewportRef,
     referencePlanes,
     setReferencePlanes,
+    cutFeatures,
+    setCutFeatures,
     notify: { succeed, fail, warn }
   });
   const modelingActive = modeling.active;
@@ -432,8 +457,10 @@ export function App() {
         setProjectId(null);
         setParts([]);
         setReferencePlanes([]);
+        setCutFeatures([]);
         setSelectedPartId(null);
         setResultsAvailable(false);
+        setSimulatedParts(null);
         setGridMeta(null);
         setProbe(null);
         job.reset();
@@ -551,14 +578,17 @@ export function App() {
     [projectId, fail]
   );
 
+  const rebuildDependents = modeling.rebuildDependents;
   const removePart = useCallback(
     (partId: string) => {
+      // Before the part leaves state: the rebuild reads which bodies used it.
+      rebuildDependents(partId);
       setParts((current) => current.filter((part) => part.id !== partId));
       setSelectedPartId((current) => (current === partId ? null : current));
       if (!projectId) return;
       api.deletePart(projectId, partId).catch((error: unknown) => fail(error, 'Unable to remove the part'));
     },
-    [projectId, fail]
+    [projectId, fail, rebuildDependents]
   );
 
   const duplicatePart = useCallback(
@@ -721,6 +751,7 @@ export function App() {
     try {
       const target = await ensureProject();
       setResultsAvailable(false);
+      setSimulatedParts(null);
       setGridMeta(null);
       patchView({ playing: false, timePercent: 0 });
       await job.start(target);
@@ -775,6 +806,17 @@ export function App() {
     setDefectVolume(value);
     if (value === null) warn('Defect volume is only defined for threshold modes.');
   }, [warn]);
+
+  /**
+   * What changed since the loaded run, or null while the results still match
+   * the parts. Not judged while a project is loading: its parts arrive one at
+   * a time and would look like deletions until the last one lands.
+   */
+  const staleResults = useMemo(() => {
+    if (!resultsAvailable || !simulatedParts || loadingProject || job.isBusy) return null;
+    if (simulatedPartsKey(simulatedParts) === simulatedPartsKey(parts)) return null;
+    return describePartChanges(simulatedParts, parts);
+  }, [resultsAvailable, simulatedParts, loadingProject, job.isBusy, parts]);
 
   // A stale volume is worse than none: it is a number for a threshold the user
   // has already moved past.
@@ -1227,7 +1269,7 @@ export function App() {
         onStop={stopSimulation}
         canRun={parts.length > 0}
         isBusy={job.isBusy}
-        job={job.job}
+        job={staleResults !== null ? { ...job.job, message: 'Results out of date' } : job.job}
         onScreenshot={() => void takeScreenshot()}
         onExport={(kind) => {
           if (kind === 'screenshot') void takeScreenshot();
@@ -1322,6 +1364,9 @@ export function App() {
             resultsAvailable && Boolean(gridMeta?.downsampled) && downsampledDismissedFor !== resultsVersion
           }
           onDismissDownsampledWarning={() => setDownsampledDismissedFor(resultsVersion)}
+          staleResults={staleResults}
+          onRunAgain={() => void runSimulation()}
+          running={job.isBusy}
           onRequestAddParts={() => {
             patchShell({ activePanel: 'parts' });
             window.setTimeout(() => addPartsRef.current(), 0);

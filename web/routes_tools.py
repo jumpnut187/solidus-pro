@@ -154,11 +154,10 @@ def duplicate_project(project_id: str):
 
     upload_folder = _upload_folder()
     upload_folder.mkdir(parents=True, exist_ok=True)
-    filepath_map: Dict[str, str] = {}
-    for part in repo.get_parts(database_path, project_id):
-        stored = str(part.get("filepath") or "")
+
+    def copy_into_uploads(stored: str) -> Optional[str]:
         if not stored:
-            continue
+            return None
         try:
             # Rows written before the path check landed may still name a file
             # anywhere on the filesystem. Copying one into the upload folder
@@ -166,19 +165,31 @@ def duplicate_project(project_id: str):
             # endpoint must not be a way to launder a path past the check.
             original = Path(repo.resolve_upload_path(stored, upload_folder))
         except repo.UnsafePartFileError:
-            continue
+            return None
         if not original.name or not original.is_file():
-            continue
+            return None
         copy_path = upload_folder / f"{os.urandom(4).hex()}_{secure_filename(original.name)}"
         try:
             shutil.copy2(original, copy_path)
         except OSError:
             # A missing or unreadable source file should not abort the whole
             # duplicate -- the copied row keeps pointing at the original.
-            continue
-        filepath_map[str(part["id"])] = str(copy_path)
+            return None
+        return str(copy_path)
 
-    new_id = repo.duplicate_project(database_path, project_id, name, filepath_map)
+    filepath_map: Dict[str, str] = {}
+    # A body an extrude cut has cut also keeps its pre-cut STL, which the copy
+    # needs for its cuts to stay editable.
+    base_map: Dict[str, str] = {}
+    for part in repo.get_parts(database_path, project_id):
+        copied = copy_into_uploads(str(part.get("filepath") or ""))
+        if copied:
+            filepath_map[str(part["id"])] = copied
+        copied_base = copy_into_uploads(str(part.get("base_filepath") or ""))
+        if copied_base:
+            base_map[str(part["id"])] = copied_base
+
+    new_id = repo.duplicate_project(database_path, project_id, name, filepath_map, base_map)
     if new_id is None:
         return jsonify({"error": "Project not found"}), 404
     return jsonify({"id": new_id, "project": repo.get_project(database_path, new_id)}), 201
@@ -654,6 +665,9 @@ def export_project_file(project_id: str):
         },
         "parts": [
             {
+                # Lets an import point features and cuts that name a body at
+                # that body's new row. The desktop loader ignores it.
+                "id": part["id"],
                 "name": part["name"],
                 # The original file name, without the server's storage prefix
                 # and without a path: an absolute server path means nothing on
@@ -779,6 +793,8 @@ def import_project_file():
     )
 
     missing: List[str] = []
+    # Exported part id -> imported part id, for features and cuts that name a body.
+    id_map: Dict[str, str] = {}
     # `load_project_state` keeps the desktop schema only, so a modeled body's
     # feature definition is read from the raw entry at the same index (the
     # loader keeps every entry, in order, or raises).
@@ -806,7 +822,7 @@ def import_project_file():
             continue
         position = _triple(part.get("position"))
         rotation = _triple(part.get("rotation"))
-        repo.add_part(
+        new_part_id = repo.add_part(
             _database_path(),
             project_id,
             {
@@ -826,6 +842,21 @@ def import_project_file():
             upload_root=_upload_folder(),
             feature=feature,
         )
+        if isinstance(raw_part.get("id"), str):
+            id_map[raw_part["id"]] = new_part_id
+
+    # Point what names a body at the imported rows. An imported body has no
+    # pre-cut base: the file it was imported from is taken as its base, and
+    # Rebuild in the Model panel applies the cuts to it again.
+    if id_map:
+        for imported in repo.get_parts(_database_path(), project_id):
+            feature = imported.get("feature")
+            remapped = repo.remap_feature_part_ids(feature, id_map)
+            if feature and remapped != feature:
+                repo.set_part_feature(_database_path(), project_id, str(imported["id"]), remapped or {})
+    if "cut_features" in ui_state:
+        cuts = repo.remap_cut_part_ids(ui_state, id_map).get("cut_features")
+        repo.set_ui_state_key(_database_path(), project_id, "cut_features", cuts)
 
     return jsonify(
         {

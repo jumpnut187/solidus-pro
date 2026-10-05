@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type MutableRefObject, type ReactNode } fr
 
 import {
   DownsampledBanner,
+  StaleResultsBanner,
   DropVeil,
   EmptyState,
   ProbeReadout,
@@ -64,6 +65,10 @@ export type CanvasStageProps = {
   /** The loaded run was stored strided; warn until the user dismisses it. */
   showDownsampledWarning: boolean;
   onDismissDownsampledWarning: () => void;
+  /** What changed since the loaded run, or null when the results match the parts. */
+  staleResults: string | null;
+  onRunAgain: () => void;
+  running: boolean;
   onRequestAddParts: () => void;
   /** Hands the shell a way to open this stage's file picker from a shortcut. */
   registerAddParts: (open: () => void) => void;
@@ -114,6 +119,9 @@ export function CanvasStage(props: CanvasStageProps) {
     onDismissToast,
     showDownsampledWarning,
     onDismissDownsampledWarning,
+    staleResults,
+    onRunAgain,
+    running,
     onRequestAddParts,
     registerAddParts,
     log
@@ -180,8 +188,11 @@ export function CanvasStage(props: CanvasStageProps) {
           banner and the loading pill stack instead of landing on each other or
           on the toolbar. It stops short of the ColorBar's gutter on the right;
           see `.stage-top-stack`. */}
-      {showDownsampledWarning || status ? (
+      {showDownsampledWarning || status || staleResults !== null ? (
         <div className="stage-top-stack">
+          {staleResults !== null ? (
+            <StaleResultsBanner changes={staleResults} onRun={onRunAgain} running={running} />
+          ) : null}
           {showDownsampledWarning ? <DownsampledBanner onDismiss={onDismissDownsampledWarning} /> : null}
           {status ? (
             <div className="stage-status" aria-live="polite">

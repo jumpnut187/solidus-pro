@@ -208,8 +208,12 @@ def update_part(project_id: str, part_id: str):
 
 @api_bp.route("/projects/<project_id>/parts/<part_id>", methods=["DELETE"])
 def delete_part(project_id: str, part_id: str):
-    filepath = repo.delete_part(database_path(), project_id, part_id)
-    if filepath:
+    # The part's STL and, for a body an extrude cut has cut, its pre-cut base.
+    # A file another row still names (a part duplicated in the browser shares
+    # its source's file) stays.
+    for filepath in repo.delete_part_files(database_path(), project_id, part_id):
+        if not filepath or repo.count_parts_using_file(database_path(), filepath) > 0:
+            continue
         try:
             Path(filepath).unlink()
         except FileNotFoundError:

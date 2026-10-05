@@ -1,5 +1,5 @@
 /** Typed client for the Solidus Pro HTTP API. */
-import type { ExtrudeFeature, ReferencePlane } from './modeling/types';
+import type { CutFeature, ExtrudeFeature, ReferencePlane } from './modeling/types';
 
 /** The ten part types the engine understands (`core/part_manager.py`). */
 export type PartType =
@@ -61,6 +61,12 @@ export type ProjectPart = {
   meshData?: MeshData;
   /** The sketch and extrude that made this body, for a body modeled in the browser. */
   feature?: ExtrudeFeature | null;
+  /**
+   * The body's STL before any extrude cut, kept by the server while a cut is
+   * applied so editing or deleting the cut can restore material. Null when
+   * the body is uncut.
+   */
+  base_filepath?: string | null;
 };
 
 export type MaterialInfo = {
@@ -140,7 +146,10 @@ export type FeatureBodyRequest = {
   is_open_top: boolean;
   visible: boolean;
   feature: ExtrudeFeature;
+  /** The body as extruded; its pre-cut base when `cut_mesh` is sent. */
   mesh: { vertices: number[]; faces: number[] };
+  /** The body after the extrude cuts that apply to it. */
+  cut_mesh?: { vertices: number[]; faces: number[] } | null;
 };
 
 /** A part as the server stores it — `mesh_data` only when it was requested. */
@@ -398,6 +407,28 @@ export const api = {
       ...jsonBody({ planes }),
       method: 'PUT'
     }),
+  /** Replace the project's extrude cut definitions (kept in its ui_state). */
+  saveCutFeatures: (projectId: string, cuts: CutFeature[]) =>
+    requestJson<{ cuts: CutFeature[] }>(`/api/projects/${projectId}/cuts`, {
+      ...jsonBody({ cuts }),
+      method: 'PUT'
+    }),
+  /**
+   * Store a body as its extrude cuts left it (in its own frame), or with
+   * `null` point it back at its pre-cut base.
+   */
+  storeCutBody: async (projectId: string, partId: string, mesh: { vertices: number[]; faces: number[] } | null) => {
+    const payload = await requestJson<{ part: StoredPart }>(`/api/projects/${projectId}/parts/${partId}/cut`, {
+      ...jsonBody({ mesh }),
+      method: 'PUT'
+    });
+    return { part: adoptPart(payload.part) };
+  },
+  /** A cut body's geometry before any cut. */
+  partBaseMesh: (projectId: string, partId: string) =>
+    requestJson<{ mesh_data: MeshData }>(`/api/projects/${projectId}/parts/${partId}/base-mesh`).then(
+      (payload) => payload.mesh_data
+    ),
   /** Triangle geometry for a stored part, used to restore a reloaded project. */
   partMesh: (projectId: string, partId: string) =>
     requestJson<{ mesh_data: MeshData }>(`/api/projects/${projectId}/parts/${partId}/mesh`).then(
