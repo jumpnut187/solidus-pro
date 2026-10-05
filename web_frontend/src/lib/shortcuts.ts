@@ -44,6 +44,7 @@ export const SHORTCUT_GROUPS: { group: string; items: ShortcutSpec[] }[] = [
     group: 'View',
     items: [
       { keys: 'Home', description: 'Fit the model to the view' },
+      { keys: 'O', description: 'Orient & Parting Line' },
       { keys: 'Space', description: 'Play / pause a time mode' },
       { keys: 'Escape', description: 'Close the top panel, dialog or tool' }
     ]

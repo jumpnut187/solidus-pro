@@ -19,6 +19,8 @@ import type {
   CameraPreset,
   GridMeta,
   MeasureResult,
+  OrientPick,
+  OrientViewState,
   PourPick,
   ProbeReading,
   ResultViewState,
@@ -74,6 +76,11 @@ export type CanvasStageProps = {
   registerAddParts: (open: () => void) => void;
   /** The job log drawer, anchored to the foot of the canvas. */
   log?: ReactNode;
+  /** The Orient & Parting Line tool's view state, or null when unused. */
+  orient: OrientViewState | null;
+  onOrientPick: (pick: OrientPick) => void;
+  /** One-click prompt shown over the canvas, e.g. to orient a fresh casting; null for none. */
+  prompt?: ReactNode;
 };
 
 /**
@@ -124,7 +131,10 @@ export function CanvasStage(props: CanvasStageProps) {
     running,
     onRequestAddParts,
     registerAddParts,
-    log
+    log,
+    orient,
+    onOrientPick,
+    prompt
   } = props;
 
   const [dragDepth, setDragDepth] = useState(0);
@@ -179,6 +189,8 @@ export function CanvasStage(props: CanvasStageProps) {
           onGridMeta={onGridMeta}
           modeling={modeling.viewState}
           onModelingEvent={modeling.handleEvent}
+          orient={orient}
+          onOrientPick={onOrientPick}
           onStatus={onStatus}
           onError={onError}
         />
@@ -188,8 +200,9 @@ export function CanvasStage(props: CanvasStageProps) {
           banner and the loading pill stack instead of landing on each other or
           on the toolbar. It stops short of the ColorBar's gutter on the right;
           see `.stage-top-stack`. */}
-      {showDownsampledWarning || status || staleResults !== null ? (
+      {showDownsampledWarning || status || staleResults !== null || prompt ? (
         <div className="stage-top-stack">
+          {prompt ?? null}
           {staleResults !== null ? (
             <StaleResultsBanner changes={staleResults} onRun={onRunAgain} running={running} />
           ) : null}

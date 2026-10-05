@@ -12,6 +12,8 @@ export type ShortcutHandlers = {
   shortcuts: () => void;
   escape: () => void;
   togglePlayback: () => void;
+  /** Open or close the Orient & Parting Line panel. */
+  toggleOrient: () => void;
 };
 
 /** Typing in a field must not fire an accelerator. */
@@ -79,8 +81,8 @@ function isInDialog(target: EventTarget | null): boolean {
 /**
  * The desktop accelerators, in the browser: F5 run, Shift+F5 stop,
  * Ctrl/Cmd+O add part, Ctrl/Cmd+S save project, Ctrl/Cmd+Shift+S save as,
- * P screenshot, Home fit, F1 help, ? shortcuts, Escape close, Space
- * play/pause. `lib/shortcuts.ts` documents exactly this set.
+ * P screenshot, Home fit, O orient & parting line, F1 help, ? shortcuts,
+ * Escape close, Space play/pause. `lib/shortcuts.ts` documents exactly this set.
  *
  * Escape is deliberately left to fire even inside a text field — it is how you
  * back out of an edit — while every other shortcut defers to typing.
@@ -138,6 +140,12 @@ export function useKeyboardShortcuts(handlers: ShortcutHandlers): void {
         if (event.repeat || isInDialog(event.target)) return;
         event.preventDefault();
         handlersNow.screenshot();
+        return;
+      }
+      if (event.key === 'o' || event.key === 'O') {
+        if (event.repeat || isInDialog(event.target)) return;
+        event.preventDefault();
+        handlersNow.toggleOrient();
         return;
       }
       if (event.key === 'Home') {

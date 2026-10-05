@@ -33,6 +33,7 @@ importlib.import_module("vtkmodules.qt").QVTKRWIBase = "QOpenGLWidget"
 
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 from ui.qt import (
+    Qt,
     QTimer,
     QVBoxLayout,
     QWidget,
@@ -70,6 +71,13 @@ from ui.result_surface import (
 #: the teal/yellow gating system) so it reads unambiguously as a UI marker
 #: rather than a part.
 POUR_LOCATION_MARKER_COLOR = (1.0, 0.0, 1.0)
+
+#: Parting-plane overlay colors: plane fill/outline and label, the section
+#: line where it cuts the casting, and the cope (above) / drag (below) tags.
+PARTING_PLANE_COLOR = (0.30, 0.75, 1.0)
+PARTING_SECTION_COLOR = (1.0, 0.85, 0.1)
+PARTING_COPE_COLOR = (1.0, 0.55, 0.35)
+PARTING_DRAG_COLOR = (0.45, 0.85, 0.55)
 
 #: Direction metal travels from the pour point. Gravity pour, so straight
 #: down -- matches the fixed -Z gravity in physics.filling.gravity_force.
@@ -933,6 +941,17 @@ class CastingVisualizer(QWidget):
     # and the "Mold Filling" analysis gate in sync.
     pour_location_changed = Signal(object)
 
+    # Orient & Parting Line surface picks. ``surface_picked`` carries
+    # {"point", "triangle", "toward_viewer", "part_id"} in world inches;
+    # ``surface_pick_cancelled`` fires when Esc ends the pick in the viewport.
+    surface_picked = Signal(object)
+    surface_pick_cancelled = Signal()
+
+    # Class-level defaults so an instance built without __init__ (the
+    # visualizer tests use __new__) never enters surface pick mode.
+    _surface_pick_enabled = False
+    _surface_pick_part_ids: Optional[List[str]] = None
+
     def __init__(self, parent=None):
         super().__init__(parent)
         
@@ -1005,6 +1024,12 @@ class CastingVisualizer(QWidget):
         self._pour_location: Optional[PourLocation] = None
         self._pour_location_actors: List[vtk.vtkActor] = []
 
+        # Orient & Parting Line: one-shot surface pick and the parting plane.
+        # ``_surface_pick_part_ids`` None = any part actor may be picked.
+        self._surface_pick_enabled = False
+        self._surface_pick_part_ids: Optional[List[str]] = None
+        self._parting_actors: List[Any] = []
+
         # Active result-mode inspector (feedmod, shrink/porosity, ...)
         self._inspector_layer: Optional[InspectorLayer] = None
 
@@ -1073,6 +1098,7 @@ class CastingVisualizer(QWidget):
 
         # Add click handler for measurement tool
         self.interactor.AddObserver("LeftButtonPressEvent", self._on_left_button_press, 1.0)
+        self.interactor.AddObserver("KeyPressEvent", self._on_key_press, 1.0)
 
         # Initialize color bar (hidden by default)
         self._init_color_bar()
@@ -1096,6 +1122,13 @@ class CastingVisualizer(QWidget):
     
     def _on_left_button_press(self, obj, event):
         """Handle left mouse button press for measurement/pour-location picking"""
+        # Orient & Parting Line picks (face down/up, parting height) are
+        # one-shot modes the user just started, so they come first.
+        if self._surface_pick_enabled:
+            click_pos = self.interactor.GetEventPosition()
+            self._handle_surface_pick(click_pos[0], click_pos[1])
+            return
+
         # Pour-location picking takes priority: it is a deliberate,
         # one-shot placement the user just started via "Set Pour Location".
         if self._pour_pick_enabled:
@@ -1787,6 +1820,186 @@ class CastingVisualizer(QWidget):
         for actor in self._pour_location_actors:
             self.renderer.RemoveActor(actor)
         self._pour_location_actors = []
+
+    # ==================== Orient & Parting Line ====================
+    #
+    # A one-shot surface pick (face down / face up / parting height) and the
+    # parting-plane overlay. Neither touches the result overlays, and the
+    # plane actors are unpickable so pour, measurement and inspector clicks
+    # keep hitting the parts underneath.
+
+    def start_surface_pick(self, part_ids: Optional[List[str]] = None) -> None:
+        """Enter surface pick mode; the next left click on a part emits ``surface_picked``.
+
+        ``part_ids`` limits the pick to those part actors (None = any part).
+        Pour-location pick mode is switched off so one click cannot do both.
+        """
+        self._pour_pick_enabled = False
+        self._surface_pick_enabled = True
+        self._surface_pick_part_ids = list(part_ids) if part_ids else None
+        if self.vtk_widget is not None:
+            self.vtk_widget.setCursor(Qt.CrossCursor)
+
+    def cancel_surface_pick(self) -> None:
+        """Leave surface pick mode without emitting anything."""
+        self._surface_pick_enabled = False
+        self._surface_pick_part_ids = None
+        if self.vtk_widget is not None:
+            self.vtk_widget.unsetCursor()
+
+    def is_surface_pick_mode(self) -> bool:
+        return self._surface_pick_enabled
+
+    def _on_key_press(self, obj, event) -> None:
+        """Esc in the viewport cancels an active surface pick."""
+        if not self._surface_pick_enabled:
+            return
+        if self.interactor.GetKeySym() == "Escape":
+            self.cancel_surface_pick()
+            self.surface_pick_cancelled.emit()
+
+    def _handle_surface_pick(self, x: int, y: int) -> None:
+        """Resolve a click to a picked triangle and emit it; a miss keeps the mode on."""
+        if self._surface_pick_part_ids is None:
+            actors = list(self.part_actors.values())
+        else:
+            actors = [
+                self.part_actors[pid] for pid in self._surface_pick_part_ids if pid in self.part_actors
+            ]
+        if not actors:
+            return
+        picker = vtk.vtkCellPicker()
+        for actor in actors:
+            picker.AddPickList(actor)
+        picker.SetPickFromList(True)
+        picker.SetTolerance(0.005)
+        picker.Pick(x, y, 0, self.renderer)
+        cell_id = picker.GetCellId()
+        dataset = picker.GetDataSet()
+        if cell_id < 0 or dataset is None:
+            return
+        point = tuple(float(v) for v in picker.GetPickPosition())
+        cell_points = dataset.GetCell(cell_id).GetPoints()
+        triangle = [tuple(cell_points.GetPoint(i)) for i in range(min(3, cell_points.GetNumberOfPoints()))]
+        if len(triangle) < 3:
+            return
+        camera = self.renderer.GetActiveCamera()
+        if camera.GetParallelProjection():
+            toward_viewer = tuple(-float(v) for v in camera.GetDirectionOfProjection())
+        else:
+            cam = camera.GetPosition()
+            toward_viewer = tuple(float(cam[i]) - point[i] for i in range(3))
+        self.cancel_surface_pick()
+        self.surface_picked.emit(
+            {
+                "point": point,
+                "triangle": triangle,
+                "toward_viewer": toward_viewer,
+                "part_id": self._part_id_for_actor(picker.GetActor()),
+            }
+        )
+
+    def show_parting_plane(
+        self,
+        z: float,
+        extent: Tuple[float, float, float, float],
+        segments: Optional[np.ndarray] = None,
+        label: str = "",
+    ) -> None:
+        """Draw the parting plane at ``z`` over ``extent`` = (xmin, xmax, ymin, ymax).
+
+        Translucent fill, solid outline, a bright section line where the plane
+        cuts the casting (``segments``, shape (n, 2, 3)), a label, and COPE /
+        DRAG tags just above and below the plane.
+        """
+        self.hide_parting_plane(render=False)
+        xmin, xmax, ymin, ymax = (float(v) for v in extent)
+        z = float(z)
+
+        plane = vtk.vtkPlaneSource()
+        plane.SetOrigin(xmin, ymin, z)
+        plane.SetPoint1(xmax, ymin, z)
+        plane.SetPoint2(xmin, ymax, z)
+        plane_mapper = vtk.vtkPolyDataMapper()
+        plane_mapper.SetInputConnection(plane.GetOutputPort())
+
+        fill = vtk.vtkActor()
+        fill.SetMapper(plane_mapper)
+        fill_prop = fill.GetProperty()
+        fill_prop.SetColor(*PARTING_PLANE_COLOR)
+        fill_prop.SetOpacity(0.22)
+        fill_prop.LightingOff()
+        fill.PickableOff()
+
+        outline = vtk.vtkActor()
+        outline.SetMapper(plane_mapper)
+        outline_prop = outline.GetProperty()
+        outline_prop.SetRepresentationToWireframe()
+        outline_prop.SetColor(*PARTING_PLANE_COLOR)
+        outline_prop.SetLineWidth(2.0)
+        outline_prop.LightingOff()
+        outline.PickableOff()
+
+        actors: List[Any] = [fill, outline]
+
+        if segments is not None and len(segments):
+            seg = np.asarray(segments, dtype=float).reshape(-1, 3)
+            points = vtk.vtkPoints()
+            points.SetData(numpy_support.numpy_to_vtk(np.ascontiguousarray(seg), deep=True))
+            lines = vtk.vtkCellArray()
+            for i in range(0, seg.shape[0], 2):
+                lines.InsertNextCell(2)
+                lines.InsertCellPoint(i)
+                lines.InsertCellPoint(i + 1)
+            section = vtk.vtkPolyData()
+            section.SetPoints(points)
+            section.SetLines(lines)
+            section_mapper = vtk.vtkPolyDataMapper()
+            section_mapper.SetInputData(section)
+            section_actor = vtk.vtkActor()
+            section_actor.SetMapper(section_mapper)
+            section_prop = section_actor.GetProperty()
+            section_prop.SetColor(*PARTING_SECTION_COLOR)
+            section_prop.SetLineWidth(4.0)
+            section_prop.LightingOff()
+            section_actor.PickableOff()
+            actors.append(section_actor)
+
+        tag_offset = max(0.05, 0.04 * max(xmax - xmin, ymax - ymin))
+        texts = [
+            (label, (xmin, ymin, z), PARTING_PLANE_COLOR, 16),
+            ("COPE (above)", (xmax, ymax, z + tag_offset), PARTING_COPE_COLOR, 14),
+            ("DRAG (below)", (xmax, ymax, z - tag_offset), PARTING_DRAG_COLOR, 14),
+        ]
+        for text, position, color, size in texts:
+            if not text:
+                continue
+            text_actor = vtk.vtkBillboardTextActor3D()
+            text_actor.SetInput(text)
+            text_actor.SetPosition(*position)
+            text_prop = text_actor.GetTextProperty()
+            text_prop.SetColor(*color)
+            text_prop.SetFontSize(size)
+            text_prop.BoldOn()
+            text_actor.PickableOff()
+            actors.append(text_actor)
+
+        for actor in actors:
+            self.renderer.AddActor(actor)
+        self._parting_actors = actors
+        self.renderer.ResetCameraClippingRange()
+        self.render_window.Render()
+
+    def hide_parting_plane(self, render: bool = True) -> None:
+        """Remove the parting plane overlay."""
+        for actor in self._parting_actors:
+            self.renderer.RemoveActor(actor)
+        self._parting_actors = []
+        if render and self.render_window is not None:
+            self.render_window.Render()
+
+    def is_parting_plane_shown(self) -> bool:
+        return bool(self._parting_actors)
 
     def enable_feed_modulus_leader(self, enabled: bool):
         """Enable or disable feed modulus leader mode.
@@ -2738,12 +2951,15 @@ class CastingVisualizer(QWidget):
                 max(b[5] for b in all_bounds),  # z_max
             )
     
-    def load_parts_from_manager(self, part_manager):
+    def load_parts_from_manager(self, part_manager, reset_camera: bool = True):
         """
         Load all parts from a PartManager instance.
         
         Args:
             part_manager: PartManager instance with parts to display
+            reset_camera: Refit the camera to the parts. The Orient & Parting
+                Line tool passes False so the view holds still while the
+                user turns the part.
         """
         # Clear existing parts
         for actor in self.part_actors.values():
@@ -2765,9 +2981,10 @@ class CastingVisualizer(QWidget):
         self._configure_ssao()
         
         # Reset camera to show all parts
-        self.renderer.ResetCamera()
+        if reset_camera:
+            self.renderer.ResetCamera()
         self.renderer.ResetCameraClippingRange()
-        if self._is_orthographic:
+        if reset_camera and self._is_orthographic:
             self._update_parallel_scale()
         if not self.part_actors and part_manager.get_all_parts():
             logger.warning("No visible VTK part actors were created from loaded parts.")

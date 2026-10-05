@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import math
 import os
 from typing import Any, Dict, List, Optional
 
@@ -164,10 +165,47 @@ def load_project_state(payload: Dict[str, Any]) -> ProjectState:
             "mesh_setting_origin": str(simulation.get("mesh_setting_origin", "manual")),
             "current_vis_mode": str(simulation.get("current_vis_mode", "shrinkage")),
         },
-        "ui_state": dict(payload.get("ui_state", {})),
+        "ui_state": _normalize_ui_state(payload.get("ui_state")),
         "parts": normalized_parts,
     }
     return ProjectState(normalized)
+
+
+def _normalize_ui_state(value: Any) -> Dict[str, Any]:
+    """Copy ``ui_state``, keeping ``parting_line`` only when it is well formed.
+
+    A missing ``parting_line`` (projects saved before the Orient & Parting
+    Line tool) means "not set yet", so a malformed one is dropped rather than
+    guessed at.
+    """
+    ui_state = dict(value) if isinstance(value, dict) else {}
+    if "parting_line" in ui_state:
+        parting_line = normalize_parting_line(ui_state["parting_line"])
+        if parting_line is None:
+            del ui_state["parting_line"]
+        else:
+            ui_state["parting_line"] = parting_line
+    return ui_state
+
+
+def normalize_parting_line(value: Any) -> Optional[Dict[str, Any]]:
+    """Normalize ``ui_state["parting_line"]`` = ``{"z", "visible", "locked_to_casting"}``.
+
+    Returns ``None`` when absent or when ``z`` is not a finite number.
+    """
+    if not isinstance(value, dict):
+        return None
+    try:
+        z = float(value.get("z"))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(z):
+        return None
+    return {
+        "z": z,
+        "visible": bool(value.get("visible", True)),
+        "locked_to_casting": bool(value.get("locked_to_casting", True)),
+    }
 
 
 def _normalize_pour_location(value: Any) -> Optional[Dict[str, Any]]:

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Rotate3d } from 'lucide-react';
 
 import { CanvasStage } from './components/CanvasStage';
 import { IconRail } from './components/IconRail';
@@ -9,6 +10,7 @@ import { AnalysisPanel } from './components/panels/AnalysisPanel';
 import { MaterialPanel } from './components/panels/MaterialPanel';
 import { MeshPanel, type MeshStatus } from './components/panels/MeshPanel';
 import { ModelPanel } from './components/panels/ModelPanel';
+import { OrientPanel } from './components/panels/OrientPanel';
 import { PartsPanel } from './components/panels/PartsPanel';
 import { PerformancePanel } from './components/panels/PerformancePanel';
 import { ProjectsPanel } from './components/panels/ProjectsPanel';
@@ -25,14 +27,17 @@ import { OpenProjectModal } from './components/modals/OpenProjectModal';
 import { SolidificationModal } from './components/modals/SolidificationModal';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useModeling } from './hooks/useModeling';
+import { useOrient } from './hooks/useOrient';
 import { useSimulationJob } from './hooks/useSimulationJob';
 import { useToasts } from './hooks/useToasts';
 import {
   api,
+  parsePartingLine,
   saveFile,
   type AlloyGuideRow,
   type HardwareInfo,
   type MaterialInfo,
+  type PartingLine,
   type ProjectPart,
   type ProjectRecord,
   type ProjectSettings,
@@ -81,6 +86,12 @@ import {
 } from './lib/viewState';
 
 const CAD_PATTERN = /\.(stl|step|stp)$/i;
+/** The canvas status line while an Orient click is armed. */
+const ORIENT_PICK_STATUS = {
+  faceDown: 'Face down: click a face of the part (Esc to cancel)',
+  faceUp: 'Face up: click a face of the part (Esc to cancel)',
+  pickHeight: 'Pick height: click a point for the parting line (Esc to cancel)'
+} as const;
 /** Playback tick. 90 ms matches the desktop timer; speed scales the step. */
 const PLAYBACK_INTERVAL_MS = 90;
 const PLAYBACK_STEP_PERCENT = 1;
@@ -112,6 +123,10 @@ export function App() {
   const [referencePlanes, setReferencePlanes] = useState<ReferencePlane[]>([]);
   const [cutFeatures, setCutFeatures] = useState<CutFeature[]>([]);
   const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
+  /** The project's flat parting line (`ui_state.parting_line`), or null when none is set. */
+  const [partingLine, setPartingLine] = useState<PartingLine | null>(null);
+  /** The project whose "orient this casting" prompt was dismissed this session. */
+  const [orientPromptDismissed, setOrientPromptDismissed] = useState<string | null>(null);
   const [materials, setMaterials] = useState<MaterialInfo[]>([]);
   const [hardware, setHardware] = useState<HardwareInfo | null>(null);
   const [alloyGuide, setAlloyGuide] = useState<AlloyGuideRow[]>([]);
@@ -321,6 +336,7 @@ export function App() {
         skipAutosave.current = true;
         applyProjectRecord(project);
         setProjectId(id);
+        setPartingLine(parsePartingLine(project.ui_state?.parting_line));
         setParts([]);
         setReferencePlanes(parseReferencePlanes(project.ui_state?.reference_planes));
         setCutFeatures(parseCutFeatures(project.ui_state?.cut_features));
@@ -433,6 +449,18 @@ export function App() {
   useEffect(() => {
     if (modelingActive) setShell((current) => (current.activePanel === 'model' ? current : { ...current, activePanel: 'model' }));
   }, [modelingActive]);
+  const orientNotify = useMemo(() => ({ succeed, warn, fail }), [succeed, warn, fail]);
+  const orient = useOrient({
+    projectId,
+    parts,
+    setParts,
+    selectedPartId,
+    setSelectedPartId,
+    partingLine,
+    setPartingLine,
+    active: shell.activePanel === 'orient',
+    notify: orientNotify
+  });
   const cancelModeling = modeling.cancel;
   // A sketch belongs to the project it was started in.
   useEffect(() => cancelModeling(), [projectId, cancelModeling]);
@@ -448,6 +476,7 @@ export function App() {
         setSettings(defaultSettings());
         setProjectId(null);
         setParts([]);
+        setPartingLine(null);
         setReferencePlanes([]);
         setCutFeatures([]);
         setSelectedPartId(null);
@@ -539,6 +568,11 @@ export function App() {
         }
         setParts((current) => [...current, ...added]);
         setSelectedPartId(added.at(-1)?.id ?? null);
+        // A casting on its own is a fresh CAD import: CAD orientation is rarely
+        // the pouring orientation, so the orient tool comes up with it.
+        if (parts.length === 0 && added.length === 1 && added[0].part_type === 'cast') {
+          patchShell({ activePanel: 'orient' });
+        }
         succeed(`Added ${added.length} part${added.length === 1 ? '' : 's'}.`);
         void refreshProjects();
       } catch (error) {
@@ -547,7 +581,7 @@ export function App() {
         setUploading(false);
       }
     },
-    [ensureProject, fail, notify, parts.length, refreshProjects, settings, succeed, warn]
+    [ensureProject, fail, notify, parts.length, patchShell, refreshProjects, settings, succeed, warn]
   );
 
   const updatePart = useCallback(
@@ -925,6 +959,7 @@ export function App() {
     if (promptRequest) return setPromptRequest(null);
     if (confirmRequest) return setConfirmRequest(null);
     if (modal) return setModal(null);
+    if (orient.pick) return orient.cancelPick();
     // In a sketch Escape belongs to the sketcher (it backs out of the shape
     // being drawn, then the tool); only the plane step cancels outright.
     if (modeling.session) {
@@ -937,7 +972,7 @@ export function App() {
     if (modeling.measurePicks) return;
     if (shell.tool !== 'select') return patchShell({ tool: 'select' });
     if (shell.activePanel) return patchShell({ activePanel: null });
-  }, [promptRequest, confirmRequest, modal, modeling, shell.tool, shell.activePanel, patchShell]);
+  }, [promptRequest, confirmRequest, modal, orient, modeling, shell.tool, shell.activePanel, patchShell]);
 
   useKeyboardShortcuts({
     run: () => void runSimulation(),
@@ -954,6 +989,8 @@ export function App() {
     helpGuide: () => setModal('help'),
     shortcuts: () => setModal('shortcuts'),
     escape: closeTopLayer,
+    toggleOrient: () =>
+      setShell((current) => ({ ...current, activePanel: current.activePanel === 'orient' ? null : 'orient' })),
     togglePlayback: () => {
       if ((isTimeMode(view.mode) || isSweepMode(view.mode)) && resultsAvailable) {
         patchView({ playing: !view.playing });
@@ -1011,6 +1048,7 @@ export function App() {
               if (project.id === projectId) {
                 setProjectId(null);
                 setParts([]);
+                setPartingLine(null);
                 setSelectedPartId(null);
                 setResultsAvailable(false);
                 setGridMeta(null);
@@ -1026,6 +1064,16 @@ export function App() {
   );
 
   // --- Derived -------------------------------------------------------------
+  // A project that is one casting and nothing else, with no parting line yet,
+  // is a fresh import that has not been oriented: offer the tool.
+  const showOrientPrompt =
+    parts.length === 1 &&
+    parts[0].part_type === 'cast' &&
+    partingLine === null &&
+    shell.activePanel !== 'orient' &&
+    orientPromptDismissed !== projectId &&
+    !modelingActive &&
+    !loadingProject;
   const hasPourLocation = Boolean(settings.pour_location);
   const closePanel = useCallback(() => patchShell({ activePanel: null }), [patchShell]);
   const setPanel = useCallback((panel: PanelId | null) => patchShell({ activePanel: panel }), [patchShell]);
@@ -1056,6 +1104,8 @@ export function App() {
             uploading={uploading}
           />
         );
+      case 'orient':
+        return <OrientPanel orient={orient} onClose={closePanel} />;
       case 'model':
         return (
           <ModelPanel
@@ -1170,6 +1220,7 @@ export function App() {
     shell.activePanel,
     shell.tool,
     modeling,
+    orient,
     parts,
     selectedPartId,
     addFiles,
@@ -1292,7 +1343,7 @@ export function App() {
           }}
           gridMeta={gridMeta}
           onGridMeta={setGridMeta}
-          status={viewportStatus}
+          status={orient.pick ? ORIENT_PICK_STATUS[orient.pick] : viewportStatus}
           onStatus={setViewportStatus}
           onError={(message) => fail(message)}
           onAddFiles={(files) => void addFiles(files)}
@@ -1310,6 +1361,30 @@ export function App() {
           }
           onDismissDownsampledWarning={() => setDownsampledDismissedFor(resultsVersion)}
           staleResults={staleResults}
+          orient={orient.viewState}
+          onOrientPick={orient.handlePick}
+          prompt={
+            showOrientPrompt ? (
+              <div className="canvas-banner orient-prompt" role="status">
+                <Rotate3d size={14} aria-hidden="true" className="canvas-banner-icon" />
+                <span className="canvas-banner-text">
+                  <b>Orient this casting for pouring.</b> CAD orientation is rarely how it is cast. Turn it, set its
+                  height and place the parting line before adding risers.
+                </span>
+                <button type="button" className="btn btn-sm" onClick={() => patchShell({ activePanel: 'orient' })}>
+                  Orient &amp; Parting Line
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  aria-label="Dismiss orient prompt"
+                  onClick={() => setOrientPromptDismissed(projectId)}
+                >
+                  Not now
+                </button>
+              </div>
+            ) : null
+          }
           onRunAgain={() => void runSimulation()}
           running={job.isBusy}
           onRequestAddParts={() => {

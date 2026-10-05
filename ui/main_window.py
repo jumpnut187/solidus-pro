@@ -96,8 +96,10 @@ from .dialogs import (
     AnalysisOptionsDialog,
     ComponentVisibilityDialog,
     DraggableDialog,
+    OrientationDialog,
     PartsDialog,
 )
+from .orientation_tool import OrientationController, PartingLine
 from .project_state import build_project_state, load_project_state
 from .workers import (
     DeepAutoTrainWorker,
@@ -2623,6 +2625,13 @@ class MainWindow(QMainWindow):
         self.parts_manager_action.triggered.connect(self._open_parts_dialog)
         file_menu.addAction(self.parts_manager_action)
 
+        self.orientation_action = QAction("Orient && Parting Line...", self)
+        self.orientation_action.setStatusTip(
+            "Rotate the casting for pouring, set its height and place the parting line"
+        )
+        self.orientation_action.triggered.connect(self._open_orientation_dialog)
+        file_menu.addAction(self.orientation_action)
+
         self.open_project_action = QAction("📂 Open Project...", self)
         self.open_project_action.setShortcut("Ctrl+Shift+O")
         self.open_project_action.setStatusTip("Open a saved Solidus project")
@@ -2945,6 +2954,19 @@ class MainWindow(QMainWindow):
         self.parts_dialog.arrange_line_requested.connect(self._arrange_parts_line)
         self.parts_dialog.duplicate_requested.connect(self._duplicate_selected_part)
         self.parts_dialog.open_top_changed.connect(self._on_part_open_top_changed)
+
+        # Orient & Parting Line tool (non-modal). The controller holds the
+        # parting line; the dialog only forwards clicks to it.
+        self.orientation_controller = OrientationController(
+            self.part_manager, lambda: self._selected_part_id
+        )
+        self.orientation_dialog = OrientationDialog(self.orientation_controller, self)
+        self.orientation_dialog.geometry_changed.connect(self._on_orientation_geometry_changed)
+        self.orientation_dialog.parting_changed.connect(self._refresh_parting_plane)
+        self.orientation_dialog.pick_requested.connect(self._on_orientation_pick_requested)
+        self.orientation_dialog.pick_cancelled.connect(self.visualizer.cancel_surface_pick)
+        self.visualizer.surface_picked.connect(self.orientation_dialog.handle_pick)
+        self.visualizer.surface_pick_cancelled.connect(self.orientation_dialog.end_pick_mode)
         
         # Component visibility dialog (popup component show/hide list)
         self.components_dialog = ComponentVisibilityDialog(self)
@@ -3054,6 +3076,16 @@ class MainWindow(QMainWindow):
         self.open_parts_btn.setToolTip("Manage CAD parts (Add, Remove, Position)")
         self.open_parts_btn.clicked.connect(self._open_parts_dialog)
         settings_layout.addWidget(self.open_parts_btn)
+
+        # Orient & Parting Line tool
+        self.open_orientation_btn = QPushButton("Orient && Parting Line...")
+        self.open_orientation_btn.setAccessibleName("Orient & Parting Line")
+        self.open_orientation_btn.setToolTip(
+            "Rotate the casting into its pouring orientation, set its height\n"
+            "and place the parting line (risers sit on it)"
+        )
+        self.open_orientation_btn.clicked.connect(self._open_orientation_dialog)
+        settings_layout.addWidget(self.open_orientation_btn)
         
         # Parts summary label
         self.parts_summary_label = QLabel("No parts loaded")
@@ -3348,6 +3380,53 @@ class MainWindow(QMainWindow):
         self.parts_dialog.show()
         self.parts_dialog.raise_()
     
+    def _open_orientation_dialog(self):
+        """Open the Orient & Parting Line tool beside the 3D view."""
+        dialog = self.orientation_dialog
+        dialog.refresh()
+        if not dialog.isVisible():
+            geo = self.geometry()
+            dialog.adjustSize()
+            dialog.move(
+                geo.x() + max(0, geo.width() - dialog.width() - 20),
+                geo.y() + 60,
+            )
+        dialog.show()
+        dialog.raise_()
+
+    def _on_orientation_geometry_changed(self):
+        """Redraw after the Orient & Parting Line tool moved a part."""
+        self._update_visualization(reset_camera=False)
+        if self._selected_part_id:
+            part = self.part_manager.get_part(self._selected_part_id)
+            if part is not None:
+                self.visualizer.highlight_part(self._selected_part_id, True)
+                self.parts_dialog.update_position_spinboxes(*part.position)
+                self.parts_dialog.update_rotation_spinboxes(*part.rotation)
+        self._update_parts_summary()
+
+    def _refresh_parting_plane(self):
+        """Draw or hide the parting plane from the controller's parting line."""
+        parting = self.orientation_controller.parting
+        extent = self.orientation_controller.plane_extent()
+        if parting is None or not parting.visible or extent is None:
+            self.visualizer.hide_parting_plane()
+            return
+        self.visualizer.show_parting_plane(
+            parting.z,
+            extent,
+            self.orientation_controller.section_segments(),
+            f"Parting line  Z = {parting.z:.2f} in",
+        )
+
+    def _on_orientation_pick_requested(self, mode, part_ids):
+        """Put the viewport into a one-shot surface pick for the orientation tool."""
+        self.visualizer.start_surface_pick(part_ids)
+        if mode == "parting_height":
+            self.status_label.setText("Click a point on the model to set the parting line height (Esc cancels)")
+        else:
+            self.status_label.setText("Click a face of the part in the 3D view (Esc cancels)")
+
     def _open_components_dialog(self):
         """Open the component show/hide popup"""
         self._refresh_components_list()
@@ -3624,6 +3703,10 @@ class MainWindow(QMainWindow):
             # Enable controls (buttons are now enabled in the dialog itself)
             self.parts_dialog.remove_part_btn.setEnabled(True)
             self.parts_dialog.duplicate_btn.setEnabled(True)
+
+        # The orientation tool targets the selected part.
+        self.orientation_dialog.cancel_pick()
+        self.orientation_dialog.refresh()
     
     def _on_part_position_from_dialog(self, x, y, z):
         """Handle position change from dialog"""
@@ -4662,6 +4745,7 @@ class MainWindow(QMainWindow):
         )
 
         if filepaths:
+            was_empty = self.part_manager.get_part_count() == 0
             self.status_label.setText(f"Loading {len(filepaths)} file(s)...")
             self.progress_bar.setRange(0, len(filepaths))
 
@@ -4700,9 +4784,23 @@ class MainWindow(QMainWindow):
                     self.status_label.setText(f"Added {loaded_count} parts - positions preserved from CAD file")
                 else:
                     self.status_label.setText(f"Added {loaded_count} part")
+                self._offer_orientation_for_new_casting(was_empty)
             else:
                 self.status_label.setText("Failed to load parts")
     
+    def _offer_orientation_for_new_casting(self, was_empty: bool) -> None:
+        """Open Orient & Parting Line when a lone casting was just imported.
+
+        CAD orientation is rarely the pouring orientation, so a fresh single
+        casting goes straight to the tool instead of leaving the user to find it.
+        """
+        if not (was_empty and self.orientation_controller.is_single_casting_project()):
+            return
+        self._open_orientation_dialog()
+        self.status_label.setText(
+            "Casting imported. Orient it for pouring and set the parting line in Orient & Parting Line."
+        )
+
     def _remove_selected_part(self):
         """Remove the currently selected part"""
         if self._selected_part_id:
@@ -4712,6 +4810,8 @@ class MainWindow(QMainWindow):
                 self.part_manager.remove_part(self._selected_part_id)
                 self.visualizer.remove_part(self._selected_part_id)
                 self._selected_part_id = None
+                if self.part_manager.get_part_count() == 0:
+                    self.orientation_controller.parting = None
                 self._update_parts_ui()
                 self._update_visualization()
                 self.status_label.setText(f"Removed part: {name}")
@@ -4730,6 +4830,10 @@ class MainWindow(QMainWindow):
             self.part_manager.clear_all()
             self.visualizer.clear_visualization()
             self._selected_part_id = None
+            self.orientation_controller.parting = None
+            self.orientation_dialog.cancel_pick()
+            self._refresh_parting_plane()
+            self.orientation_dialog.refresh()
             self._update_parts_ui()
             self.status_label.setText("Cleared all parts")
     
@@ -4904,13 +5008,17 @@ class MainWindow(QMainWindow):
         # Update stl_loader for backwards compatibility
         self.stl_loader._update_legacy_properties()
     
-    def _update_visualization(self):
+    def _update_visualization(self, reset_camera: bool = True):
         """Update the 3D visualization with all parts"""
         try:
-            self.visualizer.load_parts_from_manager(self.part_manager)
+            self.visualizer.load_parts_from_manager(self.part_manager, reset_camera=reset_camera)
+            if hasattr(self, "orientation_controller"):
+                self._refresh_parting_plane()
         except Exception as exc:
             logger.exception(f"Failed to update 3D visualization: {exc}")
             self.status_label.setText("Failed to update 3D view. See error log.")
+        if hasattr(self, "orientation_dialog") and self.orientation_dialog.isVisible():
+            self.orientation_dialog.refresh()
     
     # ==================== Legacy STL Loading (Single Part) ====================
     
@@ -5026,6 +5134,8 @@ class MainWindow(QMainWindow):
             "fraction_liquid_playback_speed": self._fraction_liquid_playback_speed,
             "splitter_sizes": list(self.main_splitter.sizes()) if hasattr(self, "main_splitter") else [],
         }
+        if self.orientation_controller.parting is not None:
+            ui_state["parting_line"] = self.orientation_controller.parting.to_dict()
         return build_project_state(
             self.part_manager,
             alloy_name=self._current_alloy,
@@ -5106,6 +5216,9 @@ class MainWindow(QMainWindow):
         self.visualizer.clear_visualization()
         self.part_manager.clear_all()
         self._selected_part_id = None
+        self.orientation_dialog.cancel_pick()
+        # Missing key = parting line not set (projects saved before the tool).
+        self.orientation_controller.parting = PartingLine.from_dict(ui_state.get("parting_line"))
 
         missing_parts = []
         for part_data in project_state["parts"]:

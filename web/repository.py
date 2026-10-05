@@ -245,8 +245,9 @@ def get_project(database_path: Path, project_id: str) -> Optional[Dict[str, Any]
     return project
 
 
-#: ``ui_state`` keys only their own routes write (see ``web/routes_modeling.py``).
-ROUTE_OWNED_UI_STATE_KEYS = ("reference_planes", "cut_features")
+#: ``ui_state`` keys only their own routes write (see ``web/routes_modeling.py``
+#: and ``web/routes_orientation.py``).
+ROUTE_OWNED_UI_STATE_KEYS = ("reference_planes", "cut_features", "parting_line")
 
 
 def update_project(database_path: Path, project_id: str, data: Dict[str, Any]) -> None:
@@ -254,8 +255,9 @@ def update_project(database_path: Path, project_id: str, data: Dict[str, Any]) -
     if current is None:
         return
     ui_state = _merge_pour_location(dict(data.get("ui_state", current["ui_state"]) or {}), data)
-    # Reference planes and extrude cuts are written by their own routes; a
-    # client that sends a ui_state without them must not erase them.
+    # Reference planes, extrude cuts and the parting line are written by their
+    # own routes; a client that sends a ui_state without them must not erase
+    # them.
     for key in ROUTE_OWNED_UI_STATE_KEYS:
         if key not in ui_state and key in current["ui_state"]:
             ui_state[key] = current["ui_state"][key]
@@ -293,6 +295,22 @@ def set_ui_state_key(database_path: Path, project_id: str, key: str, value: Any)
             return
         ui_state = _loads(row["ui_state"], {})
         ui_state[key] = value
+        db.execute(
+            "UPDATE projects SET ui_state = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (json.dumps(ui_state), project_id),
+        )
+
+
+def delete_ui_state_key(database_path: Path, project_id: str, key: str) -> None:
+    """Remove one key of a project's ``ui_state`` JSON, leaving the others alone."""
+    with get_db_connection(database_path) as db:
+        row = db.execute("SELECT ui_state FROM projects WHERE id = ?", (project_id,)).fetchone()
+        if row is None:
+            return
+        ui_state = _loads(row["ui_state"], {})
+        if key not in ui_state:
+            return
+        del ui_state[key]
         db.execute(
             "UPDATE projects SET ui_state = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (json.dumps(ui_state), project_id),

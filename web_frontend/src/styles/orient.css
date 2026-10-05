@@ -1,0 +1,79 @@
+/* Orient & Parting Line panel. */
+
+.orient-target {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.orient-target-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.orient-target-name {
+  color: var(--text);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.orient-readout {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+
+.orient-pick-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.orient-axis-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.orient-axis-row {
+  display: grid;
+  grid-template-columns: 18px 1fr 1fr;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.orient-axis-name {
+  font-family: var(--font-mono);
+  font-weight: 700;
+}
+
+.orient-presets {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-2);
+}
+
+.orient-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: var(--sp-4);
+  row-gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+}
+
+.orient-advanced summary {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  margin-bottom: var(--sp-2);
+}

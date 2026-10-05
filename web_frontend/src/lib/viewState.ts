@@ -257,6 +257,38 @@ export type PourPick = {
 };
 
 /**
+ * Click modes of the Orient & Parting Line tool.
+ *
+ * faceDown   = the clicked face is turned to point straight down (-Z)
+ * faceUp     = the clicked face is turned to point straight up (+Z)
+ * pickHeight = the parting line moves to the clicked point's height
+ */
+export type OrientPickMode = 'faceDown' | 'faceUp' | 'pickHeight';
+
+export type OrientPick = {
+  mode: OrientPickMode;
+  /** The part clicked, or null for a section cap with no part behind it. */
+  partId: string | null;
+  point: [number, number, number];
+  /** Outward world normal of the clicked triangle, or null on a section cap. */
+  normal: [number, number, number] | null;
+};
+
+/** What the viewport draws for the Orient & Parting Line tool. */
+export type OrientViewState = {
+  /**
+   * The tool is open: the floor grid sits at Z = 0 (what "Drop to floor"
+   * means) and moving a part does not re-frame the camera, so a nudge is
+   * seen as a nudge.
+   */
+  active: boolean;
+  /** The armed click mode, or null when clicks select as usual. */
+  pick: OrientPickMode | null;
+  /** The parting plane, or null when the project has none. */
+  parting: { z: number; visible: boolean } | null;
+};
+
+/**
  * One entry of the mask code table.
  *
  * The dense mask grid stores `part-type code + 1`, because 0 has to mean "no
@@ -361,6 +393,10 @@ export type ViewportProps = {
    */
   modeling?: ModelingViewState | null;
   onModelingEvent?: (event: ModelingEvent) => void;
+  /** The Orient & Parting Line tool's view state; absent or null when unused. */
+  orient?: OrientViewState | null;
+  /** A click while `orient.pick` is armed. Clicks then do not select. */
+  onOrientPick?: (pick: OrientPick) => void;
   /** Short loading / progress messages, or null when idle. */
   onStatus: (message: string | null) => void;
   onError: (message: string) => void;

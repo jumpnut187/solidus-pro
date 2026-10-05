@@ -23,6 +23,7 @@ import '@babylonjs/core/Rendering/outlineRenderer';
 import type { ProjectPart } from '../lib/api';
 import { buildCreasedGeometry } from './creaseGeometry';
 import { FieldPaintPluginMaterial } from './fieldPaintPlugin';
+import { applyPartTransform } from './partTransform';
 
 /**
  * Surface color per part type, mirroring `core.part_manager.PART_TYPE_COLORS`
@@ -278,14 +279,8 @@ export function applyPartAppearance(
       material.separateCullingPass = false;
     }
 
-    mesh.position.set(part.position_x, part.position_y, part.position_z);
-    mesh.rotation.set(
-      (part.rotation_x * Math.PI) / 180,
-      (part.rotation_y * Math.PI) / 180,
-      (part.rotation_z * Math.PI) / 180
-    );
-    const scale = part.scale || 1;
-    mesh.scaling.set(scale, scale, scale);
+    // The engine's static-XYZ rotation, as a quaternion; see partTransform.ts.
+    applyPartTransform(mesh, part);
     mesh.setEnabled(appearance.showModel && part.visible !== false);
     if (entry.edges) {
       entry.edges.alpha = translucent ? EDGE_ALPHA_GHOST : EDGE_ALPHA_OPAQUE;

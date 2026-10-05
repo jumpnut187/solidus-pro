@@ -180,10 +180,11 @@ function assemblyCenter(parts: ProjectPart[]): Vec3 | null {
   let min: Vec3 | null = null;
   let max: Vec3 | null = null;
   for (const part of parts) {
-    const bounds = part.meshData?.bounds;
-    if (!bounds) continue;
-    const lo: Vec3 = [bounds.x[0] + part.position_x, bounds.y[0] + part.position_y, bounds.z[0] + part.position_z];
-    const hi: Vec3 = [bounds.x[1] + part.position_x, bounds.y[1] + part.position_y, bounds.z[1] + part.position_z];
+    // Through the full placement, rotation included, as the viewport draws it.
+    const box = worldBounds(part);
+    if (!box) continue;
+    const lo: Vec3 = box.min;
+    const hi: Vec3 = box.max;
     min = min ? [Math.min(min[0], lo[0]), Math.min(min[1], lo[1]), Math.min(min[2], lo[2])] : lo;
     max = max ? [Math.max(max[0], hi[0]), Math.max(max[1], hi[1]), Math.max(max[2], hi[2])] : hi;
   }

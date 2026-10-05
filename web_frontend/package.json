@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview --host 0.0.0.0 --port 4175",
-    "check:kernel": "esbuild tests/kernel.check.ts --bundle --platform=node --format=esm --external:manifold-3d --outfile=tests/.kernel.check.mjs --log-level=warning && node tests/.kernel.check.mjs"
+    "check:kernel": "esbuild tests/kernel.check.ts --bundle --platform=node --format=esm --external:manifold-3d --outfile=tests/.kernel.check.mjs --log-level=warning && node tests/.kernel.check.mjs",
+    "check:orientation": "esbuild tests/orientation.check.ts --bundle --platform=node --format=esm --outfile=tests/.orientation.check.mjs --log-level=warning && node tests/.orientation.check.mjs"
   },
   "dependencies": {
     "@babylonjs/core": "^8.38.0",

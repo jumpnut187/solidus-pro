@@ -114,6 +114,41 @@ export type ProjectSettings = {
   pour_location?: PourLocationPayload | null;
 };
 
+/**
+ * The flat parting line: the horizontal plane `z` (inches, world), cope above
+ * and drag below. Stored in the project's `ui_state.parting_line`; a project
+ * without it has no parting line yet.
+ */
+export type PartingLine = {
+  z: number;
+  visible: boolean;
+  /** Move the plane with the casting when the casting is raised or lowered. */
+  locked_to_casting: boolean;
+};
+
+/** `GET /api/projects/<id>/parting-line`: suggestions and the cope/drag split for the casting. */
+export type PartingLineInfo = {
+  parting_line: PartingLine | null;
+  part_id: string | null;
+  suggestions: { max_section: number; bottom: number; top: number; center: number };
+  split_z: number;
+  split: { cope_depth: number; drag_depth: number; cope_fraction: number; drag_fraction: number };
+  bounds: [[number, number, number], [number, number, number]];
+};
+
+/** A stored `ui_state.parting_line`, or null when absent or malformed. */
+export function parsePartingLine(raw: unknown): PartingLine | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const record = raw as Record<string, unknown>;
+  const z = Number(record.z);
+  if (record.z === null || record.z === undefined || !Number.isFinite(z)) return null;
+  return {
+    z,
+    visible: record.visible !== false,
+    locked_to_casting: record.locked_to_casting !== false
+  };
+}
+
 /** A row of `GET /api/projects`. */
 export type ProjectSummary = {
   id: string;
@@ -393,6 +428,32 @@ export const api = {
     requestJson<{ mesh_data: MeshData }>(`/api/projects/${projectId}/parts/${partId}/mesh`).then(
       (payload) => payload.mesh_data
     ),
+
+  // --- Orient & Parting Line -------------------------------------------------
+  /**
+   * Parting-line suggestions and the cope/drag split for a body (the casting by
+   * default), measured at the placement passed rather than the stored one, so
+   * the answer never lags a part write still in flight.
+   */
+  partingLineInfo: (
+    projectId: string,
+    query: { partId?: string; rotation?: number[]; position?: number[]; scale?: number; z?: number | null },
+    signal?: AbortSignal
+  ) => {
+    const params = new URLSearchParams();
+    if (query.partId) params.set('part_id', query.partId);
+    if (query.rotation) params.set('rotation', query.rotation.join(','));
+    if (query.position) params.set('position', query.position.join(','));
+    if (query.scale !== undefined) params.set('scale', String(query.scale));
+    if (query.z !== undefined && query.z !== null) params.set('z', String(query.z));
+    return requestJson<PartingLineInfo>(`/api/projects/${projectId}/parting-line?${params.toString()}`, { signal });
+  },
+  /** Store the parting line, or remove it with null. */
+  savePartingLine: (projectId: string, line: PartingLine | null) =>
+    requestJson<{ parting_line: PartingLine | null }>(`/api/projects/${projectId}/parting-line`, {
+      ...jsonBody(line ?? { parting_line: null }),
+      method: 'PUT'
+    }),
 
   // --- Mesh ----------------------------------------------------------------
   meshPreview: (projectId: string, voxelSize: number) =>

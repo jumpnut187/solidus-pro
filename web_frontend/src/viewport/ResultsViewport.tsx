@@ -58,6 +58,7 @@ import {
   type ViewportProps
 } from '../lib/viewState';
 import type { ProjectPart } from '../lib/api';
+import { partBoxWorldBounds } from '../lib/orientation';
 import { PART_TYPES } from '../lib/partTypes';
 import { Annotations } from './annotations';
 import { drawAxesGizmo } from './axesGizmo';
@@ -72,6 +73,7 @@ import {
 } from './fieldPaintPlugin';
 import { createPourMarker } from './markers';
 import { applyPartAppearance, setPartClipPlanes, syncPartMeshes, type PartEntry } from './partMeshes';
+import { PartingPlane } from './partingPlane';
 import { planarFace, type PlanarFace } from './modeling/planarFace';
 import { pickTopology } from './modeling/topologyPick';
 import type { MeasurePick } from '../lib/modeling/measure';
@@ -139,7 +141,7 @@ const HOVER_PICK_DUTY = 0.25;
  * land on, so the cursor itself says whether a click will hit before it is
  * made -- over a section's cut-away half, say, which is empty space.
  */
-function cursorFor(tool: ViewportProps['tool'], overPart: boolean, overSurface: boolean): string {
+function cursorFor(tool: ViewportProps['tool'] | 'orientPick', overPart: boolean, overSurface: boolean): string {
   if (tool === 'select') return overPart ? 'pointer' : 'default';
   return overSurface ? 'crosshair' : 'default';
 }
@@ -248,6 +250,7 @@ type SceneRefs = {
   envelope: EnvelopeMesh;
   annotations: Annotations;
   sketch: SketchOverlay;
+  parting: PartingPlane;
 };
 
 /**
@@ -269,10 +272,47 @@ function geometrySignature(parts: ProjectPart[]): string {
     .join('|');
 }
 
+/** Which bodies are on stage, ignoring where they sit. */
+function membershipSignature(parts: ProjectPart[]): string {
+  return parts
+    .map((part) => `${part.id}:${part.filepath}:${part.meshData?.vertex_count ?? 0}`)
+    .join('|');
+}
+
+/** The floor grid's height: Z = 0 while orienting, else just under the assembly. */
+function floorZFor(bounds: Bounds, orientActive: boolean): number {
+  return orientActive ? 0 : bounds.min.z - bounds.size * 0.02;
+}
+
+/** Outward world normal of one triangle of a mesh, from its winding. */
+function triangleWorldNormal(mesh: AbstractMesh, faceId: number): Vector3 | null {
+  const indices = mesh.getIndices();
+  const positions = mesh.getVerticesData('position');
+  if (!indices || !positions || faceId < 0) return null;
+  const corner = (k: number) => {
+    const index = indices[faceId * 3 + k] * 3;
+    return new Vector3(positions[index], positions[index + 1], positions[index + 2]);
+  };
+  const a = corner(0);
+  const local = Vector3.Cross(corner(1).subtract(a), corner(2).subtract(a));
+  if (local.lengthSquared() === 0) return null;
+  return Vector3.TransformNormal(local, mesh.getWorldMatrix()).normalize();
+}
+
+/**
+ * The assembly's box in world space: each part's own box carried through its
+ * placement. The mesh-local `meshData.bounds` alone framed, floored and
+ * sectioned a moved or turned part as if it were still where it was imported.
+ */
 function partBounds(parts: ProjectPart[]): Bounds | null {
   const boxes = parts
-    .map((part) => part.meshData?.bounds)
-    .filter((box): box is NonNullable<typeof box> => Boolean(box));
+    .map((part) => partBoxWorldBounds(part))
+    .filter((box): box is NonNullable<typeof box> => Boolean(box))
+    .map(([min, max]) => ({
+      x: [min[0], max[0]] as [number, number],
+      y: [min[1], max[1]] as [number, number],
+      z: [min[2], max[2]] as [number, number]
+    }));
   return unionBounds(boxes);
 }
 
@@ -652,6 +692,7 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     const caps = new SectionCaps(viewport.scene, makePlugin);
     const envelope = new EnvelopeMesh(viewport.scene, 'result-envelope', makePlugin);
     const annotations = new Annotations(viewport.scene, 10);
+    const parting = new PartingPlane(viewport.scene);
     // A part surface under the pointer, with the face's own outward normal,
     // for choosing a sketch plane. The normal comes from the triangle's
     // winding rather than from the interpolated vertex normals, which on a
@@ -727,7 +768,8 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       caps,
       envelope,
       annotations,
-      sketch
+      sketch,
+      parting
     };
 
     // Local-only handle for the screenshot harness and for diagnosing a
@@ -775,6 +817,8 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
         // two attempts at one point, and flying the camera in between them
         // moved the model out from under the cursor.
         if (button !== 0 || !wasDoubleClick || propsRef.current.tool !== 'select') return;
+        // An armed orient click is a pick, never a camera move.
+        if (propsRef.current.orient?.pick) return;
         // While modeling, a double-click belongs to the sketcher (it closes
         // a polyline), not to the camera.
         if (propsRef.current.modeling) return;
@@ -875,6 +919,20 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       if (current.modeling) return;
       const pick = pickModel(scene);
       const partId = pick?.partId ?? null;
+
+      const orientMode = current.orient?.pick ?? null;
+      if (orientMode) {
+        if (!pick) return;
+        const pickedMesh = pick.hit.pickedMesh;
+        const normal = pick.onCap || !pickedMesh ? null : triangleWorldNormal(pickedMesh, pick.hit.faceId);
+        current.onOrientPick?.({
+          mode: orientMode,
+          partId,
+          point: [pick.point.x, pick.point.y, pick.point.z],
+          normal: normal ? [normal.x, normal.y, normal.z] : null
+        });
+        return;
+      }
 
       if (current.tool === 'pour') {
         if (!pick) return;
@@ -1037,7 +1095,11 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       hoverPicks += 1;
       const pick = pickModel(viewport.scene, hoverAt.x, hoverAt.y);
       nextHoverPickAt = startedAt + (performance.now() - startedAt) / HOVER_PICK_DUTY;
-      const cursor = cursorFor(propsRef.current.tool, Boolean(pick?.partId), pick !== null);
+      const cursor = cursorFor(
+        propsRef.current.orient?.pick ? 'orientPick' : propsRef.current.tool,
+        Boolean(pick?.partId),
+        pick !== null
+      );
       if (cursor === shownCursor) return;
       shownCursor = cursor;
       canvas.style.cursor = cursor;
@@ -1093,6 +1155,7 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       entries.clear();
       pourMarkerRef.current = null;
       annotations.dispose();
+      parting.dispose();
       sketch.dispose();
       caps.dispose();
       envelope.dispose();
@@ -1112,6 +1175,10 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
   // ---------------------------------------------------------------------
 
   const signature = geometrySignature(parts);
+  const membership = membershipSignature(parts);
+  /** The membership the camera last framed; see the orient hold below. */
+  const framedMembershipRef = useRef<string | null>(null);
+  const orientActive = Boolean(props.orient?.active);
   useEffect(() => {
     const refs = sceneRef.current;
     if (!refs) return;
@@ -1130,14 +1197,19 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     refs.camera.setBounds(bounds);
     refs.sketch.setBounds(bounds ? { center: bounds.center, size: bounds.size } : null);
     if (bounds) {
-      refs.viewport.layoutFloor(bounds.center, bounds.size, bounds.min.z - bounds.size * 0.02);
+      const orienting = Boolean(propsRef.current.orient?.active);
+      refs.viewport.layoutFloor(bounds.center, bounds.size, floorZFor(bounds, orienting));
       // Short enough to say where the origin is without drawing the eye.
       refs.originAxes.scaling.setAll(Math.max(bounds.size * 0.1, 0.25));
       refs.originAxes.setEnabled(true);
       refs.annotations.setAssemblySize(bounds.size);
       // Only here. The set of parts or their placement changed, so the last
-      // framing is no longer about the thing on screen.
-      refs.camera.fit({ immediate: true });
+      // framing is no longer about the thing on screen -- except while
+      // orienting, where a part turned or raised a step must be seen to move
+      // against a still camera. A new body still re-frames.
+      const placementOnly = framedMembershipRef.current === membership;
+      if (!(orienting && placementOnly)) refs.camera.fit({ immediate: true });
+      framedMembershipRef.current = membership;
     } else {
       // An empty stage gets a quiet floor and no axes to explain.
       refs.viewport.layoutFloor(Vector3.Zero(), 12, 0);
@@ -1145,8 +1217,23 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     }
     paint();
     // `signature` is the dependency on purpose: it changes exactly when the
-    // geometry does, and not when a slider moves.
-  }, [signature, paint]);
+    // geometry does, and not when a slider moves. `membership` changes only
+    // with it.
+  }, [signature, membership, paint]);
+
+  // Opening or closing the orient tool moves the floor between Z = 0 and the
+  // assembly's foot.
+  useEffect(() => {
+    const refs = sceneRef.current;
+    const bounds = boundsRef.current;
+    if (!refs || !bounds) return;
+    refs.viewport.layoutFloor(bounds.center, bounds.size, floorZFor(bounds, orientActive));
+  }, [orientActive]);
+
+  // An armed orient click changes what the cursor promises.
+  useEffect(() => {
+    refreshHoverRef.current?.();
+  }, [props.orient?.pick]);
 
   useEffect(() => {
     if (!sceneRef.current) return;
@@ -1199,6 +1286,29 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     modelingActive,
     paint
   ]);
+
+  // The parting plane follows its height, its toggle and the castings it cuts.
+  // After the appearance effect, which is what moves the part meshes.
+  const partingZ = props.orient?.parting?.z ?? null;
+  const partingVisible = props.orient?.parting?.visible ?? false;
+  const castingKey = parts
+    .filter((part) => part.part_type === 'cast' && part.visible !== false)
+    .map((part) => part.id)
+    .join('|');
+  useEffect(() => {
+    const refs = sceneRef.current;
+    if (!refs) return;
+    const castings: Mesh[] = [];
+    for (const id of castingKey ? castingKey.split('|') : []) {
+      const entry = partEntriesRef.current.get(id);
+      if (entry) castings.push(entry.mesh);
+    }
+    refs.parting.update(
+      partingZ === null ? null : { z: partingZ, visible: partingVisible },
+      boundsRef.current,
+      castings
+    );
+  }, [partingZ, partingVisible, castingKey, signature, view.showModel]);
 
   // The sketcher draws whatever the shell says is being modeled.
   useEffect(() => {
