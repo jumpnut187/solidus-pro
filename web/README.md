@@ -122,8 +122,6 @@ client read them; a request for one now 404s.
 ### Tools
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/projects/<id>/riser-design` | propose risers over the solved geometry |
-| POST | `/projects/<id>/riser-design/apply` | add chosen risers as cylinder parts |
 | GET | `/report/formats` | which report formats this server can render, and why not |
 | POST | `/projects/<id>/report` | build a report and download it |
 | GET | `/projects/<id>/export` | download a `.solidus-project.json` |

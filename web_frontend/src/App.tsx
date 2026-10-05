@@ -17,7 +17,6 @@ import { ConfirmDialog, PromptDialog, type ConfirmRequest, type PromptRequest } 
 import { AboutModal, HardwareInfoModal, HelpGuideModal, ShortcutsModal } from './components/modals/InfoModals';
 import { AnimationModal } from './components/modals/AnimationModal';
 import { ReportModal } from './components/modals/ReportModal';
-import { RiserDesignModal } from './components/modals/RiserDesignModal';
 import { LogDrawer } from './components/LogDrawer';
 import { useJobLog } from './hooks/useJobLog';
 import { recordAnimation } from './lib/animationExport';
@@ -39,9 +38,7 @@ import {
   type ProjectSettings,
   type ProjectSummary,
   type ReportFormat,
-  type ReportSectionToggles,
-  type RiserDesignResult,
-  type RiserRecommendation
+  type ReportSectionToggles
 } from './lib/api';
 import { arrangeGrid, arrangeLine, DUPLICATE_OFFSET, type Axis } from './lib/arrange';
 import {
@@ -94,7 +91,6 @@ type ModalId =
   | 'openProject'
   | 'solidification'
   | 'statistics'
-  | 'riser'
   | 'report'
   | 'animation'
   | 'help'
@@ -146,10 +142,6 @@ export function App() {
 
   const [uploading, setUploading] = useState(false);
   const [loadingProject, setLoadingProject] = useState(false);
-  const [riserResult, setRiserResult] = useState<RiserDesignResult | null>(null);
-  const [riserBusy, setRiserBusy] = useState(false);
-  const [riserApplying, setRiserApplying] = useState(false);
-  const [riserError, setRiserError] = useState<string | null>(null);
   const [reportFormats, setReportFormats] = useState<ReportFormat[]>([]);
   const [reportBusy, setReportBusy] = useState(false);
   const [reportError, setReportError] = useState<string | null>(null);
@@ -822,51 +814,6 @@ export function App() {
   // has already moved past.
   useEffect(() => setDefectVolume(null), [view.threshold, view.mode, view.castOnly, resultsVersion]);
 
-  // --- Riser design --------------------------------------------------------
-  const analyzeRisers = useCallback(
-    async (params: { max_risers: number; modulus_factor: number; feeding_constant: number }) => {
-      if (!projectId) return;
-      setRiserBusy(true);
-      setRiserError(null);
-      setRiserResult(null);
-      try {
-        setRiserResult(await api.riserDesign(projectId, params));
-      } catch (error) {
-        setRiserError(error instanceof Error ? error.message : 'Riser design failed');
-      } finally {
-        setRiserBusy(false);
-      }
-    },
-    [projectId]
-  );
-
-  const applyRisers = useCallback(
-    async (risers: RiserRecommendation[]) => {
-      if (!projectId) return;
-      setRiserApplying(true);
-      try {
-        const response = await api.applyRisers(projectId, risers);
-        // The new parts have no geometry in the response, so pull each one's
-        // mesh before adding it: the renderer builds a part once and never
-        // revisits it, so a part added blind would stay invisible.
-        const withMeshes = await Promise.all(
-          response.parts.map(async (part) => {
-            const meshData = await api.partMesh(projectId, part.id).catch(() => undefined);
-            return meshData ? { ...part, meshData } : part;
-          })
-        );
-        setParts((current) => [...current, ...withMeshes]);
-        setModal(null);
-        succeed(`Added ${response.added} riser${response.added === 1 ? '' : 's'} to the assembly.`);
-      } catch (error) {
-        setRiserError(error instanceof Error ? error.message : 'Unable to add the risers');
-      } finally {
-        setRiserApplying(false);
-      }
-    },
-    [projectId, succeed]
-  );
-
   // --- Exports -------------------------------------------------------------
   const generateReport = useCallback(
     async (format: string, sections: ReportSectionToggles) => {
@@ -1277,14 +1224,12 @@ export function App() {
           else if (kind === 'report') setModal('report');
           else if (kind === 'projectFile') void exportProjectFile();
           else if (kind === 'importProjectFile') importInputRef.current?.click();
-          else if (kind === 'riserDesign') setModal('riser');
         }}
         onHelp={(topic) => setModal(topic === 'guide' ? 'help' : topic)}
         exportsAvailable={{
           animation: resultsAvailable,
           report: Boolean(projectId),
-          projectFile: Boolean(projectId),
-          riserDesign: resultsAvailable
+          projectFile: Boolean(projectId)
         }}
       />
 
@@ -1439,17 +1384,6 @@ export function App() {
       ) : null}
 
       {modal === 'statistics' ? <StatisticsModal meta={gridMeta} onClose={() => setModal(null)} /> : null}
-      {modal === 'riser' ? (
-        <RiserDesignModal
-          result={riserResult}
-          analyzing={riserBusy}
-          applying={riserApplying}
-          error={riserError}
-          onAnalyze={(params) => void analyzeRisers(params)}
-          onApply={(risers) => void applyRisers(risers)}
-          onClose={() => setModal(null)}
-        />
-      ) : null}
       {modal === 'report' ? (
         <ReportModal
           formats={reportFormats}

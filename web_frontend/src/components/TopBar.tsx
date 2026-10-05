@@ -19,7 +19,7 @@ export type TopBarProps = {
   job: JobState;
   onScreenshot: () => void;
   onExport: (
-    kind: 'screenshot' | 'animation' | 'report' | 'projectFile' | 'importProjectFile' | 'riserDesign'
+    kind: 'screenshot' | 'animation' | 'report' | 'projectFile' | 'importProjectFile'
   ) => void;
   onHelp: (topic: 'guide' | 'shortcuts' | 'hardware' | 'about') => void;
   /** Entries that need a project or results stay visible but disabled. */
@@ -27,7 +27,6 @@ export type TopBarProps = {
     animation: boolean;
     report: boolean;
     projectFile: boolean;
-    riserDesign: boolean;
   };
 };
 
@@ -154,12 +153,6 @@ export function TopBar({
         <Menu
           label="Tools"
           items={[
-            { label: 'Design', heading: true },
-            {
-              label: 'Automatic Riser Design',
-              onSelect: () => onExport('riserDesign'),
-              disabled: !exportsAvailable.riserDesign
-            },
             { label: 'Export', heading: true },
             { label: 'Screenshot (PNG)', onSelect: () => onExport('screenshot'), shortcut: shortcutFor('Export screenshot') },
             {

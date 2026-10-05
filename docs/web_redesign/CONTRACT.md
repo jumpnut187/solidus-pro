@@ -85,7 +85,7 @@ process with an LRU keyed by project id and file mtime; never re-read a 100 MB J
 
 Workstream B's new endpoints live under these prefixes so nothing collides:
 `/api/projects/<id>/rename`, `/api/projects/<id>/duplicate`, `/api/projects/<id>/export`,
-`/api/projects/import`, `/api/projects/<id>/riser-design`, `/api/projects/<id>/report`,
+`/api/projects/import`, `/api/projects/<id>/report`,
 `/api/projects/<id>/log`, `/api/hardware`, `/api/help/alloys`.
 
 ## Environment

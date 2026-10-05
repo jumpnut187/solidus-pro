@@ -210,47 +210,6 @@ export type AlloyGuideRow = {
   niyama_threshold: number;
 };
 
-// --- Riser design ----------------------------------------------------------
-
-export type RiserRecommendation = {
-  index: number;
-  riser_type: string;
-  shape: string;
-  position: [number, number, number];
-  diameter_in: number;
-  height_in: number;
-  volume_in3: number;
-  surface_area_in2: number;
-  modulus_in: number;
-  voxels_fed: number;
-  confidence: number;
-  rationale: string;
-};
-
-export type RiserCoverage = {
-  covered_fraction: number;
-  covered_voxels: number;
-  uncovered_voxels: number;
-  n_risers: number;
-  avg_riser_diameter_in: number;
-  total_riser_volume_in3: number;
-};
-
-export type RiserDesignResult = {
-  recommendations: RiserRecommendation[];
-  /** Coincident risers the server collapsed into one. */
-  merged_duplicates: number;
-  coverage: RiserCoverage;
-  voxel_count: number;
-  voxel_size_in: number;
-};
-
-export type RiserDesignRequest = {
-  max_risers: number;
-  modulus_factor: number;
-  feeding_constant: number;
-};
-
 // --- Reports ---------------------------------------------------------------
 
 export type ReportFormat = {
@@ -459,17 +418,6 @@ export const api = {
   /** Progress lines for a run; `since` returns only what is new. */
   projectLog: (projectId: string, since = 0) =>
     requestJson<JobLog>(`/api/projects/${projectId}/log?since=${since}`),
-
-  // --- Riser design --------------------------------------------------------
-  riserDesign: (projectId: string, params: RiserDesignRequest) =>
-    requestJson<RiserDesignResult>(`/api/projects/${projectId}/riser-design`, jsonBody(params)),
-  applyRisers: async (projectId: string, risers: RiserRecommendation[]) => {
-    const payload = await requestJson<{ parts: StoredPart[]; added: number }>(
-      `/api/projects/${projectId}/riser-design/apply`,
-      jsonBody({ risers })
-    );
-    return { parts: payload.parts.map(adoptPart), added: payload.added };
-  },
 
   // --- Reports -------------------------------------------------------------
   reportFormats: () => requestJson<{ formats: ReportFormat[] }>('/api/report/formats'),
