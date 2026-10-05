@@ -146,6 +146,15 @@ class AlloyProperties:
     
     # Gas porosity analysis
     gas_sensitivity: float = 0.5  # 0-1, alloy-specific multiplier for gas risk
+
+    # Volume lost from liquidus to solidus, % (liquid-to-solid shrinkage).
+    # Feeders must supply this, plus the liquid contraction over the
+    # superheat (see ``feeding_shrinkage``). Solid-state (patternmaker's)
+    # contraction is not fed and is excluded. Family values: carbon and
+    # stainless steels and Ni-base ~2-3 %, copper alloys ~5-6 % (Novacast,
+    # "Metal shrinkage in castings"); carbon steel ~3 % is the common
+    # foundry figure.
+    solidification_shrinkage: float = 3.0
     
     def __post_init__(self):
         """Set default liquid properties if not specified"""
@@ -190,6 +199,20 @@ class AlloyProperties:
         # authoritative value used by the solver for volumetric compensation.
         return (1 - (self.density_liquid / self.density_solid)) * 100
     
+    @property
+    def feeding_shrinkage(self) -> float:
+        """Volume a feeder must supply, as a percentage of the fed volume.
+
+        Liquid contraction from pour to liquidus plus liquid-to-solid
+        shrinkage. ``volumetric_shrinkage`` is not usable for this: it is
+        built from catalog densities that, for some alloys, are room-temperature
+        solid values, so it also counts solid-state contraction that no riser
+        feeds. The full superheat is counted, which is conservative because
+        part of the liquid contraction happens while the mold is still filling.
+        """
+        superheat = max(float(self.pouring_temp) - float(self.liquidus_temp), 0.0)
+        return float(self.solidification_shrinkage) + 100.0 * float(self.thermal_expansion) * superheat
+
     @property
     def density_change_ratio(self) -> float:
         """Density increase ratio (solid/liquid)"""
@@ -567,6 +590,7 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         # Cast Technologies "Casting shrinkage allowance is 1.6 %". App's 1.5 %
         # linear / 4.5 % volumetric is correct.
         linear_shrinkage=1.5,
+        solidification_shrinkage=5.0,  # copper alloys ~5-6 % (Novacast)
         feeding_distance_multiplier=8.0,
         # Extended properties — liquid Cu-Al bronze retains ~ 0.78 of solid k
         # and gains ~ 1.09× in cp at the liquidus.
@@ -638,6 +662,7 @@ ALLOY_DATABASE: Dict[str, AlloyProperties] = {
         # sub-peak (the PDF itself notes "two peaks"); total latent heat
         # is ~ 240 kJ/kg per industry data.
         latent_heat=240000,
+        solidification_shrinkage=5.0,  # copper alloys ~5-6 % (Novacast)
         linear_shrinkage=1.8,  # CDA "Patternmakers shrinkage" 7/32 in/ft = 1.786%
         feeding_distance_multiplier=7.8,  # CDA "Fluidity" is HIGH — large multiplier
         # Extended properties — liquid Cu-Ni retains ~ 70% of solid conductivity

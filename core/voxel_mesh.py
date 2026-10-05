@@ -1827,6 +1827,8 @@ class AdaptiveVoxelMesh:
         finally:
             self._shutdown_part_assignment_pool()
 
+        self._claim_unowned_boundary_voxels(cast_parts, all_parts)
+
         # Count voxels by type
         counts = {
             code: int(np.sum(self.voxel_part_types == code))
@@ -1859,6 +1861,92 @@ class AdaptiveVoxelMesh:
 
         # Neighbour graph and part types are both final now.
         self._material_surface_indices = None
+
+    #: Above this many candidates the boundary claim pass is skipped; a model
+    #: that large has bigger problems than a ring of mislabeled skin cells.
+    _BOUNDARY_CLAIM_MAX_CANDIDATES = 250_000
+
+    def _claim_unowned_boundary_voxels(self, cast_parts: list, other_parts: list) -> None:
+        """Give CAST-default skin cells of a riser, chill or core their real type.
+
+        The voxelizer keeps every cell a part surface passes through, so a
+        cell whose center lies up to half a cell diagonal outside a part's
+        wall is still metal. The containment test only accepts centers within
+        half a voxel, so on a curved or oblique riser wall those cells fall
+        through to the CAST default. That puts a ring of "casting" around
+        every riser, which then counts riser pipe and riser heat as casting.
+
+        A CAST-default cell whose cell does not reach any cast part is
+        reassigned to the non-cast part whose surface it does reach (largest
+        signed distance, higher code on ties). A cell reaches a surface when
+        its center is within half its cell diagonal of it. Parts that are not
+        watertight have no reliable inside, so they are left out, and cells
+        near them stay CAST.
+        """
+        if not other_parts or self.voxel_part_types is None:
+            return
+        centers = np.asarray(self.voxel_centers, dtype=np.float64)
+        sizes = np.asarray(self.voxel_sizes, dtype=np.float64).reshape(-1)
+        if sizes.size == 1:
+            sizes = np.full(len(centers), float(sizes[0]))
+        reach = 0.5 * np.sqrt(3.0) * sizes
+        max_reach = float(reach.max()) if reach.size else 0.0
+
+        others = [(m, c) for m, c in other_parts if m is not None and m.is_watertight]
+        if not others:
+            return
+        is_cast = np.asarray(self.voxel_part_types) == PART_TYPE_CAST
+        near_other = np.zeros(len(centers), dtype=bool)
+        for mesh, _code in others:
+            lo = mesh.bounds[0] - max_reach
+            hi = mesh.bounds[1] + max_reach
+            near_other |= np.all((centers >= lo) & (centers <= hi), axis=1)
+        candidates = np.flatnonzero(is_cast & near_other)
+        if len(candidates) == 0:
+            return
+        if len(candidates) > self._BOUNDARY_CLAIM_MAX_CANDIDATES:
+            print(f"    Boundary claim skipped: {len(candidates):,} candidates")
+            return
+        pts = centers[candidates]
+        cand_reach = reach[candidates]
+
+        # Keep CAST wherever the cell reaches a cast part, or a cast part
+        # cannot be measured.
+        keep = np.zeros(len(candidates), dtype=bool)
+        for mesh, _code in cast_parts:
+            if mesh is None:
+                continue
+            if not mesh.is_watertight:
+                keep[:] = True
+                break
+            lo = mesh.bounds[0] - max_reach
+            hi = mesh.bounds[1] + max_reach
+            near = ~keep & np.all((pts >= lo) & (pts <= hi), axis=1)
+            if np.any(near):
+                sd = trimesh.proximity.signed_distance(mesh, pts[near])
+                keep[np.flatnonzero(near)[sd >= -cand_reach[near]]] = True
+        todo = np.flatnonzero(~keep)
+        if len(todo) == 0:
+            return
+
+        best_sd = np.full(len(todo), -np.inf)
+        best_code = np.full(len(todo), -1, dtype=np.int64)
+        for mesh, code in others:
+            lo = mesh.bounds[0] - max_reach
+            hi = mesh.bounds[1] + max_reach
+            near = np.all((pts[todo] >= lo) & (pts[todo] <= hi), axis=1)
+            if not np.any(near):
+                continue
+            sd = np.full(len(todo), -np.inf)
+            sd[near] = trimesh.proximity.signed_distance(mesh, pts[todo][near])
+            reaches = sd >= -cand_reach[todo]
+            better = reaches & ((sd > best_sd) | ((sd == best_sd) & (code > best_code)))
+            best_sd[better] = sd[better]
+            best_code[better] = code
+        claimed = best_code >= 0
+        if np.any(claimed):
+            self.voxel_part_types[candidates[todo[claimed]]] = best_code[claimed].astype(np.int8)
+            print(f"    Boundary cells claimed from CAST default: {int(claimed.sum()):,}")
 
     def _assign_part_types_loop(
         self,

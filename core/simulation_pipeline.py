@@ -511,6 +511,20 @@ def _add_summary_statistics(result_data: Dict[str, Any], engine: SolidificationE
     feeding = getattr(engine, "feeding_path_result", None)
     put("fed_fraction", _optional_float(getattr(feeding, "fed_fraction", None)))
 
+    # Primary pipe from the riser volume balance. Pipe volume outside the
+    # riser means a feeder froze before the section it feeds.
+    pipe_report = getattr(engine, "riser_pipe_report", None)
+    if isinstance(pipe_report, list) and pipe_report:
+        put("riser_pipe_volume_in3", float(sum(r["pipe_in3"] for r in pipe_report)))
+        put("riser_pipe_in_casting_in3", float(sum(r["pipe_in_casting_in3"] for r in pipe_report)))
+        clearances = [
+            r["pipe_bottom_above_riser_base_in"]
+            for r in pipe_report
+            if np.isfinite(r["pipe_bottom_above_riser_base_in"])
+        ]
+        if clearances:
+            put("riser_pipe_min_clearance_in", float(min(clearances)))
+
     put("max_stress_mpa", _optional_float(getattr(engine, "max_stress_mpa", None)))
     put("avg_sdas_um", _optional_float(getattr(engine, "avg_sdas_um", None)))
 

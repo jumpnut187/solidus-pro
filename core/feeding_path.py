@@ -38,6 +38,9 @@ from typing import Optional, Dict, List, Tuple, Set
 from dataclasses import dataclass
 from collections import deque
 
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
+
 # Import alloy properties for permeability calculations
 try:
     from core.materials import AlloyProperties
@@ -427,6 +430,50 @@ class FeedingPathAnalyzer:
     - Voxels with low Niyama but good feed path → OK
     """
     
+    def _neighbor_edges(self, neighbors: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Undirected voxel adjacency as ``(i, j)`` pairs with ``i < j``, built once per mesh."""
+        cached = getattr(self, "_edge_cache", None)
+        if cached is not None and cached[0] is neighbors:
+            return cached[1], cached[2]
+        neighbors = np.asarray(neighbors)
+        n_voxels, width = neighbors.shape
+        rows = np.repeat(np.arange(n_voxels, dtype=np.int64), width)
+        cols = neighbors.reshape(-1).astype(np.int64)
+        keep = (cols >= 0) & (cols > rows)
+        edge_i, edge_j = rows[keep], cols[keep]
+        self._edge_cache = (neighbors, edge_i, edge_j)
+        return edge_i, edge_j
+
+    def liquid_network_cutoff(
+        self,
+        riser_mask: np.ndarray,
+        fraction_solid: np.ndarray,
+        neighbors: np.ndarray,
+    ) -> np.ndarray:
+        """Voxels still below coherency that the liquid network no longer ties to a riser.
+
+        Feed metal reaches a voxel only through metal that can still move,
+        i.e. below ``critical_fraction_solid``. A region below that point
+        whose every route to a riser crosses metal at or past it is an
+        isolated pocket: a pinch-off at a neck or junction. The Darcy trace
+        alone keeps such necks open until their permeability falls below
+        ``permeability_threshold`` (about fs 0.87 for steel), so it misses
+        pinch-offs where the neck is only modestly ahead of the pocket.
+        """
+        n_voxels = len(fraction_solid)
+        needs_feed = np.asarray(fraction_solid) < self.critical_fraction_solid
+        if not np.any(needs_feed):
+            return np.zeros(n_voxels, dtype=np.bool_)
+        edge_i, edge_j = self._neighbor_edges(neighbors)
+        live = needs_feed[edge_i] & needs_feed[edge_j]
+        graph = coo_matrix(
+            (np.ones(int(np.count_nonzero(live)), dtype=np.int8), (edge_i[live], edge_j[live])),
+            shape=(n_voxels, n_voxels),
+        )
+        _, labels = connected_components(graph, directed=False)
+        fed_labels = np.unique(labels[riser_mask & needs_feed])
+        return needs_feed & ~np.isin(labels, fed_labels)
+
     def __init__(self, 
                  voxel_mesh,  # AdaptiveVoxelMesh
                  alloy: Optional['AlloyProperties'] = None):
@@ -510,6 +557,7 @@ class FeedingPathAnalyzer:
         # that is normal freeze-off, not a feeding defect, and using the old
         # `fs < 0.99` window here flagged every voxel at its own crossing.
         blocked_voxels = (feeding_source < 0) & (fraction_solid < self.critical_fraction_solid)
+        blocked_voxels |= self.liquid_network_cutoff(riser_mask, fraction_solid, neighbors)
         open_mask = path_length >= 0.0
         latest_open_time = np.where(open_mask, 0.0, -1.0).astype(np.float32)
 
@@ -713,6 +761,23 @@ class FeedingPathAnalyzer:
                 feeding_source[active] = snapshot_result.feeding_source[active]
                 # Accumulate blocked status across the feed-active snapshots.
                 any_blocked_accum[active] |= snapshot_result.blocked_voxels[active]
+
+            # The Darcy trace runs on at most ``max_history_samples`` snapshots,
+            # and a pinch-off can open and close between two of them (seconds,
+            # on a casting that freezes over minutes). The liquid-network check
+            # is cheap, so run it on every pre-freeze snapshot.
+            if history is not None and history_times is not None and len(history) == len(history_times):
+                for snapshot, history_time in zip(history, history_times):
+                    history_time = float(history_time)
+                    if history_time > max_reference_time + 1e-6:
+                        continue
+                    cutoff = self.liquid_network_cutoff(
+                        riser_mask,
+                        np.asarray(snapshot, dtype=np.float64),
+                        neighbors,
+                    )
+                    if np.any(cutoff):
+                        any_blocked_accum |= cutoff & (history_time <= clipped_reference_times + 1e-6)
 
             valid_weight = total_weight > 0.0
             history_open_fraction[valid_weight] /= total_weight[valid_weight]

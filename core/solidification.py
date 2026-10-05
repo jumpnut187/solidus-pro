@@ -46,6 +46,7 @@ from core.part_manager import (
     is_mold,
 )
 from physics.solidification_physics import SolidificationModel as ThermalSolidificationModel
+from physics.riser_pipe import gravity_drain_pipe
 from core.acceleration import (
     update_solidification_with_part_types_parallel,
     update_solidification_with_feeding_connectivity,
@@ -2526,6 +2527,7 @@ class SolidificationEngine:
         self.feeding_path_result = result
         self.feeding_quality = result.feeding_quality
         self.feeding_blocked = result.blocked_voxels
+        self.feeding_blocked_count = int(np.count_nonzero(result.blocked_voxels))
         self.feeding_open_fraction = result.history_open_fraction
         self.feeding_latest_open_time = result.latest_open_time
         self.feeding_path_lengths = result.path_length.astype(np.float32)
@@ -3020,6 +3022,83 @@ class SolidificationEngine:
             time_factor,
         )
 
+    def _compute_riser_pipe_fraction(self) -> np.ndarray:
+        """
+        Per-voxel primary-pipe fraction from a gravity-drained volume balance.
+
+        One feed pool per physical riser: the riser's voxels plus every voxel
+        the feeding-path tracer says it feeds. Each pool is drained by
+        :func:`physics.riser_pipe.gravity_drain_pipe`, so the pipe follows the
+        solidification times and the feed demand. If the riser freezes before
+        the section it feeds, the pipe continues into the casting. Sets
+        ``self.riser_pipe_report`` (one dict per riser, volumes in in^3).
+        """
+        n_voxels = len(self.mesh.voxel_centers)
+        fraction = np.zeros(n_voxels, dtype=np.float32)
+        self.riser_pipe_report = []
+        if self.mesh.voxel_part_types is None or self.solidification_times is None:
+            return fraction
+        part_types = np.asarray(self.mesh.voxel_part_types, dtype=np.int32)
+        groups = self._group_risers_by_component()
+        if not groups:
+            return fraction
+
+        riser_comp = np.full(n_voxels, -1, dtype=np.int64)
+        for comp_id, group in enumerate(groups):
+            riser_comp[np.asarray(group, dtype=np.int64)] = comp_id
+
+        pool_ids = riser_comp.copy()
+        feeding_result = getattr(self, "feeding_path_result", None)
+        feeding_source = getattr(feeding_result, "feeding_source", None)
+        if feeding_source is not None and len(feeding_source) == n_voxels:
+            source = np.asarray(feeding_source, dtype=np.int64)
+            fed = (source >= 0) & (source < n_voxels)
+            fed &= part_types != PART_TYPE_CHILL
+            blocked = getattr(self, "feeding_blocked", None)
+            if blocked is not None and len(blocked) == n_voxels:
+                fed &= ~np.asarray(blocked, dtype=bool)
+            pool_ids[fed] = riser_comp[source[fed]]
+            pool_ids[riser_comp >= 0] = riser_comp[riser_comp >= 0]
+
+        volumes = getattr(self.mesh, "voxel_volumes", None)
+        if volumes is None or len(volumes) != n_voxels:
+            sizes = np.asarray(self.mesh.voxel_sizes, dtype=np.float64).reshape(-1)
+            volumes = np.broadcast_to(sizes, (n_voxels,)) ** 3
+        # Feed demand, not total density change: solid-state contraction is
+        # patternmaker's shrink and never drains a riser.
+        beta = float(self.alloy.feeding_shrinkage) / 100.0
+        fraction, pools = gravity_drain_pipe(
+            np.asarray(self.solidification_times, dtype=np.float64),
+            np.asarray(self.mesh.voxel_centers, dtype=np.float64)[:, 2],
+            np.asarray(volumes, dtype=np.float64),
+            pool_ids,
+            riser_comp >= 0,
+            beta,
+        )
+        for comp_id, pool in enumerate(pools):
+            group = np.asarray(groups[comp_id], dtype=np.int64)
+            piped = group[fraction[group] > 0.5]
+            riser_bottom = float(np.min(self.mesh.voxel_centers[group, 2]))
+            pipe_bottom = (
+                float(np.min(self.mesh.voxel_centers[piped, 2])) if len(piped) else float("nan")
+            )
+            self.riser_pipe_report.append(
+                {
+                    "riser": comp_id,
+                    "demand_in3": pool.demand_volume,
+                    "pipe_in3": pool.pipe_volume,
+                    "pipe_in_riser_in3": pool.feeder_pipe_volume,
+                    "pipe_in_casting_in3": pool.section_pipe_volume,
+                    "pipe_bottom_above_riser_base_in": pipe_bottom - riser_bottom,
+                }
+            )
+            print(
+                f"  Riser {comp_id} pipe: demand {pool.demand_volume:.2f} in^3, "
+                f"in riser {pool.feeder_pipe_volume:.2f}, in casting {pool.section_pipe_volume:.2f}, "
+                f"bottom {pipe_bottom - riser_bottom:.2f} in above riser base"
+            )
+        return fraction
+
     def _compute_riser_pipe_modifier(
         self,
         valid_indices: np.ndarray,
@@ -3027,11 +3106,10 @@ class SolidificationEngine:
         riser_centerlines: Dict[int, Tuple[float, float, float, float, float]],
     ) -> np.ndarray:
         """
-        Concentrate riser shrinkage into a center-top pipe region.
-
-        Outside the pipe core, riser shrinkage is intentionally suppressed
-        because the riser acts as a feeder reservoir rather than a uniformly
-        shrinking casting section.
+        Legacy geometric pipe template, kept only as the fallback when no
+        solidification times are available. The live shrinkage path uses
+        :meth:`_compute_riser_pipe_fraction`, because this template ignores
+        the thermal result and the feed demand.
         """
         n = len(valid_indices)
         riser_modifier = np.ones(n, dtype=np.float32)
@@ -3461,11 +3539,10 @@ class SolidificationEngine:
                 riser_mask,
                 riser_post_mask,
             )
-            riser_modifier = self._compute_riser_pipe_modifier(
-                valid_indices,
-                is_riser,
-                riser_centerlines,
-            )
+            # The riser pipe itself comes from the volume balance applied
+            # below. Inside risers, the heuristic only supplies a low residual
+            # (the template's outside-the-pipe level).
+            riser_modifier = np.where(is_riser, 0.18, 1.0).astype(np.float32)
             base_risk = base_risk * riser_modifier
             connected_valid_feeders = healthy_connected_feeder[valid_indices]
             feeder_neck_modifier = np.where(
@@ -3576,6 +3653,21 @@ class SolidificationEngine:
             
             # Assign to result array
             self.shrinkage_risk[valid_indices] = final_risk.astype(np.float32)
+
+        # Primary pipe: drained volume is an open cavity, wherever the free
+        # surface took it (riser, neck, or casting when the riser froze first).
+        stage_start = time.perf_counter()
+        pipe_fraction = self._compute_riser_pipe_fraction()
+        self.riser_pipe_fraction = pipe_fraction
+        self.shrinkage_risk = np.maximum(self.shrinkage_risk, pipe_fraction).astype(np.float32)
+        if len(chill_indices) > 0:
+            self.shrinkage_risk[chill_indices] = 0.0
+        self.shrinkage_probability = self.shrinkage_risk
+        stage_timings["riser_pipe_balance"] = (
+            stage_timings.get("riser_pipe_balance", 0.0) + time.perf_counter() - stage_start
+        )
+
+        if len(valid_indices) > 0:
             # Chills are external cooling devices: never shrinkage candidates,
             # even if a feeding-path edge case let one through the masks.
             if len(chill_indices) > 0:

@@ -288,6 +288,68 @@ class IsolatedPocketDetectionTests(unittest.TestCase):
         self.assertTrue(bool(result.blocked_voxels[4]))
 
 
+class PinchOffDetectionTests(unittest.TestCase):
+    """A neck past coherency isolates the liquid behind it, even while still permeable."""
+
+    def setUp(self) -> None:
+        # 0 riser, 1 riser-side metal, 2 neck, 3-4 pocket.
+        centers = np.array([[float(i), 0.0, 0.0] for i in range(5)], dtype=np.float64)
+        neighbors = np.array(
+            [[1, -1], [0, 2], [1, 3], [2, 4], [3, -1]],
+            dtype=np.int32,
+        )
+        self.mesh = _StubMesh(centers, neighbors)
+        self.riser = np.array([0], dtype=np.int64)
+
+    def test_neck_just_past_coherency_isolates_pocket(self) -> None:
+        """Neck at fs 0.64, pocket at fs 0.54 is the PART-A feeder-pad case.
+
+        The neck's Kozeny-Carman permeability is still above the Darcy
+        trace's threshold, but the pocket behind it is below coherency
+        and can no longer draw feed metal through it.
+        """
+        analyzer = FeedingPathAnalyzer(self.mesh, None)
+        fraction_solid = np.array([0.3, 0.4, 0.64, 0.45, 0.45], dtype=np.float32)
+        result = analyzer.analyze(self.riser, fraction_solid, show_progress=False)
+        self.assertGreaterEqual(result.path_length[4], 0.0, "Darcy trace still reaches the pocket")
+        self.assertFalse(bool(result.blocked_voxels[1]))
+        self.assertFalse(bool(result.blocked_voxels[2]), "The neck itself no longer needs feed")
+        self.assertTrue(bool(result.blocked_voxels[3]))
+        self.assertTrue(bool(result.blocked_voxels[4]))
+
+    def test_everything_past_coherency_is_not_a_pocket(self) -> None:
+        """Directional freezing toward the riser leaves nothing isolated."""
+        analyzer = FeedingPathAnalyzer(self.mesh, None)
+        fraction_solid = np.array([0.3, 0.4, 0.5, 0.6, 0.7], dtype=np.float32)
+        result = analyzer.analyze(self.riser, fraction_solid, show_progress=False)
+        self.assertFalse(bool(np.any(result.blocked_voxels)))
+
+    def test_short_pinch_off_between_sampled_snapshots_is_caught(self) -> None:
+        """A pinch-off visible in one snapshot counts even if the Darcy sampling skips it."""
+        analyzer = FeedingPathAnalyzer(self.mesh, None)
+        history = [
+            np.array([0.10, 0.10, 0.10, 0.10, 0.10], dtype=np.float32),
+            np.array([0.20, 0.20, 0.25, 0.20, 0.20], dtype=np.float32),
+            np.array([0.30, 0.35, 0.60, 0.48, 0.48], dtype=np.float32),
+            np.array([0.40, 0.55, 0.70, 0.75, 0.75], dtype=np.float32),
+            np.array([0.60, 0.80, 0.90, 0.95, 0.95], dtype=np.float32),
+        ]
+        history_times = [0.0, 10.0, 20.0, 30.0, 40.0]
+        reference_times = np.array([40.0, 30.0, 20.0, 30.0, 30.0], dtype=np.float32)
+        result = analyzer.analyze(
+            self.riser,
+            history[-1],
+            show_progress=False,
+            history=history,
+            history_times=history_times,
+            reference_times=reference_times,
+            max_history_samples=2,
+        )
+        self.assertFalse(bool(result.blocked_voxels[1]))
+        self.assertTrue(bool(result.blocked_voxels[3]))
+        self.assertTrue(bool(result.blocked_voxels[4]))
+
+
 class ScheduleFeedingFractionSolidTests(unittest.TestCase):
     """Verify feeding_fraction_solid contains fraction solid, not time."""
 

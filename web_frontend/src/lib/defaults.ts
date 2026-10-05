@@ -62,7 +62,7 @@ export const meshDefaults = {
   voxelSize: 0.1,
   voxelSizeMin: 0.02,
   voxelSizeMax: 0.5,
-  voxelSizeStep: 0.02,
+  voxelSizeStep: 0.01,
   refinementMin: 1,
   refinementMax: 4,
   refinement: 3
