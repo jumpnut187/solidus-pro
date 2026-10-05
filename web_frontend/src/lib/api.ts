@@ -1,4 +1,5 @@
 /** Typed client for the Solidus Pro HTTP API. */
+import type { ExtrudeFeature, ReferencePlane } from './modeling/types';
 
 /** The ten part types the engine understands (`core/part_manager.py`). */
 export type PartType =
@@ -58,6 +59,8 @@ export type ProjectPart = {
   visible: boolean;
   is_open_top: boolean;
   meshData?: MeshData;
+  /** The sketch and extrude that made this body, for a body modeled in the browser. */
+  feature?: ExtrudeFeature | null;
 };
 
 export type MaterialInfo = {
@@ -128,6 +131,16 @@ export type ProjectRecord = ProjectSettings & {
   updated_at: string;
   description: string | null;
   summary: Record<string, unknown>;
+};
+
+/** What the modeling routes take: the body's properties, its feature and its triangles. */
+export type FeatureBodyRequest = {
+  name: string;
+  part_type: PartType;
+  is_open_top: boolean;
+  visible: boolean;
+  feature: ExtrudeFeature;
+  mesh: { vertices: number[]; faces: number[] };
 };
 
 /** A part as the server stores it — `mesh_data` only when it was requested. */
@@ -363,6 +376,28 @@ export const api = {
   },
   deletePart: (projectId: string, partId: string) =>
     requestJson<{ status: string }>(`/api/projects/${projectId}/parts/${partId}`, { method: 'DELETE' }),
+  /** Store a body modeled in the browser: its triangles and the feature that made them. */
+  createFeatureBody: async (projectId: string, body: FeatureBodyRequest) => {
+    const payload = await requestJson<{ id: string; part: StoredPart }>(
+      `/api/projects/${projectId}/features`,
+      jsonBody(body)
+    );
+    return { id: payload.id, part: adoptPart(payload.part) };
+  },
+  /** Replace a modeled body after its sketch or extrude changed. */
+  updateFeatureBody: async (projectId: string, partId: string, body: FeatureBodyRequest) => {
+    const payload = await requestJson<{ part: StoredPart }>(`/api/projects/${projectId}/features/${partId}`, {
+      ...jsonBody(body),
+      method: 'PUT'
+    });
+    return { part: adoptPart(payload.part) };
+  },
+  /** Replace the project's reference planes (kept in its ui_state). */
+  saveReferencePlanes: (projectId: string, planes: ReferencePlane[]) =>
+    requestJson<{ planes: ReferencePlane[] }>(`/api/projects/${projectId}/reference-planes`, {
+      ...jsonBody({ planes }),
+      method: 'PUT'
+    }),
   /** Triangle geometry for a stored part, used to restore a reloaded project. */
   partMesh: (projectId: string, partId: string) =>
     requestJson<{ mesh_data: MeshData }>(`/api/projects/${projectId}/parts/${partId}/mesh`).then(

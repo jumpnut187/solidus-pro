@@ -135,11 +135,25 @@ def init_db(database_path: Path) -> None:
                 visible INTEGER DEFAULT 1,
                 is_open_top INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                feature_json TEXT,
                 FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
             )
             """
         )
+        _ensure_column(db, "parts", "feature_json", "TEXT")
         _backfill_part_names(db)
+
+
+def _ensure_column(db: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
+    """Add a column to a table created before the column existed.
+
+    ``CREATE TABLE IF NOT EXISTS`` leaves an existing table exactly as it was,
+    so a column added to the statement above never reaches a database that
+    predates it. Only names from this module reach the SQL, never user input.
+    """
+    columns = {str(row["name"]) for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in columns:
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
 def _backfill_part_names(db: sqlite3.Connection) -> None:
@@ -234,6 +248,10 @@ def update_project(database_path: Path, project_id: str, data: Dict[str, Any]) -
     if current is None:
         return
     ui_state = _merge_pour_location(dict(data.get("ui_state", current["ui_state"]) or {}), data)
+    # Reference planes are written by their own route; a client that sends a
+    # ui_state without them must not erase them.
+    if "reference_planes" not in ui_state and "reference_planes" in current["ui_state"]:
+        ui_state["reference_planes"] = current["ui_state"]["reference_planes"]
     with get_db_connection(database_path) as db:
         db.execute(
             """
@@ -257,6 +275,20 @@ def update_project(database_path: Path, project_id: str, data: Dict[str, Any]) -
                 json.dumps(ui_state),
                 project_id,
             ),
+        )
+
+
+def set_ui_state_key(database_path: Path, project_id: str, key: str, value: Any) -> None:
+    """Set one key of a project's ``ui_state`` JSON, leaving the others alone."""
+    with get_db_connection(database_path) as db:
+        row = db.execute("SELECT ui_state FROM projects WHERE id = ?", (project_id,)).fetchone()
+        if row is None:
+            return
+        ui_state = _loads(row["ui_state"], {})
+        ui_state[key] = value
+        db.execute(
+            "UPDATE projects SET ui_state = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (json.dumps(ui_state), project_id),
         )
 
 
@@ -320,20 +352,24 @@ def duplicate_project(
             "SELECT * FROM parts WHERE project_id = ? ORDER BY created_at ASC",
             (project_id,),
         ).fetchall()
+        # New ids first, so a modeled feature that names another body (an
+        # "up to body" extrude) can be pointed at that body's copy.
+        id_map = {str(row["id"]): str(uuid.uuid4())[:8] for row in rows}
         for row in rows:
             part = dict(row)
+            feature = _loads_feature(part.get("feature_json"))
             db.execute(
                 """
                 INSERT INTO parts (
                     id, project_id, name, part_type, filepath,
                     position_x, position_y, position_z,
                     rotation_x, rotation_y, rotation_z,
-                    scale, visible, is_open_top
+                    scale, visible, is_open_top, feature_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    str(uuid.uuid4())[:8],
+                    id_map[str(part["id"])],
                     new_id,
                     part["name"],
                     part["part_type"],
@@ -347,6 +383,7 @@ def duplicate_project(
                     part["scale"],
                     part["visible"],
                     part["is_open_top"],
+                    _dumps_feature(remap_feature_part_ids(feature, id_map)),
                 ),
             )
     return new_id
@@ -406,7 +443,15 @@ def add_part(
     data: Dict[str, Any],
     *,
     upload_root: Optional[Path] = None,
+    feature: Optional[Dict[str, Any]] = None,
 ) -> str:
+    """Insert a part row and return its id.
+
+    ``feature`` is the parametric definition of a body modeled in the browser
+    (sketch plus extrude). It is passed by the modeling routes only: it is not
+    in :data:`PART_WRITABLE_FIELDS`, so a generic part write can neither set
+    nor clear it.
+    """
     data = _checked_part_data(data, upload_root)
     part_id = str(uuid.uuid4())[:8]
     with get_db_connection(database_path) as db:
@@ -416,9 +461,9 @@ def add_part(
                 id, project_id, name, part_type, filepath,
                 position_x, position_y, position_z,
                 rotation_x, rotation_y, rotation_z,
-                scale, visible, is_open_top
+                scale, visible, is_open_top, feature_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 part_id,
@@ -435,10 +480,67 @@ def add_part(
                 float(data.get("scale", 1.0)),
                 1 if data.get("visible", True) else 0,
                 1 if data.get("is_open_top", False) else 0,
+                _dumps_feature(feature),
             ),
         )
         db.execute("UPDATE projects SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (project_id,))
     return part_id
+
+
+def set_part_feature(
+    database_path: Path,
+    project_id: str,
+    part_id: str,
+    feature: Dict[str, Any],
+) -> None:
+    """Replace a modeled part's parametric definition."""
+    with get_db_connection(database_path) as db:
+        db.execute(
+            "UPDATE parts SET feature_json = ? WHERE id = ? AND project_id = ?",
+            (_dumps_feature(feature), part_id, project_id),
+        )
+        db.execute("UPDATE projects SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (project_id,))
+
+
+def count_parts_using_file(database_path: Path, filepath: str) -> int:
+    """How many part rows, in any project, reference this file.
+
+    Duplicating a part in the browser reuses its file, so a file must not be
+    unlinked while another row still points at it.
+    """
+    with get_db_connection(database_path) as db:
+        row = db.execute("SELECT COUNT(*) AS n FROM parts WHERE filepath = ?", (filepath,)).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def remap_feature_part_ids(
+    feature: Optional[Dict[str, Any]], id_map: Dict[str, str]
+) -> Optional[Dict[str, Any]]:
+    """Point a feature's body references at the copies named in ``id_map``.
+
+    Only ``targetPartId`` (the body an "up to body" extrude stops at) names
+    another part; everything else in a feature is geometry.
+    """
+    if not feature:
+        return feature
+    target = feature.get("targetPartId")
+    if isinstance(target, str) and target in id_map:
+        return {**feature, "targetPartId": id_map[target]}
+    return feature
+
+
+def _dumps_feature(feature: Optional[Dict[str, Any]]) -> Optional[str]:
+    return json.dumps(feature) if feature else None
+
+
+def _loads_feature(value: Any) -> Optional[Dict[str, Any]]:
+    if not value:
+        return None
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def update_part(
@@ -581,6 +683,9 @@ def _loads(value: Any, default: Dict[str, Any]) -> Dict[str, Any]:
 def _normalize_part(row: Dict[str, Any]) -> Dict[str, Any]:
     row["visible"] = bool(row.get("visible", 1))
     row["is_open_top"] = bool(row.get("is_open_top", 0))
+    # The parametric definition of a body modeled in the browser, or None for
+    # an uploaded CAD body. Returned parsed, under the name the client reads.
+    row["feature"] = _loads_feature(row.pop("feature_json", None))
     # The name is returned exactly as stored. It used to be run through
     # strip_upload_prefix on every read, which also renamed a part the user had
     # deliberately called something like "12345678_v2". Uploads now store a

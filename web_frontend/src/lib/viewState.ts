@@ -8,6 +8,7 @@
  * in `defaultResultViewState`). The shell owner consumes them.
  */
 import type { PourLocationPayload, ProjectPart } from './api';
+import type { ModelingEvent, ModelingViewState, Vec3 } from './modeling/types';
 
 // ---------------------------------------------------------------------------
 // Result modes
@@ -323,6 +324,11 @@ export type ViewportHandle = {
   clearMeasurements(): void;
   /** Volume in cubic inches enclosed by the current envelope threshold, or null if unavailable. */
   defectVolumeIn3(): number | null;
+  /**
+   * Look straight at a sketch plane ("Normal To"): from the `normal` side,
+   * with `up` pointing up the screen, centred on `focus`.
+   */
+  normalTo(frame: { normal: Vec3; v: Vec3; focus: Vec3 }): void;
 };
 
 export type ViewportProps = {
@@ -349,6 +355,12 @@ export type ViewportProps = {
   onPourPicked: (pick: PourPick) => void;
 
   onGridMeta: (meta: GridMeta | null) => void;
+  /**
+   * The sketch or extrude being modeled, or null when not modeling. While it
+   * is set the viewport's clicks go to the sketcher, not to select/probe.
+   */
+  modeling?: ModelingViewState | null;
+  onModelingEvent?: (event: ModelingEvent) => void;
   /** Short loading / progress messages, or null when idle. */
   onStatus: (message: string | null) => void;
   onError: (message: string) => void;

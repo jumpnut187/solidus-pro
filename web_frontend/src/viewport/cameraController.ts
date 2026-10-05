@@ -131,6 +131,41 @@ export class CameraController {
     });
   }
 
+  /**
+   * Look along a direction: the camera on the `normal` side of `target`,
+   * with `up` up the screen. This is SOLIDWORKS' "Normal To" for a sketch
+   * plane. The radius is kept, so the zoom the user had is kept.
+   *
+   * The angles are found by placing the camera and letting Babylon derive
+   * them, which accounts for the Z-up frame; near the poles alpha only spins
+   * the view, so there it is chosen to put `up` up the screen.
+   */
+  lookAlong(normal: Vector3, up: Vector3, target: Vector3): void {
+    const n = normal.normalizeToNew();
+    const saved = {
+      alpha: this._camera.alpha,
+      beta: this._camera.beta,
+      radius: this._camera.radius,
+      target: this._camera.target.clone()
+    };
+    const radius = Math.max(this._camera.radius, this._minRadius());
+    this._camera.setTarget(target, false, false, true);
+    this._camera.setPosition(target.add(n.scale(radius)));
+    let alpha = this._camera.alpha;
+    let beta = Math.min(Math.max(this._camera.beta, POLE), Math.PI - POLE);
+    if (Math.abs(n.z) > 0.999) {
+      // Looking straight down (or up) the Z axis the screen's up is set by
+      // alpha alone. At beta near 0 the camera sits a hair off the pole along
+      // (cos a, -sin a) and the screen's up points the other way; near PI it
+      // points the same way. (Top's preset, alpha = PI/2, puts +Y up and
+      // Bottom's puts -Y up, as the presets above document.)
+      alpha = n.z > 0 ? Math.atan2(up.y, -up.x) : Math.atan2(-up.y, up.x);
+      beta = n.z > 0 ? POLE : Math.PI - POLE;
+    }
+    this._apply(saved);
+    this._animateTo({ alpha: this._shortestAlpha(alpha), beta, radius, target: target.clone() });
+  }
+
   /** Frame the whole assembly, keeping the current orientation. */
   fit(options: { immediate?: boolean } = {}): void {
     const bounds = this._bounds;

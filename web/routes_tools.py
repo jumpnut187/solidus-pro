@@ -669,6 +669,10 @@ def export_project_file(project_id: str):
                 "color": [0.7, 0.7, 0.7],
                 "visible": bool(part["visible"]),
                 "is_open_top": bool(part["is_open_top"]),
+                # A body modeled in the browser carries the sketch and extrude
+                # that made it, so it stays editable after a round trip. The
+                # desktop loader ignores keys it does not know.
+                **({"feature": part["feature"]} if part.get("feature") else {}),
             }
             for part in parts
         ],
@@ -775,9 +779,16 @@ def import_project_file():
     )
 
     missing: List[str] = []
-    for part in state.get("parts", []):
+    # `load_project_state` keeps the desktop schema only, so a modeled body's
+    # feature definition is read from the raw entry at the same index (the
+    # loader keeps every entry, in order, or raises).
+    raw_parts = payload.get("parts") if isinstance(payload.get("parts"), list) else []
+    for index, part in enumerate(state.get("parts", [])):
         if not isinstance(part, dict):
             continue
+        raw_part = raw_parts[index] if index < len(raw_parts) and isinstance(raw_parts[index], dict) else {}
+        raw_feature = raw_part.get("feature")
+        feature = raw_feature if isinstance(raw_feature, dict) else None
         # A project file may name a part by its original file name, by the
         # server's prefixed storage name (an export from an older build), with
         # or without an extension. Try all four rather than making the user
@@ -813,6 +824,7 @@ def import_project_file():
                 "is_open_top": part.get("is_open_top", False),
             },
             upload_root=_upload_folder(),
+            feature=feature,
         )
 
     return jsonify(

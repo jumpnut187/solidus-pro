@@ -13,6 +13,7 @@ import { deepMerge } from './defaults';
 
 export type PanelId =
   | 'parts'
+  | 'model'
   | 'material'
   | 'mesh'
   | 'analysis'

@@ -8,7 +8,9 @@ import {
   StatsChip,
   Toasts
 } from './CanvasOverlays';
+import { ModelingToolbar } from './ModelingToolbar';
 import { ViewportToolbar } from './ViewportToolbar';
+import type { ModelingController } from '../hooks/useModeling';
 import { ColorBar } from '../viewport/ColorBar';
 import { ResultsViewport } from '../viewport/ResultsViewport';
 import type { PourLocationPayload, ProjectPart } from '../lib/api';
@@ -34,6 +36,8 @@ export type CanvasStageProps = {
   resultsVersion: number;
   view: ResultViewState;
   onViewChange: (patch: Partial<ResultViewState>) => void;
+  /** The parametric modeling session; its toolbar replaces the viewport's while one is open. */
+  modeling: ModelingController;
   ortho: boolean;
   tool: ViewportTool;
   probe: ProbeReading | null;
@@ -85,6 +89,7 @@ export function CanvasStage(props: CanvasStageProps) {
     resultsVersion,
     view,
     onViewChange,
+    modeling,
     ortho,
     tool,
     probe,
@@ -164,6 +169,8 @@ export function CanvasStage(props: CanvasStageProps) {
           pourLocation={pourLocation}
           onPourPicked={onPourPicked}
           onGridMeta={onGridMeta}
+          modeling={modeling.viewState}
+          onModelingEvent={modeling.handleEvent}
           onStatus={onStatus}
           onError={onError}
         />
@@ -184,20 +191,24 @@ export function CanvasStage(props: CanvasStageProps) {
         </div>
       ) : null}
 
-      {parts.length === 0 && !busy ? <EmptyState onAddParts={onRequestAddParts} /> : null}
+      {parts.length === 0 && !busy && !modeling.active ? <EmptyState onAddParts={onRequestAddParts} /> : null}
       {dragDepth > 0 ? <DropVeil /> : null}
 
-      <ViewportToolbar
-        tool={tool}
-        onToolChange={onToolChange}
-        ortho={ortho}
-        onOrthoChange={onOrthoChange}
-        onCamera={onCamera}
-        onClearMeasurements={onClearMeasurements}
-        hasParts={hasParts}
-      />
+      {modeling.active ? (
+        <ModelingToolbar modeling={modeling} onCamera={onCamera} />
+      ) : (
+        <ViewportToolbar
+          tool={tool}
+          onToolChange={onToolChange}
+          ortho={ortho}
+          onOrthoChange={onOrthoChange}
+          onCamera={onCamera}
+          onClearMeasurements={onClearMeasurements}
+          hasParts={hasParts}
+        />
+      )}
 
-      {view.showLegend && resultsAvailable ? (
+      {view.showLegend && resultsAvailable && !modeling.active ? (
         <div className="overlay-colorbar">
           <ColorBar view={view} meta={gridMeta} orientation="vertical" />
         </div>
@@ -213,7 +224,7 @@ export function CanvasStage(props: CanvasStageProps) {
           }}
         />
       ) : null}
-      {gridMeta && resultsAvailable ? <StatsChip meta={gridMeta} /> : null}
+      {gridMeta && resultsAvailable && !modeling.active ? <StatsChip meta={gridMeta} /> : null}
 
       <Toasts toasts={toasts} onDismiss={onDismissToast} />
       </div>

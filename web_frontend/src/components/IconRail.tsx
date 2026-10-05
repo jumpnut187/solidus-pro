@@ -1,4 +1,4 @@
-import { Box, FlaskConical, FolderOpen, Gauge, Grid3x3, Layers, Thermometer } from 'lucide-react';
+import { Box, FlaskConical, FolderOpen, Gauge, Grid3x3, Layers, PencilRuler, Thermometer } from 'lucide-react';
 import type { ComponentType } from 'react';
 
 import type { PanelId } from '../lib/uiPrefs';
@@ -12,6 +12,7 @@ type RailEntry = {
 
 const ENTRIES: RailEntry[] = [
   { id: 'parts', label: 'Parts', title: 'Parts and assembly', Icon: Box },
+  { id: 'model', label: 'Model', title: 'Parametric modeling: sketch and extrude risers, chills and cores', Icon: PencilRuler },
   { id: 'material', label: 'Alloy', title: 'Material properties', Icon: FlaskConical },
   { id: 'mesh', label: 'Mesh', title: 'Mesh parameters', Icon: Grid3x3 },
   { id: 'analysis', label: 'Analysis', title: 'Analysis options', Icon: Layers },

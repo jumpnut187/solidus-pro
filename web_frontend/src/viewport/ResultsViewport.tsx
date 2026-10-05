@@ -72,6 +72,10 @@ import {
 } from './fieldPaintPlugin';
 import { createPourMarker } from './markers';
 import { applyPartAppearance, setPartClipPlanes, syncPartMeshes, type PartEntry } from './partMeshes';
+import { planarFace, type PlanarFace } from './modeling/planarFace';
+import { pickTopology } from './modeling/topologyPick';
+import type { MeasurePick } from '../lib/modeling/measure';
+import { SketchOverlay, type SurfacePick } from './modeling/sketchOverlay';
 import { pickVisibleAll } from './picking';
 import { SECTION_AXES, SectionCaps, isSectionCap, type SectionAxis } from './sectionCaps';
 import {
@@ -243,6 +247,7 @@ type SceneRefs = {
   caps: SectionCaps;
   envelope: EnvelopeMesh;
   annotations: Annotations;
+  sketch: SketchOverlay;
 };
 
 /**
@@ -354,6 +359,8 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const gizmoRef = useRef<HTMLCanvasElement | null>(null);
+  /** Where the sketcher puts its dimension labels, over the canvas. */
+  const sketchLayerRef = useRef<HTMLDivElement | null>(null);
 
   // Bumped whenever a new `RunResources` becomes current. The mode-loading
   // effect keys off it: the grid arrives from a promise, long after the
@@ -396,6 +403,7 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
   }, []);
 
   const { projectId, resultsAvailable, resultsVersion, view, ortho, parts, selectedPartId, tool } = props;
+  const modelingActive = Boolean(props.modeling);
 
   // ---------------------------------------------------------------------
   // Painting
@@ -644,6 +652,72 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     const caps = new SectionCaps(viewport.scene, makePlugin);
     const envelope = new EnvelopeMesh(viewport.scene, 'result-envelope', makePlugin);
     const annotations = new Annotations(viewport.scene, 10);
+    // A part surface under the pointer, with the face's own outward normal,
+    // for choosing a sketch plane. The normal comes from the triangle's
+    // winding rather than from the interpolated vertex normals, which on a
+    // bore's rim lean halfway onto the end face.
+    // The last face found, so hovering across one face does not flood-fill
+    // it again for every frame the pointer moves.
+    let lastFace: { mesh: AbstractMesh; face: PlanarFace } | null = null;
+    const pickSurface = (x: number, y: number): SurfacePick | null => {
+      const [hit] = pickVisibleAll(viewport.scene, x, y, { predicate: isPartMesh });
+      if (!hit?.pickedPoint || !hit.pickedMesh) return null;
+      const mesh = hit.pickedMesh;
+      if (!lastFace || lastFace.mesh !== mesh || !lastFace.face.ids.has(hit.faceId)) {
+        const face = planarFace(mesh, hit.faceId);
+        lastFace = face ? { mesh, face } : null;
+      }
+      const indices = mesh.getIndices();
+      const positions = mesh.getVerticesData('position');
+      if (!indices || !positions || hit.faceId < 0) return null;
+      const corner = (k: number) => {
+        const index = indices[hit.faceId * 3 + k] * 3;
+        return new Vector3(positions[index], positions[index + 1], positions[index + 2]);
+      };
+      const a = corner(0);
+      const local = Vector3.Cross(corner(1).subtract(a), corner(2).subtract(a));
+      const normal = Vector3.TransformNormal(local, mesh.getWorldMatrix()).normalize();
+      const partId = partIdOf(mesh);
+      const partName = propsRef.current.parts.find((part) => part.id === partId)?.name ?? null;
+      return {
+        point: hit.pickedPoint.clone(),
+        normal,
+        distance: hit.distance,
+        partName,
+        face: lastFace?.face ?? null
+      };
+    };
+    // What the Measure tool's click is on: a vertex, an edge or a face.
+    const pickMeasure = (x: number, y: number): MeasurePick | null => {
+      const surface = pickSurface(x, y);
+      const [hit] = pickVisibleAll(viewport.scene, x, y, { predicate: isPartMesh });
+      if (!surface || !hit?.pickedMesh) return null;
+      const partId = partIdOf(hit.pickedMesh);
+      return pickTopology({
+        scene: viewport.scene,
+        camera: viewport.camera,
+        x,
+        y,
+        mesh: hit.pickedMesh,
+        faceId: hit.faceId,
+        hitPoint: surface.point,
+        hitNormal: surface.normal,
+        edges: partId ? (partEntriesRef.current.get(partId)?.edges ?? null) : null,
+        face: surface.face,
+        partName: surface.partName,
+        assemblySize: boundsRef.current?.size ?? 10
+      });
+    };
+    const sketchLayer = sketchLayerRef.current;
+    const sketch = new SketchOverlay({
+      scene: viewport.scene,
+      camera: viewport.camera,
+      canvas,
+      layer: sketchLayer ?? container.appendChild(document.createElement('div')),
+      pickSurface,
+      pickMeasure,
+      emit: (event) => propsRef.current.onModelingEvent?.(event)
+    });
     sceneRef.current = {
       viewport,
       camera,
@@ -652,7 +726,8 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       originAxes,
       caps,
       envelope,
-      annotations
+      annotations,
+      sketch
     };
 
     // Local-only handle for the screenshot harness and for diagnosing a
@@ -700,6 +775,9 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
         // two attempts at one point, and flying the camera in between them
         // moved the model out from under the cursor.
         if (button !== 0 || !wasDoubleClick || propsRef.current.tool !== 'select') return;
+        // While modeling, a double-click belongs to the sketcher (it closes
+        // a polyline), not to the camera.
+        if (propsRef.current.modeling) return;
         const pick = pickModel(scene);
         if (pick) camera.focusOn(pick.point);
         return;
@@ -793,6 +871,8 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     const handleClick = () => {
       const scene = viewport.scene;
       const current = propsRef.current;
+      // The sketcher takes every click while modeling; see SketchOverlay.
+      if (current.modeling) return;
       const pick = pickModel(scene);
       const partId = pick?.partId ?? null;
 
@@ -943,6 +1023,12 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     };
     const updateHover = () => {
       if (!hoverStale || buttonsDown || !hoverAt) return;
+      // The sketcher sets its own cursor.
+      if (propsRef.current.modeling) {
+        hoverStale = false;
+        shownCursor = '';
+        return;
+      }
       // Still stale when skipped, so the pick happens on the first frame the
       // budget allows and the cursor catches up with a pointer that stopped.
       const startedAt = performance.now();
@@ -1007,6 +1093,7 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       entries.clear();
       pourMarkerRef.current = null;
       annotations.dispose();
+      sketch.dispose();
       caps.dispose();
       envelope.dispose();
       viewport.dispose();
@@ -1041,6 +1128,7 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       partBounds(propsRef.current.parts) ?? gridBounds(resourcesRef.current?.meta ?? null);
     boundsRef.current = bounds;
     refs.camera.setBounds(bounds);
+    refs.sketch.setBounds(bounds ? { center: bounds.center, size: bounds.size } : null);
     if (bounds) {
       refs.viewport.layoutFloor(bounds.center, bounds.size, bounds.min.z - bounds.size * 0.02);
       // Short enough to say where the origin is without drawing the eye.
@@ -1084,7 +1172,10 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
           ? BOTH_SHELL_OPACITY
           : 1;
     applyPartAppearance(parts, partEntriesRef.current, {
-      selectedPartId,
+      // No selection outline while modeling: the outline is an inflated
+      // shell drawn over the part, and it hid the face highlight and the
+      // sketch lying on the very faces being modeled on.
+      selectedPartId: modelingActive ? null : selectedPartId,
       opacity: Math.min(requested, cap),
       showModel: view.showModel,
       assemblySize: boundsRef.current?.size ?? 1,
@@ -1105,8 +1196,15 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
     view.mode,
     view.showResults,
     resultsAvailable,
+    modelingActive,
     paint
   ]);
+
+  // The sketcher draws whatever the shell says is being modeled.
+  useEffect(() => {
+    sceneRef.current?.sketch.setState(props.modeling ?? null);
+    refreshHoverRef.current?.();
+  }, [props.modeling]);
 
   // Markers belong to the tool that made them.
   useEffect(() => {
@@ -1496,6 +1594,15 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
         });
       },
       setCamera: (preset) => sceneRef.current?.camera.goTo(preset),
+      normalTo: (frame) => {
+        const refs = sceneRef.current;
+        if (!refs) return;
+        refs.camera.lookAlong(
+          new Vector3(frame.normal[0], frame.normal[1], frame.normal[2]),
+          new Vector3(frame.v[0], frame.v[1], frame.v[2]),
+          new Vector3(frame.focus[0], frame.focus[1], frame.focus[2])
+        );
+      },
       clearMeasurements: () => {
         measurePendingRef.current = null;
         clearMeasureHint();
@@ -1556,6 +1663,7 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
         class is the hook; `bench.css` positions it in the standalone bench
         and `shell.css` in the application.
       */}
+      <div ref={sketchLayerRef} className="sketch-layer" />
       <canvas ref={gizmoRef} className="viewport-gizmo" width={96} height={96} aria-hidden="true" />
     </div>
   );

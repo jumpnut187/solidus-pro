@@ -8,6 +8,7 @@ import { TransportBar } from './components/TransportBar';
 import { AnalysisPanel } from './components/panels/AnalysisPanel';
 import { MaterialPanel } from './components/panels/MaterialPanel';
 import { MeshPanel, type MeshStatus } from './components/panels/MeshPanel';
+import { ModelPanel } from './components/panels/ModelPanel';
 import { PartsPanel } from './components/panels/PartsPanel';
 import { PerformancePanel } from './components/panels/PerformancePanel';
 import { ProjectsPanel } from './components/panels/ProjectsPanel';
@@ -24,6 +25,7 @@ import { StatisticsModal } from './components/modals/StatisticsModal';
 import { OpenProjectModal } from './components/modals/OpenProjectModal';
 import { SolidificationModal } from './components/modals/SolidificationModal';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
+import { useModeling } from './hooks/useModeling';
 import { useSimulationJob } from './hooks/useSimulationJob';
 import { useToasts } from './hooks/useToasts';
 import {
@@ -56,6 +58,7 @@ import {
 } from './lib/defaults';
 import { formatCount } from './lib/format';
 import { inferPartType } from './lib/partTypes';
+import { parseReferencePlanes, type ReferencePlane } from './lib/modeling/types';
 import {
   loadShellPrefs,
   loadStoredProjectId,
@@ -104,6 +107,7 @@ export function App() {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [parts, setParts] = useState<ProjectPart[]>([]);
+  const [referencePlanes, setReferencePlanes] = useState<ReferencePlane[]>([]);
   const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
   const [materials, setMaterials] = useState<MaterialInfo[]>([]);
   const [hardware, setHardware] = useState<HardwareInfo | null>(null);
@@ -305,6 +309,7 @@ export function App() {
         applyProjectRecord(project);
         setProjectId(id);
         setParts([]);
+        setReferencePlanes(parseReferencePlanes(project.ui_state?.reference_planes));
         setSelectedPartId(storedParts[0]?.id ?? null);
         setGridMeta(null);
         setProbe(null);
@@ -394,7 +399,29 @@ export function App() {
     }
   }, [ensureProject, fail, refreshProjects, succeed]);
 
+  const modeling = useModeling({
+    projectId,
+    parts,
+    setParts,
+    setSelectedPartId,
+    ensureProject: () => ensureProject(),
+    viewportRef,
+    referencePlanes,
+    setReferencePlanes,
+    notify: { succeed, fail, warn }
+  });
+  const modelingActive = modeling.active;
+  // A modeling session lives in the Model panel; starting one from anywhere
+  // (the tree, a keyboard shortcut) brings the panel up with it.
+  useEffect(() => {
+    if (modelingActive) setShell((current) => (current.activePanel === 'model' ? current : { ...current, activePanel: 'model' }));
+  }, [modelingActive]);
+  const cancelModeling = modeling.cancel;
+  // A sketch belongs to the project it was started in.
+  useEffect(() => cancelModeling(), [projectId, cancelModeling]);
+
   const newProject = useCallback(() => {
+    cancelModeling();
     setConfirmRequest({
       title: 'New project',
       message: 'Start a new project? The current one stays saved on the server and can be reopened.',
@@ -404,6 +431,7 @@ export function App() {
         setSettings(defaultSettings());
         setProjectId(null);
         setParts([]);
+        setReferencePlanes([]);
         setSelectedPartId(null);
         setResultsAvailable(false);
         setGridMeta(null);
@@ -413,7 +441,7 @@ export function App() {
         notify('Started a new project.');
       }
     });
-  }, [job, notify, patchShell]);
+  }, [cancelModeling, job, notify, patchShell]);
 
   const saveProjectAs = useCallback(() => {
     setPromptRequest({
@@ -908,9 +936,19 @@ export function App() {
     if (promptRequest) return setPromptRequest(null);
     if (confirmRequest) return setConfirmRequest(null);
     if (modal) return setModal(null);
+    // In a sketch Escape belongs to the sketcher (it backs out of the shape
+    // being drawn, then the tool); only the plane step cancels outright.
+    if (modeling.session) {
+      if (modeling.session.stage === 'plane') modeling.cancel();
+      return;
+    }
+    // The Measure tool clears its selections on Escape itself; the plane
+    // manager cancels.
+    if (modeling.planeSession) return modeling.cancel();
+    if (modeling.measurePicks) return;
     if (shell.tool !== 'select') return patchShell({ tool: 'select' });
     if (shell.activePanel) return patchShell({ activePanel: null });
-  }, [promptRequest, confirmRequest, modal, shell.tool, shell.activePanel, patchShell]);
+  }, [promptRequest, confirmRequest, modal, modeling, shell.tool, shell.activePanel, patchShell]);
 
   useKeyboardShortcuts({
     run: () => void runSimulation(),
@@ -1029,6 +1067,17 @@ export function App() {
             uploading={uploading}
           />
         );
+      case 'model':
+        return (
+          <ModelPanel
+            modeling={modeling}
+            parts={parts}
+            selectedPartId={selectedPartId}
+            onSelectPart={setSelectedPartId}
+            onRemovePart={removePart}
+            onClose={closePanel}
+          />
+        );
       case 'material':
         return (
           <MaterialPanel
@@ -1131,6 +1180,7 @@ export function App() {
   }, [
     shell.activePanel,
     shell.tool,
+    modeling,
     parts,
     selectedPartId,
     addFiles,
@@ -1226,8 +1276,11 @@ export function App() {
           onSelectPart={setSelectedPartId}
           resultsAvailable={resultsAvailable}
           resultsVersion={resultsVersion}
-          view={view}
+          // Modeling is done on the bodies themselves: the result field would
+          // only hide the faces being sketched on.
+          view={modelingActive ? { ...view, showResults: false } : view}
           onViewChange={patchView}
+          modeling={modeling}
           ortho={shell.ortho}
           tool={shell.tool}
           probe={probe}

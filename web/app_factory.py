@@ -12,6 +12,7 @@ from web.services.simulation_queue import QueueConfig, SimulationQueueManager, d
 from web import repository as repo
 from web.routes import api_bp
 from web.routes_fields import fields_bp
+from web.routes_modeling import modeling_bp
 from web.routes_tools import tools_bp
 
 
@@ -56,6 +57,7 @@ def create_app() -> Flask:
     app.register_blueprint(api_bp)
     app.register_blueprint(fields_bp)
     app.register_blueprint(tools_bp)
+    app.register_blueprint(modeling_bp)
 
     @app.route("/")
     def index():
