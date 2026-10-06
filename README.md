@@ -2,7 +2,7 @@
 
 > **Predict defects before you pour.** The casting simulation engine that runs on your laptop — macOS, Windows, or Linux — and catches shrinkage, porosity, hot spots, and hot tears before they hit the foundry floor.
 
-Built on **real-world casting results** and validated against production foundry data. Solidus Pro brings industrial-grade solidification analysis to your desktop and browser. No HPC cluster required.
+Built on established solidification physics and published casting references. Solidus Pro brings industrial-grade solidification analysis to your desktop and browser. No HPC cluster required.
 
 ---
 
@@ -70,7 +70,7 @@ Three modes for any hardware budget:
 
 ---
 
-## Supported Alloys — Tuned from Real Foundry Data
+## Supported Alloys
 
 Each alloy's feeding distance multiplier is calibrated **from the riser's center radius** — the distance liquid metal can travel to feed a solidifying region before the path freezes shut.
 
@@ -84,15 +84,7 @@ Each alloy's feeding distance multiplier is calibrated **from the riser's center
 | MONEL400 | Monel 400 | — |
 | IN625 | Inconel 625 | — |
 
-Every alloy packs 40+ properties: liquidus/solidus/pouring temps, density curves, conductivity, latent heat, volumetric shrinkage, viscosity, SDAS parameters, Niyama thresholds, hot-tear susceptibility coefficients, sand burn-in sensitivity, and gas porosity tendencies. All validated against published casting references and production data.
-
----
-
-## Developed on Real Casting Results
-
-Solidus Pro wasn't built in a vacuum. The defect prediction engine has been tuned and validated against **actual production casting outcomes** — including radiographed sections, cut-up analyses, and foundry floor feedback. The feeding-distance models, chill effectiveness curves, and Niyama threshold calibrations all trace back to real pour results, not textbook approximations alone.
-
-**What this means for you**: when Solidus Pro flags a hot spot, it's flagging the same kind of region that showed up in a physical casting.
+Every alloy packs 40+ properties: liquidus/solidus/pouring temps, density curves, conductivity, latent heat, volumetric shrinkage, viscosity, SDAS parameters, Niyama thresholds, hot-tear susceptibility coefficients, sand burn-in sensitivity, and gas porosity tendencies. Property values come from published casting references.
 
 ---
 
@@ -222,7 +214,9 @@ python -m compileall config core physics ui web   # syntax pass
 
 ## License
 
-Educational and research use.
+Copyright (c) 2025-2026 Brendon Jarrett. All rights reserved.
+
+Proprietary and confidential. No license is granted to use, copy, modify, or distribute this software without written permission from the copyright holder. See [LICENSE](LICENSE).
 
 ---
 

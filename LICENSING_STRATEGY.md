@@ -1,5 +1,9 @@
 # Solidus Pro: GPL v3 + CLA Licensing Strategy
 
+> **Status (Oct 6, 2026): Deferred.** Solidus Pro is proprietary, all rights
+> reserved (see `LICENSE`). Nothing in this plan has been executed, and the
+> repository stays private until a sale or licensing decision is made.
+
 ## 1. Overview
 
 Solidus Pro is released under the **GNU General Public License v3.0 (GPL v3)** with a mandatory **Contributor License Agreement (CLA)**. This dual mechanism allows the foundry community to use, study, modify, and improve the software freely, while preserving the project owner's right to offer commercial licenses to organizations that cannot or will not comply with GPL v3's copyleft requirements.
