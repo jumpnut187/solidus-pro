@@ -13,6 +13,7 @@ Performance Optimizations:
 """
 
 import numpy as np
+import os
 from typing import Tuple, List, Dict, Optional, Union, Sequence
 import trimesh
 from core.part_manager import (
@@ -722,7 +723,14 @@ class AdaptiveVoxelMesh:
         self.bounds = None
         self.grid_shape = None
         self.memory_manager = get_memory_manager(memory_mode)
-        self.memory_monitor = MemoryMonitor(abort_threshold_percent=90.0)
+        # RAM abort threshold is normally 90%; CASTSIM_MEM_ABORT_PCT lets an
+        # operator deliberately run on a memory-pressured host (e.g. with a
+        # local LLM server resident) without editing source.
+        try:
+            _mem_abort = float(os.environ.get("CASTSIM_MEM_ABORT_PCT", "90.0"))
+        except (TypeError, ValueError):
+            _mem_abort = 90.0
+        self.memory_monitor = MemoryMonitor(abort_threshold_percent=_mem_abort)
         
     def generate(self, trimesh_obj: trimesh.Trimesh, 
                 bounds: np.ndarray,
