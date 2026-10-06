@@ -47,7 +47,7 @@ from typing import Any, Dict, Optional, Union
 
 SHRINK_SCALAR_MIN = 0.25
 SHRINK_SCALAR_MAX = 4.0
-SHRINK_SCALAR_DEFAULT = 1.0
+SHRINK_SCALAR_DEFAULT = 0.5
 
 
 def _clamp_float(value: Any, minimum: float, maximum: float, default: float) -> float:
@@ -71,14 +71,14 @@ def _clamp_int(value: Any, minimum: int, maximum: int, default: int) -> int:
 @dataclass
 class FeedingParams:
     """Parameters for riser feeding distance and shrinkage reduction near risers."""
-    base_feeding_distance: float = 6.0
+    base_feeding_distance: float = 3.0
     min_influence_factor: float = 0.6
     riser_max_reduction: float = 0.10
     riser_min_reduction: float = 1.0
     post_contact_reduction: float = 0.35
     disconnected_neck_floor: float = 0.70
-    shrink_scalar: float = SHRINK_SCALAR_DEFAULT
-    feeding_zone_vertical_bias: float = 0.5
+    shrink_scalar: float = 0.5
+    feeding_zone_vertical_bias: float = 0.0
 
     def __post_init__(self) -> None:
         self.shrink_scalar = _clamp_float(
@@ -90,9 +90,9 @@ class FeedingParams:
         try:
             bias = float(self.feeding_zone_vertical_bias)
         except (TypeError, ValueError):
-            bias = 0.5
+            bias = 0.0
         if bias != bias:
-            bias = 0.5
+            bias = 0.0
         self.feeding_zone_vertical_bias = max(0.0, min(2.0, bias))
 
 
@@ -414,9 +414,9 @@ class SolidificationParameters:
         try:
             bias = float(self.feeding.feeding_zone_vertical_bias)
         except (TypeError, ValueError):
-            bias = 0.5
+            bias = 0.0
         if bias != bias:
-            bias = 0.5
+            bias = 0.0
         self.feeding.feeding_zone_vertical_bias = max(0.0, min(2.0, bias))
         self.air_gap.htc_floor_fraction = _clamp_float(
             self.air_gap.htc_floor_fraction,

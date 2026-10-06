@@ -56,10 +56,10 @@ class SolidificationParametersTests(unittest.TestCase):
         params = SolidificationParameters()
 
         self.assertAlmostEqual(
-            params.feeding.feeding_zone_vertical_bias, 0.5, places=6
+            params.feeding.feeding_zone_vertical_bias, 0.0, places=6
         )
         self.assertAlmostEqual(
-            params.to_dict()["feeding"]["feeding_zone_vertical_bias"], 0.5, places=6
+            params.to_dict()["feeding"]["feeding_zone_vertical_bias"], 0.0, places=6
         )
 
     def test_feeding_zone_vertical_bias_parses_from_nested_dict(self) -> None:
@@ -86,7 +86,7 @@ class SolidificationParametersTests(unittest.TestCase):
         )
 
         self.assertAlmostEqual(
-            params.feeding.feeding_zone_vertical_bias, 0.5, places=6
+            params.feeding.feeding_zone_vertical_bias, 0.0, places=6
         )
 
     def test_feeding_zone_vertical_bias_round_trips(self) -> None:
@@ -288,7 +288,7 @@ class SolidificationParametersTests(unittest.TestCase):
         self.assertEqual(params.filling.filter.drag_enabled, 1)
 
         # Untouched sibling top-level groups are also unaffected.
-        self.assertAlmostEqual(params.feeding.base_feeding_distance, 6.0)
+        self.assertAlmostEqual(params.feeding.base_feeding_distance, 3.0)
         self.assertAlmostEqual(params.thermal_boundary.htc_gating, 400.0)
 
     def test_filling_round_trips_through_from_dict(self) -> None:
