@@ -199,6 +199,8 @@ export type ResultViewState = {
   showLegend: boolean;
   /** Restrict painted results to CAST bodies (risers, chills, cores stay neutral). */
   castOnly: boolean;
+  /** Draw the parting line over a result. Off by default: results hide it. */
+  showPartingLine: boolean;
   section: SectionState;
 };
 
@@ -219,6 +221,7 @@ export const defaultResultViewState: ResultViewState = {
   modelOpacity: 100,
   showLegend: true,
   castOnly: false,
+  showPartingLine: false,
   section: { x: { ...defaultAxis }, y: { ...defaultAxis }, z: { ...defaultAxis }, caps: true }
 };
 

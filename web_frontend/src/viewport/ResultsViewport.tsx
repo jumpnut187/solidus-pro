@@ -1290,7 +1290,11 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
   // The parting plane follows its height, its toggle and the castings it cuts.
   // After the appearance effect, which is what moves the part meshes.
   const partingZ = props.orient?.parting?.z ?? null;
-  const partingVisible = props.orient?.parting?.visible ?? false;
+  // Outside the Orient panel the plane follows the Results panel's "Show
+  // parting line" box (off by default); the Orient panel, which edits it,
+  // always shows it.
+  const partingResultsHidden = !view.showPartingLine && !props.orient?.active;
+  const partingVisible = (props.orient?.parting?.visible ?? false) && !partingResultsHidden;
   const castingKey = parts
     .filter((part) => part.part_type === 'cast' && part.visible !== false)
     .map((part) => part.id)

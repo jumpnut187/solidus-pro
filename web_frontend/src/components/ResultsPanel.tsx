@@ -400,6 +400,18 @@ export function ResultsPanel(props: ResultsPanelProps) {
               <span>Show color bar</span>
             </span>
           </label>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={view.showPartingLine}
+              aria-label="Show parting line on results"
+              onChange={(event) => onViewChange({ showPartingLine: event.target.checked })}
+            />
+            <span className="check-body">
+              <span>Show parting line</span>
+              <span className="check-note">Hidden by default. Always shown while Orient is open.</span>
+            </span>
+          </label>
         </CollapsibleGroup>
 
         <Group title="Measurement">
