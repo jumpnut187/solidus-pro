@@ -100,7 +100,14 @@ scikit-learn>=1.3.0        # ML models (GradientBoostingRegressor, preprocessing
 torch>=2.6.0               # Training + inference (MPS on Apple Silicon; 2.6+ for Python 3.13)
 coremltools>=8.3           # Apple ANE export (.mlpackage)
 onnx>=1.16.0               # Snapdragon/ONNX export + graph validation
-onnxruntime>=1.18.0        # ONNX CPU EP validation
+onnxruntime>=1.18.0        # ONNX validation + inference (CPU EP; also CUDA/TensorRT if the GPU build is installed)
+# NPU inference: replace onnxruntime with the vendor build for the machine.
+# Only one onnxruntime package may be installed at a time.
+#   Qualcomm Snapdragon X (Hexagon NPU):  onnxruntime-qnn
+#   Intel Core Ultra (NPU):               onnxruntime-openvino
+#   AMD Ryzen AI (XDNA NPU):              Ryzen AI Software (Vitis AI EP)
+#   Windows DirectML (GPU/NPU):           onnxruntime-directml
+#   NVIDIA GPU:                           onnxruntime-gpu
 onnxscript>=0.1.0          # torch ONNX exporter dependency (torch >= 2.12)
 onnx2tf>=1.22.0            # Google Tensor TFLite export (torch -> ONNX -> tflite)
 # tflite-runtime is NOT on PyPI — install separately from Google's index:

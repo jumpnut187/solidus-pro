@@ -230,6 +230,14 @@ class DeepModelSettings:
     model_dir: str = "models/deep_model"
     export_dir: str = "models/deep_model/export"
     last_model_path: str = ""        # last deep model loaded/trained
+    # Inference backend: auto, coreml, onnx, mps, cpu.  "auto" prefers an
+    # exported Core ML package, then an exported ONNX graph when ONNX Runtime
+    # matches PyTorch and is faster on this machine, then PyTorch.
+    inference_backend: str = "auto"
+    # Comma-separated ONNX Runtime execution providers to try, best first,
+    # e.g. "QNNExecutionProvider" or "OpenVINOExecutionProvider".  Empty uses
+    # the built-in NPU -> GPU -> CPU order (core/deep_model/backend.py).
+    onnx_providers: str = ""
 
     def __post_init__(self) -> None:
         self.normalize()
@@ -243,6 +251,9 @@ class DeepModelSettings:
         self.learning_rate = max(1e-8, float(self.learning_rate))
         self.min_records = max(1, int(self.min_records))
         self.cooldown_seconds = max(0, int(self.cooldown_seconds))
+        backend = str(self.inference_backend or "auto").strip().lower()
+        self.inference_backend = backend if backend in ("auto", "coreml", "onnx", "mps", "cpu") else "auto"
+        self.onnx_providers = str(self.onnx_providers or "").strip()
 
 
 # ============================================================================
@@ -425,6 +436,8 @@ class Settings:
             f"{env_prefix}DEEP_GRID_RESOLUTION": ("deep", "grid_resolution", int),
             f"{env_prefix}DEEP_MODEL_DIR": ("deep", "model_dir", str),
             f"{env_prefix}DEEP_EXPORT_DIR": ("deep", "export_dir", str),
+            f"{env_prefix}DEEP_INFERENCE_BACKEND": ("deep", "inference_backend", str),
+            f"{env_prefix}DEEP_ONNX_PROVIDERS": ("deep", "onnx_providers", str),
         }
 
         section_mapping = {
@@ -706,6 +719,8 @@ deep:
   model_dir: models/deep_model
   export_dir: models/deep_model/export
   last_model_path: ""
+  inference_backend: auto         # auto, coreml, onnx, mps, cpu
+  onnx_providers: ""              # e.g. QNNExecutionProvider; empty = NPU -> GPU -> CPU order
 
 report:
   default_format: html
@@ -767,6 +782,8 @@ grid_resolution = 64
 model_dir = "models/deep_model"
 export_dir = "models/deep_model/export"
 last_model_path = ""
+inference_backend = "auto"
+onnx_providers = ""
 
 [report]
 default_format = "html"

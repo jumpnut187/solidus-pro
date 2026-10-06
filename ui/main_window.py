@@ -6007,7 +6007,7 @@ class MainWindow(QMainWindow):
             self,
             "Deep Model Loaded",
             f"Loaded: {self.surrogate_model.manifest.name}\n"
-            f"Backend: torch (deep 3D U-Net)\n\n"
+            f"Backend: {getattr(self.surrogate_model, 'device_summary', 'torch (deep 3D U-Net)')}\n\n"
             f"{surrogate.format_metrics(self.surrogate_model.manifest.accuracy)}\n\n"
             "Run it with Surrogate > Run Surrogate Simulation.",
         )

@@ -11,7 +11,8 @@ Public API (all torch imports are lazy — the app must start without torch):
 * ``train_deep_model`` — full training run from captured records.
 * ``load_deep_model`` — build a :class:`DeepSurrogateModel` from an artifact.
 * ``export_for_target`` — export one trained model to coreml / onnx / tflite.
-* ``detect_deep_backend`` — inference backend ladder (Core ML -> MPS -> CPU).
+* ``detect_deep_backend`` — inference backend ladder
+  (Core ML -> ONNX Runtime -> MPS -> CPU).
 * ``DeepModelManifest`` — deep artifact metadata (targets, quantization).
 """
 

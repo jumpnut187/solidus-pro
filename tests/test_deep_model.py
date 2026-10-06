@@ -46,6 +46,12 @@ from core.deep_model.model import (
 from core.surrogate.split import geometry_group_key
 
 HAVE_TORCH = torch is not None
+try:
+    import onnxruntime  # noqa: F401
+
+    HAVE_ONNXRUNTIME = True
+except ImportError:  # pragma: no cover
+    HAVE_ONNXRUNTIME = False
 HAVE_COREML = False
 HAVE_TFLITE = False
 if HAVE_TORCH:
@@ -644,6 +650,172 @@ class ExportSmokeTests(unittest.TestCase):
             with self.assertRaises(ImportError) as ctx:
                 export_for_target(saved_to, "tflite", progress_cb=lambda _m: None)
             self.assertIn("onnx2tf", str(ctx.exception))
+
+
+def _active_channels(resolution: int = 8) -> np.ndarray:
+    channels = np.zeros((7, resolution, resolution, resolution), dtype=np.float32)
+    channels[0, 2:6, 2:6, 2:6] = 1.0
+    channels[2] = 0.5
+    channels[3] = 0.5
+    return channels
+
+
+@unittest.skipUnless(HAVE_TORCH and HAVE_ONNXRUNTIME, "torch / onnxruntime not installed")
+class OnnxInferenceTests(unittest.TestCase):
+    """ONNX Runtime inference: validation against PyTorch, auto selection, fallback."""
+
+    def _export_onnx(self, tmp: str) -> str:
+        data_dir = _two_record_dataset(tmp)
+        from core.deep_model.export import export_for_target
+        from core.deep_model.training import train_deep_model
+
+        summary = train_deep_model(
+            data_dir=data_dir, output_dir=os.path.join(tmp, "out"), grid=8,
+            epochs=1, batch_size=2, learning_rate=1e-3, min_records=1,
+        )
+        saved_to = summary["saved_to"]
+        export_for_target(saved_to, "onnx", progress_cb=lambda _m: None)
+        return saved_to
+
+    def test_explicit_onnx_matches_torch(self):
+        from core.deep_model.backend import DeepBackend
+        from core.deep_model.inference import load_deep_model
+
+        with tempfile.TemporaryDirectory() as tmp:
+            saved_to = self._export_onnx(tmp)
+            onnx_model = load_deep_model(saved_to, backend="onnx").model
+            torch_model = load_deep_model(saved_to, backend="cpu").model
+            self.assertIsNotNone(onnx_model.onnx_path)
+            channels, cond = _active_channels(), _conditioning()
+
+            pred_onnx = onnx_model.predict(channels, cond)
+            self.assertEqual(onnx_model._backend, DeepBackend.ONNX)
+            self.assertIn("onnx_provider", onnx_model.selection)
+            self.assertNotIn("onnx_ms", onnx_model.selection)  # explicit: no benchmark
+            pred_torch = torch_model.predict(channels, cond)
+            active = channels[0] > 0.5
+            np.testing.assert_allclose(pred_onnx[:, active], pred_torch[:, active], rtol=1e-3, atol=1e-2)
+
+            # Later predictions reuse the session instead of re-checking.
+            runner = onnx_model._onnx
+            onnx_model.predict(channels, cond)
+            self.assertIs(onnx_model._onnx, runner)
+            self.assertIn("ONNX Runtime on", onnx_model.describe())
+
+    def test_auto_times_both_and_keeps_the_faster(self):
+        from core.deep_model.backend import DeepBackend
+        from core.deep_model.inference import load_deep_model
+
+        with tempfile.TemporaryDirectory() as tmp:
+            saved_to = self._export_onnx(tmp)
+            model = load_deep_model(saved_to, backend="auto").model
+            self.assertIn("chosen on the first prediction", model.device_summary)
+            model.predict(_active_channels(), _conditioning())
+
+            sel = model.selection
+            self.assertIn("onnx_ms", sel)
+            self.assertIn("torch_ms", sel)
+            expected = "onnx" if sel["onnx_ms"] < sel["torch_ms"] else model._torch_backend.value
+            self.assertEqual(sel["chosen"], expected)
+            self.assertEqual(model._backend.value, expected)
+            self.assertEqual(model._onnx is not None, model._backend == DeepBackend.ONNX)
+
+    def test_mismatch_falls_back_to_torch(self):
+        from unittest import mock
+
+        from core.deep_model import inference
+        from core.deep_model.inference import load_deep_model
+
+        with tempfile.TemporaryDirectory() as tmp:
+            saved_to = self._export_onnx(tmp)
+            model = load_deep_model(saved_to, backend="onnx").model
+            torch_model = load_deep_model(saved_to, backend="cpu").model
+            channels, cond = _active_channels(), _conditioning()
+            # A negative tolerance can never be met, so the check must reject ONNX.
+            with mock.patch.object(inference, "ONNX_MATCH_ATOL_S", -1.0), \
+                    mock.patch.object(inference, "ONNX_MATCH_RTOL", 0.0):
+                pred = model.predict(channels, cond)
+            self.assertEqual(model._backend, model._torch_backend)
+            self.assertIsNone(model._onnx)
+            self.assertIn("differs from PyTorch", model.selection["onnx_rejected"])
+            # The fallback may run on MPS while torch_model runs on CPU.
+            np.testing.assert_allclose(pred, torch_model.predict(channels, cond), rtol=1e-4, atol=1e-2)
+
+    def test_no_onnx_artifact_stays_on_torch(self):
+        from core.deep_model.inference import load_deep_model
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = _two_record_dataset(tmp)
+            from core.deep_model.training import train_deep_model
+
+            summary = train_deep_model(
+                data_dir=data_dir, output_dir=os.path.join(tmp, "out"), grid=8,
+                epochs=1, batch_size=2, learning_rate=1e-3, min_records=1,
+            )
+            model = load_deep_model(summary["saved_to"], backend="onnx").model
+            self.assertIsNone(model.onnx_path)
+            self.assertEqual(model._backend, model._torch_backend)
+            self.assertIn("no exported", model.selection["onnx_rejected"])
+
+    def test_session_skips_provider_that_is_not_installed(self):
+        from core.deep_model.onnx_runner import create_session, find_onnx_artifact
+
+        with tempfile.TemporaryDirectory() as tmp:
+            saved_to = self._export_onnx(tmp)
+            path = find_onnx_artifact(saved_to)
+            self.assertIsNotNone(path)
+            _session, provider, skipped = create_session(
+                path, ["NoSuchExecutionProvider", "CPUExecutionProvider"]
+            )
+            self.assertEqual(provider, "CPUExecutionProvider")
+            self.assertEqual(len(skipped), 1)
+            self.assertTrue(skipped[0].startswith("NoSuchExecutionProvider"))
+
+
+@unittest.skipUnless(HAVE_ONNXRUNTIME, "onnxruntime not installed")
+class OnnxProviderOrderTests(unittest.TestCase):
+    """Provider ordering and overrides; no model or torch needed."""
+
+    def _order(self, installed, env=""):
+        from unittest import mock
+
+        import onnxruntime as ort
+
+        from core.deep_model import backend
+
+        with mock.patch.object(ort, "get_available_providers", return_value=list(installed)), \
+                mock.patch.dict(os.environ, {backend.ONNX_PROVIDERS_ENV: env}):
+            return backend.available_onnx_providers()
+
+    def test_npus_before_gpus_and_cpu_last(self):
+        order = self._order([
+            "CPUExecutionProvider", "DmlExecutionProvider", "CUDAExecutionProvider",
+            "QNNExecutionProvider", "CoreMLExecutionProvider",
+        ])
+        self.assertEqual(
+            order,
+            ["QNNExecutionProvider", "CUDAExecutionProvider", "DmlExecutionProvider", "CPUExecutionProvider"],
+        )
+
+    def test_env_override_limits_and_orders(self):
+        order = self._order(
+            ["CPUExecutionProvider", "DmlExecutionProvider", "OpenVINOExecutionProvider"],
+            env="DmlExecutionProvider, NotInstalledExecutionProvider",
+        )
+        self.assertEqual(order, ["DmlExecutionProvider", "CPUExecutionProvider"])
+
+    def test_npu_provider_options(self):
+        from core.deep_model.backend import onnx_provider_options
+
+        self.assertEqual(onnx_provider_options("QNNExecutionProvider")["backend_type"], "htp")
+        self.assertEqual(onnx_provider_options("OpenVINOExecutionProvider"), {"device_type": "NPU"})
+        self.assertEqual(onnx_provider_options("CPUExecutionProvider"), {})
+
+    def test_settings_normalize_backend(self):
+        from config.settings import DeepModelSettings
+
+        self.assertEqual(DeepModelSettings(inference_backend="ONNX").inference_backend, "onnx")
+        self.assertEqual(DeepModelSettings(inference_backend="tpu").inference_backend, "auto")
 
 
 class AutoTrainPolicyTests(unittest.TestCase):

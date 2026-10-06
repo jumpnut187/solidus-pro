@@ -4,8 +4,9 @@ All three artifacts are produced from the same trained weights
 (``weights.pt`` + ``manifest.json`` in a deep model directory):
 
 * ``coreml`` — ``.mlpackage`` for the Apple ANE (compute_units=all).
-* ``onnx`` — fp16 ONNX graph for Snapdragon (ONNX Runtime QNN EP), plus an
-  fp32 graph validated on the CPU EP.
+* ``onnx`` — fp32 ONNX graph validated on the CPU EP, plus an fp16 copy.  The
+  fp32 graph is what ``inference.py`` loads through ONNX Runtime on any
+  execution provider (QNN runs it at fp16 on the Hexagon NPU).
 * ``tflite`` — int8 post-training-quantized TFLite for Google Tensor
   (torch -> ONNX -> onnx2tf), validated with tflite-runtime.
 
@@ -45,8 +46,9 @@ ARTIFACT_NAMES = {
 TARGET_NOTES = {
     "coreml": "Apple ANE — .mlpackage, compute_units=all (ANE/GPU/CPU). "
               "ANE active when tensor shapes fit ANE tiles.",
-    "onnx": "Snapdragon — fp16 ONNX graph for ONNX Runtime QNN EP (Hexagon/HTP). "
-            "Validated on the CPU EP in this repo.",
+    "onnx": "ONNX Runtime — Qualcomm (QNN), Intel (OpenVINO) and AMD (Vitis AI) NPUs, "
+            "NVIDIA GPUs (TensorRT/CUDA), DirectML or CPU. Inference loads the fp32 graph; "
+            "an fp16 copy is written alongside. Validated on the CPU EP in this repo.",
     "tflite": "Google Tensor — int8 post-training quantized TFLite for NNAPI "
               "(Edge TPU delegate).",
 }
