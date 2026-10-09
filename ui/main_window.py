@@ -5203,13 +5203,6 @@ class MainWindow(QMainWindow):
         simulation_state = project_state["simulation"]
         ui_state = project_state.get("ui_state", {})
         project_dir = os.path.dirname(filepath)
-        type_map = {
-            "cast": PartType.CAST,
-            "riser": PartType.RISER,
-            "riser_post": PartType.RISER_POST,
-            "chill": PartType.CHILL,
-            "core": PartType.CORE,
-        }
 
         self.current_results = None
         self.result_type_combo.setEnabled(False)
@@ -5221,29 +5214,27 @@ class MainWindow(QMainWindow):
         self.orientation_controller.parting = PartingLine.from_dict(ui_state.get("parting_line"))
 
         missing_parts = []
+        restore_entries = []
+        stored_paths = []
         for part_data in project_state["parts"]:
             resolved_path = self._resolve_project_part_path(project_dir, part_data["filepath"])
             if resolved_path is None:
                 missing_parts.append(part_data["filepath"])
                 continue
+            restore_entries.append(dict(part_data, filepath=resolved_path))
+            stored_paths.append(part_data["filepath"])
 
-            part_id = self.part_manager.load_part(resolved_path, name=part_data["name"], preserve_origin=True)
-            if not part_id:
-                missing_parts.append(part_data["filepath"])
-                continue
-
-            part = self.part_manager.get_part(part_id)
-            if part is None:
-                missing_parts.append(part_data["filepath"])
-                continue
-
-            part.set_part_type(type_map.get(part_data["part_type"], PartType.CAST))
-            part.set_position(*part_data["position"])
-            part.set_rotation(*part_data["rotation"])
-            part.set_scale(part_data["scale"])
-            part.color = tuple(part_data["color"])
-            part.visible = part_data["visible"]
-            part.is_open_top = part_data["is_open_top"]
+        # Each STEP file is loaded once and its bodies matched by saved
+        # body name, at the project's voxel size.
+        restored_ids = self.part_manager.restore_parts(
+            restore_entries, voxel_size_in=simulation_state["voxel_size"]
+        )
+        for entry, stored_path, part_id in zip(restore_entries, stored_paths, restored_ids):
+            if part_id is None:
+                label = stored_path
+                if entry.get("body_name"):
+                    label = f"{label} (body '{entry['body_name']}')"
+                missing_parts.append(label)
 
         self._on_alloy_confirmed(simulation_state["alloy_name"])
         self.material_dialog.set_alloy(simulation_state["alloy_name"])

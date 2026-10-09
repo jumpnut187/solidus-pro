@@ -98,6 +98,9 @@ def upload_files():
     files = request.files.getlist("files") or request.files.getlist("file")
     if not files:
         return jsonify({"error": "No files provided"}), 400
+    # Optional: the active project's voxel size, which sets the STEP
+    # tessellation tolerance. upload_cad_file ignores an invalid value.
+    voxel_size_in = request.form.get("voxel_size_in")
     uploaded = []
     try:
         for file in files:
@@ -105,7 +108,7 @@ def upload_files():
             # Single-body files return a one-element list; multi-body
             # STEP assemblies return one entry per body. Flatten so the
             # frontend sees a uniform list of file entries.
-            uploaded.extend(upload_cad_file(file, upload_folder()))
+            uploaded.extend(upload_cad_file(file, upload_folder(), voxel_size_in))
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     return jsonify({"files": uploaded})

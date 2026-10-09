@@ -442,7 +442,12 @@ def import_project_file():
         if not file.filename:
             continue
         try:
-            for entry in upload_cad_file(file, _upload_folder()):
+            # Tessellate STEP bodies for the imported project's own voxel
+            # size; upload_voxel_size_in falls back to the default when the
+            # saved value is missing or invalid.
+            for entry in upload_cad_file(
+                file, _upload_folder(), simulation.get("voxel_size")
+            ):
                 key = str(entry.get("display_name", "")).lower()
                 if not key:
                     continue

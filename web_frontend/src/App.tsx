@@ -543,7 +543,7 @@ export function App() {
           }
         }
         const target = await ensureProject(named);
-        const uploaded = await api.uploadFiles(accepted);
+        const uploaded = await api.uploadFiles(accepted, settings.voxel_size);
         const added: ProjectPart[] = [];
         for (const file of uploaded.files) {
           // Prefer the server's clean display name; fall back to the stored

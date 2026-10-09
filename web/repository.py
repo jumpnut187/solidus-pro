@@ -17,6 +17,10 @@ import uuid
 #: an 8-hex ``file_id``, optionally followed by a ``_b<N>`` body index.
 _UPLOAD_PREFIX_RE = re.compile(r"^[0-9a-f]{8}(?:_b\d+)?_")
 
+#: Base voxel size, in inches, of a project created without one. Mirrored in
+#: the client's ``meshDefaults.voxelSize`` (web_frontend/src/lib/defaults.ts).
+DEFAULT_VOXEL_SIZE_IN = 0.1
+
 
 class UnsafePartFileError(ValueError):
     """A part referenced a file outside the upload folder."""
@@ -198,7 +202,7 @@ def create_project(database_path: Path, data: Dict[str, Any]) -> str:
                 data.get("name", now_name),
                 data.get("description", ""),
                 data.get("alloy", "WCB"),
-                float(data.get("voxel_size", 0.1)),
+                float(data.get("voxel_size", DEFAULT_VOXEL_SIZE_IN)),
                 int(data.get("refinement_level", 3)),
                 data.get("memory_mode", "auto"),
                 json.dumps(data.get("analysis_options", _default_analysis_options())),

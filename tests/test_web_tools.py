@@ -819,6 +819,30 @@ class ImportRobustnessTests(WebToolsTestCase):
 
         self.assertEqual(response.status_code, 413)
 
+    def test_import_tessellates_cad_for_the_project_voxel_size(self) -> None:
+        import io
+        import json
+        from unittest import mock
+
+        import web.payloads as payloads
+
+        payload = {
+            "schema_version": 2,
+            "simulation": {"alloy_name": "WCB", "voxel_size": 0.05},
+            "parts": [],
+        }
+        with mock.patch.object(payloads, "upload_cad_file", return_value=[]) as upload:
+            self.client.post(
+                "/api/projects/import",
+                data={
+                    "project": (io.BytesIO(json.dumps(payload).encode()), "p.json"),
+                    "files": (io.BytesIO(b"solid x\nendsolid x\n"), "cast.stl"),
+                },
+                content_type="multipart/form-data",
+            )
+        self.assertEqual(upload.call_count, 1)
+        self.assertEqual(upload.call_args.args[2], 0.05)
+
     def test_import_survives_malformed_part_transforms(self) -> None:
         import io
         import json

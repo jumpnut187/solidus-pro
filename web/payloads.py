@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional, Union, cast
 import json
+import math
 import os
 import re
 import tempfile
@@ -22,9 +23,10 @@ from core.part_manager import (
     build_part_manager as _core_build_part_manager,
     infer_part_type_from_filename,
     infer_part_type_from_name,
+    tessellation_tolerance_mm,
 )
 from core.simulation_pipeline import PipelineResult
-from web.repository import strip_upload_prefix
+from web.repository import DEFAULT_VOXEL_SIZE_IN, strip_upload_prefix
 
 
 # Extensions accepted by upload_cad_file. STL is handled natively by
@@ -127,9 +129,29 @@ def _sanitize_body_name(name: str) -> str:
     return sanitized or "body"
 
 
+def upload_voxel_size_in(value: Union[str, float, None]) -> float:
+    """The voxel size (inches) a STEP upload is tessellated for.
+
+    ``value`` is the optional ``voxel_size_in`` upload form field. Anything
+    that is not a positive finite number is ignored in favour of
+    :data:`DEFAULT_VOXEL_SIZE_IN`.
+    """
+    if value is None:
+        return DEFAULT_VOXEL_SIZE_IN
+    try:
+        voxel_size_in = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_VOXEL_SIZE_IN
+    if not math.isfinite(voxel_size_in) or voxel_size_in <= 0.0:
+        return DEFAULT_VOXEL_SIZE_IN
+    return voxel_size_in
 
 
-def upload_cad_file(file: FileStorage, upload_folder: Path) -> List[Dict[str, Any]]:
+def upload_cad_file(
+    file: FileStorage,
+    upload_folder: Path,
+    voxel_size_in: Union[str, float, None] = None,
+) -> List[Dict[str, Any]]:
     """Load a CAD file (STL or STEP) and return one file entry per body.
 
     The function unifies STL and STEP handling on top of ``trimesh``.
@@ -139,9 +161,12 @@ def upload_cad_file(file: FileStorage, upload_folder: Path) -> List[Dict[str, An
     from the STEP B-rep are preserved in the response under
     ``body_name`` and used for ``part_type`` inference.
 
-    For single-body files the original upload is kept on disk as well
-    (so downstream reloads still work); for multi-body files the
-    original STEP upload is removed after fanning out.
+    Every entry's ``filepath`` points at its exported STL. The original
+    upload is removed after fanning out for every STEP file and for any
+    multi-body file; a single-body STL keeps its original on disk.
+
+    ``voxel_size_in`` sets the STEP tessellation tolerance (see
+    :func:`upload_voxel_size_in`); it is ignored for STL.
 
     Raises:
         ValueError: on missing file, unsupported extension, missing
@@ -175,10 +200,20 @@ def upload_cad_file(file: FileStorage, upload_folder: Path) -> List[Dict[str, An
             "Install with: pip install cascadio"
         )
 
+    is_step = ext in _STEP_EXTENSIONS
     try:
         # force="scene" ensures trimesh returns a Scene even for STL
         # files, so we can iterate uniformly without a type branch.
-        loaded = trimesh.load(str(filepath), force="scene")
+        if is_step:
+            # Tessellate for the voxel size rather than at cascadio's 0.01 mm
+            # default (see core.part_manager.tessellation_tolerance_mm). The
+            # bodies are stored as STL below, so they are not re-tessellated
+            # if the project's voxel size later becomes finer: re-upload the
+            # STEP to get the finer tessellation.
+            tol_linear = tessellation_tolerance_mm(upload_voxel_size_in(voxel_size_in))
+            loaded = trimesh.load(str(filepath), force="scene", tol_linear=tol_linear)
+        else:
+            loaded = trimesh.load(str(filepath), force="scene")
     except Exception as exc:
         try:
             filepath.unlink()
@@ -191,9 +226,10 @@ def upload_cad_file(file: FileStorage, upload_folder: Path) -> List[Dict[str, An
     # ``mesh_data`` payload, the dimensions string, the volume/area
     # numbers — assumes inches (matching the existing STL path). Apply
     # the meters→inches rescale at the single chokepoint so every
-    # downstream value is already in inches.
-    if ext in _STEP_EXTENSIONS:
-        _scale_step_to_inches(loaded)
+    # downstream value is already in inches. Passing the path lets the
+    # rescale check the result against the file's declared length unit.
+    if is_step:
+        _scale_step_to_inches(loaded, str(filepath))
 
     if isinstance(loaded, trimesh.Scene):
         body_items = list(loaded.geometry.items())
@@ -211,11 +247,18 @@ def upload_cad_file(file: FileStorage, upload_folder: Path) -> List[Dict[str, An
     # For a single-body file, use the file's basename (without
     # extension) as the body name so the part_type inference and the
     # fan-out filename read cleanly. For multi-body files, trimesh
-    # already provides real CAD body names that we trust.
-    is_single_body = len(body_items) == 1
-    if is_single_body:
+    # already provides real CAD body names that we trust. As in
+    # core.part_manager, only bodies with faces count, so empty
+    # construction bodies do not turn a one-part file into an assembly.
+    nonempty_indices = [
+        index
+        for index, (_, body_mesh) in enumerate(body_items)
+        if body_mesh is not None and len(body_mesh.faces) > 0
+    ]
+    if len(nonempty_indices) == 1:
         fallback_name = strip_upload_prefix(os.path.splitext(filename)[0])
-        body_items = [(fallback_name, body_items[0][1])]
+        only_index = nonempty_indices[0]
+        body_items[only_index] = (fallback_name, body_items[only_index][1])
 
     entries: List[Dict[str, Any]] = []
     for body_index, (body_name, body_mesh) in enumerate(body_items):
@@ -262,10 +305,10 @@ def upload_cad_file(file: FileStorage, upload_folder: Path) -> List[Dict[str, An
             pass
         raise ValueError("CAD file contains no loadable bodies")
 
-    # For multi-body STEP uploads, the original STEP on disk is
-    # redundant once each body is on disk as an STL — remove it to
-    # avoid keeping a 100MB+ STEP around just for traceability.
-    if len(entries) > 1:
+    # Once each body is on disk as an STL the original STEP is redundant:
+    # no entry points at it. Remove it to avoid keeping a 100MB+ STEP
+    # around just for traceability. A single-body STL original is kept.
+    if is_step or len(entries) > 1:
         try:
             filepath.unlink()
         except FileNotFoundError:

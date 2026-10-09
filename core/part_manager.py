@@ -23,10 +23,11 @@ from __future__ import annotations
 
 import numpy as np
 import trimesh
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 import os
+import re
 import uuid
 
 try:
@@ -117,33 +118,237 @@ def tessellation_tolerance_mm(voxel_size_in: Optional[float]) -> Optional[float]
     )
 
 
-def _scale_step_to_inches(geometry):
-    """Rescale cascadio/trimesh STEP output from meters back to inches.
+_INCHES_PER_METRE = 1000.0 / _MM_PER_INCH
+
+#: SI prefixes a STEP ``SI_UNIT(prefix, .METRE.)`` may carry, as metres.
+_STEP_SI_PREFIX_METRES = {
+    "$": 1.0,
+    "KILO": 1e3,
+    "HECTO": 1e2,
+    "DECA": 1e1,
+    "DECI": 1e-1,
+    "CENTI": 1e-2,
+    "MILLI": 1e-3,
+    "MICRO": 1e-6,
+    "NANO": 1e-9,
+}
+
+#: ``CONVERSION_BASED_UNIT`` names, as inches. Unlisted names are resolved
+#: through the unit's own ``LENGTH_MEASURE_WITH_UNIT`` definition instead.
+_STEP_NAMED_LENGTH_UNIT_INCHES = {
+    "INCH": 1.0,
+    "FOOT": 12.0,
+    "YARD": 36.0,
+    "MIL": 1e-3,
+    "THOU": 1e-3,
+    "MILLIMETRE": 1.0 / _MM_PER_INCH,
+    "MILLIMETER": 1.0 / _MM_PER_INCH,
+    "CENTIMETRE": 10.0 / _MM_PER_INCH,
+    "CENTIMETER": 10.0 / _MM_PER_INCH,
+    "METRE": _INCHES_PER_METRE,
+    "METER": _INCHES_PER_METRE,
+}
+
+_STEP_ENTITY_RE = re.compile(r"#(\d+)\s*=\s*((?:[^;']|'(?:[^']|'')*')*);")
+_STEP_UNIT_CONTEXT_RE = re.compile(r"GLOBAL_UNIT_ASSIGNED_CONTEXT\s*\(\s*\(([^)]*)\)")
+_STEP_SI_LENGTH_RE = re.compile(r"SI_UNIT\s*\(\s*(\$|\.\w+\.)\s*,\s*\.METRE\.\s*\)")
+_STEP_CONVERSION_UNIT_RE = re.compile(
+    r"CONVERSION_BASED_UNIT\s*\(\s*'([^']*)'\s*,\s*#(\d+)\s*\)"
+)
+_STEP_LENGTH_MEASURE_RE = re.compile(
+    r"LENGTH_MEASURE_WITH_UNIT\s*\(\s*LENGTH_MEASURE\s*\(\s*([-+0-9.EeDd]+)\s*\)\s*,\s*#(\d+)\s*\)"
+)
+_STEP_VERTEX_POINT_RE = re.compile(r"VERTEX_POINT\s*\(\s*'(?:[^']|'')*'\s*,\s*#(\d+)\s*\)")
+_STEP_CARTESIAN_POINT_RE = re.compile(
+    r"CARTESIAN_POINT\s*\(\s*'(?:[^']|'')*'\s*,\s*\(([^)]*)\)\s*\)"
+)
+
+#: A correctly scaled body can never be smaller than the box around its own
+#: B-rep vertices, which lie on its surface. 5 % below that is a unit error.
+STEP_SCALE_SHRINK_TOLERANCE = 0.05
+
+#: Upper bound on loaded size / B-rep-vertex size. Unlike the lower bound this
+#: is not exact -- a cylinder carries only seam vertices, so its vertex box is
+#: legitimately much smaller than the body (the 3x3x5 in test riser measures
+#: 1.29x). 10x is the smallest unit mix-up (mm vs cm); every real unit error
+#: (mm/in 25.4x, m/mm 1000x) is beyond it.
+STEP_SCALE_MAX_GROWTH = 10.0
+
+
+def _parse_step_entities(text: str) -> Dict[int, str]:
+    """Map STEP entity id -> entity body text (everything after ``#id=``)."""
+    return {int(m.group(1)): m.group(2) for m in _STEP_ENTITY_RE.finditer(text)}
+
+
+def _step_length_unit_to_inches(
+    entities: Dict[int, str], unit_id: int, _depth: int = 0
+) -> Optional[float]:
+    """Inches per one declared length unit, for the unit entity ``unit_id``."""
+    body = entities.get(unit_id)
+    if body is None or _depth > 4:
+        return None
+
+    conversion = _STEP_CONVERSION_UNIT_RE.search(body)
+    if conversion is not None:
+        name = conversion.group(1).strip().upper()
+        if name in _STEP_NAMED_LENGTH_UNIT_INCHES:
+            return _STEP_NAMED_LENGTH_UNIT_INCHES[name]
+        measure = entities.get(int(conversion.group(2)), "")
+        measure_match = _STEP_LENGTH_MEASURE_RE.search(measure)
+        if measure_match is None:
+            return None
+        base = _step_length_unit_to_inches(
+            entities, int(measure_match.group(2)), _depth + 1
+        )
+        if base is None:
+            return None
+        return float(measure_match.group(1).replace("D", "E").replace("d", "e")) * base
+
+    si_unit = _STEP_SI_LENGTH_RE.search(body)
+    if si_unit is not None:
+        prefix = si_unit.group(1).strip(".").upper()
+        metres = _STEP_SI_PREFIX_METRES.get(prefix)
+        return None if metres is None else metres * _INCHES_PER_METRE
+    return None
+
+
+def step_declared_length_unit_inches(text: str) -> Optional[float]:
+    """
+    Inches per declared length unit of a STEP file, or None if unreadable.
+
+    Reads the length unit each ``GLOBAL_UNIT_ASSIGNED_CONTEXT`` assigns:
+    ``SI_UNIT(prefix, .METRE.)`` or a ``CONVERSION_BASED_UNIT`` such as
+    ``'INCH'``. Only the unit the context references counts -- an inch file
+    also contains ``SI_UNIT(.MILLI.,.METRE.)``, as the base its inch is
+    defined against. Returns None when no length unit is found or when
+    contexts disagree.
+    """
+    entities = _parse_step_entities(text)
+    return _declared_length_unit_inches(entities)
+
+
+def _declared_length_unit_inches(entities: Dict[int, str]) -> Optional[float]:
+    factors = set()
+    for body in entities.values():
+        context = _STEP_UNIT_CONTEXT_RE.search(body)
+        if context is None:
+            continue
+        for ref in re.findall(r"#(\d+)", context.group(1)):
+            unit_body = entities.get(int(ref), "")
+            if "LENGTH_UNIT" not in unit_body:
+                continue
+            factor = _step_length_unit_to_inches(entities, int(ref))
+            factors.add(None if factor is None else round(factor, 9))
+    if len(factors) != 1:
+        return None
+    return factors.pop()
+
+
+def _step_vertex_points(entities: Dict[int, str]) -> np.ndarray:
+    """B-rep vertex coordinates in the file's declared length unit."""
+    points = []
+    for body in entities.values():
+        vertex = _STEP_VERTEX_POINT_RE.match(body)
+        if vertex is None:
+            continue
+        point = _STEP_CARTESIAN_POINT_RE.match(entities.get(int(vertex.group(1)), ""))
+        if point is None:
+            continue
+        try:
+            coords = [float(v) for v in point.group(1).split(",")]
+        except ValueError:
+            continue
+        if len(coords) == 3:
+            points.append(coords)
+    return np.asarray(points, dtype=float).reshape(-1, 3)
+
+
+#: Largest STEP file the unit check reads. The check parses the whole file
+#: into an entity dict (roughly two copies in memory) and runs on the web
+#: request thread, so it is skipped for large assemblies rather than paid for
+#: on every load and re-tessellation.
+STEP_SCALE_CHECK_MAX_BYTES = 32 * 1024 * 1024
+
+
+def _check_step_scale(geometry, filepath: str) -> None:
+    """Warn when loaded STEP geometry disagrees with the file's declared unit."""
+    try:
+        size = os.path.getsize(filepath)
+    except OSError as exc:
+        logger.warning(f"Cannot read '{filepath}' to check its STEP length unit: {exc}")
+        return
+    if size > STEP_SCALE_CHECK_MAX_BYTES:
+        logger.info(
+            f"STEP unit check skipped for '{filepath}': {size / 1e6:.0f} MB exceeds "
+            f"the {STEP_SCALE_CHECK_MAX_BYTES / 1e6:.0f} MB check limit."
+        )
+        return
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError as exc:
+        logger.warning(f"Cannot read '{filepath}' to check its STEP length unit: {exc}")
+        return
+
+    entities = _parse_step_entities(text)
+    unit_in = _declared_length_unit_inches(entities)
+    if unit_in is None:
+        logger.warning(
+            f"Could not read the declared length unit of '{filepath}'; "
+            f"its size is unchecked and relies on cascadio's unit handling."
+        )
+        return
+
+    vertices = _step_vertex_points(entities)
+    if len(vertices) < 2:
+        return
+    declared_diag = float(np.linalg.norm(np.ptp(vertices, axis=0))) * unit_in
+    if declared_diag <= 0.0:
+        return
+
+    if isinstance(geometry, trimesh.Scene):
+        meshes = list(geometry.geometry.values())
+    else:
+        meshes = [geometry]
+    loaded = [m.vertices for m in meshes if m is not None and len(m.faces) > 0]
+    if not loaded:
+        return
+    loaded_diag = float(np.linalg.norm(np.ptp(np.vstack(loaded), axis=0)))
+
+    ratio = loaded_diag / declared_diag
+    if ratio < 1.0 - STEP_SCALE_SHRINK_TOLERANCE or ratio > STEP_SCALE_MAX_GROWTH:
+        logger.warning(
+            f"STEP unit check failed for '{filepath}': loaded size "
+            f"{loaded_diag:.4g} in vs {declared_diag:.4g} in spanned by its B-rep "
+            f"vertices in the declared unit ({unit_in:.6g} in/unit), ratio "
+            f"{ratio:.3g}. The part is probably mis-scaled."
+        )
+
+
+def _scale_step_to_inches(geometry, filepath: Optional[str] = None) -> None:
+    """Rescale cascadio/trimesh STEP output from meters to inches.
 
     ``trimesh.load`` on a STEP file dispatches to ``cascadio``, which
-    converts the STEP assembly to GLB as an intermediate. The glTF 2.0
-    spec mandates that POSITION coordinates are in **meters**, so
-    trimesh hands us STEP meshes in meters regardless of the STEP file's
-    authored units (mm, inches, m, ...). Every other code path in this
-    project (STLLoader, voxel_mesh, payloads, UI) assumes inches, so
-    without rescaling a STEP file authored in mm is loaded ~39× too
-    small — every downstream dimension collapses and defect analyses
-    silently return 0.
+    converts the STEP to GLB as an intermediate. glTF positions are in
+    **meters**, so trimesh hands back STEP meshes in meters. Every other
+    code path (STLLoader, voxel_mesh, payloads, UI) assumes inches, so this
+    helper applies the meters->inches scale to a single ``Trimesh`` or to
+    every body of a ``Scene``. Empty bodies (zero faces) are skipped.
 
-    This helper applies the meters→inches scale to either a single
-    ``Trimesh`` or to every body of a ``Scene``. Empty / placeholder
-    meshes (zero faces) are skipped because ``trimesh`` cannot compute
-    meaningful extents for them.
+    cascadio converts from the file's *declared* length unit, not from a
+    size heuristic: measured with cascadio 0.1.1 on the inch-authored
+    ``Test_Model/Filling_Test`` files, and on the same files re-declared as
+    ``SI_UNIT(.MILLI.,.METRE.)``, both come out at their declared size. So no
+    unit correction is applied here.
 
-    Limitation: cascadio's own unit-detection heuristic is fragile for
-    inch-authored STEP files (it conflates any extent > 1.0 with
-    millimeters), so for that rare case the returned mesh would still
-    be mis-scaled. STEP files from mainstream CAD tools
-    (Solidworks, Onshape, etc.) almost always export in mm, where this
-    helper is correct.
+    When ``filepath`` is given, the result is checked against the declared
+    unit: the file's length unit is read (``SI_UNIT`` on METRE or a
+    ``CONVERSION_BASED_UNIT`` such as INCH), and a warning is logged when the
+    loaded size is smaller than the file's own B-rep vertices span (by more
+    than :data:`STEP_SCALE_SHRINK_TOLERANCE`) or larger by more than
+    :data:`STEP_SCALE_MAX_GROWTH`. A warning is also logged when the unit
+    cannot be read. Geometry is never changed by the check.
     """
-    import numpy as np
-
     if isinstance(geometry, trimesh.Scene):
         bodies = list(geometry.geometry.values())
         for body in bodies:
@@ -152,6 +357,51 @@ def _scale_step_to_inches(geometry):
             body.apply_scale(_METERS_TO_INCHES)
     elif geometry is not None and len(geometry.faces) > 0:
         geometry.apply_scale(_METERS_TO_INCHES)
+    else:
+        return
+
+    if filepath is not None:
+        try:
+            _check_step_scale(geometry, filepath)
+        except Exception as exc:  # a diagnostic must never block a load
+            logger.warning(f"STEP unit check skipped for '{filepath}': {exc}")
+
+
+def _load_cad_scene(filepath: str, tol_linear: Optional[float]) -> trimesh.Scene:
+    """
+    Load a CAD file as a Scene, STEP bodies rescaled to inches.
+
+    ``tol_linear`` (mm) reaches cascadio through trimesh's STEP loader and
+    sets the tessellation density; None leaves cascadio's default.
+    """
+    if tol_linear is None:
+        scene = trimesh.load(filepath, force="scene")
+    else:
+        scene = trimesh.load(filepath, force="scene", tol_linear=tol_linear)
+    if not isinstance(scene, trimesh.Scene):
+        # Defensive: if trimesh ever returns a bare Trimesh despite
+        # force="scene", wrap it.
+        scene = trimesh.Scene(geometry={"Body_1": scene})
+    if os.path.splitext(filepath)[1].lower() in _STEP_EXTENSIONS:
+        _scale_step_to_inches(scene, filepath)
+    return scene
+
+
+def _count_nonempty_bodies(scene: trimesh.Scene) -> int:
+    return sum(
+        1 for mesh in scene.geometry.values() if mesh is not None and len(mesh.faces) > 0
+    )
+
+
+def _default_body_identity(
+    filepath: str, body_name: str, single_body: bool
+) -> Tuple[str, PartType]:
+    """Default Part name and type for a CAD body: file stem if it is the only body."""
+    if single_body:
+        # Same inference input as load_part: the full path, whose extension
+        # infer_part_type_from_name strips.
+        return os.path.splitext(os.path.basename(filepath))[0], infer_part_type_from_name(filepath)
+    return body_name, infer_part_type_from_name(body_name)
 
 
 class PartType(Enum):
@@ -387,6 +637,20 @@ def part_type_from_display_name(
     unmappable on the way back.
     """
     return _PART_TYPE_BY_DISPLAY_NAME.get(str(text).strip(), default)
+
+
+def part_type_from_value(value: Any) -> PartType:
+    """
+    Map a serialized ``PartType.value`` (e.g. ``"sprue"``) back to its type.
+
+    Unknown values fall back to CAST with a warning rather than failing the
+    whole load.
+    """
+    try:
+        return PartType(str(value))
+    except ValueError:
+        logger.warning(f"Unknown part type {value!r}; treating it as cast.")
+        return PartType.CAST
 
 
 #: Compact letter labels for part-type summaries, e.g. "5 part(s): 3C, 1S, 1G".
@@ -756,7 +1020,13 @@ class PartManager:
 
             # If a multi-body STEP slipped through, only register the first body.
             # Callers should use load_assembly_parts() for full Scene support.
+            # The unit check compares against the whole file's B-rep vertices,
+            # so it is skipped once the scene is reduced to one of several
+            # bodies -- it would always report a false mis-scale.
+            check_path: Optional[str] = filepath
             if isinstance(trimesh_obj, trimesh.Scene):
+                if len(trimesh_obj.geometry) > 1:
+                    check_path = None
                 if not trimesh_obj.geometry:
                     raise ValueError("STEP file contains no bodies")
                 first_body_name, first_body_mesh = next(
@@ -772,7 +1042,7 @@ class PartManager:
             # STEP files load in meters (cascadio's GLB intermediate).
             # Rescale to inches so downstream STL-equivalent units match.
             if ext in _STEP_EXTENSIONS:
-                _scale_step_to_inches(trimesh_obj)
+                _scale_step_to_inches(trimesh_obj, check_path)
 
             # Default name from filename
             if name is None:
@@ -850,8 +1120,9 @@ class PartManager:
         named ``Riser_Sleeve`` is classified as ``RISER``).
 
         Single-body files are handled by registering the lone mesh and
-        returning a one-element list — semantically equivalent to
-        :meth:`load_part` but uniformly returning a list.
+        returning a one-element list. Like :meth:`load_part`, that Part is
+        named and typed from the file stem; ``body_name`` still records the
+        CAD body name, which re-tessellation matches on.
 
         Args:
             filepath: Path to a CAD assembly file. ``.step``/``.stp``
@@ -902,28 +1173,14 @@ class PartManager:
                 if ext in _STEP_EXTENSIONS
                 else None
             )
-            if tol_linear is None:
-                scene = trimesh.load(filepath, force="scene")
-            else:
-                scene = trimesh.load(filepath, force="scene", tol_linear=tol_linear)
-
-            if not isinstance(scene, trimesh.Scene):
-                # Defensive: if trimesh ever returns a bare Trimesh
-                # despite force="scene", wrap it.
-                scene = trimesh.Scene(geometry={"Body_1": scene})
+            scene = _load_cad_scene(filepath, tol_linear)
 
             if not scene.geometry:
                 raise ValueError("Assembly contains no bodies")
 
-            # STEP assemblies come back from cascadio in meters. Rescale
-            # the whole scene once so every body's vertices are in
-            # inches — matches STLLoader and the rest of the pipeline.
-            ext = os.path.splitext(filepath)[1].lower()
-            if ext in _STEP_EXTENSIONS:
-                _scale_step_to_inches(scene)
-
             part_ids: List[str] = []
             base_prefix = name_prefix or os.path.splitext(os.path.basename(filepath))[0]
+            single_body = _count_nonempty_bodies(scene) == 1
 
             for body_index, (body_name, body_mesh) in enumerate(scene.geometry.items()):
                 if body_mesh is None or len(body_mesh.faces) == 0:
@@ -933,17 +1190,21 @@ class PartManager:
                     continue
 
                 part_id = str(uuid.uuid4())[:8]
-                # Use CAD body name as the Part name; prefix ensures
-                # uniqueness when multiple assemblies are loaded.
-                part_name = f"{base_prefix}_{body_name}" if name_prefix else body_name
+                # A single-body file is named and typed from its file stem,
+                # like load_part and the web upload; a multi-body file from
+                # each CAD body name. body_name keeps the real CAD name either
+                # way, because that is what re-tessellation matches on.
+                display_name, inferred_type = _default_body_identity(
+                    filepath, body_name, single_body
+                )
+                # Prefix ensures uniqueness when multiple assemblies are loaded.
+                part_name = f"{base_prefix}_{display_name}" if name_prefix else display_name
                 # Make name unique if needed
                 unique_name = part_name
                 counter = 1
                 while any(p.name == unique_name for p in self.parts.values()):
                     unique_name = f"{part_name}_{counter}"
                     counter += 1
-
-                inferred_type = infer_part_type_from_name(body_name)
 
                 part = Part(
                     id=part_id,
@@ -1025,10 +1286,7 @@ class PartManager:
                 )
                 continue
             try:
-                scene = trimesh.load(filepath, force="scene", tol_linear=target)
-                if not isinstance(scene, trimesh.Scene):
-                    scene = trimesh.Scene(geometry={"Body_1": scene})
-                _scale_step_to_inches(scene)
+                scene = _load_cad_scene(filepath, target)
                 bodies = list(scene.geometry.items())
             except Exception:
                 logger.exception(f"Re-tessellation failed for '{filepath}'")
@@ -1063,9 +1321,9 @@ class PartManager:
 
         Matched by CAD body name first, since that is stable across
         tessellation settings. Index is the fallback for parts loaded before
-        the name was recorded; it is only trusted when the body count still
-        agrees, because an index into a differently-sized list is not a match,
-        it is a silent geometry swap.
+        the name was recorded. When a recorded name is no longer in the file
+        the index is still used, but a warning is logged: the CAD may have
+        been edited, and the body at that index may be a different one.
         """
         if part.body_name:
             for name, mesh in bodies:
@@ -1073,8 +1331,226 @@ class PartManager:
                     return mesh
         index = part.body_index
         if index is not None and 0 <= index < len(bodies):
+            if part.body_name:
+                logger.warning(
+                    f"CAD body '{part.body_name}' of part '{part.name}' is no "
+                    f"longer in '{part.filepath}'; using body #{index} "
+                    f"('{bodies[index][0]}') by position instead."
+                )
             return bodies[index][1]
         return None
+
+    def load_step_bodies(
+        self,
+        filepath: str,
+        body_refs: Sequence[Mapping[str, Any]],
+        voxel_size_in: Optional[float] = None,
+    ) -> List[Optional[str]]:
+        """
+        Register saved bodies of one STEP file, loading the file once.
+
+        Used to reopen a project: each ref describes one saved Part from this
+        file, by its optional keys ``body_name``, ``body_index`` and ``name``.
+        A ref is matched to a scene body by ``body_name``, then by
+        ``body_index`` (position in ``scene.geometry``, as recorded by
+        :meth:`load_assembly_parts`). A legacy ref that carries neither is
+        matched by its position in ``body_refs`` among the file's non-empty
+        bodies -- the order :meth:`load_assembly_parts` registered them in --
+        and a warning is logged. Order matching is only used when *no* ref in
+        the group records a body; in a mixed group (e.g. a duplicate made
+        before body provenance existed) a ref with no body gets the first
+        non-empty body, which is what :meth:`load_part` registers.
+
+        Each Part records ``body_name``, ``body_index`` and
+        ``tessellation_tolerance_mm`` so :meth:`retessellate_for_voxel_size`
+        keeps working. Part type is inferred as in
+        :meth:`load_assembly_parts`; callers restoring a saved type set it
+        afterwards.
+
+        Args:
+            filepath: STEP file the bodies come from.
+            body_refs: One mapping per Part to create, in saved order.
+            voxel_size_in: Voxel size to tessellate for. Falls back to
+                :attr:`tessellation_voxel_size_in`.
+
+        Returns:
+            Part IDs aligned with ``body_refs``; None where the file could not
+            be loaded or no body matched.
+        """
+        refs = list(body_refs)
+        result: List[Optional[str]] = [None] * len(refs)
+        if not refs:
+            return result
+        if not os.path.exists(filepath):
+            logger.error(f"STEP file not found: {filepath}")
+            return result
+        if not STEP_SUPPORTED:
+            logger.error(
+                "STEP support requires the 'cascadio' package. "
+                "Install with: pip install cascadio"
+            )
+            return result
+
+        if voxel_size_in is None:
+            voxel_size_in = self.tessellation_voxel_size_in
+        tol_linear = tessellation_tolerance_mm(voxel_size_in)
+        try:
+            scene = _load_cad_scene(filepath, tol_linear)
+        except Exception:
+            logger.exception(f"Failed to load STEP file: {filepath}")
+            return result
+
+        bodies = list(scene.geometry.items())
+        nonempty = [
+            index for index, (_, mesh) in enumerate(bodies)
+            if mesh is not None and len(mesh.faces) > 0
+        ]
+        single_body = len(nonempty) == 1
+        name_to_index = {name: index for index, (name, _) in enumerate(bodies)}
+        used = set()
+        # Saved order only mirrors scene order when every ref in the group is
+        # legacy. One ref with recorded provenance means the group was saved
+        # by this version, so a ref without it did not come from
+        # load_assembly_parts and its position says nothing about its body.
+        all_legacy = all(
+            not ref.get("body_name") and ref.get("body_index") is None
+            for ref in refs
+        )
+
+        legacy_refs = 0
+        for position, ref in enumerate(refs):
+            body_name = ref.get("body_name") or None
+            body_index = ref.get("body_index")
+            index: Optional[int] = None
+            if body_name is not None and body_name in name_to_index:
+                index = name_to_index[body_name]
+            elif body_index is not None and 0 <= int(body_index) < len(bodies):
+                index = int(body_index)
+                if body_name is not None:
+                    logger.warning(
+                        f"CAD body '{body_name}' of saved part '{ref.get('name')}' "
+                        f"is no longer in '{filepath}'; using body #{index} "
+                        f"('{bodies[index][0]}') by position instead."
+                    )
+            elif body_name is None and body_index is None:
+                legacy_refs += 1
+                if all_legacy:
+                    if position < len(nonempty):
+                        index = nonempty[position]
+                elif nonempty:
+                    index = nonempty[0]
+
+            if index is None or index not in nonempty:
+                logger.warning(
+                    f"No body in '{filepath}' matches saved part "
+                    f"'{ref.get('name')}' (body_name={body_name!r}, "
+                    f"body_index={body_index!r}); it was not loaded."
+                )
+                continue
+
+            scene_body_name, mesh = bodies[index]
+            # Two saved parts may reference one body (e.g. a duplicate);
+            # each Part must own its triangles.
+            if index in used:
+                mesh = mesh.copy()
+            used.add(index)
+
+            default_name, inferred_type = _default_body_identity(
+                filepath, scene_body_name, single_body
+            )
+            base_name = ref.get("name") or default_name
+            unique_name = base_name
+            counter = 1
+            while any(p.name == unique_name for p in self.parts.values()):
+                unique_name = f"{base_name}_{counter}"
+                counter += 1
+
+            part_id = str(uuid.uuid4())[:8]
+            part = Part(
+                id=part_id,
+                name=unique_name,
+                filepath=filepath,
+                trimesh_obj=mesh,
+                part_type=inferred_type,
+                color=PART_TYPE_COLORS.get(inferred_type, (0.7, 0.75, 0.8)),
+                body_name=scene_body_name,
+                body_index=index,
+                tessellation_tolerance_mm=tol_linear,
+            )
+            self.parts[part_id] = part
+            self._part_order.append(part_id)
+            result[position] = part_id
+
+        if legacy_refs:
+            how = (
+                "matched to bodies by saved order"
+                if all_legacy
+                else "given the file's first body"
+            )
+            logger.warning(
+                f"{legacy_refs} saved part(s) from '{filepath}' have no recorded "
+                f"CAD body; {how}. Re-save the project to record body names."
+            )
+        return result
+
+    def restore_parts(
+        self,
+        entries: Sequence[Mapping[str, Any]],
+        voxel_size_in: Optional[float] = None,
+    ) -> List[Optional[str]]:
+        """
+        Recreate saved Parts, in saved order, from project part entries.
+
+        Each entry is a saved project part (see ``ui.project_state``) whose
+        ``filepath`` already resolves to an existing file. STEP entries are
+        grouped by file and loaded once per file through
+        :meth:`load_step_bodies`; other formats go through :meth:`load_part`
+        exactly as before. Saved name, part type, position, rotation, scale,
+        color, visibility and ``is_open_top`` are then applied.
+
+        Returns:
+            Part IDs aligned with ``entries``; None where an entry failed.
+        """
+        entries = list(entries)
+        part_ids: List[Optional[str]] = [None] * len(entries)
+        step_groups: Dict[str, List[int]] = {}
+        for position, entry in enumerate(entries):
+            filepath = str(entry["filepath"])
+            if os.path.splitext(filepath)[1].lower() in _STEP_EXTENSIONS:
+                step_groups.setdefault(filepath, []).append(position)
+            else:
+                part_ids[position] = self.load_part(
+                    filepath, name=entry.get("name"), preserve_origin=True
+                )
+
+        for filepath, positions in step_groups.items():
+            loaded = self.load_step_bodies(
+                filepath, [entries[p] for p in positions], voxel_size_in
+            )
+            for position, part_id in zip(positions, loaded):
+                part_ids[position] = part_id
+
+        # STEP groups were loaded after the other files; put every restored
+        # part back in saved order.
+        restored = [part_id for part_id in part_ids if part_id]
+        restored_set = set(restored)
+        self._part_order = [
+            part_id for part_id in self._part_order if part_id not in restored_set
+        ] + restored
+
+        for entry, part_id in zip(entries, part_ids):
+            part = self.parts.get(part_id) if part_id else None
+            if part is None:
+                continue
+            part.set_part_type(part_type_from_value(entry.get("part_type", "cast")))
+            part.set_position(*entry.get("position", (0.0, 0.0, 0.0)))
+            part.set_rotation(*entry.get("rotation", (0.0, 0.0, 0.0)))
+            part.set_scale(float(entry.get("scale", 1.0)))
+            if entry.get("color") is not None:
+                part.color = tuple(entry["color"])
+            part.visible = bool(entry.get("visible", True))
+            part.is_open_top = bool(entry.get("is_open_top", False))
+        return part_ids
 
     def remove_part(self, part_id: str) -> bool:
         """Remove a part by ID"""
@@ -1269,14 +1745,35 @@ class PartManager:
         original = self.get_part(part_id)
         if not original:
             return None
-        
-        # Load new instance
-        new_id = self.load_part(original.filepath, name=f"{original.name}_copy")
-        if not new_id:
-            return None
-        
+
+        # Copy the original's geometry and provenance rather than reloading
+        # the file: reloading a STEP assembly registers its *first* body, not
+        # the one being duplicated, and drops body_name/body_index, which
+        # project reopen and re-tessellation match on.
+        base_name = f"{original.name}_copy"
+        name = base_name
+        counter = 1
+        while any(p.name == name for p in self.parts.values()):
+            name = f"{base_name}_{counter}"
+            counter += 1
+
+        new_id = str(uuid.uuid4())[:8]
+        new_part = Part(
+            id=new_id,
+            name=name,
+            filepath=original.filepath,
+            trimesh_obj=original.trimesh_obj.copy(),
+            part_type=original.part_type,
+            body_name=original.body_name,
+            body_index=original.body_index,
+            tessellation_tolerance_mm=original.tessellation_tolerance_mm,
+            is_open_top=original.is_open_top,
+        )
+        self.parts[new_id] = new_part
+        self._part_order.append(new_id)
+        logger.info(f"Part duplicated: '{original.name}' -> '{name}' (ID: {new_id})")
+
         # Apply same transforms plus offset
-        new_part = self.get_part(new_id)
         new_part.set_position(
             original.position[0] + offset[0],
             original.position[1] + offset[1],

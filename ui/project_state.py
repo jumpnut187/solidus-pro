@@ -66,6 +66,10 @@ def build_project_state(
                 "color": [float(value) for value in part.color],
                 "visible": bool(part.visible),
                 "is_open_top": bool(part.is_open_top),
+                # Which CAD body of a multi-body STEP file this part is.
+                # None for STL parts and for STEP parts loaded via load_part.
+                "body_name": part.body_name,
+                "body_index": part.body_index,
             }
         )
 
@@ -134,6 +138,10 @@ def load_project_state(payload: Dict[str, Any]) -> ProjectState:
                 "color": _normalize_vector(part.get("color"), 3, default=0.7),
                 "visible": bool(part.get("visible", True)),
                 "is_open_top": bool(part.get("is_open_top", False)),
+                # Absent on projects saved before bodies were recorded; the
+                # loader then matches STEP bodies by saved order.
+                "body_name": _normalize_optional_str(part.get("body_name")),
+                "body_index": _normalize_optional_int(part.get("body_index")),
             }
         )
 
@@ -220,6 +228,22 @@ def _normalize_pour_location(value: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(value, dict):
         return None
     return dict(value)
+
+
+def _normalize_optional_str(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value)
+    return text if text else None
+
+
+def _normalize_optional_int(value: Any) -> Optional[int]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_vector(value: Any, expected_len: int, *, default: float) -> List[float]:

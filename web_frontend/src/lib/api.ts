@@ -358,9 +358,11 @@ export const api = {
     requestJson<{ status: string }>(`/api/projects/${projectId}`, { method: 'DELETE' }),
 
   // --- Parts ---------------------------------------------------------------
-  uploadFiles: (files: File[]) => {
+  // voxelSize (inches) sets the server's STEP tessellation tolerance.
+  uploadFiles: (files: File[], voxelSize: number) => {
     const form = new FormData();
     for (const file of files) form.append('files', file);
+    form.append('voxel_size_in', String(voxelSize));
     return requestJson<{ files: UploadedFile[] }>('/api/uploads', { method: 'POST', body: form });
   },
   addPart: async (projectId: string, part: Omit<ProjectPart, 'id'>) => {
