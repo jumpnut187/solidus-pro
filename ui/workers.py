@@ -168,8 +168,9 @@ class SimulationWorker(QThread):
             if use_incremental:
                 perf_flags.append("Incremental")
             perf_text = f" [{', '.join(perf_flags)}]" if perf_flags else ""
-            # None means settings.mesh.mesh_type.
+            # None means settings.mesh.mesh_type / settings.mesh.voxel_cut_cells.
             mesh_type = self.performance_options.get("mesh_type")
+            voxel_cut_cells = self.performance_options.get("voxel_cut_cells")
 
             if self.run_mesh_type() == "tet":
                 self.progress.emit(f"Generating tetrahedral mesh{perf_text}...")
@@ -192,6 +193,7 @@ class SimulationWorker(QThread):
                 solidification_params=self.solidification_params,
                 pour_location=self.pour_location,
                 mesh_type=mesh_type,
+                voxel_cut_cells=None if voxel_cut_cells is None else bool(voxel_cut_cells),
             )
 
             pipeline_start = time.perf_counter()
@@ -361,12 +363,14 @@ class SurrogateWorker(QThread):
         solidification_params: Optional[dict] = None,
         pour_location: Optional[dict] = None,
         mesh_type: Optional[str] = None,
+        voxel_cut_cells: Optional[bool] = None,
     ) -> None:
         super().__init__()
         self.stl_loader = stl_loader
         self.model = model
-        # None means settings.mesh.mesh_type.
+        # None means settings.mesh.mesh_type / settings.mesh.voxel_cut_cells.
         self.mesh_type = mesh_type
+        self.voxel_cut_cells = voxel_cut_cells
         self.alloy_name = alloy_name
         self.voxel_size = voxel_size
         self.refinement_level = refinement_level
@@ -418,6 +422,7 @@ class SurrogateWorker(QThread):
                 solidification_params=self.solidification_params,
                 pour_location=self.pour_location,
                 mesh_type=self.mesh_type,
+                voxel_cut_cells=self.voxel_cut_cells,
             )
             result = run_surrogate_pipeline(
                 inputs,

@@ -107,6 +107,7 @@ class PipelineInputs:
         thread_budget_provider: Optional[ThreadBudgetProvider] = None,
         pour_location: Optional[Dict[str, Any]] = None,
         mesh_type: Optional[str] = None,
+        voxel_cut_cells: Optional[bool] = None,
     ) -> None:
         self.alloy_name = alloy_name
         self.voxel_size = voxel_size
@@ -127,6 +128,9 @@ class PipelineInputs:
         self.pour_location = pour_location
         # "voxel" or "tet"; None uses settings.mesh.mesh_type.
         self.mesh_type = mesh_type
+        # Cut cells on a voxel mesh (core/cut_cells.py), tet fallback included;
+        # None uses settings.mesh.voxel_cut_cells.
+        self.voxel_cut_cells = voxel_cut_cells
 
 
 class PipelineResult:
@@ -191,6 +195,18 @@ def resolve_mesh_type(inputs: PipelineInputs, mesh_settings: Optional[MeshSettin
             expected=" or ".join(MESH_TYPES),
         )
     return mesh_type
+
+
+def resolve_voxel_cut_cells(inputs: PipelineInputs, mesh_settings: Optional[MeshSettings] = None) -> bool:
+    """Cut cells for a voxel mesh of this run: ``inputs.voxel_cut_cells`` when set, else the setting.
+
+    A settings object without the field (written before it existed) means off.
+    """
+    requested = getattr(inputs, "voxel_cut_cells", None)
+    if requested is not None:
+        return bool(requested)
+    settings_mesh = mesh_settings if mesh_settings is not None else get_settings().mesh
+    return bool(getattr(settings_mesh, "voxel_cut_cells", False))
 
 
 def _tet_size_terms(parts: Sequence[Tuple[Any, int]]) -> Tuple[float, float]:
@@ -851,6 +867,7 @@ def prepare_mesh_and_geometry(
         part_assignment_mode=inputs.part_assignment_mode,
         part_assignment_workers=inputs.part_assignment_workers,
         part_assignment_batch_size=inputs.part_assignment_batch_size,
+        voxel_cut_cells=resolve_voxel_cut_cells(inputs, mesh_settings),
     )
 
     def on_mesh_progress(current: int, total: int, stage: str) -> None:

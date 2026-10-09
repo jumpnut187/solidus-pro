@@ -87,7 +87,7 @@ class MeshSettings:
     tet_auto_fallback: bool = True           # a failed, slow or oversized tet mesh falls back to voxel
     tet_mesh_timeout_s: float = 600.0        # fTetWild wall-time limit when tet_auto_fallback is on
     tet_auto_max_nodes: int = 300_000        # skip tet (fall back) above this estimated node count
-    voxel_cut_cells: bool = False            # FAVOR-style cut cells on the voxel grid
+    voxel_cut_cells: bool = True             # FAVOR-style cut cells on the voxel grid (core/cut_cells.py)
     
     def __post_init__(self) -> None:
         """Validate mesh settings"""
@@ -145,7 +145,7 @@ class MeshSettings:
         self.tet_max_nodes = max_nodes
 
         self.tet_auto_fallback = _coerce_bool(self.tet_auto_fallback, "tet_auto_fallback", True)
-        self.voxel_cut_cells = _coerce_bool(self.voxel_cut_cells, "voxel_cut_cells", False)
+        self.voxel_cut_cells = _coerce_bool(self.voxel_cut_cells, "voxel_cut_cells", True)
 
         try:
             timeout_s = float(self.tet_mesh_timeout_s)
@@ -816,7 +816,7 @@ mesh:
   tet_auto_fallback: true          # failed, slow or oversized tet mesh -> voxel run
   tet_mesh_timeout_s: 600.0        # fTetWild wall-time limit (s) when auto fallback is on
   tet_auto_max_nodes: 300000       # fall back to voxel above this estimated tet node count
-  voxel_cut_cells: false           # FAVOR-style cut cells on the voxel grid
+  voxel_cut_cells: true            # CAD metal fraction + mold-contact area per voxel (false = plain voxels)
 
 simulation:
   default_alloy: WCB
@@ -890,7 +890,7 @@ tet_max_nodes = 3000000
 tet_auto_fallback = true
 tet_mesh_timeout_s = 600.0
 tet_auto_max_nodes = 300000
-voxel_cut_cells = false
+voxel_cut_cells = true
 
 [simulation]
 default_alloy = "WCB"

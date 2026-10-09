@@ -83,6 +83,10 @@ Covers all seven alloys: WCB, CF8, C958, C964, CA6NM, MONEL400 and IN625.
      - Tetrahedral follows the CAD surface and solves heat flow with finite elements; the size field becomes "Mesh size" (tet edge length = mesh size x `mesh.tet_edge_length_factor`, 2.0)
      - Default from `mesh.mesh_type` in `castsim.yaml` or `CASTSIM_MESH_TYPE`; set `tet` to make tet the default
      - A tet run that is too large (`mesh.tet_auto_max_nodes`, 300,000 nodes), fails to mesh, or meshes longer than `mesh.tet_mesh_timeout_s` (600 s) finishes on the voxel mesh and says why
+   - Cut cells (CAD-accurate boundary): on (default)
+     - Voxel runs use the CAD metal volume and mold-contact area in each boundary voxel
+     - At 0.1 in, total solidification time within about 1 % of a fine tet reference (plain voxels: +2 to +17 %)
+     - Turn off, or set `mesh.voxel_cut_cells: false` / `CASTSIM_VOXEL_CUT_CELLS=0`, to reproduce older voxel results
    - Base Voxel Size: 0.1 in (default)
      - Smaller = more accurate, slower
      - Larger = faster, less accurate

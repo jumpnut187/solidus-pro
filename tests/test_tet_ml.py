@@ -313,7 +313,7 @@ class TetCaptureTests(unittest.TestCase):
             capture_run(self.voxel_result.engine, voxel_size=EDGE_LENGTH_IN, resolution=RESOLUTION, out_dir=tmp)
             with open(os.path.join(tmp, INDEX_FILENAME), newline="") as fh:
                 header = next(csv.reader(fh))
-            self.assertEqual(header[-1], "mesh_type")
+            self.assertEqual(header[-2:], ["mesh_type", "cut_cells"])
             self.assertEqual(header[:6], ["sample_id", "timestamp", "alloy", "voxel_count", "resolution", "path"])
 
     def test_surrogate_pipeline_on_tet_returns_node_schedule(self) -> None:

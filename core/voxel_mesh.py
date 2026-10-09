@@ -674,7 +674,8 @@ class AdaptiveVoxelMesh:
                  use_chunked_voxelization: bool = False,
                  part_assignment_mode: str = "auto",
                  part_assignment_workers: int = 0,
-                 part_assignment_batch_size: int = 2500):
+                 part_assignment_batch_size: int = 2500,
+                 voxel_cut_cells: Optional[bool] = None):
         """
         Args:
             base_voxel_size: Base voxel size in inches
@@ -685,6 +686,8 @@ class AdaptiveVoxelMesh:
             part_assignment_mode: "auto", "parallel", or "legacy"
             part_assignment_workers: Worker count for parallel part assignment (0 = auto)
             part_assignment_batch_size: Candidate points per containment batch
+            voxel_cut_cells: Cut cells on or off for this mesh; None reads
+                ``settings.mesh.voxel_cut_cells`` in generate()
         """
         self.base_voxel_size = base_voxel_size
         self.original_voxel_size = base_voxel_size  # Track if we had to adjust
@@ -723,9 +726,11 @@ class AdaptiveVoxelMesh:
         # Bounding boxes of metal parts (CAST/RISER/RISER_POST), recorded in
         # assign_part_types; used to detect phantom gap-fill voxels.
         self.metal_part_bounds = None
-        # Cut cells (settings.mesh.voxel_cut_cells, read in generate()). When
-        # on, voxel_volumes = phi * size^3 and voxel_surface_areas = exterior
-        # CAD area inside the cell; see core/cut_cells.py.
+        # Cut cells (``voxel_cut_cells``, else settings.mesh.voxel_cut_cells
+        # read in generate()). When on, voxel_volumes = phi * size^3 and
+        # voxel_surface_areas = exterior CAD area inside the cell; see
+        # core/cut_cells.py.
+        self._voxel_cut_cells_requested = voxel_cut_cells
         self.cut_cells = False
         self.voxel_metal_fractions = None
         self._cut_cell_part_counts = None
@@ -875,7 +880,9 @@ class AdaptiveVoxelMesh:
         refined_voxels = initial_voxels  # No refinement to save memory
 
         cut_geometry = None
-        if _cut_cells_enabled() and len(refined_voxels) > 0:
+        requested_cut_cells = getattr(self, "_voxel_cut_cells_requested", None)
+        use_cut_cells = _cut_cells_enabled() if requested_cut_cells is None else bool(requested_cut_cells)
+        if use_cut_cells and len(refined_voxels) > 0:
             if progress_callback:
                 progress_callback(0, 100, 'cut_cells')
             cut_geometry = self._compute_cut_cells(refined_voxels, trimesh_obj, part_meshes)
@@ -951,7 +958,7 @@ class AdaptiveVoxelMesh:
         geometry = compute_cut_cell_geometry(centers, float(self.base_voxel_size), meshes)
         self._cut_cell_part_meshes = meshes
         print(
-            f"  Cut cells: {geometry.n_input:,} voxelized, {geometry.n_added:,} added, "
+            f"  Cut cells: {geometry.n_input:,} voxelized, {geometry.n_duplicates:,} duplicates, {geometry.n_added:,} added, "
             f"{geometry.n_dropped:,} dropped, {int(np.count_nonzero(geometry.sampled)):,} sampled "
             f"({geometry.timings.get('total_s', 0.0):.1f} s)"
         )
@@ -971,6 +978,7 @@ class AdaptiveVoxelMesh:
         self.cut_cells = True
         self.cut_cell_stats = {
             "input_voxels": geometry.n_input,
+            "duplicate_voxels": geometry.n_duplicates,
             "added_voxels": geometry.n_added,
             "dropped_voxels": geometry.n_dropped,
             "sampled_voxels": int(np.count_nonzero(geometry.sampled)),

@@ -127,6 +127,68 @@ class MetalFractionTest(unittest.TestCase):
         self.assertAlmostEqual(float(np.sum(geometry.metal_fractions, dtype=np.float64)) * 1e-3, 21.0, delta=0.05)
         self.assertAlmostEqual(float(np.sum(geometry.surface_areas, dtype=np.float64)), 54.0, delta=0.1)
 
+    def test_clearance_gap_between_parts_is_not_mold_contact(self) -> None:
+        # review_cut_cells.md P2: a 0.01 in CAD gap at 0.1 in is bridged by
+        # lattice conduction, so its two faces must not also lose heat to sand.
+        a = trimesh.creation.box(bounds=[[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]])
+        b = trimesh.creation.box(bounds=[[1.01, 0.0, 0.0], [2.01, 1.0, 1.0]])
+        geometry = compute_cut_cell_geometry(_lattice_centers([a, b], 0.1), 0.1, [a, b])
+        self.assertAlmostEqual(float(np.sum(geometry.surface_areas, dtype=np.float64)), 10.0, delta=0.05)
+        self.assertAlmostEqual(float(np.sum(geometry.metal_fractions, dtype=np.float64)) * 1e-3, 2.0, delta=0.01)
+
+    def test_part_with_an_open_piece_stays_one_unit(self) -> None:
+        # review_cut_cells.md P2: an open piece's volume depends on the origin,
+        # so it must not be split off and tested alone.
+        # A sphere with its cap cut off: Trimesh.split's repair cannot close the
+        # hole (it does close a missing box face), and the volume is > 0.
+        closed = trimesh.creation.box(bounds=[[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]])
+        open_cap = trimesh.creation.icosphere(subdivisions=2, radius=0.5)
+        open_cap.apply_translation((3.0, 3.0, 3.0))
+        open_cap.update_faces(open_cap.triangles_center[:, 2] < 3.2)
+        open_cap.remove_unreferenced_vertices()
+        self.assertFalse(open_cap.is_watertight)
+        self.assertGreater(open_cap.volume, 0.0)  # the pre-fix split rule would accept it
+        units, owner = cut_cells.split_into_bodies([trimesh.util.concatenate([closed, open_cap])])
+        self.assertEqual(len(units), 1)
+        np.testing.assert_array_equal(owner, [0])
+        two_closed = trimesh.util.concatenate([closed, trimesh.creation.box(bounds=[[2.0, 2.0, 2.0], [3.0, 3.0, 3.0]])])
+        self.assertEqual(len(cut_cells.split_into_bodies([two_closed])[0]), 2)
+        # One missing triangle: split's repair closes it, so the part is used closed
+        # whether it arrives alone or inside an assembly mesh
+        # (tests/test_voxel_sealed_pockets.py::test_open_part_keeps_the_fill).
+        holed = trimesh.creation.box(bounds=[[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]])
+        holed.update_faces(np.arange(len(holed.faces)) != 0)
+        self.assertFalse(holed.is_watertight)
+        units, _ = cut_cells.split_into_bodies([holed])
+        self.assertEqual(len(units), 1)
+        self.assertTrue(units[0].is_watertight)
+
+    def test_open_mesh_containment_stays_on_the_winding_number(self) -> None:
+        # review_cut_cells.md P2: above WINDING_NUMBER_MAX_PAIRS the winding
+        # number fell back to the ray test; contains() now chunks the points.
+        import core.tet_mesh as tet_mesh
+
+        open_box = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+        open_box.update_faces(open_box.face_normals[:, 2] < 0.5)  # drop the top face
+        self.assertFalse(open_box.is_watertight)
+        points = np.random.default_rng(5).uniform(-0.8, 0.8, (500, 3))
+        expected = tet_mesh.winding_number_contains(open_box, points)
+        cap = 30 * len(open_box.faces)
+        calls = []
+        original = tet_mesh.winding_number_contains
+
+        def spy(mesh, query, **kwargs):
+            calls.append(len(query))
+            return original(mesh, query, **kwargs)
+
+        with mock.patch.object(tet_mesh, "WINDING_NUMBER_MAX_PAIRS", cap), \
+                mock.patch.object(tet_mesh, "winding_number_contains", spy), \
+                self.assertNoLogs(tet_mesh.logger, level="WARNING"):
+            actual = cut_cells.contains(open_box, points)
+        np.testing.assert_array_equal(actual, expected)
+        self.assertGreater(len(calls), 1)
+        self.assertTrue(all(n * len(open_box.faces) <= cap for n in calls))
+
     def test_dominant_part_code_breaks_ties_toward_the_higher_code(self) -> None:
         counts = np.array([[10, 5, 0], [8, 8, 0], [0, 0, 0], [0, 3, 9]], dtype=np.uint16)
         codes = dominant_part_codes(counts, [0, 1, 2])
@@ -484,6 +546,17 @@ class VoxelMeshCutCellTest(unittest.TestCase):
         self.assertLess(abs(float(np.sum(cut.voxel_volumes, dtype=np.float64)) / cad - 1.0), 0.005)
         self.assertGreater(cut.cut_cell_stats["added_voxels"], 0)
 
+    def test_chunked_path_off_pitch_extent_has_no_duplicate_cells(self) -> None:
+        # Padded extent 5.13 in at 0.1 in: 52 chunked centres per axis spaced
+        # 0.0986 in, so from k ~ 37 two centres round to one lattice cell.
+        box = trimesh.creation.box(extents=(5.03, 5.03, 5.03))
+        cad = box.volume
+        cut = _generate([box], 0.1, cut=True, chunked=True)  # 52^3 candidates: chunked
+        centers = np.asarray(cut.voxel_centers, dtype=np.float64)
+        self.assertGreater(cut.cut_cell_stats["duplicate_voxels"], 0)
+        self.assertEqual(len(np.unique(np.rint(centers / 0.1).astype(np.int64), axis=0)), len(centers))
+        self.assertLess(abs(float(np.sum(cut.voxel_volumes, dtype=np.float64)) / cad - 1.0), 0.002)
+
 
 class EngineVolumeShareTest(unittest.TestCase):
     def test_shrinkage_percentage_is_volume_weighted_with_cut_cells(self) -> None:
@@ -536,6 +609,274 @@ class FlagOffTest(unittest.TestCase):
         self.assertFalse(result.voxel_mesh.cut_cells)
         self.assertTrue(np.all(np.isfinite(np.asarray(result.engine.solidification_times)[
             np.asarray(result.voxel_mesh.voxel_part_types) != 2])))
+
+
+class _MeshSettingsWithoutCutCellFlag:
+    """``settings.mesh`` as it was before the flag existed: ``voxel_cut_cells`` raises AttributeError."""
+
+    def __init__(self, inner) -> None:
+        object.__setattr__(self, "_inner", inner)
+
+    def __getattr__(self, name: str):
+        if name == "voxel_cut_cells":
+            raise AttributeError(name)
+        return getattr(self._inner, name)
+
+
+def _output_arrays(engine) -> dict:
+    """Every ndarray the engine, its mesh and its heat model hold (dict values one level down)."""
+    out = {}
+    sources = {"engine": engine, "mesh": engine.mesh, "heat": getattr(engine, "_thermal_heat_model", None)}
+    for prefix, obj in sources.items():
+        if obj is None:
+            continue
+        for name, value in vars(obj).items():
+            if isinstance(value, np.ndarray):
+                out[f"{prefix}.{name}"] = value
+            elif isinstance(value, dict):
+                for key, item in value.items():
+                    if isinstance(item, np.ndarray):
+                        out[f"{prefix}.{name}[{key!r}]"] = item
+    return out
+
+
+class FlagOffBitIdentityTest(unittest.TestCase):
+    def test_flag_off_matches_a_run_without_the_flag_bit_for_bit(self) -> None:
+        """tests/test_simulation_scenarios.py cast + chill + riser, flag False vs no flag attribute."""
+        from tests.test_simulation_scenarios import (
+            _cast_with_chill_and_riser_manager,
+            _run_pipeline_with_patched_memory,
+        )
+
+        settings = get_settings()
+        absent = _MeshSettingsWithoutCutCellFlag(settings.mesh)
+        self.assertFalse(hasattr(absent, "voxel_cut_cells"))
+        with mock.patch.object(settings.mesh, "voxel_cut_cells", False), \
+                contextlib.redirect_stdout(io.StringIO()):
+            off = _output_arrays(_run_pipeline_with_patched_memory(_cast_with_chill_and_riser_manager()))
+        with mock.patch.object(settings, "mesh", absent), contextlib.redirect_stdout(io.StringIO()):
+            unset = _output_arrays(_run_pipeline_with_patched_memory(_cast_with_chill_and_riser_manager()))
+
+        self.assertEqual(sorted(off), sorted(unset))
+        self.assertIn("engine.solidification_times", off)
+        self.assertIn("heat._temperatures", off)
+        self.assertNotIn("mesh.voxel_metal_fractions", off)
+        for name in off:
+            a, b = off[name], unset[name]
+            self.assertEqual((a.dtype, a.shape), (b.dtype, b.shape), msg=name)
+            if a.dtype == object:
+                self.assertTrue(all(np.array_equal(x, y) for x, y in zip(a.ravel(), b.ravel())), msg=name)
+            else:
+                self.assertEqual(np.ascontiguousarray(a).tobytes(), np.ascontiguousarray(b).tobytes(), msg=name)
+
+
+@unittest.skipUnless(NUMBA, "Numba unavailable")
+class CutCellKernelParityTest(unittest.TestCase):
+    """Cut-cell Numba kernels vs their NumPy references (tests/test_parallel_kernel_parity.py pattern)."""
+
+    def test_update_kernel_matches_numpy_for_truncated_stencils(self) -> None:
+        # 6 slots (faces only), 21 slots (odd corner remainder), 26 slots.
+        rng = np.random.default_rng(17)
+        centers = np.stack(np.meshgrid(*[np.arange(5.0)] * 3, indexing="ij"), -1).reshape(-1, 3) * 0.1
+        full = _canonical_neighbors(centers, 0.1)
+        n = len(centers)
+        for slots in (6, 21, 26):
+            neighbors = np.ascontiguousarray(full[:, :slots])
+            weights = rng.uniform(0.0, 1.2, n)
+            weights[rng.random(n) < 0.1] = 0.0
+            a = heat_transfer.cut_cell_link_apertures(weights)
+            f = heat_transfer.cut_cell_conductance_factors(weights, neighbors, a)
+            args = (rng.uniform(20.0, 1600.0, n), neighbors, rng.uniform(5e-6, 2e-5, n), rng.uniform(1e6, 5e6, n),
+                    weights, f, a, np.full(n, 1.0 / inches_to_meters(0.1) ** 2), rng.uniform(-1.0, 1.0, n), 0.05)
+            np.testing.assert_allclose(
+                heat_transfer.update_heterogeneous_cut_cell_parallel(*args),
+                heat_transfer.update_heterogeneous_cut_cell_numpy(*args), rtol=1e-12, atol=1e-9, err_msg=f"{slots} slots",
+            )
+            rate_args = args[1:8]
+            np.testing.assert_allclose(
+                heat_transfer.cut_cell_conduction_rates_parallel(*rate_args),
+                heat_transfer.cut_cell_conduction_rates_numpy(*rate_args), rtol=1e-12, err_msg=f"{slots} slots",
+            )
+
+    def test_interpolation_kernel_at_breakpoints_and_non_finite(self) -> None:
+        curves = _steel_curves()
+        points = curves["temp_points"]
+        cap = curves["density"] * curves["specific_heat"]
+        T = np.concatenate([points, np.nextafter(points, -np.inf), np.nextafter(points, np.inf),
+                            np.array([np.nan, np.inf, -np.inf])])
+        actual = heat_transfer.interpolate_curve_parallel(T, points, cap)
+        expected = np.interp(T, points, cap)
+        np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=0.0, equal_nan=True)
+
+    def _stepped_model(self, *, use_numba: bool):
+        sphere = trimesh.creation.icosphere(subdivisions=3, radius=0.45)
+        geometry = compute_cut_cell_geometry(_lattice_centers([sphere], 0.1), 0.1, [sphere])
+        neighbors = _canonical_neighbors(geometry.centers.astype(np.float64), 0.1)
+        merged = merge_small_cut_cells(geometry.metal_fractions, geometry.surface_areas, neighbors, None, 0.25)
+        n = len(geometry.centers)
+        with mock.patch.object(heat_transfer, "NUMBA_AVAILABLE", use_numba):
+            model = HeatTransferModel(
+                n, inches_to_meters(0.1), neighbors, _Steel(), use_temperature_dependent=True,
+                property_curves=_steel_curves(), capacity_weights=merged.capacity_weights,
+                boundary_areas=inches_to_meters(inches_to_meters(merged.boundary_areas)),
+                slave_cells=(merged.slaves, merged.masters),
+            )
+            model.add_boundary(np.flatnonzero(merged.boundary_areas > 0), BoundaryType.INTERFACE,
+                               htc=800.0, T_infinity=25.0, time_function=lambda t: 1.0 / (1.0 + t))
+            model.set_initial_temperature(np.random.default_rng(23).uniform(1440.0, 1560.0, n))
+            dts = []
+            for _ in range(40):
+                dt = model.get_stable_timestep()
+                dts.append(dt)
+                model.step(dt)
+            capacity = model.volumetric_heat_capacity()
+        return np.array(model.temperatures, dtype=np.float64), np.array(dts), capacity
+
+    def test_model_dispatch_matches_numpy_fallback(self) -> None:
+        kernel = self._stepped_model(use_numba=True)
+        reference = self._stepped_model(use_numba=False)
+        for name, a, b in zip(("temperatures", "stable dt", "rho_cp"), kernel, reference):
+            np.testing.assert_allclose(a, b, rtol=1e-10, atol=1e-9, err_msg=name)
+
+    def _run_engine(self, *, use_numba: bool) -> dict:
+        import core.solidification_loop as solidification_loop
+        import physics.solidification_physics as solidification_physics
+        from tests.test_thermal_boundary_config import _build_engine
+
+        engine = _build_engine(with_chill=True)
+        mesh = engine.mesh
+        mesh.cut_cells = True
+        mesh.voxel_metal_fractions = np.array([1.0, 0.7, 0.45, 0.15, 1.0, 0.9, 1.0, 1.0], dtype=np.float32)
+        mesh.voxel_surface_areas = np.array([5.0, 3.6, 3.2, 1.2, 4.0, 4.0, 4.0, 5.0], dtype=np.float32)
+        engine.time_step = 0.1
+        engine.max_time = 40.0
+        patches = [
+            mock.patch.object(solidification_physics, "NUMBA_AVAILABLE", use_numba),
+            mock.patch.object(solidification_loop, "ENTHALPY_KERNEL_AVAILABLE", use_numba),
+            mock.patch.object(solidification_loop, "NUMBA_THREADING_AVAILABLE", use_numba),
+            mock.patch.object(heat_transfer, "NUMBA_AVAILABLE", use_numba),
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            engine._initialize_thermal_models(show_progress=False)
+            self.assertIsNotNone(engine._cut_cell_merge)
+            self.assertEqual(engine._cut_cell_merge.slaves.tolist(), [3])
+            solidification_loop._run_thermal_coupled_integration(engine, show_progress=False, progress_callback=None)
+        return {
+            "states": np.asarray(engine.mesh.voxel_states).copy(),
+            "start": np.asarray(engine.solidification_start_times).copy(),
+            "end": np.asarray(engine.solidification_end_times).copy(),
+            "local": np.asarray(engine.local_solidification_time).copy(),
+            "temps": np.asarray(engine._thermal_latest_temperatures).copy(),
+            "time": np.array([engine.time]),
+        }
+
+    def test_thermal_loop_end_to_end_with_cut_cells(self) -> None:
+        """Engine thermal loop with cut cells: kernels vs NumPy (exact inversion included)."""
+        kernel = self._run_engine(use_numba=True)
+        reference = self._run_engine(use_numba=False)
+        self.assertGreater(float(np.max(kernel["states"])), 0.0)
+        for key in kernel:
+            np.testing.assert_allclose(kernel[key], reference[key], rtol=1e-9, atol=1e-9, equal_nan=True,
+                                       err_msg=f"end-to-end mismatch in {key}")
+
+
+class SlaveInitialStateTest(unittest.TestCase):
+    def test_slaved_cell_starts_at_its_masters_temperature(self) -> None:
+        """review_cut_cells.md P2: with a non-uniform initial field the slave starts at the master's T."""
+        import core.solidification_loop as solidification_loop
+        from tests.test_thermal_boundary_config import _build_engine
+
+        engine = _build_engine(with_chill=True)
+        mesh = engine.mesh
+        mesh.cut_cells = True
+        mesh.voxel_metal_fractions = np.array([1.0, 0.7, 0.45, 0.15, 1.0, 0.9, 1.0, 1.0], dtype=np.float32)
+        mesh.voxel_surface_areas = np.array([5.0, 3.6, 3.2, 1.2, 4.0, 4.0, 4.0, 5.0], dtype=np.float32)
+        mesh.get_voxel_count = lambda: 8
+        engine.set_initial_temperature_field(np.linspace(1500.0, 1600.0, 8))
+        engine.time_step = 0.1
+        engine.max_time = 5.0
+        engine._initialize_thermal_models(show_progress=False)
+        merge = engine._cut_cell_merge
+        self.assertEqual((merge.slaves.tolist(), merge.masters.tolist()), ([3], [4]))
+        temperatures = np.asarray(engine._thermal_heat_model.temperatures)
+        self.assertEqual(temperatures[3], temperatures[4])
+        self.assertEqual(engine._thermal_latest_temperatures[3], engine._thermal_latest_temperatures[4])
+        self.assertNotEqual(temperatures[2], temperatures[4])  # the field itself is untouched elsewhere
+        solidification_loop._run_thermal_coupled_integration(engine, show_progress=False, progress_callback=None)
+        # Without the copy, step 1 reports the slave's jump to the master's T as cooling.
+        self.assertEqual(engine._thermal_peak_cooling_rates[3], engine._thermal_peak_cooling_rates[4])
+
+
+def _sphere_manager():
+    from core.part_manager import Part, PartManager, PartType
+
+    manager = PartManager()
+    part = Part(id="sphere", name="sphere", filepath="sphere.stl",
+                trimesh_obj=trimesh.creation.icosphere(subdivisions=3, radius=0.6))
+    part.set_part_type(PartType.CAST)
+    manager.parts["sphere"] = part
+    manager._part_order.append("sphere")
+    return manager
+
+
+def _run_sphere(voxel_cut_cells, setting: bool):
+    import core.simulation_pipeline as sp
+
+    inputs = sp.PipelineInputs("WCB", 0.2, 0, mesh_type="voxel", voxel_cut_cells=voxel_cut_cells,
+                               analysis_options={"shrinkage": True, "hotspot": True, "filling": False})
+    with mock.patch.object(get_settings().mesh, "voxel_cut_cells", setting), contextlib.redirect_stdout(io.StringIO()):
+        return sp.run_pipeline(inputs, part_manager=_sphere_manager())
+
+
+class PipelineInputsCutCellsTest(unittest.TestCase):
+    def test_inputs_override_the_setting_and_none_follows_it(self) -> None:
+        import core.simulation_pipeline as sp
+
+        inputs = sp.PipelineInputs("WCB", 0.2, 0)
+        self.assertIsNone(inputs.voxel_cut_cells)
+        for setting in (False, True):
+            with mock.patch.object(get_settings().mesh, "voxel_cut_cells", setting):
+                self.assertIs(sp.resolve_voxel_cut_cells(inputs), setting)
+                self.assertIs(sp.resolve_voxel_cut_cells(sp.PipelineInputs("WCB", 0.2, 0, voxel_cut_cells=not setting)),
+                              not setting)
+        self.assertTrue(_run_sphere(True, False).voxel_mesh.cut_cells)
+        self.assertFalse(_run_sphere(False, True).voxel_mesh.cut_cells)
+        self.assertTrue(_run_sphere(None, True).voxel_mesh.cut_cells)
+
+
+class SurrogateRecordCutCellsTest(unittest.TestCase):
+    def test_records_and_index_mark_cut_cell_runs(self) -> None:
+        """review_cut_cells.md P2: capture_run writes ``cut_cells`` to the record and the index."""
+        import csv
+        import os
+        import tempfile
+
+        from core.surrogate.dataset import INDEX_FILENAME, capture_run, dataset_summary, load_record
+
+        on = _run_sphere(True, False)
+        off = _run_sphere(False, False)
+        with tempfile.TemporaryDirectory() as tmp:
+            # An index written before the cut_cells column: the value lands as a trailing field.
+            with open(os.path.join(tmp, INDEX_FILENAME), "w", newline="") as fh:
+                fh.write("sample_id,timestamp,alloy,voxel_count,resolution,path,mesh_type\r\n"
+                         "aaaaaaaaaaaa,2026-01-01 00:00:00,WCB,125,16,/old/run_a.npz,voxel\r\n")
+            on_path = capture_run(on.engine, voxel_size=0.2, resolution=16, out_dir=tmp)
+            off_path = capture_run(off.engine, voxel_size=0.2, resolution=16, out_dir=tmp)
+            self.assertIsNotNone(on_path)
+            self.assertIsNotNone(off_path)
+            self.assertTrue(load_record(on_path)["cut_cells"])
+            self.assertFalse(load_record(off_path)["cut_cells"])
+            runs = dataset_summary(tmp)["runs"]
+            self.assertEqual([(r["mesh_type"], r["cut_cells"]) for r in runs],
+                             [("voxel", "0"), ("voxel", "1"), ("voxel", "0")])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            capture_run(on.engine, voxel_size=0.2, resolution=16, out_dir=tmp)
+            with open(os.path.join(tmp, INDEX_FILENAME), newline="") as fh:
+                header = next(csv.reader(fh))
+            self.assertEqual(header[-2:], ["mesh_type", "cut_cells"])
 
 
 if __name__ == "__main__":

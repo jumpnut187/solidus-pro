@@ -7,6 +7,8 @@
    the unchanged voxel response otherwise.
 4. ``MeshDialog`` combo default, label, store/restore; the riser-design tet
    mesh; the verbatim ``MeshGenerationError`` dialog.
+5. The cut-cell option (``performance_options["voxel_cut_cells"]``) takes the
+   same path to ``PipelineInputs.voxel_cut_cells``.
 """
 
 from __future__ import annotations
@@ -474,6 +476,63 @@ class RiserDesignTetTests(unittest.TestCase):
         self.assertIs(kwargs["neighbors"], self.mesh.voxel_neighbors)
         self.assertIs(kwargs["surface_mask"], self.mesh.surface_voxels)
         dialog.deleteLater()
+
+
+class CutCellOptionTests(unittest.TestCase):
+    """``performance_options["voxel_cut_cells"]``: mesh dialog, project file, workers, web inputs."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_dialog_checkbox_follows_settings_store_restore_and_set_values(self) -> None:
+        for default in (True, False):
+            with self.subTest(default=default), patch.object(get_settings().mesh, "voxel_cut_cells", default):
+                dialog = mw.MeshDialog()
+                self.assertEqual(dialog.cut_cells_check.text(), "Cut cells (CAD-accurate boundary)")
+                self.assertIs(dialog.get_voxel_cut_cells(), default)
+                dialog.store_original_values()
+                dialog.set_voxel_cut_cells(not default)
+                dialog.restore_original_values()
+                self.assertIs(dialog.get_voxel_cut_cells(), default)
+                dialog.set_values(0.2, 2, "auto", voxel_cut_cells=not default)
+                self.assertIs(dialog.get_voxel_cut_cells(), not default)
+                dialog.set_values(0.2, 2, "auto")  # None leaves it alone
+                self.assertIs(dialog.get_voxel_cut_cells(), not default)
+                dialog.deleteLater()
+
+    def test_mesh_confirm_stores_the_choice_in_performance_options(self) -> None:
+        host = MagicMock()
+        host._performance_options = {}
+        host.mesh_dialog = mw.MeshDialog()
+        for value in (True, False):
+            host.mesh_dialog.set_voxel_cut_cells(value)
+            mw.MainWindow._on_mesh_settings_confirmed(host, 0.1, 3, "auto")
+            self.assertIs(host._performance_options["voxel_cut_cells"], value)
+        host.mesh_dialog.deleteLater()
+
+    def test_project_round_trip_keeps_bools_and_drops_other_values(self) -> None:
+        for value in (True, False):
+            loaded = load_project_state(_project_payload({"voxel_cut_cells": value})).to_dict()
+            self.assertIs(loaded["simulation"]["performance_options"]["voxel_cut_cells"], value)
+        loaded = load_project_state(_project_payload({"voxel_cut_cells": "maybe", "use_gpu": True})).to_dict()
+        self.assertNotIn("voxel_cut_cells", loaded["simulation"]["performance_options"])
+        loaded = load_project_state(_project_payload({"use_gpu": True})).to_dict()
+        self.assertNotIn("voxel_cut_cells", loaded["simulation"]["performance_options"])
+
+    def test_workers_and_web_inputs_pass_the_choice(self) -> None:
+        capture = PipelineInputsMeshTypeTests._captured_inputs
+        for value in (True, False):
+            worker = SimulationWorker(MagicMock(), "WCB", 0.2, 3, performance_options={"voxel_cut_cells": value})
+            self.assertIs(capture(self, worker).voxel_cut_cells, value)
+            worker = SurrogateWorker(MagicMock(), MagicMock(), "WCB", 0.2, 3, voxel_cut_cells=value)
+            self.assertIs(capture(self, worker).voxel_cut_cells, value)
+            inputs = build_pipeline_inputs({"alloy": "WCB", "performance_options": {"voxel_cut_cells": value}})
+            self.assertIs(inputs.voxel_cut_cells, value)
+        # Absent means settings.mesh.voxel_cut_cells.
+        self.assertIsNone(capture(self, SimulationWorker(MagicMock(), "WCB", 0.2, 3)).voxel_cut_cells)
+        self.assertIsNone(capture(self, SurrogateWorker(MagicMock(), MagicMock(), "WCB", 0.2, 3)).voxel_cut_cells)
+        self.assertIsNone(build_pipeline_inputs({"alloy": "WCB"}).voxel_cut_cells)
 
 
 if __name__ == "__main__":

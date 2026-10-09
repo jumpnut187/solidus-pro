@@ -1013,9 +1013,11 @@ def _run_thermal_coupled_integration(
         beta = l_vol / rho_cp  # K of recalescence per unit fraction solid
 
         if cut_cell_mode:
-            # Cut cells: exact inversion with beta_i = L_vol / rho_cp_i(T_post),
-            # the capacity the heat step used (rho(T)*cp(T) on curve runs).
-            # phi scales latent and sensible capacity alike, so it cancels.
+            # Cut cells: exact inversion with beta_i = L_vol / rho_cp_i(T_post)
+            # (rho(T)*cp(T) on curve runs). The heat step used rho_cp at the
+            # pre-step temperature; the lag is O(dt) (tests/test_cut_cells.py
+            # LatentHeatTest). phi scales latent and sensible capacity alike,
+            # so it cancels.
             beta_cells = l_vol / heat_model.volumetric_heat_capacity(T_post)
             if NUMBA_THREADING_AVAILABLE:
                 _invert_enthalpy_kernel(T_post, fs_prev, T_final, T_liq, T_sol, beta_cells)

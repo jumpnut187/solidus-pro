@@ -125,6 +125,10 @@ def build_pipeline_inputs(
         pour_location=sim_data.get("pour_location"),
         # None (absent) means settings.mesh.mesh_type.
         mesh_type=performance.get("mesh_type"),
+        # None (absent) means settings.mesh.voxel_cut_cells.
+        voxel_cut_cells=(
+            None if performance.get("voxel_cut_cells") is None else bool(performance.get("voxel_cut_cells"))
+        ),
     )
 
 

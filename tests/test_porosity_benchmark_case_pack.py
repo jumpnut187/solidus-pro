@@ -70,7 +70,8 @@ class PorosityBenchmarkCasePackTests(unittest.TestCase):
         for case in case_pack["cases"]:
             builder_name = case["builder"]
             self.assertIn(builder_name, CASE_BUILDERS)
-            engine = _run_pipeline_with_patched_memory(CASE_BUILDERS[builder_name]())
+            # Plain voxels: the case-pack thresholds and reference targets were calibrated on old-voxel results.
+            engine = _run_pipeline_with_patched_memory(CASE_BUILDERS[builder_name](), voxel_cut_cells=False)
             metrics[case["id"]] = _collect_case_metrics(engine)
         return metrics
 

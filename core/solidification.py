@@ -529,6 +529,12 @@ class SolidificationEngine:
         # what the metal did, so this override applies in both cases.
         if len(chill_indices) > 0:
             initial_temperatures[chill_indices] = chill_temperature
+        # Cut cells: a slaved cell starts at its master's temperature, as it is
+        # after every step. fs starts at 0 (1 for chills, and a slave shares its
+        # master's part code), so the two then invert identically.
+        cut_cell_merge = getattr(self, "_cut_cell_merge", None)
+        if cut_cell_merge is not None and len(cut_cell_merge.slaves) > 0:
+            initial_temperatures[cut_cell_merge.slaves] = initial_temperatures[cut_cell_merge.masters]
         return initial_temperatures
 
     def _preset_chill_solid_state(self, chill_indices: np.ndarray) -> None:

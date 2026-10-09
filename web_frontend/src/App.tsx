@@ -57,6 +57,7 @@ import {
   meshTypeOf,
   performanceDefaults,
   tetEdgeFactorOf,
+  voxelCutCellsOf,
   projectNameFromFile,
   saveStoredSettings
 } from './lib/defaults';
@@ -1194,7 +1195,11 @@ export function App() {
                 voxel_size: meshDefaults.voxelSize,
                 refinement_level: meshDefaults.refinement,
                 memory_mode: 'auto',
-                performance_options: { ...current.performance_options, mesh_type: performanceDefaults.mesh_type }
+                performance_options: {
+                  ...current.performance_options,
+                  mesh_type: performanceDefaults.mesh_type,
+                  voxel_cut_cells: performanceDefaults.voxel_cut_cells
+                }
               }))
             }
             onClose={closePanel}
@@ -1234,10 +1239,14 @@ export function App() {
               }))
             }
             onReset={() =>
-              // mesh_type belongs to the Mesh panel; its reset is there.
+              // mesh_type and voxel_cut_cells belong to the Mesh panel; their reset is there.
               setSettings((current) => ({
                 ...current,
-                performance_options: { ...performanceDefaults, mesh_type: meshTypeOf(current.performance_options) }
+                performance_options: {
+                  ...performanceDefaults,
+                  mesh_type: meshTypeOf(current.performance_options),
+                  voxel_cut_cells: voxelCutCellsOf(current.performance_options)
+                }
               }))
             }
             onClose={closePanel}

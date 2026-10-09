@@ -20,6 +20,7 @@ main.py (desktop)                    run_web.py -> web/app_factory.py
                             |
     prepare_mesh_and_geometry()  -- resolve_mesh_type(inputs) --
          voxel: core/voxel_mesh.py  AdaptiveVoxelMesh
+                + core/cut_cells.py (phi, A; resolve_voxel_cut_cells)
          tet:   core/tet_mesh.py    build_tet_mesh -> TetVolumeMesh
                 (too large / failed / timed out -> voxel, reason recorded)
     create_analysis_options()    ->  AnalysisOptions
@@ -118,6 +119,51 @@ gravity 9.81 m/s²). Use `physics.units`; never add another bare `0.0254`.
 - `voxel_states` — fraction solid. Physics state living on the mesh object.
 - `voxel_part_types` — int32 codes, see below.
 - `surface_voxels` — bool mask.
+
+### Voxel cut cells
+
+`settings.mesh.voxel_cut_cells` (default True; `PipelineInputs.voxel_cut_cells`
+overrides through `resolve_voxel_cut_cells`; both UIs send
+`performance_options.voxel_cut_cells`) adds CAD geometry to each voxel:
+
+| what | where | meaning |
+|---|---|---|
+| phi | `mesh.voxel_metal_fractions` | metal fraction of the cell, (0, 1]; `voxel_volumes = phi * h^3` |
+| A | `mesh.voxel_surface_areas` | exterior CAD area in the cell (in^2), mold contact only |
+| flag | `mesh.cut_cells`, `mesh.cut_cell_stats` | on, and the added/dropped/sampled counts |
+| merge | `engine._cut_cell_merge` (`CutCellMerge`) | capacity weights, merged areas, slave/master pairs |
+
+- `core/cut_cells.py::compute_cut_cell_geometry` runs in
+  `AdaptiveVoxelMesh.generate` after either voxelizer. It adds cells the CAD
+  surface passes through, flood-fills interior holes, drops cells with
+  phi = 0 and removes duplicate lattice keys. Each STL is split into closed
+  bodies (open pieces keep the part whole). A surface sample whose outward
+  probe (half a pitch) lands in another part is an interface, not mold area.
+- Boundary cells take the part code holding most of their sampled metal;
+  ties go to the higher code.
+- Small-cell rule: `merge_small_cut_cells` slaves a cell with phi < 0.25 to
+  its fullest same-code neighbour (faces, then edges and corners). The master
+  takes the slave's phi and A; the slave has capacity 0 and copies the
+  master's temperature after every step and at t = 0. A cell with no master
+  stays unmerged; the conductance cap keeps it stable.
+- `HeatTransferModel` takes `capacity_weights`, `boundary_areas` and
+  `slave_cells` (all None when off): capacity `rho(T)*cp(T) * w * h^3`, links
+  scaled so no cell exceeds the full-cell rate, Robin flux through
+  `A / (w * h^3)`. The thermal loop uses the exact enthalpy inversion.
+- Flag off is the pre-cut-cell voxel path bit for bit.
+
+**Flag-off totals hide cancelling errors.** Plain voxels overstate metal
+volume (+13 to +44 % at 0.1-0.2 in) and approximate mold area by one face per
+surface cell, while the old voxel physics loses heat: the capped enthalpy
+correction discards about 7 % of the latent heat and constant `rho_l*cp`
+loses about 3.5 % of sensible heat. With the geometry fixed and the old
+physics, cut cells ran 7-11 % fast at 0.1 in; with both fixed they are within
+1 % of a 0.05 in tet reference. A flag-off total time can sit near the
+reference while the field is off (l_bracket at 0.1 in: +14.2 % total, 16 %
+field error). Calibrations tuned on flag-off totals (shrinkage thresholds,
+porosity case packs, surrogate data) absorbed these errors; surrogate records
+carry `cut_cells` to keep the two apart. Measurements:
+`docs/tet_migration/cut_cells_integration.md`.
 
 ### Mesh object contract
 

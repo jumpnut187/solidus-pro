@@ -282,14 +282,14 @@ class FallbackSettingsTests(unittest.TestCase):
         self.assertIs(mesh.tet_auto_fallback, True)
         self.assertEqual(mesh.tet_mesh_timeout_s, 600.0)
         self.assertEqual(mesh.tet_auto_max_nodes, 300_000)
-        self.assertIs(mesh.voxel_cut_cells, False)
+        self.assertIs(mesh.voxel_cut_cells, True)
 
     def test_environment_overrides(self) -> None:
         env = {
             "CASTSIM_TET_AUTO_FALLBACK": "false",
             "CASTSIM_TET_MESH_TIMEOUT_S": "90",
             "CASTSIM_TET_AUTO_MAX_NODES": "1234",
-            "CASTSIM_VOXEL_CUT_CELLS": "1",
+            "CASTSIM_VOXEL_CUT_CELLS": "0",
         }
         settings = Settings()
         with mock.patch.dict(os.environ, env):
@@ -297,7 +297,7 @@ class FallbackSettingsTests(unittest.TestCase):
         self.assertIs(settings.mesh.tet_auto_fallback, False)
         self.assertEqual(settings.mesh.tet_mesh_timeout_s, 90.0)
         self.assertEqual(settings.mesh.tet_auto_max_nodes, 1234)
-        self.assertIs(settings.mesh.voxel_cut_cells, True)
+        self.assertIs(settings.mesh.voxel_cut_cells, False)
         for name in env:
             self.assertIn(name, settings._env_vars_applied)
 
@@ -317,10 +317,10 @@ class FallbackSettingsTests(unittest.TestCase):
 
     def test_config_file_strings_are_read_as_booleans(self) -> None:
         settings = Settings()
-        settings._apply_config_dict({"mesh": {"tet_auto_fallback": "no", "voxel_cut_cells": "yes"}})
+        settings._apply_config_dict({"mesh": {"tet_auto_fallback": "no", "voxel_cut_cells": "off"}})
         settings.mesh.normalize_tet_fields()
         self.assertIs(settings.mesh.tet_auto_fallback, False)
-        self.assertIs(settings.mesh.voxel_cut_cells, True)
+        self.assertIs(settings.mesh.voxel_cut_cells, False)
 
     def test_templates_carry_the_new_fields_at_their_defaults(self) -> None:
         defaults = MeshSettings()

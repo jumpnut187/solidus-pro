@@ -435,6 +435,18 @@ class MeshDialog(DraggableDialog):
         )
         self.content_layout.addWidget(self.mesh_type_combo)
 
+        # Cut cells (PipelineInputs.voxel_cut_cells). Applies to voxel meshes,
+        # including the voxel mesh a tet run falls back to.
+        self.cut_cells_check = QCheckBox("Cut cells (CAD-accurate boundary)")
+        self.cut_cells_check.setToolTip(
+            "Voxel mesh only. Each boundary voxel carries the metal fraction and the\n"
+            "mold-contact area of the CAD inside it, so metal volume and cooling\n"
+            "surface match the CAD instead of the voxel staircase.\n"
+            "Measured at 0.1 in: total solidification time within about 1 % of a\n"
+            "fine tet reference (plain voxels: up to +17 %)."
+        )
+        self.content_layout.addWidget(self.cut_cells_check)
+
         # Voxel size (tet edge length = this * settings.mesh.tet_edge_length_factor)
         self.voxel_size_label = QLabel(self.VOXEL_SIZE_LABEL)
         self.content_layout.addWidget(self.voxel_size_label)
@@ -488,6 +500,7 @@ class MeshDialog(DraggableDialog):
         self.mesh_type_combo.currentIndexChanged.connect(self._update_size_label)
         self.voxel_size_spin.valueChanged.connect(self._update_size_label)
         self.set_mesh_type(get_settings().mesh.mesh_type)
+        self.set_voxel_cut_cells(bool(getattr(get_settings().mesh, "voxel_cut_cells", False)))
 
     def _update_size_label(self, *_args):
         """Name the size control for the selected mesh type; on tet show the effective edge length."""
@@ -505,6 +518,7 @@ class MeshDialog(DraggableDialog):
             'refinement': int(self.refinement_spin.value()),
             'memory_mode': self.memory_mode_combo.currentIndex(),
             'mesh_type': self.mesh_type_combo.currentIndex(),
+            'voxel_cut_cells': self.cut_cells_check.isChecked(),
         }
     
     def restore_original_values(self):
@@ -514,6 +528,7 @@ class MeshDialog(DraggableDialog):
             self.refinement_spin.setValue(self._original_values['refinement'])
             self.memory_mode_combo.setCurrentIndex(self._original_values['memory_mode'])
             self.mesh_type_combo.setCurrentIndex(self._original_values['mesh_type'])
+            self.cut_cells_check.setChecked(self._original_values['voxel_cut_cells'])
     
     def apply_values(self):
         """Emit signal with current settings"""
@@ -546,15 +561,24 @@ class MeshDialog(DraggableDialog):
             index = self.mesh_type_combo.findData("voxel")
         self.mesh_type_combo.setCurrentIndex(index)
         self._update_size_label()
+
+    def get_voxel_cut_cells(self) -> bool:
+        """The PipelineInputs.voxel_cut_cells value."""
+        return self.cut_cells_check.isChecked()
+
+    def set_voxel_cut_cells(self, enabled: bool) -> None:
+        self.cut_cells_check.setChecked(bool(enabled))
     
-    def set_values(self, voxel_size, refinement, memory_mode="auto", mesh_type=None):
-        """Set current values. ``mesh_type`` None leaves the mesh type unchanged."""
+    def set_values(self, voxel_size, refinement, memory_mode="auto", mesh_type=None, voxel_cut_cells=None):
+        """Set current values. ``mesh_type`` / ``voxel_cut_cells`` None leave them unchanged."""
         self.voxel_size_spin.setValue(voxel_size)
         self.refinement_spin.setValue(refinement)
         mode_map = {"auto": 0, "ram": 1, "disk": 2}
         self.memory_mode_combo.setCurrentIndex(mode_map.get(memory_mode, 0))
         if mesh_type is not None:
             self.set_mesh_type(mesh_type)
+        if voxel_cut_cells is not None:
+            self.set_voxel_cut_cells(voxel_cut_cells)
 
 
 
@@ -2090,7 +2114,8 @@ class RiserDesignDialog(DraggableDialog):
             # Create voxel mesh
             self._voxel_mesh = AdaptiveVoxelMesh(
                 base_voxel_size=voxel_size,
-                max_refinement_level=3
+                max_refinement_level=3,
+                voxel_cut_cells=main_window._performance_options.get('voxel_cut_cells'),
             )
             success = self._voxel_mesh.generate(mesh, bounds)
             
@@ -2725,8 +2750,9 @@ class MainWindow(QMainWindow):
         self._performance_options['use_gpu'] = bool(
             getattr(_settings, 'use_gpu', self._performance_options.get('use_gpu', True))
         )
-        # The mesh dialog starts on settings.mesh.mesh_type.
+        # The mesh dialog starts on settings.mesh.mesh_type / voxel_cut_cells.
         self._performance_options['mesh_type'] = self.mesh_dialog.get_mesh_type()
+        self._performance_options['voxel_cut_cells'] = self.mesh_dialog.get_voxel_cut_cells()
         self._update_performance_summary()
         self._update_mesh_summary()
     
@@ -3632,6 +3658,7 @@ class MainWindow(QMainWindow):
             self._current_refinement,
             self._current_memory_mode,
             mesh_type=self._performance_options.get('mesh_type'),
+            voxel_cut_cells=self._performance_options.get('voxel_cut_cells'),
         )
         # Enable ML button if STL is loaded
         self.mesh_dialog.apply_ml_button.setEnabled(self.stl_loader.is_valid())
@@ -4581,6 +4608,7 @@ class MainWindow(QMainWindow):
         # mesh_type rides in performance_options so it reaches the worker and
         # the project file without a new signal argument or schema field.
         self._performance_options['mesh_type'] = self.mesh_dialog.get_mesh_type()
+        self._performance_options['voxel_cut_cells'] = self.mesh_dialog.get_voxel_cut_cells()
         # CAD is tessellated when the file is opened, but the voxel size is
         # chosen here -- afterwards. Picking a finer grid now would otherwise
         # leave the geometry coarser than the grid can resolve, so the STEP
@@ -5383,6 +5411,10 @@ class MainWindow(QMainWindow):
             mesh_type=simulation_state["performance_options"].get(
                 "mesh_type", _get_settings().mesh.mesh_type
             ),
+            # Absent on projects saved before the cut-cell option.
+            voxel_cut_cells=simulation_state["performance_options"].get(
+                "voxel_cut_cells", bool(getattr(_get_settings().mesh, "voxel_cut_cells", False))
+            ),
         )
         self._on_mesh_settings_confirmed(
             simulation_state["voxel_size"],
@@ -5611,6 +5643,7 @@ class MainWindow(QMainWindow):
             'refinement': int(self._current_refinement),
             'memory_mode': memory_mode,
             'mesh_type': self._performance_options.get('mesh_type'),
+            'voxel_cut_cells': self._performance_options.get('voxel_cut_cells'),
             'estimated_voxels': validation.estimated_voxels if validation is not None else None,
             'estimated_memory_mb': validation.estimated_memory_mb if validation is not None else None
         })
@@ -6392,6 +6425,7 @@ class MainWindow(QMainWindow):
             solidification_params=self._solidification_params,
             pour_location=self._pour_location,
             mesh_type=self._performance_options.get('mesh_type'),
+            voxel_cut_cells=self._performance_options.get('voxel_cut_cells'),
         )
         self.surrogate_worker.progress.connect(self._on_simulation_progress)
         self.surrogate_worker.detailed_progress.connect(self._on_detailed_progress)

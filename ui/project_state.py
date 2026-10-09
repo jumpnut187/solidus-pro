@@ -186,6 +186,8 @@ def _normalize_performance_options(value: Any) -> Dict[str, Any]:
     ``mesh_type`` ("voxel" or "tet") lives here so it round-trips without a
     schema bump. Absent (projects saved before the toggle) or unknown means
     "use ``settings.mesh.mesh_type``", so an unknown value is dropped.
+    ``voxel_cut_cells`` works the same way: kept when it is a bool,
+    dropped otherwise (absent means ``settings.mesh.voxel_cut_cells``).
     """
     options = dict(value) if isinstance(value, dict) else {}
     if "mesh_type" in options:
@@ -194,6 +196,8 @@ def _normalize_performance_options(value: Any) -> Dict[str, Any]:
             options["mesh_type"] = mesh_type
         else:
             del options["mesh_type"]
+    if "voxel_cut_cells" in options and not isinstance(options["voxel_cut_cells"], bool):
+        del options["voxel_cut_cells"]
     return options
 
 

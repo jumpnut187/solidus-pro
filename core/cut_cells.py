@@ -46,8 +46,10 @@ DEFAULT_SUBSAMPLES = 64
 #: Area-sample spacing as a fraction of the pitch (16 samples per pitch^2).
 DEFAULT_AREA_SAMPLE_SPACING = 0.25
 #: Outward offset (fraction of the pitch) used to decide whether a surface
-#: sample faces sand or another part.
-INTERFACE_PROBE_OFFSET = 0.02
+#: sample faces sand or another part. Half a pitch, so a CAD clearance gap
+#: narrower than that (which the lattice bridges by conduction anyway) counts
+#: as a part-to-part interface, not mold contact.
+INTERFACE_PROBE_OFFSET = 0.5
 #: Cells below this metal fraction are merged into a face neighbour.
 DEFAULT_PHI_MIN = 0.25
 
@@ -69,6 +71,7 @@ class CutCellGeometry:
     part_counts: np.ndarray  # (N, P) uint16, sub-points inside each part (0 when not sampled)
     pitch: float
     n_input: int = 0
+    n_duplicates: int = 0
     n_added: int = 0
     n_dropped: int = 0
     timings: Dict[str, float] = field(default_factory=dict)
@@ -102,14 +105,26 @@ def _r2_offsets(j: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
 
 
 def contains(mesh: trimesh.Trimesh, points: np.ndarray) -> np.ndarray:
-    """Point-in-part test: embree ray test when watertight, winding number otherwise."""
+    """Point-in-part test: embree ray test when watertight, winding number otherwise.
+
+    Open meshes are queried in point chunks small enough that every chunk
+    stays under ``core.tet_mesh.WINDING_NUMBER_MAX_PAIRS``, so the winding
+    number is never replaced by the ray test, which is unreliable on open
+    surfaces.
+    """
     if len(points) == 0:
         return np.zeros(0, dtype=bool)
     if mesh.is_watertight:
         return np.asarray(mesh.contains(points), dtype=bool)
-    from core.tet_mesh import winding_number_contains
+    from core.tet_mesh import WINDING_NUMBER_MAX_PAIRS, winding_number_contains
 
-    return np.asarray(winding_number_contains(mesh, points), dtype=bool)
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    chunk = max(1, WINDING_NUMBER_MAX_PAIRS // max(1, len(mesh.faces)))
+    inside = np.zeros(len(points), dtype=bool)
+    for start in range(0, len(points), chunk):
+        stop = min(len(points), start + chunk)
+        inside[start:stop] = np.asarray(winding_number_contains(mesh, points[start:stop]), dtype=bool)
+    return inside
 
 
 def _keys(ijk: np.ndarray) -> np.ndarray:
@@ -187,8 +202,12 @@ def split_into_bodies(
     (``sample_stl_files/thick_thin_test.stl`` is two boxes sharing a face).
     A ray-parity test on the combined mesh misclassifies points behind the
     doubled face, and the shared face is not mold contact. As separate
-    units the shared face becomes an interface. A part with an inverted
-    (negative volume) body, which is a void shell, stays one unit.
+    units the shared face becomes an interface. ``Trimesh.split`` repairs
+    each piece (it closes small holes), so an open part whose pieces all
+    come back closed uses them, one piece included. A part stays as given
+    when any piece is still open (its volume depends on the coordinate
+    origin, so open patches cannot be tested alone) or inverted (a void
+    shell).
 
     Returns ``(units, owner)`` with ``owner[u]`` the index of the part unit
     ``u`` came from.
@@ -200,7 +219,9 @@ def split_into_bodies(
         # Split by face adjacency, not vertex connectivity: l_bracket.stl's two
         # boxes share vertices (body_count 1) but no edges.
         split = mesh.split(only_watertight=False)
-        if len(split) > 1 and all(b.volume > 0.0 for b in split):
+        if (len(split) > 1 or not mesh.is_watertight) and len(split) > 0 and all(
+            b.is_watertight and b.volume > 0.0 for b in split
+        ):
             bodies = list(split)
         units.extend(bodies)
         owner.extend([p] * len(bodies))
@@ -398,6 +419,17 @@ def compute_cut_cell_geometry(
 
     ijk = np.rint((centers - origin) / pitch).astype(np.int64)
     in_keys = _keys(ijk)
+    # The chunked voxelizer spaces centres by (E - s) / (ceil(E / s) - 1) < s
+    # when the padded extent E is not a multiple of the pitch s, so two
+    # input centres can round to one lattice cell. Keep the first of each,
+    # in input order (a no-op on the trimesh path, whose centres are on the lattice).
+    _, first = np.unique(in_keys, return_index=True)
+    n_duplicates = n_input - len(first)
+    if n_duplicates:
+        first = np.sort(first)
+        ijk = ijk[first]
+        in_keys = in_keys[first]
+    n_unique = len(in_keys)
     added_keys = np.setdiff1d(surf_keys, in_keys, assume_unique=False)
     added_keys = np.concatenate(
         [added_keys, _flood_missing_interior(np.concatenate([in_keys, added_keys]), origin, pitch, units)]
@@ -460,14 +492,15 @@ def compute_cut_cell_geometry(
         part_counts=counts[kept_idx],
         pitch=float(pitch),
         n_input=n_input,
-        n_added=int(np.count_nonzero(keep[n_input:])),
-        n_dropped=int(np.count_nonzero(~keep[:n_input])),
+        n_duplicates=n_duplicates,
+        n_added=int(np.count_nonzero(keep[n_unique:])),
+        n_dropped=int(np.count_nonzero(~keep[:n_unique])),
         timings=timings,
     )
     timings["total_s"] = time.perf_counter() - t0
     logger.info(
-        "Cut cells: %d input, %d added, %d dropped, %d sampled, %.1f s",
-        n_input, geometry.n_added, geometry.n_dropped, len(sampled_idx), timings["total_s"],
+        "Cut cells: %d input, %d duplicates, %d added, %d dropped, %d sampled, %.1f s",
+        n_input, n_duplicates, geometry.n_added, geometry.n_dropped, len(sampled_idx), timings["total_s"],
     )
     return geometry
 

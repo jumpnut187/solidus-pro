@@ -43,6 +43,20 @@ Projects saved without a mesh type open as Voxel in both UIs. Select tet with `m
 
 A tet run falls back to the voxel mesh automatically (`mesh.tet_auto_fallback`, on by default) and finishes as a voxel run when the estimated node count is above `mesh.tet_auto_max_nodes` (300,000), when fTetWild fails on every attempt, or when fTetWild runs longer than `mesh.tet_mesh_timeout_s` (600 s). The reason shows in the status line and an after-run notice on the desktop, and in a banner on the web Results panel. With the fallback off, those cases stop the run with an error, and tet meshes above `mesh.tet_max_nodes` (3,000,000) are refused with a message giving a safe mesh size.
 
+### Cut Cells — CAD-Accurate Voxel Boundary (default on)
+"Cut cells (CAD-accurate boundary)" in the Mesh dialog (desktop) and Mesh panel (web), `mesh.voxel_cut_cells` in `castsim.yaml`, or `CASTSIM_VOXEL_CUT_CELLS`. Each boundary voxel carries the metal fraction and the mold-contact area of the CAD inside it (`core/cut_cells.py`), so the voxel mesh holds the CAD metal volume and cooling surface instead of a staircase. It applies to voxel runs, including a tet run that falls back to voxel. Turn it off to reproduce results from before the option existed, bit for bit.
+
+Measured against a tet reference at 0.05 in (`tools/benchmark_cut_cells.py`), voxel size 0.1 in:
+
+| case | total time, plain voxels | total time, cut cells | field error, cut cells | wall time on/off |
+|---|---|---|---|---|
+| thick_thin | +2.2 % | +0.8 % | 0.78 % | 1.3x |
+| l_bracket | +14.2 % | +1.0 % | 1.55 % | 1.2x |
+| box + riser + chill | +17.1 % | +0.3 % | 1.83 % | 0.8x |
+| C05813 (17 parts, vs tet 0.2 in) | +9.8 % | +1.0 % | - | 0.8x |
+
+At 0.2 in: C05813 +18.0 % plain, +2.3 % with cut cells. At 0.1 in, metal volume is within 0.6 % of CAD with cut cells (C05813: 0.04 %) and 7 to 28 % over without.
+
 ### GPU Acceleration — Pick Your Weapon
 | Hardware | Backend | Status |
 |---|---|---|

@@ -259,6 +259,8 @@ def benchmark_cases(args: argparse.Namespace) -> int:
 
 def benchmark_model(args: argparse.Namespace) -> int:
     manager, cad = model_manager(args.c05813)
+    # Metal codes only: ``cad`` also holds the chills, which are not metal.
+    cad_metal = float(sum(v for c, v in cad.items() if is_metal(np.array([c]))[0]))
     for size in args.sizes:
         for flag in args.cut_cells:
             res = run_one("C05813", {"part_manager": manager}, "voxel", size, cut_cells=flag,
@@ -273,6 +275,8 @@ def benchmark_model(args: argparse.Namespace) -> int:
                 "total_s": round(r.total_s, 1),
                 "vs_tet_0.2": f"{100 * (r.total_s / args.tet_total - 1):+.1f} %",
                 "metal_in3": round(res.metal_volume, 2),
+                "cad_metal_in3": round(cad_metal, 2),
+                "metal_vs_cad": f"{100 * (res.metal_volume / cad_metal - 1):+.2f} %",
                 "code_volumes_in3": {c: round(v, 2) for c, v in sorted(res.code_volumes.items())},
                 "cad_in3": {c: round(v, 2) for c, v in sorted(cad.items())},
                 "cast_hot_spot_in": [round(float(v), 2) for v in res.hot_spot],
