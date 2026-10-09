@@ -21,7 +21,6 @@ import numpy as np
 
 from core.analysis_strategies import run_post_analyses
 from core.materials import AlloyProperties, get_alloy
-from core.filling_stage import maybe_run_filling
 from core.simulation_pipeline import (
     PipelineInputs,
     PipelineResult,
@@ -30,6 +29,7 @@ from core.simulation_pipeline import (
     build_visualization_payload,
     create_analysis_options,
     prepare_mesh_and_geometry,
+    run_filling_for_mesh,
 )
 from core.solidification import SOLVER_MODE_SCHEDULE_LEGACY, SolidificationEngine
 from core.part_manager import is_chill
@@ -198,11 +198,13 @@ def run_surrogate_pipeline(
     disabled_analyses = _disable_unsupported_analyses(analysis_options)
 
 
-    filling_result = maybe_run_filling(
+    # On a tet run the fill solves on a lattice and comes back per node.
+    filling_result = run_filling_for_mesh(
         voxel_mesh,
         alloy,
         analysis_options,
         inputs,
+        parts_with_types=parts_with_types,
         cancel_callback=cancel_callback,
         progress_message_callback=progress_message_callback,
     )
@@ -236,6 +238,7 @@ def run_surrogate_pipeline(
     channels, meta = encode_channels(engine, chill_boost, riser_slowdown, resolution=resolution)
     prediction = model.predict(channels, conditioning)
 
+    # Voxel centres, or node coordinates on a tet run (voxel_centers == node_xyz).
     centers = np.asarray(voxel_mesh.voxel_centers, dtype=np.float64)
     start = unproject_grid(prediction[0], centers, meta)
     local = unproject_grid(prediction[2], centers, meta)

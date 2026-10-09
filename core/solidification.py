@@ -143,6 +143,11 @@ VALID_SOLVER_MODES = {
     SOLVER_MODE_THERMAL_COUPLED,
 }
 
+#: B4 graphite chill: k=150 W/(m K), rho=1800 kg/m^3, cp=710 J/(kg K).
+#: Shared by the voxel and tet thermal paths.
+CHILL_THERMAL_DIFFUSIVITY_M2_S = 1.17e-4
+CHILL_RHO_CP_J_M3_K = 1800.0 * 710.0
+
 
 # Niyama critical thresholds by alloy (values below indicate defect risk)
 # Based on literature and foundry experience
@@ -394,6 +399,10 @@ class SolidificationEngine:
     def _get_solver_mode(self) -> str:
         """Return a normalized solver mode, defaulting to the new thermal path."""
         solver_mode = getattr(self.analysis_options, "solver_mode", SOLVER_MODE_THERMAL_COUPLED)
+        if getattr(self.mesh, "mesh_type", "voxel") == "tet":
+            from core.tet_thermal import resolve_tet_solver_mode
+
+            return resolve_tet_solver_mode(self, solver_mode)
         if solver_mode not in VALID_SOLVER_MODES:
             return SOLVER_MODE_THERMAL_COUPLED
         return solver_mode
@@ -408,8 +417,116 @@ class SolidificationEngine:
             return float(base_voxel_size)
         return 0.1
 
+    def _alloy_property_curves(self) -> Dict[str, np.ndarray]:
+        """B6: 6-point k, cp, rho curves from room temperature to liquidus + 100 C."""
+        solidus = float(self.alloy.solidus_temp)
+        liquidus = float(self.alloy.liquidus_temp)
+        k_s = float(self.alloy.thermal_conductivity)
+        cp = float(self.alloy.specific_heat)
+        rho_s = float(self.alloy.density_solid)
+        rho_l = float(self.alloy.density_liquid)
+        return {
+            "temp_points": np.array(
+                [20.0, 0.5 * solidus, solidus, (solidus + liquidus) / 2, liquidus, liquidus + 100]
+            ),
+            "conductivity": k_s * np.array([1.0, 0.95, 0.85, 0.77, 0.70, 0.665]),
+            "specific_heat": cp * np.array([0.85, 0.92, 1.0, 1.05, 1.10, 1.15]),
+            "density": np.array(
+                [rho_s, 0.98 * rho_s, 0.96 * rho_s, (rho_s + rho_l) / 2, rho_l, 0.98 * rho_l]
+            ),
+        }
+
+    def _allocate_thermal_tracking_arrays(self, n_voxels: int) -> None:
+        """Per-point peak cooling rate and Niyama capture buffers for the thermal loop."""
+        self._thermal_peak_cooling_rates = np.zeros(n_voxels, dtype=np.float32)
+        self._thermal_niyama_sampled = np.zeros(n_voxels, dtype=bool)
+        self._thermal_niyama_gradient_at_eval = np.zeros(n_voxels, dtype=np.float32)
+        self._thermal_niyama_cooling_rate_at_eval = np.zeros(n_voxels, dtype=np.float32)
+        self._thermal_niyama_temperature_at_eval = np.zeros(n_voxels, dtype=np.float32)
+        self._thermal_niyama_time_at_eval = np.zeros(n_voxels, dtype=np.float32)
+        self._thermal_niyama_values_at_eval = np.full(n_voxels, np.inf, dtype=np.float32)
+        self._thermal_niyama_quality = np.zeros(n_voxels, dtype=np.int8)
+
+    def _initial_thermal_temperatures(
+        self, n_voxels: int, chill_indices: np.ndarray, chill_temperature: float
+    ) -> np.ndarray:
+        """Fill field (or pouring temperature) with chills forced to chill temperature."""
+        if self._initial_temperature_field is not None:
+            # A pour/filling stage computed where the metal actually is and how
+            # much heat it lost on the way in. Use it instead of assuming the
+            # cavity filled instantaneously at pouring temperature.
+            initial_temperatures = np.array(
+                self._initial_temperature_field, dtype=np.float64, copy=True
+            )
+        else:
+            initial_temperatures = np.full(n_voxels, self.alloy.pouring_temp, dtype=np.float64)
+
+        # Chills are mold material: they start at mold temperature no matter
+        # what the metal did, so this override applies in both cases.
+        if len(chill_indices) > 0:
+            initial_temperatures[chill_indices] = chill_temperature
+        return initial_temperatures
+
+    def _preset_chill_solid_state(self, chill_indices: np.ndarray) -> None:
+        """Chills start pre-solid: fs = 1, start/end/local times 0, feeding fs 1."""
+        if len(chill_indices) > 0:
+            thermal_model = self._thermal_solidification_model
+            thermal_model._fraction_solid[chill_indices] = 1.0
+            thermal_model._fraction_solid_prev[chill_indices] = 1.0
+            thermal_model._solidification_start[chill_indices] = 0.0
+            thermal_model._solidification_end[chill_indices] = 0.0
+
+        self.mesh.voxel_states[:] = 0.0
+        if len(chill_indices) > 0:
+            self.mesh.voxel_states[chill_indices] = 1.0
+            self.solidification_start_times[chill_indices] = 0.0
+            self.solidification_end_times[chill_indices] = 0.0
+            self.local_solidification_time[chill_indices] = 0.0
+            self.solidification_times[chill_indices] = 0.0
+            if self.feeding_fraction_solid is not None:
+                self.feeding_fraction_solid[chill_indices] = 1.0
+
+    def _mold_interface_decay(self, h0: float, floor: Optional[float] = None) -> Callable[[float], float]:
+        """
+        Time multiplier anchored at 1.0 for contact conductance h0.
+
+        Mold heat-absorption model: the effective interface HTC combines the
+        contact conductance (h0) in series with the semi-infinite sand mold
+        penetration resistance. A constant h0 toward a constant sink
+        temperature would flash-cool the casting (a 2" WCB block froze in
+        ~12 s) because a real sand mold heats up; the penetration term
+        reproduces that ~1/sqrt(t) decay.
+
+        The INTERFACE branch multiplies bc.htc by this function, so it
+        returns the RATIO h_eff(t)/h0:
+            h_eff(t) = 1 / (1/h0 + 1/h_pen(t))
+            h_pen(t) = k_mold / sqrt(pi * alpha_mold * t)
+        floored at ``floor`` (default: the air-gap floor fraction).
+        """
+        tb = self.analysis_options.solidification_params.thermal_boundary
+        if floor is None:
+            ap = getattr(self.analysis_options.solidification_params, "air_gap", None)
+            floor = float(getattr(ap, "htc_floor_fraction", 0.35))
+        mold_k = float(getattr(tb, "mold_thermal_conductivity", 0.6))
+        mold_alpha = float(getattr(tb, "mold_thermal_diffusivity", 3.3e-7))
+        pen_prefactor = mold_k / np.sqrt(np.pi * max(mold_alpha, 1e-12))
+
+        def multiplier(t: float) -> float:
+            if t <= 0.0:
+                return 1.0
+            h_pen = pen_prefactor / np.sqrt(max(t, 1e-9))
+            h_eff = 1.0 / (1.0 / max(h0, 1e-9) + 1.0 / max(h_pen, 1e-9))
+            return max(h_eff / max(h0, 1e-9), floor)
+
+        return multiplier
+
     def _initialize_thermal_models(self, show_progress: bool) -> None:
         """Create the coupled thermal and fraction-solid models for the new solver path."""
+        if getattr(self.mesh, "mesh_type", "voxel") == "tet":
+            from core.tet_thermal import initialize_tet_thermal_models
+
+            initialize_tet_thermal_models(self, show_progress=show_progress)
+            return
         n_voxels = len(self.mesh.voxel_centers)
         voxel_size_in = self._get_mean_voxel_size_inches()
         voxel_size_m = max(inches_to_meters(voxel_size_in), 1e-6)
@@ -432,8 +549,8 @@ class SolidificationEngine:
         # The conservative two-point-flux stencil in HeatTransferModel uses
         # these per-voxel values so the cast/chill interface conserves energy.
         chill_indices = self._get_chill_voxel_indices()
-        chill_alpha = 1.17e-4
-        chill_rho_cp = 1800.0 * 710.0
+        chill_alpha = CHILL_THERMAL_DIFFUSIVITY_M2_S
+        chill_rho_cp = CHILL_RHO_CP_J_M3_K
         diffusivity_overrides = None
         rho_cp_overrides = None
         if len(chill_indices) > 0:
@@ -449,22 +566,7 @@ class SolidificationEngine:
 
         # B6: temperature-dependent material property curves (k, cp, rho) with
         # reference points spanning room temperature through above-liquidus.
-        solidus = float(self.alloy.solidus_temp)
-        liquidus = float(self.alloy.liquidus_temp)
-        k_s = float(self.alloy.thermal_conductivity)
-        cp = float(self.alloy.specific_heat)
-        rho_s = float(self.alloy.density_solid)
-        rho_l = float(self.alloy.density_liquid)
-        property_curves = {
-            "temp_points": np.array(
-                [20.0, 0.5 * solidus, solidus, (solidus + liquidus) / 2, liquidus, liquidus + 100]
-            ),
-            "conductivity": k_s * np.array([1.0, 0.95, 0.85, 0.77, 0.70, 0.665]),
-            "specific_heat": cp * np.array([0.85, 0.92, 1.0, 1.05, 1.10, 1.15]),
-            "density": np.array(
-                [rho_s, 0.98 * rho_s, 0.96 * rho_s, (rho_s + rho_l) / 2, rho_l, 0.98 * rho_l]
-            ),
-        }
+        property_curves = self._alloy_property_curves()
 
         self._thermal_heat_model = HeatTransferModel(
             n_voxels=n_voxels,
@@ -481,32 +583,14 @@ class SolidificationEngine:
             n_voxels=n_voxels,
             alloy=self.alloy,
         )
-        self._thermal_peak_cooling_rates = np.zeros(n_voxels, dtype=np.float32)
-        self._thermal_niyama_sampled = np.zeros(n_voxels, dtype=bool)
-        self._thermal_niyama_gradient_at_eval = np.zeros(n_voxels, dtype=np.float32)
-        self._thermal_niyama_cooling_rate_at_eval = np.zeros(n_voxels, dtype=np.float32)
-        self._thermal_niyama_temperature_at_eval = np.zeros(n_voxels, dtype=np.float32)
-        self._thermal_niyama_time_at_eval = np.zeros(n_voxels, dtype=np.float32)
-        self._thermal_niyama_values_at_eval = np.full(n_voxels, np.inf, dtype=np.float32)
-        self._thermal_niyama_quality = np.zeros(n_voxels, dtype=np.int8)
+        self._allocate_thermal_tracking_arrays(n_voxels)
 
         boundary_params = self.analysis_options.solidification_params.thermal_boundary
         mold_temperature = boundary_params.mold_temperature
         chill_temperature = boundary_params.chill_temperature
-        if self._initial_temperature_field is not None:
-            # A pour/filling stage computed where the metal actually is and how
-            # much heat it lost on the way in. Use it instead of assuming the
-            # cavity filled instantaneously at pouring temperature.
-            initial_temperatures = np.array(
-                self._initial_temperature_field, dtype=np.float64, copy=True
-            )
-        else:
-            initial_temperatures = np.full(n_voxels, self.alloy.pouring_temp, dtype=np.float64)
-
-        # Chills are mold material: they start at mold temperature no matter
-        # what the metal did, so this override applies in both cases.
-        if len(chill_indices) > 0:
-            initial_temperatures[chill_indices] = chill_temperature
+        initial_temperatures = self._initial_thermal_temperatures(
+            n_voxels, chill_indices, chill_temperature
+        )
 
         self._thermal_heat_model.set_initial_temperature(initial_temperatures)
         self._thermal_heat_model.set_heat_source(np.zeros(n_voxels, dtype=np.float64))
@@ -514,22 +598,7 @@ class SolidificationEngine:
             mold_temperature=mold_temperature, chill_temperature=chill_temperature
         )
 
-        if len(chill_indices) > 0:
-            thermal_model = self._thermal_solidification_model
-            thermal_model._fraction_solid[chill_indices] = 1.0
-            thermal_model._fraction_solid_prev[chill_indices] = 1.0
-            thermal_model._solidification_start[chill_indices] = 0.0
-            thermal_model._solidification_end[chill_indices] = 0.0
-
-        self.mesh.voxel_states[:] = 0.0
-        if len(chill_indices) > 0:
-            self.mesh.voxel_states[chill_indices] = 1.0
-            self.solidification_start_times[chill_indices] = 0.0
-            self.solidification_end_times[chill_indices] = 0.0
-            self.local_solidification_time[chill_indices] = 0.0
-            self.solidification_times[chill_indices] = 0.0
-            if self.feeding_fraction_solid is not None:
-                self.feeding_fraction_solid[chill_indices] = 1.0
+        self._preset_chill_solid_state(chill_indices)
 
         self._thermal_latest_temperatures = initial_temperatures.astype(np.float32, copy=True)
         self._thermal_latest_gradients = np.zeros(n_voxels, dtype=np.float32)
@@ -577,39 +646,7 @@ class SolidificationEngine:
             return
 
         tb = self.analysis_options.solidification_params.thermal_boundary
-
-        # Mold heat-absorption model: the effective interface HTC combines the
-        # contact conductance (h0) in series with the semi-infinite sand mold
-        # penetration resistance h_pen(t) = k_mold / sqrt(pi * alpha_mold * t).
-        # A constant h0 toward a constant sink temperature would flash-cool
-        # the casting (a 2" WCB block froze in ~12 s) because a real sand mold
-        # heats up; the penetration term reproduces that ~1/sqrt(t) decay.
-        # h_eff(t) = 1 / (1/h0 + 1/h_pen(t)), floored at the air-gap floor.
-        ap = getattr(self.analysis_options.solidification_params, "air_gap", None)
-        floor = float(getattr(ap, "htc_floor_fraction", 0.35))
-        mold_k = float(getattr(tb, "mold_thermal_conductivity", 0.6))
-        mold_alpha = float(getattr(tb, "mold_thermal_diffusivity", 3.3e-7))
-
-        def _mold_interface_decay(h0: float, floor: float = floor):
-            """
-            Time multiplier anchored at 1.0 for contact conductance h0.
-
-            The INTERFACE branch multiplies bc.htc by this function, so it
-            returns the RATIO h_eff(t)/h0:
-                h_eff(t) = 1 / (1/h0 + 1/h_pen(t))
-                h_pen(t) = k_mold / sqrt(pi * alpha_mold * t)
-            floored at the given floor fraction.
-            """
-            pen_prefactor = mold_k / np.sqrt(np.pi * max(mold_alpha, 1e-12))
-
-            def multiplier(t: float) -> float:
-                if t <= 0.0:
-                    return 1.0
-                h_pen = pen_prefactor / np.sqrt(max(t, 1e-9))
-                h_eff = 1.0 / (1.0 / max(h0, 1e-9) + 1.0 / max(h_pen, 1e-9))
-                return max(h_eff / max(h0, 1e-9), floor)
-
-            return multiplier
+        _mold_interface_decay = self._mold_interface_decay
 
         surface_indices = np.asarray(self.mesh.get_surface_voxel_indices(), dtype=np.int32)
         if surface_indices.size == 0:

@@ -818,15 +818,17 @@ def _apply_enthalpy_correction_numpy(
     T_liq: float,
     T_sol: float,
     dT: float,
-    beta: float,
+    beta: float | np.ndarray,
 ) -> None:
     """
     NumPy reference for the implicit latent-heat correction.
 
     Fallback for when the Numba kernel is unavailable, and the parity
     reference the kernel is tested against. Writes into ``T_final``; see
-    ``_run_thermal_coupled_integration`` for the derivation.
+    ``_run_thermal_coupled_integration`` for the derivation. ``beta`` is a
+    scalar (voxel path) or a per-point array (tet path, ``L_i / C_i``).
     """
+    beta_all = np.broadcast_to(np.asarray(beta, dtype=np.float64), T_post.shape)
     T_final[:] = T_post
     below_liq = T_post < T_liq
     if not np.any(below_liq):
@@ -837,7 +839,8 @@ def _apply_enthalpy_correction_numpy(
     active = (fs_max > fs_prev[liq_idx]) & (T_post[liq_idx] > T_sol)
     if np.any(active):
         sel = liq_idx[active]
-        T_mush = (T_post[sel] + beta * (T_liq / dT - fs_prev[sel])) / (1.0 + beta / dT)
+        beta_sel = beta_all[sel]
+        T_mush = (T_post[sel] + beta_sel * (T_liq / dT - fs_prev[sel])) / (1.0 + beta_sel / dT)
         # Branch: implicit solve leaves the mushy zone upward (would
         # remelt -> no latent, keep T_post) or downward (all latent
         # released at solidus -> recalesce by the remaining fraction).
@@ -848,7 +851,7 @@ def _apply_enthalpy_correction_numpy(
             T_post[sel],
             np.where(
                 all_solid,
-                T_post[sel] + beta * (1.0 - fs_prev[sel]),
+                T_post[sel] + beta_sel * (1.0 - fs_prev[sel]),
                 T_mush,
             ),
         )
@@ -868,7 +871,7 @@ def _apply_enthalpy_correction_numpy(
         # T_sol makes coarse-step crossings consistent with the
         # fine-step limit.
         T_final[sel2] = np.minimum(
-            T_post[sel2] + beta * np.clip(remaining, 0.0, 1.0),
+            T_post[sel2] + beta_all[sel2] * np.clip(remaining, 0.0, 1.0),
             T_sol,
         )
 
@@ -1131,6 +1134,15 @@ def run_time_integration(
     Execute the solidification time loop and update engine state in place.
     """
     _configure_numba_threads_for_solidification(engine, show_progress=show_progress)
+
+    if getattr(getattr(engine, "mesh", None), "mesh_type", "voxel") == "tet":
+        from core.tet_thermal import run_tet_thermal_integration
+
+        return run_tet_thermal_integration(
+            engine,
+            show_progress=show_progress,
+            progress_callback=progress_callback,
+        )
 
     solver_mode = getattr(getattr(engine, "analysis_options", None), "solver_mode", None)
     if solver_mode == THERMAL_COUPLED_SOLVER_MODE:

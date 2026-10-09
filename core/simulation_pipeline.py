@@ -7,19 +7,27 @@ execution, and result packaging to avoid duplicated orchestration logic.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple, cast
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union, cast
 import os
 
 import numpy as np
 
 from core.filling_stage import maybe_run_filling
+from core.tet_filling import maybe_run_tet_filling
+from core.tet_mesh import TetVolumeMesh, build_tet_mesh
 
 try:
     from core.error_logger import logger as _filling_logger
 except ImportError:  # pragma: no cover - headless/dummy fallback
     from core.error_logger_dummy import logger as _filling_logger  # type: ignore
 from core.materials import get_alloy
-from core.part_manager import PartManager, PartType, build_part_manager, infer_part_type_from_filename
+from core.part_manager import (
+    PART_TYPE_CAST,
+    PartManager,
+    PartType,
+    build_part_manager,
+    infer_part_type_from_filename,
+)
 from core.solidification import (
     AnalysisOptions,
     SOLVER_MODE_THERMAL_COUPLED,
@@ -29,11 +37,19 @@ from core.solidification import (
 from core.voxel_mesh import AdaptiveVoxelMesh
 from config.exceptions import (
     MeshError,
+    MeshGenerationError,
     SimulationError,
     ValidationError,
 )
 from config.hardware_config import hardware
+from config.settings import MESH_TYPES, MeshSettings, get_settings
 from core.thread_budget import set_process_thread_budget
+
+#: Either simulation mesh. ``TetVolumeMesh`` duck-types ``AdaptiveVoxelMesh``.
+SimulationMesh = Union[AdaptiveVoxelMesh, TetVolumeMesh]
+
+#: Measured upper envelope of fTetWild node count per (part volume / h^3).
+TET_NODES_PER_UNIT_VOLUME = 2.0
 
 
 ProgressMessageCallback = Callable[[str], None]
@@ -80,6 +96,7 @@ class PipelineInputs:
         solidification_params: Optional[Dict[str, Any]] = None,
         thread_budget_provider: Optional[ThreadBudgetProvider] = None,
         pour_location: Optional[Dict[str, Any]] = None,
+        mesh_type: Optional[str] = None,
     ) -> None:
         self.alloy_name = alloy_name
         self.voxel_size = voxel_size
@@ -98,15 +115,21 @@ class PipelineInputs:
         self.thread_budget_provider = thread_budget_provider
         # Serialized PourLocation, or None. Filling runs only when set.
         self.pour_location = pour_location
+        # "voxel" or "tet"; None uses settings.mesh.mesh_type.
+        self.mesh_type = mesh_type
 
 
 class PipelineResult:
-    """Simulation pipeline outputs."""
+    """Simulation pipeline outputs.
+
+    ``voxel_mesh`` is the simulation mesh of either kind; ``mesh_type`` says
+    which ("voxel" or "tet").
+    """
 
     def __init__(
         self,
         part_manager: Optional[PartManager],
-        voxel_mesh: AdaptiveVoxelMesh,
+        voxel_mesh: SimulationMesh,
         engine: SolidificationEngine,
         result_data: Dict[str, Any],
         visualization_data: Dict[str, Any],
@@ -116,6 +139,56 @@ class PipelineResult:
         self.engine = engine
         self.result_data = result_data
         self.visualization_data = visualization_data
+        self.mesh_type = mesh_type_of(voxel_mesh)
+
+
+def mesh_type_of(mesh: Any) -> str:
+    """"tet" for a ``TetVolumeMesh``, else "voxel"."""
+    return "tet" if getattr(mesh, "mesh_type", "voxel") == "tet" else "voxel"
+
+
+def resolve_mesh_type(inputs: PipelineInputs, mesh_settings: Optional[MeshSettings] = None) -> str:
+    """Mesh type for this run: ``inputs.mesh_type`` when set, else ``settings.mesh.mesh_type``.
+
+    Raises ``ValidationError`` for an explicit unknown value. The settings
+    value is already normalized to a valid type.
+    """
+    requested = getattr(inputs, "mesh_type", None)
+    if requested is None:
+        settings_mesh = mesh_settings if mesh_settings is not None else get_settings().mesh
+        return str(settings_mesh.mesh_type)
+    mesh_type = str(requested).strip().lower()
+    if mesh_type not in MESH_TYPES:
+        raise ValidationError(
+            f"Unknown mesh type {requested!r}",
+            parameter="mesh_type",
+            expected=" or ".join(MESH_TYPES),
+        )
+    return mesh_type
+
+
+def estimate_tet_node_count(parts: Sequence[Tuple[Any, int]], edge_length_in: float) -> int:
+    """Upper-envelope node count of a tet mesh of ``parts`` at edge length ``edge_length_in``.
+
+    ``TET_NODES_PER_UNIT_VOLUME * sum(part volume) / h^3``. An open surface
+    has no trustworthy enclosed volume, so it counts its convex-hull volume
+    (bounding-box volume if the hull fails), an upper bound.
+    """
+    total_in3 = 0.0
+    for mesh, _code in parts:
+        volume = float("nan")
+        try:
+            if mesh.is_watertight:
+                volume = abs(float(mesh.volume))
+            else:
+                volume = abs(float(mesh.convex_hull.volume))
+        except Exception:
+            pass
+        if not np.isfinite(volume) or volume <= 0.0:
+            extents = np.asarray(mesh.bounds[1], dtype=np.float64) - np.asarray(mesh.bounds[0], dtype=np.float64)
+            volume = float(np.prod(np.maximum(extents, 0.0)))
+        total_in3 += volume
+    return int(np.ceil(TET_NODES_PER_UNIT_VOLUME * total_in3 / float(edge_length_in) ** 3))
 
 
 def _emit_message(callback: Optional[ProgressMessageCallback], message: str) -> None:
@@ -202,7 +275,7 @@ def create_analysis_options(
 
 def build_visualization_payload(
     engine: SolidificationEngine,
-    voxel_mesh: AdaptiveVoxelMesh,
+    voxel_mesh: SimulationMesh,
     *,
     total_volume: float,
     bounds: np.ndarray,
@@ -218,8 +291,12 @@ def build_visualization_payload(
     if voxel_sizes is None:
         voxel_sizes = np.full(len(voxel_centers), 0.1, dtype=np.float32)
     n_voxels = len(voxel_centers)
+    mesh_type = mesh_type_of(voxel_mesh)
 
+    # On a tet run every per-point array is per node, so "voxel_count" is the
+    # node count.
     result_data: Dict[str, Any] = {
+        "mesh_type": mesh_type,
         "voxel_count": n_voxels,
         "total_volume": float(total_volume),
         "bounds": {
@@ -235,7 +312,11 @@ def build_visualization_payload(
     else:
         indices = np.arange(n_voxels)
 
+    if mesh_type == "tet":
+        result_data["tet_count"] = int(len(cast(TetVolumeMesh, voxel_mesh).tets))
+
     visualization_data: Dict[str, Any] = {
+        "mesh_type": mesh_type,
         "centers": voxel_centers[indices].tolist(),
         "sizes": voxel_sizes[indices].tolist() if voxel_sizes is not None else [0.1] * len(indices),
     }
@@ -418,7 +499,7 @@ def build_visualization_payload(
     fill_frames = getattr(engine, "_fill_frames", None)
     if fill_frames:
         fill_history: list[list[float]] = []
-        fill_times: list[float] = []
+        fill_frame_times: list[float] = []
         for frame in fill_frames:
             fraction = getattr(frame, "fill_fraction", None)
             if fraction is None:
@@ -427,10 +508,10 @@ def build_visualization_payload(
             if len(fraction_arr) != n_voxels:
                 continue
             fill_history.append(np.clip(fraction_arr[indices], 0.0, 1.0).tolist())
-            fill_times.append(float(getattr(frame, "time_s", 0.0)))
+            fill_frame_times.append(float(getattr(frame, "time_s", 0.0)))
         if fill_history:
             visualization_data["fill_animation_history"] = fill_history
-            visualization_data["fill_animation_times"] = fill_times
+            visualization_data["fill_animation_times"] = fill_frame_times
             result_data["fill_animation_frames"] = len(fill_history)
 
     _add_summary_statistics(result_data, engine)
@@ -560,18 +641,22 @@ def prepare_mesh_and_geometry(
     progress_message_callback: Optional[ProgressMessageCallback] = None,
     detailed_progress_callback: Optional[DetailedProgressCallback] = None,
     cancel_callback: Optional[CancelCallback] = None,
-) -> Tuple[Any, Any, float, Sequence[Any], AdaptiveVoxelMesh, Dict[str, Any]]:
+) -> Tuple[Any, Any, float, Sequence[Any], SimulationMesh, Dict[str, Any]]:
     """
-    Resolve the geometry source and generate the adaptive voxel mesh.
+    Resolve the geometry source and generate the simulation mesh.
 
     Shared by the traditional pipeline (:func:`run_pipeline`) and the
     surrogate pipeline (``core.surrogate.pipeline``) so both paths perform
-    identical geometry work.
+    identical geometry work. The mesh is an ``AdaptiveVoxelMesh`` or, when
+    :func:`resolve_mesh_type` returns "tet", a ``TetVolumeMesh``.
 
     Returns:
         ``(mesh_to_use, bounds_to_use, total_volume, parts_with_types,
-        voxel_mesh, mem_stats)``.
+        voxel_mesh, mem_stats)``. ``parts_with_types`` is empty when the
+        geometry came from a bare STL.
     """
+    mesh_settings = get_settings().mesh
+    mesh_type = resolve_mesh_type(inputs, mesh_settings)
     _check_cancel(cancel_callback)
 
     mesh_to_use = None
@@ -601,6 +686,26 @@ def prepare_mesh_and_geometry(
             parameter="part_manager|stl_loader",
             expected="A non-empty PartManager or an initialized STLLoader",
         )
+
+    if mesh_type == "tet":
+        tet_mesh = _build_tet_simulation_mesh(
+            inputs,
+            mesh_settings,
+            parts_with_types or [(mesh_to_use, PART_TYPE_CAST)],
+            progress_message_callback=progress_message_callback,
+            detailed_progress_callback=detailed_progress_callback,
+            cancel_callback=cancel_callback,
+        )
+        mem_stats = tet_mesh.get_memory_stats()
+        _emit_message(
+            progress_message_callback,
+            (
+                f"Memory: RAM={mem_stats['ram_mb']:.1f}MB, "
+                f"Disk={mem_stats['disk_mb']:.1f}MB, "
+                f"Available={mem_stats['available_gb']:.1f}GB"
+            ),
+        )
+        return mesh_to_use, bounds_to_use, total_volume, parts_with_types, tet_mesh, mem_stats
 
     _emit_message(
         progress_message_callback,
@@ -655,6 +760,106 @@ def prepare_mesh_and_geometry(
         ),
     )
     return mesh_to_use, bounds_to_use, total_volume, parts_with_types, voxel_mesh, mem_stats
+
+
+def _build_tet_simulation_mesh(
+    inputs: PipelineInputs,
+    mesh_settings: MeshSettings,
+    parts: Sequence[Tuple[Any, int]],
+    *,
+    progress_message_callback: Optional[ProgressMessageCallback],
+    detailed_progress_callback: Optional[DetailedProgressCallback],
+    cancel_callback: Optional[CancelCallback],
+) -> TetVolumeMesh:
+    """Tet-mesh ``parts`` at ``inputs.voxel_size * tet_edge_length_factor``.
+
+    Raises ``MeshGenerationError`` before meshing when the estimated node
+    count exceeds ``mesh_settings.tet_max_nodes``.
+    """
+    edge_length_in = float(inputs.voxel_size) * float(mesh_settings.tet_edge_length_factor)
+    estimated_nodes = estimate_tet_node_count(parts, edge_length_in)
+    max_nodes = int(mesh_settings.tet_max_nodes)
+    if estimated_nodes > max_nodes:
+        # Node count scales as h^-3, so this edge length lands at the limit.
+        suggested_in = edge_length_in * (estimated_nodes / max_nodes) ** (1.0 / 3.0)
+        raise MeshGenerationError(
+            f"tet mesh at edge length {edge_length_in:g} in would have about "
+            f"{estimated_nodes:,} nodes, above the limit of {max_nodes:,} "
+            f"(settings.mesh.tet_max_nodes). Use a voxel size of at least "
+            f"{suggested_in / float(mesh_settings.tet_edge_length_factor):.3g} in, "
+            f"or raise tet_max_nodes if the machine has the memory",
+            voxel_size=edge_length_in,
+            estimated_voxels=estimated_nodes,
+        )
+
+    _emit_message(
+        progress_message_callback,
+        f"Generating tetrahedral mesh (edge length {edge_length_in:g} in, "
+        f"about {estimated_nodes:,} nodes at most)...",
+    )
+
+    def on_tet_progress(fraction: float, stage: str) -> None:
+        _check_cancel(cancel_callback)
+        if detailed_progress_callback is not None:
+            detailed_progress_callback(int(round(100.0 * float(fraction))), 100, stage)
+
+    _apply_thread_budget(inputs.thread_budget_provider)
+    budget = inputs.thread_budget_provider() if inputs.thread_budget_provider is not None else None
+    tet_mesh = build_tet_mesh(
+        list(parts),
+        edge_length_in,
+        epsilon_rel=float(mesh_settings.tet_epsilon_rel),
+        num_threads=int(budget) if budget else 0,
+        progress_callback=on_tet_progress,
+    )
+    _check_cancel(cancel_callback)
+    _emit_message(
+        progress_message_callback,
+        f"Tet mesh: {tet_mesh.get_voxel_count():,} nodes, {len(tet_mesh.tets):,} tets, "
+        f"{len(tet_mesh.boundary_faces):,} boundary faces",
+    )
+    return tet_mesh
+
+
+def run_filling_for_mesh(
+    mesh: SimulationMesh,
+    alloy: Any,
+    analysis_options: AnalysisOptions,
+    inputs: PipelineInputs,
+    *,
+    parts_with_types: Sequence[Tuple[Any, int]],
+    cancel_callback: Optional[CancelCallback] = None,
+    progress_message_callback: Optional[ProgressMessageCallback] = None,
+    detailed_progress_callback: Optional[DetailedProgressCallback] = None,
+) -> Any:
+    """Run the filling stage on either mesh kind; the result's per-point fields match the mesh.
+
+    A tet run fills on a lattice of pitch
+    ``inputs.voxel_size * settings.mesh.tet_lattice_spacing_factor`` and maps
+    the fields to nodes (``core.tet_filling``).
+    """
+    if mesh_type_of(mesh) == "tet":
+        spacing_in = float(inputs.voxel_size) * float(get_settings().mesh.tet_lattice_spacing_factor)
+        return maybe_run_tet_filling(
+            mesh,
+            alloy,
+            analysis_options,
+            inputs,
+            spacing_in=spacing_in,
+            parts_with_types=parts_with_types,
+            cancel_callback=cancel_callback,
+            progress_message_callback=progress_message_callback,
+            detailed_progress_callback=detailed_progress_callback,
+        )
+    return maybe_run_filling(
+        mesh,
+        alloy,
+        analysis_options,
+        inputs,
+        cancel_callback=cancel_callback,
+        progress_message_callback=progress_message_callback,
+        detailed_progress_callback=detailed_progress_callback,
+    )
 
 
 def run_pipeline(
@@ -715,11 +920,12 @@ def run_pipeline(
         _filling_logger.info(message)
         _emit_message(progress_message_callback, message)
 
-    filling_result = maybe_run_filling(
+    filling_result = run_filling_for_mesh(
         voxel_mesh,
         alloy,
         analysis_options,
         inputs,
+        parts_with_types=parts_with_types,
         cancel_callback=cancel_callback,
         progress_message_callback=_filling_message,
         detailed_progress_callback=detailed_progress_callback,
@@ -727,7 +933,8 @@ def run_pipeline(
 
     _emit_message(progress_message_callback, "Running solidification simulation...")
     _apply_thread_budget(inputs.thread_budget_provider)
-    engine = SolidificationEngine(voxel_mesh, alloy, analysis_options)
+    # TetVolumeMesh duck-types AdaptiveVoxelMesh (DESIGN.md decision 6).
+    engine = SolidificationEngine(cast(AdaptiveVoxelMesh, voxel_mesh), alloy, analysis_options)
     engine.initialize()
     if inputs.thread_budget_provider is not None:
         engine._thread_budget_provider = inputs.thread_budget_provider
@@ -787,10 +994,12 @@ def run_pipeline(
         # Report the handover explicitly. Without this the only sign a fill ran
         # is its progress chatter, so a run where filling was silently off is
         # indistinguishable from one where it ran and found nothing wrong.
+        # On a tet run the counts are fill-lattice cells, not nodes.
+        fill_unit = "lattice cells" if mesh_type_of(voxel_mesh) == "tet" else "voxels"
         _emit_message(
             progress_message_callback,
             f"Filling: seeded initial temperature from the fill "
-            f"({filling_result.filled_voxel_count:,} voxels filled, "
+            f"({filling_result.filled_voxel_count:,} {fill_unit} filled, "
             f"{filling_result.misrun_voxel_count:,} misrun, "
             f"{filling_result.filled_fraction:.0%} of the metal) in "
             f"{filling_result.fill_seconds:.2f} s of pour",
