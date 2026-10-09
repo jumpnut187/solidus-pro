@@ -21,6 +21,29 @@ import multiprocessing
 from config.hardware_config import hardware
 
 
+def _restore_default_fp_environment() -> bool:
+    """Undo the flush-to-zero mode ``ti.init`` leaves on the calling thread.
+
+    Taichi's init sets the CPU FPCR flush-to-zero bit on the host thread. With
+    subnormals flushed, scipy's ``cKDTree`` build can recurse without end on
+    ordinary point sets and overflow the stack (SIGSEGV), and any other host
+    numerics silently change. Metal kernels run on the GPU and do not depend on
+    the host FP mode, so restoring the default environment is safe.
+
+    Returns True when the default environment was restored.
+    """
+    if platform.system() != "Darwin":
+        return False
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None)
+        default_env = ctypes.c_char.in_dll(libc, "_FE_DFL_ENV")
+        return int(libc.fesetenv(ctypes.byref(default_env))) == 0
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 class GPUBackend(Enum):
     """Available GPU backends"""
     NONE = "none"           # CPU-only
@@ -216,6 +239,7 @@ class GPUComputeManager:
             
             if not self._taichi_initialized:
                 ti.init(arch=ti.metal, log_level=ti.WARN)
+                _restore_default_fp_environment()
                 self._taichi_initialized = True
                 print(f"  Metal: Taichi Metal backend initialized")
             

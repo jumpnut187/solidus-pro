@@ -48,7 +48,7 @@ inside `SolidificationEngine`, which is already 5,400 lines and one class.
 
 | Layer | May import | Must not import | Holds |
 |---|---|---|---|
-| `physics/` | stdlib, numpy, numba | `core/`, `config/`, `ui/`, `web/` | Mesh-agnostic solvers |
+| `physics/` | stdlib, numpy, scipy, numba | `core/`, `config/`, `ui/`, `web/` | Mesh-agnostic solvers |
 | `core/` | `physics/`, `config/` | `ui/`, `web/` | Mesh, part types, orchestration |
 | `config/` | stdlib | everything else | Settings, hardware, exceptions |
 | `ui/`, `web/` | `core/`, `config/` | each other | Presentation |
