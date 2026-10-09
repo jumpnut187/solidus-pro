@@ -318,3 +318,26 @@ Reports: `wave2_engine.md`, `wave2_pipeline.md`, `wave2_integration.md`. Commit 
 - Changed meanings on tet runs: `engine.time_step` = last accepted dt;
   `thermal_gradients` = true |grad T| (degC/mm), not the voxel RMS slope;
   `voxel_sizes` = mean incident edge length; `voxel_part_types` is int8.
+
+## Wave 3 outcomes
+
+Reports: `wave3_{enthalpy,post,present,ml,ui,integration}.md`. Commit 3f67c76.
+Full suite 2015 run, only the 3 baseline failures; `npm run build` passes.
+
+- Tet latent heat: `core.tet_thermal.invert_tet_enthalpy` (exact for constant
+  properties; drift 2.9e-14). Parent measured drift with the real 6-point WCB
+  curves, adiabatic, dt 2 s, 600 steps: 0.55 % of total enthalpy (0.31 % of the
+  200-1600 C span), from the lagged C(T). Step defaults: 2 s / 15 C (<= 1.4 %
+  from dt-converged on two cases).
+- Post-analyses, presentation, ML and UI are ported (see reports). Contracts
+  fixed by the parent during the wave: `RiserDesigner(..., voxel_volumes=None,
+  mesh_type="voxel")`, `extract_pocket_at(..., mesh_type="voxel")`,
+  `tet_grid_missing` 404 for tet artifacts without a field grid.
+- E2E at 0.1 in, all analyses + filling: thick_thin tet 34.6k nodes 64.9 s
+  (vol 21.00 = CAD) vs voxel 23.8k 80.9 s (23.81); l_bracket tet 13.5k nodes
+  37.2 s (7.00 = CAD) vs voxel 8.9k 33.2 s (8.95).
+- Still open: web client default mesh_type is 'voxel' (server default not
+  exposed); stress distortion magnitude uncalibrated on tets; rendering reads
+  lattice factors from current settings, not the run's; refinement level and
+  memory mode remain editable but ignored on tets; riser dialog end-to-end on a
+  real tet mesh was not exercised offscreen.
