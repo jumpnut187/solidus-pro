@@ -20,6 +20,7 @@ import trimesh
 from scipy.sparse.csgraph import connected_components
 
 import core.tet_mesh as tet_mesh_module
+from core import tetwild_child
 from config.exceptions import MeshGenerationError
 from core.part_manager import (
     PART_TYPE_CAST,
@@ -189,7 +190,15 @@ class TetMeshSampleStlTest(unittest.TestCase):
                 skin = trimesh.Trimesh(mesh.node_xyz, mesh.boundary_faces, process=False)
                 sample = np.flatnonzero(~mesh.surface_voxels)[::5][:400]
                 _, distance, _ = trimesh.proximity.closest_point(skin, mesh.node_xyz[sample])
-                np.testing.assert_allclose(mesh.voxel_moduli[sample], distance, atol=1e-5)
+                actual = np.asarray(mesh.voxel_moduli[sample], dtype=np.float64)
+                # _distance_to_boundary tests the k nearest-centroid faces, so it may
+                # only overestimate, by a bounded amount (docstring: < ~0.6 h).
+                # fTetWild meshes differ run to run; a rare node lands a few 1e-5 in
+                # high. Pin: never below exact, nearly all exact, worst case tiny.
+                self.assertTrue(np.all(actual >= distance - 1e-6))
+                close = np.abs(actual - distance) <= 1e-5
+                self.assertGreaterEqual(close.mean(), 0.98)
+                self.assertLess(float(np.max(actual - distance)), 0.05 * mesh.base_voxel_size)
 
     def test_quality_summary(self) -> None:
         mesh = self.meshes["cylinder"]
@@ -204,19 +213,28 @@ class TetMeshSampleStlTest(unittest.TestCase):
 
 
 class TetMeshAssemblyTest(unittest.TestCase):
-    """Casting box with a riser on top and a chill underneath, both touching."""
+    """Casting box with a riser on top and a chill underneath, both touching (CSG strategy)."""
+
+    STRATEGY = "csg"
+    VOLUME_TOLERANCE = 0.01
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.mesh = build_tet_mesh(
             [(CASTING, PART_TYPE_CAST), (RISER, PART_TYPE_RISER), (CHILL, PART_TYPE_CHILL)],
             ASSEMBLY_H,
+            strategy=cls.STRATEGY,
         )
         # Permuted input order: proves marker k maps to the k-th leaf.
         cls.permuted = build_tet_mesh(
             [(CHILL, PART_TYPE_CHILL), (CASTING, PART_TYPE_CAST), (RISER, PART_TYPE_RISER)],
             ASSEMBLY_H,
+            strategy=cls.STRATEGY,
         )
+
+    def test_strategy_recorded(self) -> None:
+        self.assertEqual(self.mesh.meshing_strategy, self.STRATEGY)
+        self.assertEqual(self.permuted.meshing_strategy, self.STRATEGY)
 
     def test_per_code_volumes(self) -> None:
         for label, mesh in (("input order", self.mesh), ("permuted", self.permuted)):
@@ -226,7 +244,9 @@ class TetMeshAssemblyTest(unittest.TestCase):
                 (PART_TYPE_CHILL, CHILL),
             ):
                 with self.subTest(order=label, code=code):
-                    self.assertAlmostEqual(_code_volume(mesh, code) / part.volume, 1.0, delta=0.01)
+                    self.assertAlmostEqual(
+                        _code_volume(mesh, code) / part.volume, 1.0, delta=self.VOLUME_TOLERANCE
+                    )
 
     def test_interfaces_share_nodes(self) -> None:
         cast = _nodes_of_code(self.mesh, PART_TYPE_CAST)
@@ -263,6 +283,57 @@ class TetMeshAssemblyTest(unittest.TestCase):
         self.assertTrue(np.all(centroid_z[owners == PART_TYPE_RISER] >= 2.0 - 1e-6))
         self.assertTrue(np.all(centroid_z[owners == PART_TYPE_CHILL] <= 1e-6))
         self.assertEqual(len(mesh.metal_part_bounds), 2)
+
+
+class TetMeshSoupAssemblyTest(TetMeshAssemblyTest):
+    """The same assembly meshed with the soup strategy (the CSG crash fallback).
+
+    Soup meshes the concatenated surfaces with fTetWild's outside filter off
+    and labels tets by CAD containment, so it must keep the conforming
+    interfaces and the per-part volumes.
+    """
+
+    STRATEGY = "soup"
+    VOLUME_TOLERANCE = 0.02
+
+    def test_every_kept_tet_lies_inside_a_part(self) -> None:
+        for label, mesh in (("input order", self.mesh), ("permuted", self.permuted)):
+            with self.subTest(order=label):
+                centroids = mesh.node_xyz[mesh.tets].mean(axis=1)
+                inside = np.zeros(len(centroids), dtype=bool)
+                for part in (CASTING, RISER, CHILL):
+                    inside |= part.contains(centroids)
+                self.assertTrue(np.all(inside))
+
+    def test_boundary_faces_lie_on_a_part_surface(self) -> None:
+        """Every boundary face is within the fTetWild envelope of some part surface."""
+        parts = (CASTING, RISER, CHILL)
+        assembly = trimesh.util.concatenate(parts)
+        envelope = 1e-3 * float(np.linalg.norm(assembly.bounds[1] - assembly.bounds[0]))
+        for label, mesh in (("input order", self.mesh), ("permuted", self.permuted)):
+            with self.subTest(order=label):
+                points = np.vstack(
+                    [mesh.node_xyz[np.unique(mesh.boundary_faces)], mesh.node_xyz[mesh.boundary_faces].mean(axis=1)]
+                )
+                distance = np.min(
+                    [trimesh.proximity.closest_point(part, points)[1] for part in parts], axis=0
+                )
+                self.assertLess(float(distance.max()), 2.0 * envelope)
+
+
+class TetMeshSoupCoreTest(unittest.TestCase):
+    """CORE removal works on the soup strategy too."""
+
+    def test_core_removed_with_contact_faces(self) -> None:
+        box = _box((2.0, 2.0, 2.0), (0.0, 0.0, 1.0))
+        core = _cylinder(0.5, 1.0, (0.0, 0.0, 1.0), sections=24)
+        mesh = build_tet_mesh([(box, PART_TYPE_CAST), (core, PART_TYPE_CORE)], 0.2, strategy="soup")
+        self.assertEqual(mesh.meshing_strategy, "soup")
+        self.assertFalse(np.any(mesh.tet_part_types == PART_TYPE_CORE))
+        self.assertAlmostEqual(mesh.tet_volumes.sum() / (box.volume - core.volume), 1.0, delta=0.01)
+        core_faces = mesh.boundary_face_contact_codes == PART_TYPE_CORE
+        self.assertAlmostEqual(mesh.boundary_face_areas[core_faces].sum() / core.area, 1.0, delta=0.02)
+        np.testing.assert_allclose(_enclosed_volume(mesh), mesh.tet_volumes.sum(), rtol=1e-9)
 
 
 class TetMeshCoreAndOverlapTest(unittest.TestCase):
@@ -354,7 +425,7 @@ class TetMeshModulusTest(unittest.TestCase):
 
 
 class TetMeshPlumbingTest(unittest.TestCase):
-    """Import laziness, stdout silencing, and input validation."""
+    """Import laziness, native stdout silencing, and input validation."""
 
     def test_import_does_not_load_pyvista_or_vtk(self) -> None:
         code = (
@@ -388,31 +459,122 @@ class TetMeshPlumbingTest(unittest.TestCase):
             build_tet_mesh([], 0.2)
         with self.assertRaises(MeshGenerationError):
             build_tet_mesh([(CASTING, PART_TYPE_CAST)], 0.0)
+        with self.assertRaises(ValueError):
+            build_tet_mesh([(CASTING, PART_TYPE_CAST)], 0.2, strategy="tetgen")
 
 
-def _fd1_identity() -> tuple:
-    stat = os.fstat(1)
-    return (stat.st_dev, stat.st_ino)
+SMALL_PARTS = [
+    (_box((1.0, 1.0, 1.0), (0.0, 0.0, 0.5)), PART_TYPE_CAST),
+    (_box((1.0, 1.0, 0.5), (0.0, 0.0, -0.25)), PART_TYPE_CHILL),
+]
 
 
-class StdoutGuardTest(unittest.TestCase):
-    """``_silence_c_stdout`` is serialized across threads and restores state on every failure path."""
+class _CancelRequested(Exception):
+    pass
 
-    def _assert_restored(self, python_out: io.StringIO, fd1: tuple) -> None:
-        self.assertIs(sys.stdout, python_out)
-        self.assertEqual(_fd1_identity(), fd1)
-        print("stdout works")
-        self.assertIn("stdout works", python_out.getvalue())
+
+class TetwildChildProcessTest(unittest.TestCase):
+    """fTetWild runs in ``core/tetwild_child.py``: crashes fall back or raise, cancel kills the child."""
+
+    def _crash_in(self, modes: str):
+        return mock.patch.dict(os.environ, {tetwild_child.FAULT_ENV: modes})
+
+    def test_child_script_imports_only_stdlib_numpy_and_pytetwild(self) -> None:
+        import ast
+
+        tree = ast.parse((REPO / "core" / "tetwild_child.py").read_text(encoding="utf-8"))
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imported.add((node.module or "").split(".")[0])
+        third_party = {m for m in imported if m not in sys.stdlib_module_names and m != "__future__"}
+        self.assertEqual(third_party, {"numpy", "pytetwild"})
+
+    def test_csg_crash_falls_back_to_soup(self) -> None:
+        messages: list[str] = []
+        with self._crash_in("csg"), self.assertLogs("core.tet_mesh", level="WARNING") as logs:
+            mesh = build_tet_mesh(SMALL_PARTS, 0.3, progress_callback=lambda f, m: messages.append(m))
+        # The test process survived a SIGSEGV in the mesher.
+        self.assertEqual(mesh.meshing_strategy, "soup")
+        self.assertIn("SIGSEGV", "\n".join(logs.output))
+        self.assertTrue(any("retrying with merged part surfaces" in m for m in messages))
+        self.assertIn("soup strategy", messages[-1])
+        for (part, code) in SMALL_PARTS:
+            self.assertAlmostEqual(_code_volume(mesh, code) / part.volume, 1.0, delta=0.02)
+
+    def test_soup_crash_is_retried_once(self) -> None:
+        real = tet_mesh_module._tetrahedralize_in_child
+        calls: list[str] = []
+
+        def crash_first_soup(mode, *args):
+            calls.append(mode)
+            if mode == "csg" or calls.count("soup") == 1:
+                raise tet_mesh_module._ChildFailure("crashed with SIGBUS", "")
+            return real(mode, *args)
+
+        with mock.patch.object(
+            tet_mesh_module, "_tetrahedralize_in_child", side_effect=crash_first_soup
+        ), self.assertLogs("core.tet_mesh", level="INFO") as logs:
+            mesh = build_tet_mesh(SMALL_PARTS, 0.3)
+        self.assertEqual(calls, list(tet_mesh_module.MESHING_ATTEMPTS["auto"]))
+        self.assertEqual(calls, ["csg", "soup", "soup"])
+        self.assertEqual(mesh.meshing_strategy, "soup")
+        output = "\n".join(logs.output)
+        self.assertIn("attempt 1/3 (csg) failed", output)
+        self.assertIn("attempt 2/3 (soup) failed", output)
+        self.assertIn("attempt 3/3 (soup) succeeded", output)
+
+    def test_every_strategy_crashing_raises_with_the_voxel_hint(self) -> None:
+        cases = {"assembly": (SMALL_PARTS, "csg,soup"), "single part": (SMALL_PARTS[:1], "soup")}
+        for label, (parts, modes) in cases.items():
+            with self.subTest(label), self._crash_in(modes), self.assertLogs("core.tet_mesh", level="WARNING"):
+                with self.assertRaises(MeshGenerationError) as raised:
+                    build_tet_mesh(parts, 0.3)
+                message = str(raised.exception)
+                self.assertIn("SIGSEGV", message)
+                self.assertIn("edge length 0.3 in", message)
+                self.assertIn("Change the mesh size, or switch Mesh type to Voxel", message)
+
+    def test_child_python_error_reports_exit_code_and_stderr(self) -> None:
+        with mock.patch.object(tet_mesh_module, "_CHILD_SCRIPT", str(REPO / "core" / "no_such_child.py")):
+            with self.assertLogs("core.tet_mesh", level="WARNING"), self.assertRaises(MeshGenerationError) as raised:
+                build_tet_mesh(SMALL_PARTS, 0.3, strategy="csg")
+        self.assertIn("exited with code", str(raised.exception))
+        self.assertIn("no_such_child.py", str(raised.exception))
+
+    def test_cancel_kills_the_running_child_promptly(self) -> None:
+        sphere = trimesh.creation.icosphere(subdivisions=4, radius=2.0)
+        started = time.monotonic()
+        cancel_at: list[float] = []
+        processes: list = []
+        real_popen = subprocess.Popen
+
+        def popen(*args, **kwargs):
+            processes.append(real_popen(*args, **kwargs))
+            return processes[-1]
+
+        def progress(fraction: float, message: str) -> None:
+            if time.monotonic() - started > 2.0:
+                cancel_at.append(time.monotonic())
+                raise _CancelRequested
+
+        with mock.patch.object(tet_mesh_module.subprocess, "Popen", side_effect=popen):
+            with self.assertRaises(_CancelRequested):
+                build_tet_mesh([(sphere, PART_TYPE_CAST)], 0.04, progress_callback=progress)
+        self.assertLess(time.monotonic() - cancel_at[0], 2.0)
+        self.assertEqual(len(processes), 1)
+        self.assertIsNotNone(processes[0].poll())
+        self.assertFalse(tet_mesh_module._NATIVE_MESH_LOCK.locked())
 
     def test_two_threads_meshing_concurrently_leave_stdout_intact(self) -> None:
-        parts = [(_box((1.0, 1.0, 1.0), (0.0, 0.0, 0.5)), PART_TYPE_CAST),
-                 (_box((1.0, 1.0, 0.5), (0.0, 0.0, -0.25)), PART_TYPE_CHILL)]
         results: list = []
         errors: list = []
 
         def mesh() -> None:
             try:
-                results.append(build_tet_mesh(parts, 0.3).get_voxel_count())
+                results.append(build_tet_mesh(SMALL_PARTS, 0.3).get_voxel_count())
             except Exception as exc:  # reported below
                 errors.append(exc)
 
@@ -422,88 +584,21 @@ class StdoutGuardTest(unittest.TestCase):
         with tempfile.TemporaryFile() as fd_out:
             try:
                 os.dup2(fd_out.fileno(), 1)
-                fd1 = _fd1_identity()
                 with redirect_stdout(python_out):
                     threads = [threading.Thread(target=mesh) for _ in range(2)]
                     for thread in threads:
                         thread.start()
                     for thread in threads:
                         thread.join()
-                    self._assert_restored(python_out, fd1)
                     os.write(1, b"fd1 works")
             finally:
                 os.dup2(saved, 1)
                 os.close(saved)
             fd_out.seek(0)
             self.assertEqual(fd_out.read(), b"fd1 works")
+        self.assertEqual(python_out.getvalue(), "")
         self.assertEqual(errors, [])
         self.assertEqual(len(results), 2)
-
-    def test_overlapping_entries_are_serialized(self) -> None:
-        """A enters, B enters while A is inside, A exits first: the unlocked guard left fd 1 on devnull."""
-        inside = [0]
-        peak = [0]
-        counter_lock = threading.Lock()
-
-        def enter(delay: float) -> None:
-            time.sleep(delay)
-            with tet_mesh_module._silence_c_stdout():
-                with counter_lock:
-                    inside[0] += 1
-                    peak[0] = max(peak[0], inside[0])
-                time.sleep(0.2)
-                with counter_lock:
-                    inside[0] -= 1
-
-        python_out = io.StringIO()
-        fd1 = _fd1_identity()
-        with redirect_stdout(python_out):
-            threads = [threading.Thread(target=enter, args=(d,)) for d in (0.0, 0.05)]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join()
-            self._assert_restored(python_out, fd1)
-        self.assertEqual(peak[0], 1)
-
-    def test_libc_failures_do_not_break_the_guard(self) -> None:
-        cases = {
-            "_libc raises TypeError": dict(side_effect=TypeError("no CDLL(None) on Windows")),
-            "_libc returns an object without fflush": dict(return_value=object()),
-        }
-        for label, behaviour in cases.items():
-            with self.subTest(label), mock.patch.object(tet_mesh_module, "_libc", **behaviour):
-                python_out = io.StringIO()
-                fd1 = _fd1_identity()
-                with redirect_stdout(python_out):
-                    with tet_mesh_module._silence_c_stdout():
-                        self.assertIsNot(sys.stdout, python_out)
-                    self._assert_restored(python_out, fd1)
-
-    def test_body_and_open_failures_restore_stdout(self) -> None:
-        python_out = io.StringIO()
-        fd1 = _fd1_identity()
-        with redirect_stdout(python_out):
-            with self.assertRaises(RuntimeError):
-                with tet_mesh_module._silence_c_stdout():
-                    raise RuntimeError("native failure")
-            self._assert_restored(python_out, fd1)
-            with mock.patch.object(tet_mesh_module.os, "open", side_effect=OSError("no devnull")):
-                with self.assertRaises(OSError):
-                    with tet_mesh_module._silence_c_stdout():
-                        pass
-            self._assert_restored(python_out, fd1)
-        # The lock is released after every failure.
-        self.assertFalse(tet_mesh_module._NATIVE_MESH_LOCK.locked())
-
-    def test_libc_returns_none_when_every_runtime_fails_to_load(self) -> None:
-        with mock.patch.object(tet_mesh_module.ctypes, "CDLL", side_effect=TypeError("bad name")):
-            self.assertIsNone(tet_mesh_module._libc())
-        with mock.patch.object(tet_mesh_module.sys, "platform", "win32"), mock.patch.object(
-            tet_mesh_module.ctypes, "CDLL", side_effect=[OSError("no ucrtbase"), "msvcrt handle"]
-        ) as cdll:
-            self.assertEqual(tet_mesh_module._libc(), "msvcrt handle")
-        self.assertEqual([c.args[0] for c in cdll.call_args_list], ["ucrtbase", "msvcrt"])
 
 
 class OpenPartOverlapTest(unittest.TestCase):

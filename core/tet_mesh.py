@@ -1,29 +1,33 @@
 """Conforming tetrahedral volume mesh of a casting assembly (contract C1).
 
 ``build_tet_mesh`` meshes every part in one fTetWild CSG union, so parts that
-touch share nodes on their interface. CORE and FILTER tets are removed after
+touch share nodes on their interface. When the CSG run crashes it falls back
+to one unfiltered fTetWild run on the concatenated part surfaces (soup), which
+is also conforming, labels tets by containment and drops tets inside no part.
+fTetWild always runs in a child
+process (``core/tetwild_child.py``). CORE and FILTER tets are removed after
 meshing; the faces they expose become boundary faces with a contact code.
 
 ``TetVolumeMesh`` duck-types ``AdaptiveVoxelMesh``: the ``voxel_*`` arrays
 exist with node semantics (one entry per tet node, in node order). All lengths
 are inches.
 
-pytetwild imports pyvista/vtk at package import, so it is imported inside
-``build_tet_mesh`` only.
+pytetwild imports pyvista/vtk at package import, so only the child imports it.
 """
 
 from __future__ import annotations
 
-import ctypes
 import json
 import logging
 import math
 import os
+import signal
+import subprocess
 import sys
 import tempfile
 import threading
-from contextlib import contextmanager
-from typing import Callable, Iterator, Sequence
+import time
+from typing import Callable, Sequence
 
 import numpy as np
 import trimesh
@@ -31,6 +35,7 @@ from numba import njit, prange
 from scipy.spatial import cKDTree
 
 from config.exceptions import MeshGenerationError
+from core import tetwild_child
 from core.part_manager import (
     METAL_PART_CODES,
     PART_TYPE_CHILL,
@@ -43,11 +48,26 @@ logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[float, str], None]
 
-#: Held for the whole stdout-silencing context, native fTetWild call included.
-#: The context swaps process-wide state (fd 1 and ``sys.stdout``), so two
-#: threads inside it at once restore each other's devnull. fTetWild's own
-#: thread safety is unknown, so serializing the native call is wanted anyway.
+#: Held while an fTetWild child runs: one mesher at a time, because each
+#: child uses every core by default.
 _NATIVE_MESH_LOCK = threading.Lock()
+
+#: fTetWild attempts, in order, per ``build_tet_mesh(strategy=...)`` value.
+#: The soup run is tried twice: its SIGBUS (``remove_duplicates`` in fTetWild's
+#: input simplification) is not deterministic and fires in the first seconds.
+MESHING_ATTEMPTS: dict[str, tuple[str, ...]] = {
+    "auto": ("csg", "soup", "soup"),
+    "csg": ("csg",),
+    "soup": ("soup", "soup"),
+}
+MESHING_STRATEGIES: tuple[str, ...] = tuple(MESHING_ATTEMPTS)
+
+_CHILD_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tetwild_child.py")
+#: Seconds between progress-callback polls while the child runs.
+_CHILD_POLL_S = 0.15
+#: Seconds a terminated child gets to exit before it is killed.
+_CHILD_TERMINATE_GRACE_S = 1.0
+_CHILD_STDERR_TAIL_LINES = 20
 
 #: Point x triangle pairs above which ``winding_number_contains`` falls back
 #: to the voxel path's containment check. Measured 1.8e9 pairs/s on 18
@@ -92,6 +112,7 @@ class TetVolumeMesh:
         *,
         base_voxel_size: float,
         metal_part_bounds: Sequence[np.ndarray] = (),
+        meshing_strategy: str | None = None,
     ) -> None:
         self.node_xyz = np.ascontiguousarray(node_xyz, dtype=np.float64)
         self.tets = np.ascontiguousarray(tets, dtype=np.int32)
@@ -120,6 +141,8 @@ class TetVolumeMesh:
         self.grid_shape = None
         self.bounds = np.column_stack([self.node_xyz.min(axis=0), self.node_xyz.max(axis=0)])
         self.metal_part_bounds = [np.asarray(b, dtype=np.float64) for b in metal_part_bounds]
+        #: "csg" or "soup" when built by ``build_tet_mesh``, else None.
+        self.meshing_strategy = meshing_strategy
 
         tet_nodes = self.tets.reshape(-1)
         self.voxel_centers = self.node_xyz.astype(np.float32)
@@ -235,18 +258,36 @@ def build_tet_mesh(
     stop_energy: float = 10.0,
     num_threads: int = 0,
     progress_callback: ProgressCallback | None = None,
+    strategy: str = "auto",
 ) -> TetVolumeMesh:
     """Mesh ``parts`` (world coords, inches, part code) into one conforming tet mesh.
 
     ``edge_length_in`` is the target tet edge length in inches. ``epsilon_rel``
     is the fTetWild envelope relative to the assembly bounding-box diagonal.
-    Raises ``MeshGenerationError`` on failure, empty output or non-finite
-    coordinates.
+
+    fTetWild runs in a child process (``core/tetwild_child.py``), so a native
+    crash cannot kill the caller, and ``progress_callback`` is polled during
+    the run: an exception it raises (cancel) stops the child and propagates.
+
+    ``strategy``: ``"csg"`` meshes several parts in one CSG union with a
+    marker per part. ``"soup"`` meshes the concatenated part surfaces in one
+    call without fTetWild's inside/outside filter (its winding-number filter
+    drops a slab of metal where touching parts have coincident faces), labels
+    tets by centroid containment (``_label_soup_tets``) and drops tets inside
+    no part as exterior. ``"auto"`` tries CSG and falls back to soup when the
+    CSG child exits abnormally. ``MESHING_ATTEMPTS`` lists the attempts per
+    strategy. One part always uses soup, with fTetWild's filter on and every
+    tet taking the part's code. The strategy used is ``mesh.meshing_strategy``.
+
+    Raises ``MeshGenerationError`` when every attempt fails, on empty output
+    or non-finite coordinates.
     """
     def report(fraction: float, message: str) -> None:
         if progress_callback is not None:
             progress_callback(fraction, message)
 
+    if strategy not in MESHING_STRATEGIES:
+        raise ValueError(f"strategy must be one of {MESHING_STRATEGIES}, got {strategy!r}")
     meshes = [m for m, _ in parts]
     codes = np.array([int(c) for _, c in parts], dtype=np.int64)
     if len(meshes) == 0:
@@ -257,28 +298,69 @@ def build_tet_mesh(
         if len(mesh.faces) == 0 or not np.all(np.isfinite(mesh.vertices)):
             raise MeshGenerationError("part mesh is empty or has non-finite vertices", voxel_size=edge_length_in)
 
-    report(0.0, "Tetrahedralizing parts")
-    try:
-        vertices, tets, markers = _tetrahedralize(
-            meshes, edge_length_in, epsilon_rel, stop_energy, num_threads
+    attempts = MESHING_ATTEMPTS["soup" if len(meshes) == 1 else strategy]
+    failures: list[tuple[str, _ChildFailure]] = []
+    for number, used in enumerate(attempts, start=1):
+        started = time.monotonic()
+        try:
+            vertices, tets, markers = _tetrahedralize_in_child(
+                used, meshes, edge_length_in, epsilon_rel, stop_energy, num_threads, report
+            )
+        except _ChildFailure as failure:
+            failures.append((used, failure))
+            logger.warning(
+                "fTetWild attempt %d/%d (%s) failed after %.1f s at edge length %g in: %s. "
+                "Child stderr tail:\n%s",
+                number,
+                len(attempts),
+                used,
+                time.monotonic() - started,
+                edge_length_in,
+                failure.description,
+                failure.stderr_tail or "(empty)",
+            )
+            if number < len(attempts):
+                report(
+                    0.0,
+                    f"Tet meshing with the {_STRATEGY_LABELS[used]} {failure.description}; "
+                    f"retrying with {_STRATEGY_LABELS[attempts[number]]}",
+                )
+            continue
+        logger.info(
+            "fTetWild attempt %d/%d (%s) succeeded in %.1f s at edge length %g in",
+            number,
+            len(attempts),
+            used,
+            time.monotonic() - started,
+            edge_length_in,
         )
-    except MeshGenerationError:
-        raise
-    except Exception as exc:  # native failures surface as RuntimeError/ValueError
-        raise MeshGenerationError(f"fTetWild failed: {exc}", voxel_size=edge_length_in) from exc
+        break
+    else:
+        raise MeshGenerationError(_failure_message(failures, edge_length_in), voxel_size=edge_length_in)
+
     if len(tets) == 0 or len(vertices) == 0:
         raise MeshGenerationError("fTetWild returned an empty mesh", voxel_size=edge_length_in)
     if not np.all(np.isfinite(vertices)):
         raise MeshGenerationError("fTetWild returned non-finite coordinates", voxel_size=edge_length_in)
-    if markers.min() < 1 or markers.max() > len(meshes):
-        raise MeshGenerationError(
-            f"fTetWild markers {markers.min()}..{markers.max()} outside 1..{len(meshes)}",
-            voxel_size=edge_length_in,
-        )
 
     report(0.7, "Assigning part codes")
     tets = _orient_positive(vertices, tets)
-    tet_codes = _resolve_overlap_codes(vertices, tets, markers - 1, meshes, codes)
+    if used == "csg":
+        if markers.min() < 1 or markers.max() > len(meshes):
+            raise MeshGenerationError(
+                f"fTetWild markers {markers.min()}..{markers.max()} outside 1..{len(meshes)}",
+                voxel_size=edge_length_in,
+            )
+        tet_codes = _resolve_overlap_codes(vertices, tets, markers - 1, meshes, codes)
+    elif len(meshes) == 1:
+        tet_codes = np.full(len(tets), int(codes[0]), dtype=np.int64)
+    else:
+        tet_codes = _label_soup_tets(vertices, tets, meshes, codes)
+        inside = tet_codes >= 0
+        logger.info("soup mesh: kept %d of %d tets inside a part", int(inside.sum()), len(tets))
+        if not np.any(inside):
+            raise MeshGenerationError("no soup-mesh tet lies inside a part", voxel_size=edge_length_in)
+        tets, tet_codes = tets[inside], tet_codes[inside]
 
     report(0.8, "Building node arrays")
     domain = _extract_thermal_domain(vertices, tets, tet_codes)
@@ -301,130 +383,172 @@ def build_tet_mesh(
         contact_codes,
         base_voxel_size=edge_length_in,
         metal_part_bounds=metal_part_bounds,
+        meshing_strategy=used,
     )
-    report(1.0, f"Tet mesh ready: {mesh.get_voxel_count()} nodes, {len(mesh.tets)} tets")
+    report(
+        1.0,
+        f"Tet mesh ready ({used} strategy): {mesh.get_voxel_count()} nodes, {len(mesh.tets)} tets",
+    )
     return mesh
 
 
 # Meshing ----------------------------------------------------------------------
 
 
-def _tetrahedralize(
+class _ChildFailure(Exception):
+    """The fTetWild child exited abnormally or wrote no result."""
+
+    def __init__(self, description: str, stderr_tail: str) -> None:
+        super().__init__(description)
+        self.description = description
+        self.stderr_tail = stderr_tail
+
+
+_STRATEGY_LABELS = {"csg": "CSG union", "soup": "merged part surfaces"}
+
+
+def _failure_message(failures: Sequence[tuple[str, _ChildFailure]], edge_length_in: float) -> str:
+    """User-facing text for ``MeshGenerationError`` after every strategy failed."""
+    attempts = ", ".join(f"{_STRATEGY_LABELS[s]}: {f.description}" for s, f in failures)
+    return (
+        f"the tet mesher (fTetWild) failed at edge length {edge_length_in:g} in ({attempts}). "
+        "Change the mesh size, or switch Mesh type to Voxel."
+    )
+
+
+def _tetrahedralize_in_child(
+    mode: str,
     meshes: Sequence[trimesh.Trimesh],
     edge_length_in: float,
     epsilon_rel: float,
     stop_energy: float,
     num_threads: int,
+    report: ProgressCallback,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Run fTetWild. Returns vertices (in), tets, and 1-based leaf markers.
+    """Run fTetWild in ``mode`` ("csg" or "soup") in a child. Returns vertices (in), tets, 1-based markers.
 
-    One part uses ``pytetwild.tetrahedralize`` with an absolute edge length.
-    Several parts use one left-deep CSG union; marker k is the k-th leaf,
-    which is the k-th input part.
+    Soup output has no markers; it returns an empty marker array, and it
+    keeps fTetWild's outside filter only for a single part. CSG takes
+    a relative edge length; marker k is the k-th leaf, the k-th input part.
+    Raises ``_ChildFailure`` when the child exits abnormally.
     """
-    import pytetwild
-    from pytetwild import PyfTetWildWrapper
-
-    if len(meshes) == 1:
-        mesh = meshes[0]
-        with _silence_c_stdout():
-            vertices, tets = pytetwild.tetrahedralize(
-                np.asarray(mesh.vertices, dtype=np.float64),
-                np.asarray(mesh.faces, dtype=np.int32),
-                edge_length_abs=edge_length_in,
-                epsilon=epsilon_rel,
-                stop_energy=stop_energy,
-                coarsen=False,
-                num_threads=num_threads,
+    request: dict = {
+        "mode": mode,
+        "epsilon_rel": float(epsilon_rel),
+        "stop_energy": float(stop_energy),
+        "coarsen": False,
+        "num_threads": int(num_threads),
+    }
+    with tempfile.TemporaryDirectory(prefix="castsim_tet_") as workdir:
+        if mode == "soup":
+            offsets = np.cumsum([0] + [len(m.vertices) for m in meshes[:-1]])
+            np.savez(
+                os.path.join(workdir, tetwild_child.SURFACE_FILE),
+                vertices=np.vstack([np.asarray(m.vertices, dtype=np.float64) for m in meshes]),
+                faces=np.vstack(
+                    [np.asarray(m.faces, dtype=np.int64) + o for m, o in zip(meshes, offsets)]
+                ).astype(np.int32),
             )
-        tets = np.asarray(tets, dtype=np.int64)
-        return np.asarray(vertices, dtype=np.float64), tets, np.ones(len(tets), dtype=np.int64)
+            request["edge_length_abs"] = float(edge_length_in)
+            request["filter_outside"] = len(meshes) == 1
+        else:
+            all_vertices = np.vstack([np.asarray(m.vertices, dtype=np.float64) for m in meshes])
+            diagonal = float(np.linalg.norm(all_vertices.max(axis=0) - all_vertices.min(axis=0)))
+            tree: str | dict = ""
+            for index, mesh in enumerate(meshes):
+                path = os.path.join(workdir, f"part_{index}.obj")
+                mesh.export(path, file_type="obj")
+                tree = path if index == 0 else {"operation": "union", "left": tree, "right": path}
+            request["csg_path"] = os.path.join(workdir, "csg.json")
+            with open(request["csg_path"], "w", encoding="utf-8") as handle:
+                json.dump(tree, handle)
+            request["edge_length_r"] = min(edge_length_in / diagonal, 1.0)
+        with open(os.path.join(workdir, tetwild_child.REQUEST_FILE), "w", encoding="utf-8") as handle:
+            json.dump(request, handle)
 
-    all_vertices = np.vstack([np.asarray(m.vertices, dtype=np.float64) for m in meshes])
-    diagonal = float(np.linalg.norm(all_vertices.max(axis=0) - all_vertices.min(axis=0)))
-    edge_length_r = min(edge_length_in / diagonal, 1.0)
-    with tempfile.TemporaryDirectory(prefix="castsim_tet_") as tmp:
-        tree: str | dict = ""
-        for index, mesh in enumerate(meshes):
-            path = os.path.join(tmp, f"part_{index}.obj")
-            mesh.export(path, file_type="obj")
-            tree = path if index == 0 else {"operation": "union", "left": tree, "right": path}
-        csg_path = os.path.join(tmp, "csg.json")
-        with open(csg_path, "w", encoding="utf-8") as handle:
-            json.dump(tree, handle)
-        with _silence_c_stdout():
-            vertices, tets, markers = PyfTetWildWrapper.tetrahedralize_csg(
-                csg_path, epsilon_rel, edge_length_r, stop_energy, False, num_threads, 6, False
+        _run_child(workdir, f"Tetrahedralizing parts ({_STRATEGY_LABELS[mode]})", report)
+
+        with np.load(os.path.join(workdir, tetwild_child.RESULT_FILE)) as result:
+            vertices = np.asarray(result["vertices"], dtype=np.float64)
+            tets = np.asarray(result["tets"], dtype=np.int64)
+            markers = (
+                np.asarray(result["markers"], dtype=np.int64)
+                if "markers" in result.files
+                else np.zeros(0, dtype=np.int64)
             )
-    return (
-        np.asarray(vertices, dtype=np.float64),
-        np.asarray(tets, dtype=np.int64),
-        np.asarray(markers, dtype=np.int64),
-    )
+    return vertices, tets, markers
 
 
-@contextmanager
-def _silence_c_stdout() -> Iterator[None]:
-    """Send fd 1 and ``sys.stdout`` to os.devnull; fTetWild prints regardless of its log level.
+def _run_child(workdir: str, message: str, report: ProgressCallback) -> None:
+    """Run ``tetwild_child.py workdir`` under ``_NATIVE_MESH_LOCK``, polling ``report``.
 
-    The CSG wrapper forwards ``std::cout`` to Python's ``sys.stdout``, so the
-    fd redirect alone does not silence it. Holds ``_NATIVE_MESH_LOCK`` for the
-    whole context. ``sys.stdout`` and fd 1 are restored even when opening a
-    descriptor, the body or the C stdio flush fails.
+    The child's cwd is ``workdir`` (fTetWild writes ``__tracked_surface.stl``
+    to the cwd), stdout goes to devnull and stderr to a file in ``workdir``.
+    If ``report`` raises, the child is terminated (killed after
+    ``_CHILD_TERMINATE_GRACE_S``) and the exception propagates.
     """
-    with _NATIVE_MESH_LOCK:
-        saved_stdout = sys.stdout
-        saved_fd: int | None = None
-        devnull_fd: int | None = None
-        python_devnull = None
-        try:
-            try:
-                saved_stdout.flush()
-            except (AttributeError, OSError, ValueError):
-                pass  # None (pythonw) or a closed stream: nothing to flush
-            saved_fd = os.dup(1)
-            devnull_fd = os.open(os.devnull, os.O_WRONLY)
-            python_devnull = open(os.devnull, "w", encoding="utf-8")
-            os.dup2(devnull_fd, 1)
-            sys.stdout = python_devnull
-            yield
-        finally:
-            sys.stdout = saved_stdout
-            # Drain C stdio buffers while fd 1 still points at devnull.
-            _flush_c_stdio()
-            if saved_fd is not None:
-                os.dup2(saved_fd, 1)
-                os.close(saved_fd)
-            if devnull_fd is not None:
-                os.close(devnull_fd)
-            if python_devnull is not None:
-                python_devnull.close()
-
-
-def _flush_c_stdio() -> None:
-    """``fflush(NULL)`` in the C runtime, skipped when the runtime or its ``fflush`` is unavailable."""
+    start = time.monotonic()
+    while not _NATIVE_MESH_LOCK.acquire(timeout=_CHILD_POLL_S):
+        report(0.0, "Waiting for another tet mesh to finish")
     try:
-        libc = _libc()
-        fflush = getattr(libc, "fflush", None) if libc is not None else None
-        if fflush is not None:
-            fflush(None)
-    except Exception:
-        pass
-
-
-def _libc() -> ctypes.CDLL | None:
-    """The C runtime that owns the process's stdio, or None.
-
-    ``ctypes.CDLL(None)`` raises TypeError on Windows, where the CRT is
-    ``ucrtbase`` (MSVC 2015+) or the legacy ``msvcrt``.
-    """
-    names: tuple[str | None, ...] = ("ucrtbase", "msvcrt") if sys.platform == "win32" else (None,)
-    for name in names:
+        stderr_path = os.path.join(workdir, "child_stderr.log")
+        with open(stderr_path, "wb") as stderr_file:
+            process = subprocess.Popen(
+                [sys.executable, _CHILD_SCRIPT, workdir],
+                cwd=workdir,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_file,
+            )
         try:
-            return ctypes.CDLL(name)
-        except Exception:
-            continue
-    return None
+            while process.poll() is None:
+                report(0.05, f"{message}, {time.monotonic() - start:.0f} s")
+                try:
+                    process.wait(timeout=_CHILD_POLL_S)
+                except subprocess.TimeoutExpired:
+                    pass
+        except BaseException:
+            _stop_child(process)
+            raise
+    finally:
+        _NATIVE_MESH_LOCK.release()
+
+    returncode = process.returncode
+    has_result = os.path.exists(os.path.join(workdir, tetwild_child.RESULT_FILE))
+    if returncode == 0 and has_result:
+        return
+    tail = _tail_lines(stderr_path, _CHILD_STDERR_TAIL_LINES)
+    if returncode < 0:
+        try:
+            description = f"crashed with {signal.Signals(-returncode).name}"
+        except ValueError:
+            description = f"crashed with signal {-returncode}"
+    elif returncode != 0:
+        last = tail.strip().splitlines()[-1] if tail.strip() else ""
+        description = f"exited with code {returncode}" + (f" ({last})" if last else "")
+    else:
+        description = "exited without writing a result"
+    raise _ChildFailure(description, tail)
+
+
+def _stop_child(process: subprocess.Popen) -> None:
+    """Terminate ``process``; kill it if it is still alive after ``_CHILD_TERMINATE_GRACE_S``."""
+    process.terminate()
+    try:
+        process.wait(timeout=_CHILD_TERMINATE_GRACE_S)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+def _tail_lines(path: str, count: int) -> str:
+    """Last ``count`` lines of a text file, "" when it cannot be read."""
+    try:
+        with open(path, "rb") as handle:
+            lines = handle.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    return "\n".join(lines[-count:])
 
 
 # Topology ---------------------------------------------------------------------
@@ -470,6 +594,39 @@ def _resolve_overlap_codes(
             overlaps[leaf_index]
             & (tet_codes < codes[part])
             & np.all((centroids >= lo) & (centroids <= hi), axis=1)
+        )
+        if len(candidates) == 0:
+            continue
+        if mesh.is_watertight:
+            inside = mesh.contains(centroids[candidates])
+        else:
+            inside = winding_number_contains(mesh, centroids[candidates])
+        tet_codes[candidates[inside]] = codes[part]
+    return tet_codes
+
+
+def _label_soup_tets(
+    vertices: np.ndarray,
+    tets: np.ndarray,
+    meshes: Sequence[trimesh.Trimesh],
+    codes: np.ndarray,
+) -> np.ndarray:
+    """Part code per tet of an unfiltered soup mesh: highest code among parts containing the centroid, -1 outside all.
+
+    The soup mesh fills the whole fTetWild bounding box, so -1 marks
+    exterior (sand) tets that the caller drops. Parts are tested in
+    descending code order, only on centroids still unlabelled and inside the
+    part's box, so a higher code always wins and centroids outside every
+    part box are never tested. Watertight parts use ``Trimesh.contains``,
+    open parts ``winding_number_contains``.
+    """
+    centroids = vertices[tets].mean(axis=1)
+    tet_codes = np.full(len(tets), -1, dtype=np.int64)
+    for part in np.argsort(-codes, kind="stable"):
+        mesh = meshes[part]
+        lo, hi = np.asarray(mesh.bounds, dtype=np.float64)
+        candidates = np.flatnonzero(
+            (tet_codes < 0) & np.all((centroids >= lo) & (centroids <= hi), axis=1)
         )
         if len(candidates) == 0:
             continue
