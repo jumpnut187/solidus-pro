@@ -155,6 +155,16 @@ def _is_tet_mesh(mesh) -> bool:
     return getattr(mesh, "mesh_type", "voxel") == "tet"
 
 
+def _has_cut_cells(mesh) -> bool:
+    """True for a voxel mesh built with cut cells (``core/cut_cells.py``)."""
+    return bool(getattr(mesh, "cut_cells", False)) and getattr(mesh, "voxel_metal_fractions", None) is not None
+
+
+def _volume_shares_by_point_volume(mesh) -> bool:
+    """Volume shares must weight points by ``voxel_volumes`` (tet nodes and cut cells vary in size)."""
+    return _is_tet_mesh(mesh) or _has_cut_cells(mesh)
+
+
 def _tet_graph_length_in(mesh, sources: np.ndarray, traversable: np.ndarray) -> np.ndarray:
     """Shortest path length (inches) along tet edges from any source node.
 
@@ -621,17 +631,19 @@ class SolidificationEngine:
         # B6: temperature-dependent material property curves (k, cp, rho) with
         # reference points spanning room temperature through above-liquidus.
         property_curves = self._alloy_property_curves()
+        neighbors = np.asarray(self.mesh.voxel_neighbors, dtype=np.int32)
 
         self._thermal_heat_model = HeatTransferModel(
             n_voxels=n_voxels,
             voxel_size=voxel_size_m,
-            neighbors=np.asarray(self.mesh.voxel_neighbors, dtype=np.int32),
+            neighbors=neighbors,
             alloy=self.alloy,
             use_temperature_dependent=True,
             voxel_sizes=voxel_sizes_m,
             diffusivity_overrides=diffusivity_overrides,
             property_curves=property_curves,
             rho_cp_overrides=rho_cp_overrides,
+            **self._cut_cell_solver_inputs(neighbors),
         )
         self._thermal_solidification_model = ThermalSolidificationModel(
             n_voxels=n_voxels,
@@ -694,6 +706,33 @@ class SolidificationEngine:
                     if show_progress:
                         print(f"    Adaptive thermal timestep: {self.time_step:.4f}s (CFL)")
 
+    def _cut_cell_solver_inputs(self, neighbors: np.ndarray) -> Dict[str, Any]:
+        """HeatTransferModel cut-cell arguments, empty for a mesh without cut cells.
+
+        Cells below ``core.cut_cells.DEFAULT_PHI_MIN`` are slaved to a
+        same-part face neighbour (volume and area move to the master), see
+        ``core.cut_cells.merge_small_cut_cells``.
+        """
+        self._cut_cell_merge = None
+        if not _has_cut_cells(self.mesh):
+            return {}
+        from core.cut_cells import DEFAULT_PHI_MIN, merge_small_cut_cells
+
+        part_types = getattr(self.mesh, "voxel_part_types", None)
+        merge = merge_small_cut_cells(
+            np.asarray(self.mesh.voxel_metal_fractions, dtype=np.float64),
+            np.asarray(self.mesh.voxel_surface_areas, dtype=np.float64),
+            neighbors,
+            None if part_types is None else np.asarray(part_types),
+            DEFAULT_PHI_MIN,
+        )
+        self._cut_cell_merge = merge
+        return {
+            "capacity_weights": merge.capacity_weights,
+            "boundary_areas": inches_to_meters(inches_to_meters(merge.boundary_areas)),
+            "slave_cells": (merge.slaves, merge.masters),
+        }
+
     def _configure_thermal_boundaries(self, *, mold_temperature: float, chill_temperature: float) -> None:
         """Map current part types to simple thermal boundary conditions."""
         if self._thermal_heat_model is None:
@@ -702,7 +741,12 @@ class SolidificationEngine:
         tb = self.analysis_options.solidification_params.thermal_boundary
         _mold_interface_decay = self._mold_interface_decay
 
-        surface_indices = np.asarray(self.mesh.get_surface_voxel_indices(), dtype=np.int32)
+        cut_cell_merge = getattr(self, "_cut_cell_merge", None)
+        if cut_cell_merge is not None:
+            # Cut cells: the cells holding exterior CAD area after merging.
+            surface_indices = np.flatnonzero(cut_cell_merge.boundary_areas > 0.0).astype(np.int32)
+        else:
+            surface_indices = np.asarray(self.mesh.get_surface_voxel_indices(), dtype=np.int32)
         if surface_indices.size == 0:
             return
 
@@ -5522,13 +5566,14 @@ class SolidificationEngine:
         """Share of the mesh flagged by the shrinkage statistics, in percent.
 
         Voxel meshes: affected voxel count / voxel count (cells are near
-        uniform). Tet meshes: affected lumped node volume / total node volume,
-        because node volumes vary with the local edge length.
+        uniform). Tet meshes and cut-cell voxel meshes: affected volume /
+        total volume, because node volumes vary with the local edge length
+        and cut-cell volumes with the metal fraction.
         """
         n_points = len(self.mesh.voxel_centers)
         if n_points == 0:
             return 0.0
-        if not _is_tet_mesh(self.mesh):
+        if not _volume_shares_by_point_volume(self.mesh):
             return float(self.affected_voxel_count / n_points * 100)
         shrink = getattr(self, "shrinkage_probability", None)
         poro = getattr(self, "porosity_probability", None)
@@ -6097,7 +6142,7 @@ class SolidificationEngine:
                 shrink_scalar = self._get_shrink_scalar()
             results['affected_voxels'] = self.affected_voxel_count
             results['shrinkage_volume'] = self.total_shrinkage_volume
-            if _is_tet_mesh(self.mesh):
+            if _volume_shares_by_point_volume(self.mesh):
                 results['shrinkage_percentage'] = SolidificationEngine.get_shrinkage_percentage(self)
             else:
                 results['shrinkage_percentage'] = (self.affected_voxel_count / 
