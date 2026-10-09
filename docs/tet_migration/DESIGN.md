@@ -289,3 +289,32 @@ Reports: `wave1_mesh.md`, `wave1_solver.md`, `wave1_lattice.md`. Commit 20e098d.
   `test_porosity_benchmark_case_pack...test_case_pack_reference_targets`
   (riser_post_block), `test_shrinkage_display_intensity...test_shrink_scalar_below_one...`.
   Do not chase these.
+
+## Wave 2 outcomes (binding for later waves)
+
+Reports: `wave2_engine.md`, `wave2_pipeline.md`, `wave2_integration.md`. Commit cb655bc.
+
+- `run_pipeline(mesh_type="tet")` and `run_surrogate_pipeline` run end to end.
+  Every engine per-point array has length N nodes. Full suite: 1931 run, only
+  the 3 baseline failures.
+- Settings: `settings.mesh.mesh_type` (default "voxel"), `tet_edge_length_factor`,
+  `tet_epsilon_rel`, `tet_max_time_step_s`, `tet_max_delta_t_c`,
+  `tet_lattice_spacing_factor`, `tet_max_nodes`. `PipelineInputs.mesh_type`
+  (None -> settings; an explicit unknown value raises ValidationError).
+  `PipelineResult.mesh_type`; payload `visualization_data["mesh_type"]`,
+  `result_data["mesh_type"]`, `result_data["tet_count"]`.
+- `core/simulation_pipeline.estimate_tet_node_count(parts, h)` and the
+  `tet_max_nodes` guard raise `MeshGenerationError` with an actionable message.
+- `core/tet_filling.py`: `maybe_run_tet_filling`, `build_filling_lattice`
+  (sampler + node mapping), FILTER cells rasterized onto the fill lattice.
+  Fill summary counts are in lattice cells, not nodes.
+- Voxel vs tet on a 2x2x1 box + riser + chill (CAD metal 5.36 in3): voxel metal
+  volume is 7.73 / 6.37 / 5.85 in3 at h 0.2 / 0.1 / 0.05 and its total time
+  falls 194.7 / 156.5 / 143.3 s toward the tet value; tet is h-converged at
+  124.5-125.8 s with 5.39-5.43 in3. Hot spot under the riser neck in every run.
+- Known defect, fixed in wave 3: the tet enthalpy correction reuses the voxel
+  math, which caps recalescence at T_sol and discards latent heat on large
+  steps. Default step limits finish ~7 % early.
+- Changed meanings on tet runs: `engine.time_step` = last accepted dt;
+  `thermal_gradients` = true |grad T| (degC/mm), not the voxel RMS slope;
+  `voxel_sizes` = mean incident edge length; `voxel_part_types` is int8.
