@@ -386,7 +386,7 @@ class MeshDialog(DraggableDialog):
     apply_ml_requested = Signal()
 
     VOXEL_SIZE_LABEL = "Base Voxel Size (inches):"
-    ELEMENT_SIZE_LABEL = "Element size (in):"
+    ELEMENT_SIZE_LABEL = "Mesh size (in):"
     
     def __init__(self, parent=None):
         super().__init__(parent, "Mesh Parameters")
@@ -418,6 +418,10 @@ class MeshDialog(DraggableDialog):
         self.voxel_size_spin.setSingleStep(0.02)
         self.voxel_size_spin.setDecimals(3)
         self.content_layout.addWidget(self.voxel_size_spin)
+        # Tet only: the edge length the size above produces.
+        self.tet_edge_label = QLabel("")
+        self.tet_edge_label.setStyleSheet("font-size: 10px; color: #888;")
+        self.content_layout.addWidget(self.tet_edge_label)
         
         # Refinement level
         self.content_layout.addWidget(QLabel("Refinement Level:"))
@@ -456,12 +460,17 @@ class MeshDialog(DraggableDialog):
         self.content_layout.addStretch()
 
         self.mesh_type_combo.currentIndexChanged.connect(self._update_size_label)
+        self.voxel_size_spin.valueChanged.connect(self._update_size_label)
         self.set_mesh_type(get_settings().mesh.mesh_type)
 
     def _update_size_label(self, *_args):
-        """Name the size control for the selected mesh type."""
+        """Name the size control for the selected mesh type; on tet show the effective edge length."""
         tet = self.get_mesh_type() == "tet"
         self.voxel_size_label.setText(self.ELEMENT_SIZE_LABEL if tet else self.VOXEL_SIZE_LABEL)
+        self.tet_edge_label.setText(
+            f"Tet edge \u2248 {tet_edge_length_in(self.voxel_size_spin.value()):.3f} in" if tet else ""
+        )
+        self.tet_edge_label.setVisible(tet)
     
     def store_original_values(self):
         """Store current settings"""
@@ -505,10 +514,10 @@ class MeshDialog(DraggableDialog):
         return str(self.mesh_type_combo.currentData())
 
     def set_mesh_type(self, mesh_type: str) -> None:
-        """Select ``mesh_type`` ("tet" or "voxel"); an unknown value selects Voxel."""
+        """Select ``mesh_type`` ("tet" or "voxel"); an unknown value selects Tetrahedral."""
         index = self.mesh_type_combo.findData(str(mesh_type).strip().lower())
         if index < 0:
-            index = self.mesh_type_combo.findData("voxel")
+            index = self.mesh_type_combo.findData("tet")
         self.mesh_type_combo.setCurrentIndex(index)
         self._update_size_label()
     
@@ -1782,6 +1791,13 @@ class ConsoleWindow(QDialog):
         super().showEvent(event)
 
 
+def tet_edge_length_in(voxel_size: float) -> float:
+    """Tet edge length, inches, a run at ``voxel_size`` meshes with (``x settings.mesh.tet_edge_length_factor``)."""
+    from config.settings import get_settings
+
+    return float(voxel_size) * float(get_settings().mesh.tet_edge_length_factor)
+
+
 # ==================== Riser Design Dialog ====================
 
 def build_riser_design_tet_mesh(cast_mesh, voxel_size: float):
@@ -2686,6 +2702,7 @@ class MainWindow(QMainWindow):
         # The mesh dialog starts on settings.mesh.mesh_type.
         self._performance_options['mesh_type'] = self.mesh_dialog.get_mesh_type()
         self._update_performance_summary()
+        self._update_mesh_summary()
     
     def _create_menu_bar(self):
         """Create the application menu bar"""
@@ -4594,7 +4611,9 @@ class MainWindow(QMainWindow):
     def _update_mesh_summary(self):
         """Update mesh summary label in sidebar"""
         if self._performance_options.get('mesh_type') == 'tet':
-            self.mesh_summary_label.setText(f"Tet: {self._current_voxel_size:.3f}\"")
+            self.mesh_summary_label.setText(
+                f"Tet: {self._current_voxel_size:.3f}\", edge \u2248 {tet_edge_length_in(self._current_voxel_size):.3f}\""
+            )
             return
         self.mesh_summary_label.setText(
             f"Voxel: {self._current_voxel_size:.3f}\", Ref: {int(self._current_refinement)}"
@@ -5653,8 +5672,20 @@ class MainWindow(QMainWindow):
             percentage = int((current / total) * 100)
             self.progress_bar.setFormat(f"{percentage}%")
         
-        # Update status label
-        self.status_label.setText(f"Processing {stage}: Z-slice {current}/{total}")
+        # Update status label. The tet pipeline reports stage percentages,
+        # not voxelizer Z-slices.
+        if self._progress_sender_is_tet_run():
+            self.status_label.setText(f"{stage} {int((current / total) * 100)}%")
+        else:
+            self.status_label.setText(f"Processing {stage}: Z-slice {current}/{total}")
+
+    def _progress_sender_is_tet_run(self) -> bool:
+        """True when the worker emitting progress runs a tet mesh (``run_mesh_type``)."""
+        try:
+            run_mesh_type = getattr(self.sender(), "run_mesh_type", None)
+            return callable(run_mesh_type) and run_mesh_type() == "tet"
+        except Exception:
+            return False
     
     def _on_simulation_finished(self, success: bool, status: str):
         """Handle simulation completion"""
@@ -5669,8 +5700,13 @@ class MainWindow(QMainWindow):
                 'elapsed_time_seconds': elapsed_time,
                 'alloy': self._current_alloy
             })
-            logger.log_performance("Complete simulation", elapsed_time, 
-                                   self.simulation_worker.voxel_mesh.get_voxel_count() if self.simulation_worker.voxel_mesh else 0)
+            finished_mesh = self.simulation_worker.voxel_mesh
+            logger.log_performance(
+                "Complete simulation",
+                elapsed_time,
+                finished_mesh.get_voxel_count() if finished_mesh else 0,
+                count_unit="nodes" if getattr(finished_mesh, "mesh_type", "voxel") == "tet" else "voxels",
+            )
             
             # Get results
             simulation = self.simulation_worker.simulation

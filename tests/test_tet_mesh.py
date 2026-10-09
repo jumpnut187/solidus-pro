@@ -7,14 +7,19 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import scipy.sparse as sp
 import trimesh
+from scipy.sparse.csgraph import connected_components
 
+import core.tet_mesh as tet_mesh_module
 from config.exceptions import MeshGenerationError
 from core.part_manager import (
     PART_TYPE_CAST,
@@ -22,7 +27,7 @@ from core.part_manager import (
     PART_TYPE_CORE,
     PART_TYPE_RISER,
 )
-from core.tet_mesh import TetVolumeMesh, build_tet_mesh
+from core.tet_mesh import TetVolumeMesh, build_tet_mesh, winding_number_contains
 
 REPO = Path(__file__).resolve().parents[1]
 SAMPLES = REPO / "sample_stl_files"
@@ -38,6 +43,14 @@ def _cylinder(radius, height, center, sections=32) -> trimesh.Trimesh:
     mesh = trimesh.creation.cylinder(radius=radius, height=height, sections=sections)
     mesh.apply_translation(center)
     return mesh
+
+
+def _open_cylinder(radius, height, center, *, open_end: str, sections=32) -> trimesh.Trimesh:
+    """Cylinder with its ``"top"`` or ``"bottom"`` cap removed: an open, non-watertight surface."""
+    mesh = _cylinder(radius, height, center, sections)
+    normal_z = mesh.face_normals[:, 2]
+    keep = normal_z < 0.99 if open_end == "top" else normal_z > -0.99
+    return trimesh.Trimesh(mesh.vertices, mesh.faces[keep], process=True)
 
 
 def _code_volume(mesh: TetVolumeMesh, code: int) -> float:
@@ -375,6 +388,202 @@ class TetMeshPlumbingTest(unittest.TestCase):
             build_tet_mesh([], 0.2)
         with self.assertRaises(MeshGenerationError):
             build_tet_mesh([(CASTING, PART_TYPE_CAST)], 0.0)
+
+
+def _fd1_identity() -> tuple:
+    stat = os.fstat(1)
+    return (stat.st_dev, stat.st_ino)
+
+
+class StdoutGuardTest(unittest.TestCase):
+    """``_silence_c_stdout`` is serialized across threads and restores state on every failure path."""
+
+    def _assert_restored(self, python_out: io.StringIO, fd1: tuple) -> None:
+        self.assertIs(sys.stdout, python_out)
+        self.assertEqual(_fd1_identity(), fd1)
+        print("stdout works")
+        self.assertIn("stdout works", python_out.getvalue())
+
+    def test_two_threads_meshing_concurrently_leave_stdout_intact(self) -> None:
+        parts = [(_box((1.0, 1.0, 1.0), (0.0, 0.0, 0.5)), PART_TYPE_CAST),
+                 (_box((1.0, 1.0, 0.5), (0.0, 0.0, -0.25)), PART_TYPE_CHILL)]
+        results: list = []
+        errors: list = []
+
+        def mesh() -> None:
+            try:
+                results.append(build_tet_mesh(parts, 0.3).get_voxel_count())
+            except Exception as exc:  # reported below
+                errors.append(exc)
+
+        python_out = io.StringIO()
+        sys.stdout.flush()
+        saved = os.dup(1)
+        with tempfile.TemporaryFile() as fd_out:
+            try:
+                os.dup2(fd_out.fileno(), 1)
+                fd1 = _fd1_identity()
+                with redirect_stdout(python_out):
+                    threads = [threading.Thread(target=mesh) for _ in range(2)]
+                    for thread in threads:
+                        thread.start()
+                    for thread in threads:
+                        thread.join()
+                    self._assert_restored(python_out, fd1)
+                    os.write(1, b"fd1 works")
+            finally:
+                os.dup2(saved, 1)
+                os.close(saved)
+            fd_out.seek(0)
+            self.assertEqual(fd_out.read(), b"fd1 works")
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 2)
+
+    def test_overlapping_entries_are_serialized(self) -> None:
+        """A enters, B enters while A is inside, A exits first: the unlocked guard left fd 1 on devnull."""
+        inside = [0]
+        peak = [0]
+        counter_lock = threading.Lock()
+
+        def enter(delay: float) -> None:
+            time.sleep(delay)
+            with tet_mesh_module._silence_c_stdout():
+                with counter_lock:
+                    inside[0] += 1
+                    peak[0] = max(peak[0], inside[0])
+                time.sleep(0.2)
+                with counter_lock:
+                    inside[0] -= 1
+
+        python_out = io.StringIO()
+        fd1 = _fd1_identity()
+        with redirect_stdout(python_out):
+            threads = [threading.Thread(target=enter, args=(d,)) for d in (0.0, 0.05)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            self._assert_restored(python_out, fd1)
+        self.assertEqual(peak[0], 1)
+
+    def test_libc_failures_do_not_break_the_guard(self) -> None:
+        cases = {
+            "_libc raises TypeError": dict(side_effect=TypeError("no CDLL(None) on Windows")),
+            "_libc returns an object without fflush": dict(return_value=object()),
+        }
+        for label, behaviour in cases.items():
+            with self.subTest(label), mock.patch.object(tet_mesh_module, "_libc", **behaviour):
+                python_out = io.StringIO()
+                fd1 = _fd1_identity()
+                with redirect_stdout(python_out):
+                    with tet_mesh_module._silence_c_stdout():
+                        self.assertIsNot(sys.stdout, python_out)
+                    self._assert_restored(python_out, fd1)
+
+    def test_body_and_open_failures_restore_stdout(self) -> None:
+        python_out = io.StringIO()
+        fd1 = _fd1_identity()
+        with redirect_stdout(python_out):
+            with self.assertRaises(RuntimeError):
+                with tet_mesh_module._silence_c_stdout():
+                    raise RuntimeError("native failure")
+            self._assert_restored(python_out, fd1)
+            with mock.patch.object(tet_mesh_module.os, "open", side_effect=OSError("no devnull")):
+                with self.assertRaises(OSError):
+                    with tet_mesh_module._silence_c_stdout():
+                        pass
+            self._assert_restored(python_out, fd1)
+        # The lock is released after every failure.
+        self.assertFalse(tet_mesh_module._NATIVE_MESH_LOCK.locked())
+
+    def test_libc_returns_none_when_every_runtime_fails_to_load(self) -> None:
+        with mock.patch.object(tet_mesh_module.ctypes, "CDLL", side_effect=TypeError("bad name")):
+            self.assertIsNone(tet_mesh_module._libc())
+        with mock.patch.object(tet_mesh_module.sys, "platform", "win32"), mock.patch.object(
+            tet_mesh_module.ctypes, "CDLL", side_effect=[OSError("no ucrtbase"), "msvcrt handle"]
+        ) as cdll:
+            self.assertEqual(tet_mesh_module._libc(), "msvcrt handle")
+        self.assertEqual([c.args[0] for c in cdll.call_args_list], ["ucrtbase", "msvcrt"])
+
+
+class OpenPartOverlapTest(unittest.TestCase):
+    """Overlap pass on a non-watertight part uses the generalized winding number."""
+
+    # Risers sunk 1 in into the casting box (z 1..3, casting z 0..2).
+    OPEN_RISER = _open_cylinder(0.8, 2.0, (0.0, 0.0, 2.0), open_end="top")
+    # Missing cap inside the casting: ray tests fail in the overlap itself.
+    OPEN_BOTTOM_RISER = _open_cylinder(0.8, 2.0, (0.0, 0.0, 2.0), open_end="bottom")
+
+    def test_winding_number_matches_exact_containment_where_ray_tests_fail(self) -> None:
+        riser = self.OPEN_RISER
+        self.assertFalse(riser.is_watertight)
+        points = np.random.default_rng(0).uniform([-1.0, -1.0, 0.0], [1.0, 1.0, 3.0], (20000, 3))
+        exact = (np.hypot(points[:, 0], points[:, 1]) < 0.8) & (points[:, 2] > 1.0) & (points[:, 2] < 3.0)
+        winding_wrong = int(np.sum(winding_number_contains(riser, points) != exact))
+        ray_wrong = int(np.sum(riser.contains(points) != exact))
+        # Measured: 47 (faceting of the 32-gon) vs 1933 of 6737 inside points.
+        self.assertLess(winding_wrong, 0.02 * len(points))
+        self.assertGreater(ray_wrong, 0.05 * len(points))
+
+    def test_open_riser_overlapping_a_casting_takes_the_riser_code(self) -> None:
+        """Measured with ``Trimesh.contains``: riser volume 0.716 of exact in riser-first order."""
+        riser_volume = np.pi * 0.8**2 * 2.0
+        for order in ("casting first", "riser first"):
+            parts = [(CASTING, PART_TYPE_CAST), (self.OPEN_BOTTOM_RISER, PART_TYPE_RISER)]
+            if order == "riser first":
+                parts.reverse()
+            with self.subTest(order=order):
+                mesh = build_tet_mesh(parts, ASSEMBLY_H)
+                self.assertAlmostEqual(_code_volume(mesh, PART_TYPE_RISER) / riser_volume, 1.0, delta=0.01)
+                self.assertAlmostEqual(
+                    _code_volume(mesh, PART_TYPE_CAST) / (CASTING.volume - riser_volume / 2.0),
+                    1.0,
+                    delta=0.01,
+                )
+
+    def test_watertight_parts_keep_the_ray_test(self) -> None:
+        sunk = _cylinder(0.8, 2.0, (0.0, 0.0, 2.0))
+        with mock.patch.object(tet_mesh_module, "winding_number_contains") as winding:
+            build_tet_mesh([(CASTING, PART_TYPE_CAST), (sunk, PART_TYPE_RISER)], 0.4)
+        winding.assert_not_called()
+
+    def test_work_above_the_pair_cap_falls_back_with_a_warning(self) -> None:
+        points = np.array([[0.0, 0.0, 2.0], [0.0, 0.0, 5.0]])
+        with mock.patch.object(tet_mesh_module, "WINDING_NUMBER_MAX_PAIRS", 1), mock.patch(
+            "core.voxel_mesh._robust_contains_check_impl", return_value=np.array([True, False])
+        ) as robust, self.assertLogs("core.tet_mesh", level="WARNING"):
+            inside = winding_number_contains(self.OPEN_RISER, points)
+        robust.assert_called_once()
+        np.testing.assert_array_equal(inside, [True, False])
+
+
+class DisjointAssemblyTest(unittest.TestCase):
+    """Parts that do not touch become separate components, each fully bounded."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.cast = _box((2.0, 2.0, 1.0), (0.0, 0.0, 0.5))
+        cls.riser = _box((1.0, 1.0, 1.0), (3.0, 0.0, 0.5))  # 1 in gap along x
+        cls.mesh = build_tet_mesh([(cls.cast, PART_TYPE_CAST), (cls.riser, PART_TYPE_RISER)], 0.25)
+
+    def test_two_components_each_closed_by_boundary_faces(self) -> None:
+        mesh = self.mesh
+        n = mesh.get_voxel_count()
+        adjacency = sp.csr_matrix(
+            (np.ones(len(mesh.adj_indices)), mesh.adj_indices, mesh.adj_indptr), shape=(n, n)
+        )
+        count, labels = connected_components(adjacency, directed=False)
+        self.assertEqual(count, 2)
+        np.testing.assert_array_equal(mesh.boundary_face_contact_codes, -1)
+        for component in range(2):
+            with self.subTest(component=component):
+                tets = np.all(labels[mesh.tets] == component, axis=1)
+                faces = np.all(labels[mesh.boundary_faces] == component, axis=1)
+                codes = set(np.unique(mesh.tet_part_types[tets]).tolist())
+                self.assertEqual(len(codes), 1)
+                part = self.cast if codes == {PART_TYPE_CAST} else self.riser
+                self.assertAlmostEqual(mesh.boundary_face_areas[faces].sum() / part.area, 1.0, delta=0.01)
+                self.assertTrue(np.all(mesh.boundary_face_part_types[faces] == codes.pop()))
 
 
 if __name__ == "__main__":

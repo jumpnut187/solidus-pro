@@ -5378,10 +5378,16 @@ class SolidificationEngine:
         entrapment_exponent = 2.0
         niyama_coupling_alpha = 0.5
 
-        # 1. Compute SGI₀ per surface voxel
+        # 1. Compute SGI₀ per surface voxel. Tet meshes remove CORE tets, so
+        # the metal nodes on core-contact faces stand in for the core surface.
+        gas_part_types = self.mesh.voxel_part_types
+        if _is_tet_mesh(self.mesh):
+            gas_part_types = np.asarray(gas_part_types, dtype=np.int32).copy()
+            core_faces = np.asarray(self.mesh.boundary_face_contact_codes) == PART_TYPE_CORE
+            gas_part_types[np.asarray(self.mesh.boundary_faces)[core_faces].reshape(-1)] = PART_TYPE_CORE
         sgi0 = compute_surface_gas_generation(
             surface_indices=surface_indices,
-            voxel_part_types=self.mesh.voxel_part_types,
+            voxel_part_types=gas_part_types,
             local_solidification_times=self.local_solidification_time,
             humidity=humidity,
             binder_type=binder_type,

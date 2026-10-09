@@ -239,7 +239,14 @@ def tet_presentation_spacing(mesh: object) -> float:
     the pitch the tet filling stage uses. ``mesh.base_voxel_size`` on a tet
     mesh is the meshing edge length, ``voxel_size * tet_edge_length_factor``,
     so the edge factor is divided back out.
+
+    A mesh built by the pipeline carries ``lattice_spacing_in``, the pitch
+    recorded at run time; it wins over the current settings so changing a
+    factor after a run does not change how that run renders.
     """
+    recorded = getattr(mesh, "lattice_spacing_in", None)
+    if recorded is not None and float(recorded) > 0.0:
+        return float(recorded)
     from config.settings import get_settings
 
     mesh_settings = get_settings().mesh

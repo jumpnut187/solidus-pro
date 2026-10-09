@@ -38,7 +38,14 @@ def _run_pipeline_with_patched_memory(
     stress_analysis: bool = False,
     sand_restraint_index: float = 0.5,
     extra_analysis_options: dict | None = None,
+    mesh_type: str = "voxel",
 ) -> object:
+    """Run the pipeline with the voxel memory checks patched out.
+
+    ``mesh_type`` defaults to "voxel": the patches target ``core.voxel_mesh``,
+    the 0.5 in size leaves 2-4 tet elements across these parts, and the
+    expected values were calibrated on the voxel solver.
+    """
     analysis_options = {
         "shrinkage": True,
         "hotspot": True,
@@ -61,6 +68,7 @@ def _run_pipeline_with_patched_memory(
         use_incremental=False,
         show_progress=False,
         max_voxels_for_visualization=5_000,
+        mesh_type=mesh_type,
     )
 
     with ExitStack() as stack:

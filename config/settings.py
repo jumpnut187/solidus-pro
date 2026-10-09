@@ -58,7 +58,7 @@ MESH_TYPES = ("voxel", "tet")
 
 #: Positive tet-mesh tunables and their defaults, restored when a loaded value is invalid.
 _TET_POSITIVE_DEFAULTS: Dict[str, float] = {
-    "tet_edge_length_factor": 1.0,
+    "tet_edge_length_factor": 2.0,
     "tet_epsilon_rel": 1e-3,
     "tet_max_time_step_s": 2.0,
     "tet_max_delta_t_c": 15.0,
@@ -77,8 +77,8 @@ class MeshSettings:
     use_octree: bool = True
     use_chunked_voxelization: bool = True
     neighbor_search_radius_factor: float = 2.0
-    mesh_type: str = "voxel"                 # "voxel" or "tet"
-    tet_edge_length_factor: float = 1.0      # tet edge length = factor * base_voxel_size
+    mesh_type: str = "tet"                   # "tet" (default) or "voxel" (fallback)
+    tet_edge_length_factor: float = 2.0      # tet edge length = factor * base_voxel_size
     tet_epsilon_rel: float = 1e-3            # fTetWild envelope, relative to bbox diagonal
     tet_max_time_step_s: float = 2.0         # implicit tet solver dt ceiling, seconds
     tet_max_delta_t_c: float = 15.0          # halve dt above this max metal |dT| per step, degC
@@ -98,17 +98,17 @@ class MeshSettings:
     def normalize_tet_fields(self) -> None:
         """Validate ``mesh_type`` and the ``tet_*`` fields; called at construction and after load.
 
-        An unknown mesh type falls back to "voxel" and a non-positive or
+        An unknown mesh type falls back to "tet" and a non-positive or
         non-numeric tunable falls back to its default, each with a warning.
         """
         mesh_type = str(self.mesh_type or "").strip().lower()
         if mesh_type not in MESH_TYPES:
             warnings.warn(
-                f"Unknown mesh_type {self.mesh_type!r}; using 'voxel'. Valid: {', '.join(MESH_TYPES)}",
+                f"Unknown mesh_type {self.mesh_type!r}; using 'tet'. Valid: {', '.join(MESH_TYPES)}",
                 RuntimeWarning,
                 stacklevel=2,
             )
-            mesh_type = "voxel"
+            mesh_type = "tet"
         self.mesh_type = mesh_type
 
         for name, default in _TET_POSITIVE_DEFAULTS.items():
@@ -747,8 +747,8 @@ mesh:
   max_refinement_level: 3
   memory_mode: auto         # auto, ram, or disk
   use_octree: true
-  mesh_type: voxel          # voxel or tet
-  tet_edge_length_factor: 1.0      # tet edge length = factor * base_voxel_size
+  mesh_type: tet            # tet (default) or voxel (fallback)
+  tet_edge_length_factor: 2.0      # tet edge length = factor * base_voxel_size
   tet_epsilon_rel: 0.001           # fTetWild envelope, relative to bbox diagonal
   tet_max_time_step_s: 2.0         # implicit tet solver dt ceiling (s)
   tet_max_delta_t_c: 15.0          # halve dt above this metal |dT| per step (C)
@@ -817,8 +817,8 @@ base_voxel_size = 0.1
 max_refinement_level = 3
 memory_mode = "auto"
 use_octree = true
-mesh_type = "voxel"
-tet_edge_length_factor = 1.0
+mesh_type = "tet"
+tet_edge_length_factor = 2.0
 tet_epsilon_rel = 0.001
 tet_max_time_step_s = 2.0
 tet_max_delta_t_c = 15.0

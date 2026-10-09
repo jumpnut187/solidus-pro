@@ -603,6 +603,15 @@ def write_artifact(path: Path, artifact: Dict[str, Any]) -> None:
     # payload the JSON carries.
     grid_source = artifact.pop(GRID_SOURCE_KEY, None)
 
+    # Imported here rather than at module scope: web.fields pulls in scipy,
+    # and this module is imported by paths that only need the CAD helpers.
+    from web.fields import TET_MESH_TYPE, build_artifact_grids, save_artifact_sidecar, write_sidecar_for_artifact
+
+    # A tet grid is built before the JSON is written: a lattice over the cell
+    # limit is recorded in the summary, because the JSON cannot rebuild it.
+    tet_run = (grid_source or artifact.get("visualization") or {}).get("mesh_type") == TET_MESH_TYPE
+    tet_grids = build_artifact_grids(artifact, grid_source=grid_source) if tet_run else None
+
     handle_fd, temporary_name = tempfile.mkstemp(
         prefix=path.name + ".", suffix=".tmp", dir=str(path.parent)
     )
@@ -615,11 +624,12 @@ def write_artifact(path: Path, artifact: Dict[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
         raise
 
-    # Imported here rather than at module scope: web.fields pulls in scipy,
-    # and this module is imported by paths that only need the CAD helpers.
-    from web.fields import write_sidecar_for_artifact
-
-    write_sidecar_for_artifact(path, artifact, grid_source=grid_source)
+    # The sidecar is saved after the JSON so its mtime is not older.
+    if tet_run:
+        if tet_grids is not None:
+            save_artifact_sidecar(path, tet_grids)
+    else:
+        write_sidecar_for_artifact(path, artifact, grid_source=grid_source)
 
 
 def _matching_indices(source_centers: np.ndarray, sampled_centers: np.ndarray) -> np.ndarray:

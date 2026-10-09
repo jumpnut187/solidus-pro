@@ -38,6 +38,9 @@ def _build_engine(part_manager, analysis_options=None):
         memory_mode="conservative",
         analysis_options=analysis_options or {"shrinkage": True, "hotspot": True},
         max_voxels_for_visualization=5000,
+        # Voxel: patches core.voxel_mesh, compares two meshings element-wise, and expects
+        # chill-interface metal to keep its seed (tet blends shared interface nodes).
+        mesh_type="voxel",
     )
     with ExitStack() as stack:
         stack.enter_context(

@@ -61,6 +61,27 @@ def _project_payload(performance_options: dict) -> dict:
     ).to_dict()
 
 
+def _box_parts() -> list:
+    """The 2 x 2 x 1 in box the preview tests upload, as pipeline parts."""
+    from core.part_manager import PART_TYPE_CAST
+
+    return [(trimesh.creation.box(extents=(2.0, 2.0, 1.0)), PART_TYPE_CAST)]
+
+
+def _box_node_estimate(edge_length_in: float) -> int:
+    """``estimate_tet_node_count`` of the preview box."""
+    from core.simulation_pipeline import estimate_tet_node_count
+
+    return estimate_tet_node_count(_box_parts(), edge_length_in)
+
+
+def _box_edge_length_for_node_limit(max_nodes: int) -> float:
+    """``tet_edge_length_for_node_limit`` of the preview box."""
+    from core.simulation_pipeline import tet_edge_length_for_node_limit
+
+    return tet_edge_length_for_node_limit(_box_parts(), max_nodes)
+
+
 class ProjectStateMeshTypeTests(unittest.TestCase):
     def test_mesh_type_round_trips_in_performance_options(self) -> None:
         for mesh_type in ("tet", "voxel"):
@@ -136,6 +157,100 @@ class PipelineInputsMeshTypeTests(unittest.TestCase):
         box.critical.assert_called_once_with(window, "Mesh Generation Error", str(error))
 
 
+class TetRunLoggingAndProgressTests(unittest.TestCase):
+    """review_integration.md P1-1 and the owner's GUI findings (a), (b)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _run(self, worker, *, mesh_type_of_result=None, error=None):
+        result = MagicMock()
+        result.voxel_mesh = MagicMock(mesh_type=mesh_type_of_result)
+        result.voxel_mesh.get_voxel_count.return_value = 100
+        pipeline = patch("ui.workers.run_pipeline", side_effect=error) if error else patch(
+            "ui.workers.run_pipeline", return_value=result
+        )
+        messages = []
+        worker.progress.connect(messages.append)
+        with pipeline, patch("ui.workers.log_mesh_training_example") as log, patch.object(
+            SimulationWorker, "_maybe_capture_surrogate_training_data"
+        ):
+            worker.run()
+        return log, messages
+
+    def test_tet_runs_never_feed_the_voxel_size_recommender(self) -> None:
+        for error in (None, RuntimeError("solver blew up")):
+            with self.subTest(error=error):
+                worker = SimulationWorker(MagicMock(), "WCB", 0.2, 3, performance_options={"mesh_type": "tet"})
+                log, _ = self._run(worker, mesh_type_of_result="tet", error=error)
+                log.assert_not_called()
+                worker = SimulationWorker(MagicMock(), "WCB", 0.2, 3, performance_options={"mesh_type": "voxel"})
+                log, _ = self._run(worker, mesh_type_of_result="voxel", error=error)
+                log.assert_called_once()
+
+    def test_settings_default_tet_is_a_tet_run(self) -> None:
+        with patch.object(get_settings().mesh, "mesh_type", "tet"):
+            worker = SimulationWorker(MagicMock(), "WCB", 0.2, 3)
+            self.assertEqual(worker.run_mesh_type(), "tet")
+            log, messages = self._run(worker, error=RuntimeError("no mesh"))
+        log.assert_not_called()
+        self.assertTrue(messages[0].startswith("Generating tetrahedral mesh"), messages[0])
+        with patch.object(get_settings().mesh, "mesh_type", "voxel"):
+            worker = SimulationWorker(MagicMock(), "WCB", 0.2, 3)
+            log, messages = self._run(worker, error=RuntimeError("no mesh"))
+        log.assert_called_once()
+        self.assertTrue(messages[0].startswith("Generating adaptive voxel mesh"), messages[0])
+        with patch.object(get_settings().mesh, "mesh_type", "tet"):
+            self.assertEqual(SurrogateWorker(MagicMock(), MagicMock(), "WCB", 0.2, 3).run_mesh_type(), "tet")
+
+    def _progress_window(self):
+        window = mw.MainWindow.__new__(mw.MainWindow)
+        window.progress_bar = MagicMock()
+        window.status_label = MagicMock()
+        window.slice_start_times = []
+        window.last_slice_index = 0
+        return window
+
+    def test_tet_progress_shows_stage_percent_without_z_slices(self) -> None:
+        window = self._progress_window()
+        tet = SimulationWorker(MagicMock(), "WCB", 0.2, 3, performance_options={"mesh_type": "tet"})
+        with patch.object(window, "sender", return_value=tet):
+            window._on_detailed_progress(40, 100, "Tetrahedralizing parts")
+        window.status_label.setText.assert_called_with("Tetrahedralizing parts 40%")
+        window = self._progress_window()
+        voxel = SimulationWorker(MagicMock(), "WCB", 0.2, 3, performance_options={"mesh_type": "voxel"})
+        with patch.object(window, "sender", return_value=voxel):
+            window._on_detailed_progress(40, 100, "Voxelizing")
+        window.status_label.setText.assert_called_with("Processing Voxelizing: Z-slice 40/100")
+
+    def test_completion_rate_counts_nodes_on_tet_runs(self) -> None:
+        from core.error_logger import logger as error_logger
+
+        with patch.object(error_logger, "info") as info:
+            error_logger.log_performance("Complete simulation", 2.0, 1000, count_unit="nodes")
+            error_logger.log_performance("Complete simulation", 2.0, 1000)
+        self.assertIn("(500 nodes/sec)", info.call_args_list[0].args[0])
+        self.assertIn("(500 voxels/sec)", info.call_args_list[1].args[0])
+
+        class _Stop(Exception):
+            pass
+
+        for mesh_type, unit in (("tet", "nodes"), ("voxel", "voxels")):
+            window = mw.MainWindow.__new__(mw.MainWindow)
+            window.progress_bar = MagicMock()
+            window._set_simulation_running = MagicMock()
+            window._current_alloy = "WCB"
+            mesh = MagicMock(mesh_type=mesh_type)
+            mesh.get_voxel_count.return_value = 10
+            window.simulation_worker = MagicMock(voxel_mesh=mesh)
+            window.simulation_worker.simulation.export_results.side_effect = _Stop
+            with self.subTest(mesh_type=mesh_type), patch.object(mw, "logger") as logger:
+                with self.assertRaises(_Stop):
+                    window._on_simulation_finished(True, "completed")
+                self.assertEqual(logger.log_performance.call_args.kwargs["count_unit"], unit)
+
+
 class WebMeshPreviewTetTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -187,8 +302,7 @@ class WebMeshPreviewTetTests(unittest.TestCase):
         self.assertEqual(payload["mesh_type"], "tet")
         edge = 0.2 * float(mesh_settings.tet_edge_length_factor)
         self.assertAlmostEqual(payload["edge_length_in"], edge)
-        # 2 nodes per h^3 of the 4 in3 box (TET_NODES_PER_UNIT_VOLUME).
-        self.assertEqual(payload["estimated_nodes"], int(np.ceil(2.0 * 4.0 / edge**3)))
+        self.assertEqual(payload["estimated_nodes"], _box_node_estimate(edge))
         self.assertEqual(payload["max_nodes"], int(mesh_settings.tet_max_nodes))
         self.assertTrue(payload["can_proceed"])
         self.assertIsNone(payload["recommended_voxel_size"])
@@ -202,7 +316,9 @@ class WebMeshPreviewTetTests(unittest.TestCase):
         suggested = payload["recommended_voxel_size"]
         self.assertGreater(suggested, 0.1)
         factor = float(get_settings().mesh.tet_edge_length_factor)
-        self.assertLessEqual(int(np.ceil(2.0 * 4.0 / (suggested * factor) ** 3)), 100)
+        self.assertLessEqual(_box_node_estimate(suggested * factor), 100)
+        # The route rounds the helper's edge length up to 0.001 in of voxel size.
+        self.assertAlmostEqual(suggested, np.ceil(1000.0 * _box_edge_length_for_node_limit(100) / factor) / 1000.0)
 
     def test_voxel_preview_is_unchanged(self) -> None:
         for body in ({"voxel_size": 0.2, "mesh_type": "voxel"}, {"voxel_size": 0.2}):
@@ -229,7 +345,7 @@ class WebMeshPreviewTetTests(unittest.TestCase):
         self.assertEqual(tet["base_voxel_size"], voxel["base_voxel_size"])
         edge = tet["base_voxel_size"] * float(get_settings().mesh.tet_edge_length_factor)
         self.assertAlmostEqual(tet["edge_length_in"], edge)
-        self.assertEqual(tet["estimated_nodes"], int(np.ceil(2.0 * 4.0 / edge**3)))
+        self.assertEqual(tet["estimated_nodes"], _box_node_estimate(edge))
         self.assertEqual(tet["max_nodes"], int(get_settings().mesh.tet_max_nodes))
         self.assertIsInstance(tet["can_proceed"], bool)
 
@@ -252,7 +368,7 @@ class MeshDialogMeshTypeTests(unittest.TestCase):
             dialog = mw.MeshDialog()
         dialog.store_original_values()
         dialog.set_mesh_type("tet")
-        self.assertEqual(dialog.voxel_size_label.text(), "Element size (in):")
+        self.assertEqual(dialog.voxel_size_label.text(), "Mesh size (in):")
         dialog.restore_original_values()
         self.assertEqual(dialog.get_mesh_type(), "voxel")
         self.assertEqual(dialog.voxel_size_label.text(), mw.MeshDialog.VOXEL_SIZE_LABEL)
@@ -261,9 +377,38 @@ class MeshDialogMeshTypeTests(unittest.TestCase):
         self.assertEqual(dialog.get_mesh_type(), "tet")
         dialog.set_values(0.25, 2, "ram")  # mesh_type None leaves it alone
         self.assertEqual(dialog.get_mesh_type(), "tet")
-        dialog.set_mesh_type("hex")
-        self.assertEqual(dialog.get_mesh_type(), "voxel")
+        dialog.set_mesh_type("voxel")
+        dialog.set_mesh_type("hex")  # unknown falls back to the tet default
+        self.assertEqual(dialog.get_mesh_type(), "tet")
         dialog.deleteLater()
+
+    def test_tet_shows_the_effective_edge_length(self) -> None:
+        with patch.object(get_settings().mesh, "tet_edge_length_factor", 2.0):
+            dialog = mw.MeshDialog()
+            dialog.set_mesh_type("tet")
+            dialog.voxel_size_spin.setValue(0.1)
+            self.assertEqual(dialog.tet_edge_label.text(), "Tet edge \u2248 0.200 in")
+            dialog.voxel_size_spin.setValue(0.15)
+            self.assertEqual(dialog.tet_edge_label.text(), "Tet edge \u2248 0.300 in")
+            dialog.set_mesh_type("voxel")
+            self.assertEqual(dialog.tet_edge_label.text(), "")
+            self.assertTrue(dialog.tet_edge_label.isHidden())
+        dialog.deleteLater()
+
+    def test_sidebar_summary_shows_the_effective_edge_length(self) -> None:
+        from PySide6.QtWidgets import QLabel
+
+        window = MagicMock()
+        window.mesh_summary_label = QLabel()
+        window._current_voxel_size = 0.1
+        window._current_refinement = 3
+        with patch.object(get_settings().mesh, "tet_edge_length_factor", 2.0):
+            window._performance_options = {"mesh_type": "tet"}
+            mw.MainWindow._update_mesh_summary(window)
+            self.assertEqual(window.mesh_summary_label.text(), 'Tet: 0.100", edge \u2248 0.200"')
+            window._performance_options = {"mesh_type": "voxel"}
+            mw.MainWindow._update_mesh_summary(window)
+            self.assertEqual(window.mesh_summary_label.text(), 'Voxel: 0.100", Ref: 3')
 
 
 class RiserDesignTetTests(unittest.TestCase):

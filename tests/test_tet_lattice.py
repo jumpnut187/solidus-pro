@@ -247,6 +247,17 @@ class TetLatticeSamplerTests(unittest.TestCase):
         self.assertEqual(view.base_voxel_size, spacing)
         np.testing.assert_allclose(view.bounds, [[0.0, 2.0], [0.0, 1.5], [0.0, 1.0]])
 
+    def test_lattice_view_builds_topology_arrays_on_first_access(self) -> None:
+        nodes, tets = kuhn_hex_mesh((4, 3, 2), 0.5)
+        sampler = TetLatticeSampler(nodes, tets, np.zeros(len(tets), dtype=np.int8), 0.25)
+        view = sampler.lattice_view()
+        lazy = ("voxel_neighbors", "surface_voxels", "voxel_surface_areas", "voxel_moduli")
+        self.assertFalse(set(lazy) & set(vars(view)))
+        for name in lazy:
+            self.assertEqual(len(getattr(view, name)), view.get_voxel_count())
+        self.assertTrue(set(lazy) <= set(vars(view)))
+        self.assertIs(view.voxel_neighbors, view.voxel_neighbors)
+
     def test_tet_larger_than_one_chunk_is_located(self) -> None:
         import core.tet_lattice as tet_lattice
 

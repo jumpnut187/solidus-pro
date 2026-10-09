@@ -16,14 +16,18 @@ from __future__ import annotations
 
 import ctypes
 import json
+import logging
+import math
 import os
 import sys
 import tempfile
+import threading
 from contextlib import contextmanager
 from typing import Callable, Iterator, Sequence
 
 import numpy as np
 import trimesh
+from numba import njit, prange
 from scipy.spatial import cKDTree
 
 from config.exceptions import MeshGenerationError
@@ -35,7 +39,20 @@ from core.part_manager import (
     is_metal,
 )
 
+logger = logging.getLogger(__name__)
+
 ProgressCallback = Callable[[float, str], None]
+
+#: Held for the whole stdout-silencing context, native fTetWild call included.
+#: The context swaps process-wide state (fd 1 and ``sys.stdout``), so two
+#: threads inside it at once restore each other's devnull. fTetWild's own
+#: thread safety is unknown, so serializing the native call is wanted anyway.
+_NATIVE_MESH_LOCK = threading.Lock()
+
+#: Point x triangle pairs above which ``winding_number_contains`` falls back
+#: to the voxel path's containment check. Measured 1.8e9 pairs/s on 18
+#: cores, so the cap is about 6 s there.
+WINDING_NUMBER_MAX_PAIRS = 10_000_000_000
 
 #: Part codes whose tets are removed from the thermal domain after meshing.
 REMOVED_PART_CODES: tuple[int, ...] = (PART_TYPE_CORE, PART_TYPE_FILTER)
@@ -351,34 +368,63 @@ def _silence_c_stdout() -> Iterator[None]:
     """Send fd 1 and ``sys.stdout`` to os.devnull; fTetWild prints regardless of its log level.
 
     The CSG wrapper forwards ``std::cout`` to Python's ``sys.stdout``, so the
-    fd redirect alone does not silence it.
+    fd redirect alone does not silence it. Holds ``_NATIVE_MESH_LOCK`` for the
+    whole context. ``sys.stdout`` and fd 1 are restored even when opening a
+    descriptor, the body or the C stdio flush fails.
     """
-    sys.stdout.flush()
-    saved = os.dup(1)
-    devnull = os.open(os.devnull, os.O_WRONLY)
-    saved_stdout = sys.stdout
-    libc = _libc()
-    try:
-        with open(os.devnull, "w", encoding="utf-8") as python_devnull:
-            os.dup2(devnull, 1)
-            sys.stdout = python_devnull
+    with _NATIVE_MESH_LOCK:
+        saved_stdout = sys.stdout
+        saved_fd: int | None = None
+        devnull_fd: int | None = None
+        python_devnull = None
+        try:
             try:
-                yield
-            finally:
-                if libc is not None:
-                    libc.fflush(None)  # drain C stdio buffers into devnull, not the restored fd
-                sys.stdout = saved_stdout
-    finally:
-        os.dup2(saved, 1)
-        os.close(saved)
-        os.close(devnull)
+                saved_stdout.flush()
+            except (AttributeError, OSError, ValueError):
+                pass  # None (pythonw) or a closed stream: nothing to flush
+            saved_fd = os.dup(1)
+            devnull_fd = os.open(os.devnull, os.O_WRONLY)
+            python_devnull = open(os.devnull, "w", encoding="utf-8")
+            os.dup2(devnull_fd, 1)
+            sys.stdout = python_devnull
+            yield
+        finally:
+            sys.stdout = saved_stdout
+            # Drain C stdio buffers while fd 1 still points at devnull.
+            _flush_c_stdio()
+            if saved_fd is not None:
+                os.dup2(saved_fd, 1)
+                os.close(saved_fd)
+            if devnull_fd is not None:
+                os.close(devnull_fd)
+            if python_devnull is not None:
+                python_devnull.close()
+
+
+def _flush_c_stdio() -> None:
+    """``fflush(NULL)`` in the C runtime, skipped when the runtime or its ``fflush`` is unavailable."""
+    try:
+        libc = _libc()
+        fflush = getattr(libc, "fflush", None) if libc is not None else None
+        if fflush is not None:
+            fflush(None)
+    except Exception:
+        pass
 
 
 def _libc() -> ctypes.CDLL | None:
-    try:
-        return ctypes.CDLL(None)
-    except OSError:
-        return None
+    """The C runtime that owns the process's stdio, or None.
+
+    ``ctypes.CDLL(None)`` raises TypeError on Windows, where the CRT is
+    ``ucrtbase`` (MSVC 2015+) or the legacy ``msvcrt``.
+    """
+    names: tuple[str | None, ...] = ("ucrtbase", "msvcrt") if sys.platform == "win32" else (None,)
+    for name in names:
+        try:
+            return ctypes.CDLL(name)
+        except Exception:
+            continue
+    return None
 
 
 # Topology ---------------------------------------------------------------------
@@ -410,7 +456,8 @@ def _resolve_overlap_codes(
 
     Only parts whose bounding box overlaps the marker part's box, and only
     centroids inside the testing part's box with a lower current code, are
-    tested with ``Trimesh.contains``.
+    tested. Watertight parts use ``Trimesh.contains``. Open parts use the
+    generalized winding number, the rule fTetWild meshes them by.
     """
     tet_codes = codes[leaf_index].copy()
     centroids = vertices[tets].mean(axis=1)
@@ -426,9 +473,84 @@ def _resolve_overlap_codes(
         )
         if len(candidates) == 0:
             continue
-        inside = mesh.contains(centroids[candidates])
+        if mesh.is_watertight:
+            inside = mesh.contains(centroids[candidates])
+        else:
+            inside = winding_number_contains(mesh, centroids[candidates])
         tet_codes[candidates[inside]] = codes[part]
     return tet_codes
+
+
+def winding_number_contains(
+    mesh: trimesh.Trimesh, points: np.ndarray, *, near_surface_tol: float = 0.0
+) -> np.ndarray:
+    """(P,) bool: generalized winding number of ``mesh`` at each point above 0.5.
+
+    Valid for open and non-manifold surfaces, where ``Trimesh.contains`` ray
+    tests are not. Points within ``near_surface_tol`` (inches) of the surface
+    also count as inside. Above ``WINDING_NUMBER_MAX_PAIRS`` point x triangle
+    pairs it logs a warning and returns
+    ``core.voxel_mesh._robust_contains_check_impl(mesh, points, near_surface_tol)``.
+    """
+    from core.voxel_mesh import _near_surface_mask, _robust_contains_check_impl
+
+    query = np.ascontiguousarray(points, dtype=np.float64).reshape(-1, 3)
+    if len(query) == 0 or len(mesh.faces) == 0:
+        return np.zeros(len(query), dtype=bool)
+    pairs = len(query) * len(mesh.faces)
+    if pairs > WINDING_NUMBER_MAX_PAIRS:
+        logger.warning(
+            "winding-number containment skipped: %d points x %d faces exceeds %d pairs; "
+            "using the ray-test containment check, which is unreliable on open surfaces",
+            len(query),
+            len(mesh.faces),
+            WINDING_NUMBER_MAX_PAIRS,
+        )
+        return np.asarray(_robust_contains_check_impl(mesh, query, near_surface_tol), dtype=bool)
+    triangles = np.ascontiguousarray(mesh.triangles, dtype=np.float64)
+    inside = _winding_numbers(triangles, query) > 0.5
+    if near_surface_tol > 0.0:
+        inside |= np.asarray(_near_surface_mask(mesh, query, near_surface_tol), dtype=bool)
+    return inside
+
+
+@njit(parallel=True, cache=True)
+def _winding_numbers(triangles: np.ndarray, points: np.ndarray) -> np.ndarray:
+    """(P,) generalized winding numbers: sum of signed triangle solid angles / 4 pi.
+
+    Solid angle by Van Oosterom and Strackee (1983).
+    """
+    n_points = points.shape[0]
+    n_faces = triangles.shape[0]
+    result = np.empty(n_points, dtype=np.float64)
+    for i in prange(n_points):
+        px = points[i, 0]
+        py = points[i, 1]
+        pz = points[i, 2]
+        total = 0.0
+        for f in range(n_faces):
+            ax = triangles[f, 0, 0] - px
+            ay = triangles[f, 0, 1] - py
+            az = triangles[f, 0, 2] - pz
+            bx = triangles[f, 1, 0] - px
+            by = triangles[f, 1, 1] - py
+            bz = triangles[f, 1, 2] - pz
+            cx = triangles[f, 2, 0] - px
+            cy = triangles[f, 2, 1] - py
+            cz = triangles[f, 2, 2] - pz
+            la = math.sqrt(ax * ax + ay * ay + az * az)
+            lb = math.sqrt(bx * bx + by * by + bz * bz)
+            lc = math.sqrt(cx * cx + cy * cy + cz * cz)
+            det = ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx)
+            den = (
+                la * lb * lc
+                + (ax * bx + ay * by + az * bz) * lc
+                + (bx * cx + by * cy + bz * cz) * la
+                + (cx * ax + cy * ay + cz * az) * lb
+            )
+            total += 2.0 * math.atan2(det, den)
+        result[i] = total / (4.0 * math.pi)
+    return result
 
 
 def _face_partners(tets: np.ndarray) -> np.ndarray:

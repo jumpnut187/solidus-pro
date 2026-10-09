@@ -19,6 +19,7 @@ the ``web/fields.py`` encoding: part code + 1 inside, 0 outside.
 
 from __future__ import annotations
 
+from functools import cached_property
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -309,6 +310,10 @@ class LatticeView:
     surface cell centre, 0 on surface cells. That is the voxel path's
     definition (``AdaptiveVoxelMesh`` queries a KD-tree of surface voxel
     centres), computed here with an exact Euclidean distance transform.
+
+    ``voxel_neighbors`` (M x 26 int32), ``surface_voxels``,
+    ``voxel_surface_areas`` and ``voxel_moduli`` (a full-box EDT) are built on
+    first access and cached. Filling reads none of them.
     """
 
     mesh_type = "lattice"
@@ -317,7 +322,6 @@ class LatticeView:
         self.sampler = sampler
         spacing = sampler.spacing
         count = sampler.cell_flat.size
-        nx, ny, nz = sampler.dims
 
         self.base_voxel_size: float = spacing
         self.bounds: np.ndarray = sampler.bounds.copy()
@@ -327,6 +331,12 @@ class LatticeView:
         self.voxel_volumes: np.ndarray = np.full(count, spacing**3, dtype=np.float32)
         self.voxel_part_types: np.ndarray = sampler.cell_part_types.copy()
 
+    @cached_property
+    def voxel_neighbors(self) -> np.ndarray:
+        """(M, 26) int32 view-cell indices in the canonical slot layout, -1 where empty."""
+        sampler = self.sampler
+        count = sampler.cell_flat.size
+        nx, ny, _ = sampler.dims
         lookup = np.full(sampler.cell_count, -1, dtype=np.int32)
         lookup[sampler.cell_flat] = np.arange(count, dtype=np.int32)
         flat = sampler.cell_flat
@@ -338,14 +348,25 @@ class LatticeView:
             in_box = np.all((nijk >= 0) & (nijk < dims_arr), axis=1)
             nflat = nijk[in_box, 0] + nx * (nijk[in_box, 1] + ny * nijk[in_box, 2])
             neighbors[in_box, slot] = lookup[nflat]
-        self.voxel_neighbors: np.ndarray = neighbors
+        return neighbors
 
-        exposed = np.count_nonzero(neighbors[:, :6] < 0, axis=1)
-        self.surface_voxels: np.ndarray = exposed > 0
-        self.voxel_surface_areas: np.ndarray = (exposed * spacing**2).astype(np.float32)
-        self.voxel_moduli: np.ndarray = self._surface_distance()
+    @cached_property
+    def _exposed_face_count(self) -> np.ndarray:
+        """(M,) count of the 6 face neighbours that are outside the view."""
+        return np.count_nonzero(self.voxel_neighbors[:, :6] < 0, axis=1)
 
-    def _surface_distance(self) -> np.ndarray:
+    @cached_property
+    def surface_voxels(self) -> np.ndarray:
+        """(M,) bool: at least one face neighbour is outside."""
+        return self._exposed_face_count > 0
+
+    @cached_property
+    def voxel_surface_areas(self) -> np.ndarray:
+        """(M,) float32 in^2: exposed face count x spacing^2."""
+        return (self._exposed_face_count * self.sampler.spacing**2).astype(np.float32)
+
+    @cached_property
+    def voxel_moduli(self) -> np.ndarray:
         """(M,) float32 inches: distance from each cell centre to the nearest surface cell centre."""
         sampler = self.sampler
         count = sampler.cell_flat.size

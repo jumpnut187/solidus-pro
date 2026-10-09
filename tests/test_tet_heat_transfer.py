@@ -9,10 +9,12 @@ from __future__ import annotations
 import itertools
 import math
 import unittest
+from unittest import mock
 
 import numpy as np
 from scipy.optimize import brentq
 
+from physics import tet_heat_transfer
 from physics.tet_heat_transfer import TetHeatTransferModel, TetMaterial
 
 
@@ -131,6 +133,70 @@ class TetHeatTransferAssemblyTest(unittest.TestCase):
         grad = model.nodal_gradient()
         np.testing.assert_allclose(grad, np.broadcast_to(slope, grad.shape), rtol=0, atol=1e-8)
         np.testing.assert_allclose(model.gradient_magnitude(), np.linalg.norm(slope), rtol=1e-12)
+
+    def test_masked_gradient_at_material_interface_is_one_sided(self) -> None:
+        # Flat interface at z = 0.02 m between metal (k 25, above) and chill
+        # (k 150, below). Flux continuity: G_chill = G_metal * k_m / k_c.
+        k_metal, k_chill, g_metal = 25.0, 150.0, 2000.0
+        g_chill = g_metal * k_metal / k_chill
+        nodes, tets = kuhn_box_mesh((4, 2, 4), (0.04, 0.02, 0.04))
+        metal_tets = nodes[tets].mean(axis=1)[:, 2] > 0.02
+        model = TetHeatTransferModel(
+            nodes, tets, np.where(metal_tets, 0, 1),
+            [constant_material(k_metal, 5e6), constant_material(k_chill, 1.3e6)],
+            boundary_faces_of(tets),
+        )
+        dz = nodes[:, 2] - 0.02
+        model.set_initial_temperature(1000.0 + np.where(dz >= 0.0, g_metal, g_chill) * dz)
+        interface = np.flatnonzero(np.isclose(nodes[:, 2], 0.02))
+
+        metal_side = model.nodal_gradient(metal_tets)
+        np.testing.assert_allclose(metal_side[interface], [[0.0, 0.0, g_metal]] * interface.size, atol=1e-9)
+        # Nodes away from the interface keep their own one-material gradient.
+        below = nodes[:, 2] < 0.02 - 1e-9
+        np.testing.assert_allclose(metal_side[below, 2], g_chill, rtol=1e-12)
+        # The unmasked average mixes in the chill's shallow gradient.
+        mixed = model.gradient_magnitude()[interface]
+        self.assertTrue(np.all(mixed < 0.8 * g_metal))
+        # The node subset returns the same rows.
+        np.testing.assert_allclose(
+            model.nodal_gradient(metal_tets, nodes=interface), metal_side[interface], rtol=1e-12
+        )
+        np.testing.assert_allclose(model.gradient_magnitude(nodes=interface), mixed, rtol=1e-12)
+        with self.assertRaises(ValueError):
+            model.nodal_gradient(np.ones(3, dtype=bool))
+
+    def test_numba_and_scipy_paths_agree(self) -> None:
+        curve = TetMaterial(
+            np.array([0.0, 500.0, 1000.0]), np.array([10.0, 40.0, 25.0]), np.array([3e6, 3.5e6, 4e6])
+        )
+        nodes, tets = kuhn_box_mesh((4, 3, 3), (0.04, 0.03, 0.03))
+        faces = boundary_faces_of(tets)
+        tet_material = (nodes[tets].mean(axis=1)[:, 0] > 0.02).astype(np.int64)
+        rng = np.random.default_rng(5)
+        initial = rng.uniform(100.0, 1100.0, len(nodes))
+        mask = tet_material == 0
+
+        def run() -> tuple:
+            model = TetHeatTransferModel(
+                nodes, tets, tet_material, [curve, constant_material(150.0, 1.3e6)], faces
+            )
+            model.add_boundary_group(np.arange(len(faces)), 500.0, 25.0, lambda t: 1.0 / (1.0 + t))
+            model.set_initial_temperature(initial)
+            for dt in (0.5, 1.0, 2.0):
+                model.step(dt)
+            return (
+                model.temperatures.copy(),
+                model.node_heat_capacity(),
+                model.nodal_gradient(mask),
+                model.stiffness_matrix().toarray(),
+            )
+
+        numba_result = run()
+        with mock.patch.object(tet_heat_transfer, "NUMBA_AVAILABLE", False):
+            scipy_result = run()
+        for got, expected in zip(numba_result, scipy_result):
+            np.testing.assert_allclose(got, expected, rtol=1e-9, atol=1e-9)
 
     def test_latent_capacity_sums_to_material_latent_heat(self) -> None:
         nodes, tets = kuhn_box_mesh((2, 2, 2), (0.02, 0.02, 0.02))

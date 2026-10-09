@@ -34,12 +34,12 @@ Load your full casting assembly in one go:
 
 Automatic part-type detection from filenames. Parallel point-containment assignment that scales to massive assemblies.
 
-### Mesh Type — Voxel or Tetrahedral
+### Mesh Type — Tetrahedral (default) or Voxel (fallback)
 The Mesh dialog (desktop) and Mesh panel (web) choose the simulation mesh:
-- **Voxel** (default) — adaptive voxel grid, explicit thermal solver.
-- **Tetrahedral** — conforming tet mesh from fTetWild (`pytetwild`), implicit P1 finite-element thermal solve. It follows the CAD surface, so metal volume matches the CAD instead of overshooting at coarse sizes. The element size slider sets the target edge length. Requires `thermal_coupled` (forced).
+- **Tetrahedral** (default) — conforming tet mesh from fTetWild (`pytetwild`), implicit P1 finite-element thermal solve. It follows the CAD surface, so metal volume matches the CAD instead of overshooting at coarse sizes. The tet edge length is the mesh size times `mesh.tet_edge_length_factor` (2.0). Requires `thermal_coupled` (forced).
+- **Voxel** (fallback) — adaptive voxel grid, explicit thermal solver.
 
-Set the default with `mesh.mesh_type` in `castsim.yaml` or `CASTSIM_MESH_TYPE=tet`. Tet meshes above `mesh.tet_max_nodes` (3,000,000) are refused with a message giving a safe element size.
+Projects saved without a mesh type open as Tetrahedral in both UIs. Select the voxel fallback with `mesh.mesh_type: voxel` in `castsim.yaml` or `CASTSIM_MESH_TYPE=voxel`. Tet meshes above `mesh.tet_max_nodes` (3,000,000) are refused with a message giving a safe mesh size.
 
 ### GPU Acceleration — Pick Your Weapon
 | Hardware | Backend | Status |

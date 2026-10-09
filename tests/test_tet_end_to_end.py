@@ -67,11 +67,18 @@ def _assembly() -> PartManager:
     return manager
 
 
+def run_settings() -> Settings:
+    """Default settings with edge factor 1.0, so ``EDGE_LENGTH_IN`` is the tet edge length."""
+    settings = Settings()
+    settings.mesh.tet_edge_length_factor = 1.0
+    return settings
+
+
 def _run(mesh_type: str, **kwargs):
     """run_pipeline with default settings (no user config files) and default analysis options."""
     pipeline_kwargs = {k: kwargs.pop(k) for k in ("part_manager", "stl_loader") if k in kwargs}
     inputs = sp.PipelineInputs("WCB", EDGE_LENGTH_IN, 0, mesh_type=mesh_type, **kwargs)
-    settings = Settings()
+    settings = run_settings()
     started = time.perf_counter()
     with mock.patch.object(sp, "get_settings", return_value=settings), mock.patch.object(
         tet_thermal, "get_settings", return_value=settings
@@ -208,7 +215,7 @@ class AssemblyTetFillingEndToEndTests(_TetRunAssertions):
             "analysis_options": {"filling": True},
             "pour_location": RISER_POUR.to_dict(),
         }
-        settings = Settings()
+        settings = run_settings()
         started = time.perf_counter()
         with mock.patch.object(sp, "get_settings", return_value=settings), mock.patch.object(
             tet_thermal, "get_settings", return_value=settings

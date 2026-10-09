@@ -48,8 +48,14 @@ from core.thread_budget import set_process_thread_budget
 #: Either simulation mesh. ``TetVolumeMesh`` duck-types ``AdaptiveVoxelMesh``.
 SimulationMesh = Union[AdaptiveVoxelMesh, TetVolumeMesh]
 
-#: Measured upper envelope of fTetWild node count per (part volume / h^3).
-TET_NODES_PER_UNIT_VOLUME = 2.0
+#: fTetWild node-count model ``TET_NODES_PER_UNIT_VOLUME * V / h^3 +
+#: TET_NODES_PER_UNIT_AREA * A / h^2`` (V part volume, A part surface area,
+#: h edge length). Fitted as an upper bound on 14 measured meshes (7 shapes,
+#: 2 edge lengths each): estimate / measured nodes is 1.12-1.87. The area
+#: term carries the surface-node excess of thin walls. Fit table:
+#: docs/tet_migration/fix_geometry.md.
+TET_NODES_PER_UNIT_VOLUME = 1.55
+TET_NODES_PER_UNIT_AREA = 3.3
 
 
 ProgressMessageCallback = Callable[[str], None]
@@ -167,15 +173,20 @@ def resolve_mesh_type(inputs: PipelineInputs, mesh_settings: Optional[MeshSettin
     return mesh_type
 
 
-def estimate_tet_node_count(parts: Sequence[Tuple[Any, int]], edge_length_in: float) -> int:
-    """Upper-envelope node count of a tet mesh of ``parts`` at edge length ``edge_length_in``.
+def _tet_size_terms(parts: Sequence[Tuple[Any, int]]) -> Tuple[float, float]:
+    """Total part volume (in^3) and surface area (in^2) for the node-count model.
 
-    ``TET_NODES_PER_UNIT_VOLUME * sum(part volume) / h^3``. An open surface
-    has no trustworthy enclosed volume, so it counts its convex-hull volume
-    (bounding-box volume if the hull fails), an upper bound.
+    An open surface has no trustworthy enclosed volume, so it counts its
+    convex-hull volume (bounding-box volume if the hull fails), an upper
+    bound. A failed area counts the bounding-box surface area.
     """
     total_in3 = 0.0
+    total_in2 = 0.0
     for mesh, _code in parts:
+        extents = np.maximum(
+            np.asarray(mesh.bounds[1], dtype=np.float64) - np.asarray(mesh.bounds[0], dtype=np.float64),
+            0.0,
+        )
         volume = float("nan")
         try:
             if mesh.is_watertight:
@@ -185,10 +196,54 @@ def estimate_tet_node_count(parts: Sequence[Tuple[Any, int]], edge_length_in: fl
         except Exception:
             pass
         if not np.isfinite(volume) or volume <= 0.0:
-            extents = np.asarray(mesh.bounds[1], dtype=np.float64) - np.asarray(mesh.bounds[0], dtype=np.float64)
-            volume = float(np.prod(np.maximum(extents, 0.0)))
+            volume = float(np.prod(extents))
+        area = float("nan")
+        try:
+            area = float(mesh.area)
+        except Exception:
+            pass
+        if not np.isfinite(area) or area <= 0.0:
+            area = 2.0 * float(extents[0] * extents[1] + extents[1] * extents[2] + extents[2] * extents[0])
         total_in3 += volume
-    return int(np.ceil(TET_NODES_PER_UNIT_VOLUME * total_in3 / float(edge_length_in) ** 3))
+        total_in2 += area
+    return total_in3, total_in2
+
+
+def _tet_node_model(volume_in3: float, area_in2: float, edge_length_in: float) -> int:
+    h = float(edge_length_in)
+    return int(
+        np.ceil(TET_NODES_PER_UNIT_VOLUME * volume_in3 / h**3 + TET_NODES_PER_UNIT_AREA * area_in2 / h**2)
+    )
+
+
+def estimate_tet_node_count(parts: Sequence[Tuple[Any, int]], edge_length_in: float) -> int:
+    """Upper-bound node count of a tet mesh of ``parts`` at edge length ``edge_length_in``.
+
+    ``TET_NODES_PER_UNIT_VOLUME * V / h^3 + TET_NODES_PER_UNIT_AREA * A / h^2``
+    over the summed part volume V and surface area A (see ``_tet_size_terms``).
+    Measured meshes have 53-89 % of this estimate.
+    """
+    volume_in3, area_in2 = _tet_size_terms(parts)
+    return _tet_node_model(volume_in3, area_in2, edge_length_in)
+
+
+def tet_edge_length_for_node_limit(parts: Sequence[Tuple[Any, int]], max_nodes: int) -> float:
+    """Smallest edge length (in) whose ``estimate_tet_node_count`` is at most ``max_nodes``.
+
+    Solves ``max_nodes * h^3 - b * A * h - a * V = 0``, which has exactly one
+    positive root, then steps up past the estimate's ceiling rounding.
+    """
+    if int(max_nodes) <= 0:
+        raise ValueError(f"max_nodes must be positive, got {max_nodes!r}")
+    volume_in3, area_in2 = _tet_size_terms(parts)
+    roots = np.roots(
+        [float(max_nodes), 0.0, -TET_NODES_PER_UNIT_AREA * area_in2, -TET_NODES_PER_UNIT_VOLUME * volume_in3]
+    )
+    real = roots[np.abs(roots.imag) <= 1e-9 * np.maximum(np.abs(roots), 1.0)].real
+    edge_length_in = float(real.max())
+    while _tet_node_model(volume_in3, area_in2, edge_length_in) > int(max_nodes):
+        edge_length_in *= 1.0 + 1e-9
+    return edge_length_in
 
 
 def _emit_message(callback: Optional[ProgressMessageCallback], message: str) -> None:
@@ -785,13 +840,16 @@ def _build_tet_simulation_mesh(
     estimated_nodes = estimate_tet_node_count(parts, edge_length_in)
     max_nodes = int(mesh_settings.tet_max_nodes)
     if estimated_nodes > max_nodes:
-        # Node count scales as h^-3, so this edge length lands at the limit.
-        suggested_in = edge_length_in * (estimated_nodes / max_nodes) ** (1.0 / 3.0)
+        suggested_in = tet_edge_length_for_node_limit(parts, max_nodes)
+        # Rounded up to 0.001 in so the suggested size passes this guard.
+        suggested_voxel_in = float(
+            np.ceil(1000.0 * suggested_in / float(mesh_settings.tet_edge_length_factor)) / 1000.0
+        )
         raise MeshGenerationError(
             f"tet mesh at edge length {edge_length_in:g} in would have about "
             f"{estimated_nodes:,} nodes, above the limit of {max_nodes:,} "
             f"(settings.mesh.tet_max_nodes). Use a voxel size of at least "
-            f"{suggested_in / float(mesh_settings.tet_edge_length_factor):.3g} in, "
+            f"{suggested_voxel_in:g} in, "
             f"or raise tet_max_nodes if the machine has the memory",
             voxel_size=edge_length_in,
             estimated_voxels=estimated_nodes,
@@ -818,6 +876,11 @@ def _build_tet_simulation_mesh(
         progress_callback=on_tet_progress,
     )
     _check_cancel(cancel_callback)
+    # Record the run's lattice pitch on the mesh so rendering does not depend
+    # on settings that may change between the run and a later re-render.
+    tet_mesh.lattice_spacing_in = float(inputs.voxel_size) * float(
+        mesh_settings.tet_lattice_spacing_factor
+    )
     _emit_message(
         progress_message_callback,
         f"Tet mesh: {tet_mesh.get_voxel_count():,} nodes, {len(tet_mesh.tets):,} tets, "

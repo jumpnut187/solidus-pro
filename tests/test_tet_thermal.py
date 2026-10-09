@@ -37,10 +37,17 @@ from core.solidification_loop import _apply_enthalpy_correction_numpy
 from core.tet_mesh import TetVolumeMesh, build_tet_mesh
 from config.settings import MeshSettings
 from core.tet_thermal import (
+    CHILL_MATERIAL_INDEX,
     DEFAULT_TET_MAX_DELTA_T_C,
     DEFAULT_TET_MAX_TIME_STEP_S,
+    METAL_MATERIAL_INDEX,
+    TET_RETRY_MAX_FACTOR,
+    TET_RETRY_MIN_FACTOR,
+    TET_TIME_STEP_GROWTH,
+    blend_chill_interface_temperatures,
     invert_tet_enthalpy,
     tet_boundary_groups,
+    tet_material_indices,
     tet_materials,
 )
 from core.voxel_mesh import AdaptiveVoxelMesh
@@ -94,6 +101,16 @@ def _fresh(mesh: TetVolumeMesh) -> TetVolumeMesh:
     clone = copy.copy(mesh)
     clone.voxel_states = np.zeros(mesh.get_voxel_count(), dtype=np.float32)
     return clone
+
+
+def _chill_interface_nodes(mesh: TetVolumeMesh) -> np.ndarray:
+    """Nodes incident to both a metal tet and a CHILL tet."""
+    chill_tet = np.asarray(mesh.tet_part_types) == PART_TYPE_CHILL
+    on_chill = np.zeros(mesh.get_voxel_count(), dtype=bool)
+    on_metal = np.zeros(mesh.get_voxel_count(), dtype=bool)
+    on_chill[np.asarray(mesh.tets)[chill_tet].ravel()] = True
+    on_metal[np.asarray(mesh.tets)[~chill_tet].ravel()] = True
+    return np.flatnonzero(on_chill & on_metal)
 
 
 class TetEngineRiserAssemblyTest(unittest.TestCase):
@@ -270,7 +287,44 @@ class TetEngineChillTest(unittest.TestCase):
         temps = fresh._thermal_heat_model.temperatures
         chill_t = fresh.analysis_options.solidification_params.thermal_boundary.chill_temperature
         np.testing.assert_allclose(temps[chill], chill_t)
-        np.testing.assert_allclose(temps[~chill], 1550.0)
+        # Metal nodes that touch a chill tet start between the two temperatures
+        # (blend_chill_interface_temperatures); all other metal nodes at 1550.
+        interface = _chill_interface_nodes(self.chill_mesh)
+        self.assertGreater(interface.size, 0)
+        self.assertFalse(np.any(chill[interface]))
+        bulk = np.ones(len(temps), dtype=bool)
+        bulk[interface] = False
+        np.testing.assert_allclose(temps[bulk & ~chill], 1550.0)
+        self.assertTrue(np.all(temps[interface] > chill_t))
+        self.assertTrue(np.all(temps[interface] < 1550.0))
+
+    def test_cast_face_gradients_use_metal_tets_only(self) -> None:
+        # Review finding 2: thermal_gradients at the chill face is the
+        # metal-side gradient, not the average with the graphite tets.
+        # The shrinkage analysis then replaces thermal_gradients with the
+        # Niyama samples, so check the loop's final field and every call.
+        metal_tets = tet_material_indices(self.chill_mesh.tet_part_types) == METAL_MATERIAL_INDEX
+        masks = []
+        original = TetHeatTransferModel.gradient_magnitude
+
+        def recording(model, tet_mask=None, nodes=None):
+            masks.append(tet_mask)
+            return original(model, tet_mask, nodes)
+
+        with mock.patch.object(
+            TetHeatTransferModel, "gradient_magnitude", autospec=True, side_effect=recording
+        ):
+            e = _run(_fresh(self.chill_mesh))
+        self.assertGreater(len(masks), 10)
+        for mask in masks:
+            np.testing.assert_array_equal(mask, metal_tets)
+
+        heat_model = e._thermal_heat_model
+        expected = heat_model.gradient_magnitude(metal_tets) * 1e-3  # K/m -> C/mm
+        np.testing.assert_allclose(e._thermal_latest_gradients, expected.astype(np.float32), rtol=1e-6)
+        interface = _chill_interface_nodes(self.chill_mesh)
+        all_tets = heat_model.gradient_magnitude(nodes=interface) * 1e-3
+        self.assertFalse(np.allclose(e._thermal_latest_gradients[interface], all_tets, rtol=1e-3))
 
     def test_boundary_groups_follow_part_codes(self) -> None:
         groups = {g.label: g for g in tet_boundary_groups(self.chilled)}
@@ -486,6 +540,135 @@ class TetAdiabaticEnthalpyConservationTest(unittest.TestCase):
         self.assertTrue(np.all(fs >= 0.99))
         self.assertEqual(engine.time_step, 20.0)
         np.testing.assert_array_equal(engine.mesh.voxel_states, fs.astype(np.float32))
+
+
+class BlendChillInterfaceTemperaturesTest(unittest.TestCase):
+    """Review finding 1: a node shared by metal and chill tets starts at the capacity-weighted mean."""
+
+    def test_shared_nodes_take_capacity_weighted_mean(self) -> None:
+        # Tet 0 (metal) and tet 1 (chill) share nodes 0, 1, 2.
+        tets = np.array([[0, 1, 2, 3], [0, 1, 2, 4]])
+        tet_material = np.array([METAL_MATERIAL_INDEX, CHILL_MATERIAL_INDEX])
+        volumes = np.array([2.0, 1.0])
+        metal = TetMaterial(np.array([0.0, 2000.0]), np.array([30.0, 30.0]), np.array([4e6, 6e6]))
+        chill = TetMaterial(np.zeros(1), np.array([150.0]), np.array([1.28e6]))
+        materials = [None, None]
+        materials[METAL_MATERIAL_INDEX] = metal
+        materials[CHILL_MATERIAL_INDEX] = chill
+        initial = np.array([1500.0, 1500.0, 1500.0, 1500.0, 25.0])
+
+        blended = blend_chill_interface_temperatures(
+            initial, tets=tets, tet_material=tet_material, tet_volumes=volumes,
+            materials=materials, chill_temperature=25.0,
+        )
+
+        c_metal = 5.5e6 * 2.0 / 4.0  # rho_cp(1500) * V / 4
+        c_chill = 1.28e6 * 1.0 / 4.0
+        expected = (c_metal * 1500.0 + c_chill * 25.0) / (c_metal + c_chill)
+        np.testing.assert_allclose(blended[:3], expected, rtol=1e-12)
+        self.assertEqual(blended[3], 1500.0)
+        self.assertEqual(blended[4], 25.0)
+        self.assertEqual(initial[0], 1500.0)  # input untouched
+
+    def test_no_chill_is_identity(self) -> None:
+        tets = np.array([[0, 1, 2, 3]])
+        metal = TetMaterial(np.zeros(1), np.array([30.0]), np.array([5e6]))
+        initial = np.full(4, 1500.0)
+        blended = blend_chill_interface_temperatures(
+            initial, tets=tets, tet_material=np.array([METAL_MATERIAL_INDEX]),
+            tet_volumes=np.ones(1), materials=[metal, metal], chill_temperature=25.0,
+        )
+        np.testing.assert_array_equal(blended, initial)
+
+
+class TetChillInterfaceConvergenceTest(unittest.TestCase):
+    """Review finding 1: cast end times next to the chill converge with h faster with the blend.
+
+    Measured (docs/tet_migration/fix_physics.md): probe mean 8.45 / 4.97 s at
+    h 0.2 / 0.1 without the blend, 5.45 / 3.93 s with it (h 0.07: 3.6 s).
+    """
+
+    PARTS = [(CASTING, PART_TYPE_CAST), (CHILL, PART_TYPE_CHILL)]
+
+    @staticmethod
+    def _probe_mean(engine: SolidificationEngine) -> float:
+        """Mean CAST end time, linearly interpolated at fixed points 0.05-0.2 in above the chill."""
+        from scipy.interpolate import LinearNDInterpolator
+
+        mesh = engine.mesh
+        cast = np.asarray(mesh.voxel_part_types) == PART_TYPE_CAST
+        grid = np.linspace(-0.9, 0.9, 9)
+        probes = np.array(
+            np.meshgrid(grid, grid, [0.05, 0.1, 0.15, 0.2], indexing="ij")
+        ).reshape(3, -1).T
+        times = np.asarray(engine.solidification_times, dtype=np.float64)[cast]
+        return float(np.mean(LinearNDInterpolator(mesh.node_xyz[cast], times)(probes)))
+
+    def _probe_means(self, mesh: TetVolumeMesh) -> Tuple[float, float]:
+        blended = self._probe_mean(_run(_fresh(mesh)))
+        with mock.patch(
+            "core.tet_thermal.blend_chill_interface_temperatures",
+            side_effect=lambda temps, **_: np.array(temps, dtype=np.float64),
+        ):
+            unblended = self._probe_mean(_run(_fresh(mesh)))
+        return blended, unblended
+
+    def test_blend_halves_the_h_gap(self) -> None:
+        coarse_with, coarse_without = self._probe_means(build_tet_mesh(self.PARTS, 0.2))
+        fine_with, fine_without = self._probe_means(build_tet_mesh(self.PARTS, 0.1))
+        gap_with = abs(coarse_with - fine_with)
+        gap_without = abs(coarse_without - fine_without)
+        self.assertLess(
+            gap_with, 0.7 * gap_without,
+            f"h 0.2 vs 0.1 gap {gap_with:.2f} s with blend, {gap_without:.2f} s without",
+        )
+
+
+class TetStepControllerTest(unittest.TestCase):
+    """Review finding 3: proportional retry, no growth right after a rejection."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        records = []
+        original = TetHeatTransferModel.step
+
+        def recording_step(model: TetHeatTransferModel, dt: float) -> None:
+            records.append((model.time, dt))
+            original(model, dt)
+
+        with mock.patch.object(
+            TetHeatTransferModel, "step", autospec=True, side_effect=recording_step
+        ):
+            _run(_tet_mesh([(CASTING, PART_TYPE_CAST)]))
+        cls.records = records
+        # A step is rejected when the next solve starts at the same time.
+        cls.rejected = [records[i + 1][0] == records[i][0] for i in range(len(records) - 1)] + [False]
+
+    def test_rejection_rate(self) -> None:
+        # HEAD 9514111 rejected 48 of 208 solves on this box; now ~26 of 192.
+        self.assertGreater(sum(self.rejected), 0)
+        self.assertLess(sum(self.rejected) / len(self.records), 0.2)
+
+    def test_retry_is_proportional_and_next_step_does_not_grow(self) -> None:
+        records, rejected = self.records, self.rejected
+        checked = 0
+        for i in range(len(records) - 2):
+            if not rejected[i]:
+                continue
+            dt_rejected, dt_retry = records[i][1], records[i + 1][1]
+            if dt_retry > 1e-3:
+                ratio = dt_retry / dt_rejected
+                self.assertGreaterEqual(ratio, TET_RETRY_MIN_FACTOR - 1e-12)
+                self.assertLessEqual(ratio, TET_RETRY_MAX_FACTOR + 1e-12)
+            if not rejected[i + 1]:
+                self.assertEqual(records[i + 2][1], dt_retry)
+                checked += 1
+        self.assertGreater(checked, 0)
+
+    def test_accepted_steps_grow_at_most_x1_25(self) -> None:
+        dts = [dt for (_, dt), rejected in zip(self.records, self.rejected) if not rejected]
+        growth = np.array(dts[1:]) / np.array(dts[:-1])
+        self.assertLessEqual(float(growth.max()), TET_TIME_STEP_GROWTH + 1e-12)
 
 
 class TetStepControlDefaultsTest(unittest.TestCase):

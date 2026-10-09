@@ -95,6 +95,7 @@ class _PartManager:
 @contextlib.contextmanager
 def _default_settings():
     settings = Settings()
+    settings.mesh.tet_edge_length_factor = 1.0  # EDGE_LENGTH_IN is the tet edge length
     with mock.patch.object(sp, "get_settings", return_value=settings), mock.patch.object(
         tet_thermal, "get_settings", return_value=settings
     ), contextlib.redirect_stdout(io.StringIO()):
@@ -342,6 +343,62 @@ class TetCaptureTests(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(engine.solidification_start_times)))
         self.assertTrue(np.all(engine.local_solidification_time > 0.0))
         self.assertEqual(len(result.visualization_data["solidification_times"]), n)
+
+
+class GenerateDatasetMeshTypeTests(unittest.TestCase):
+    """review_integration.md default flip: dataset generation records mesh_type and keys on it."""
+
+    def _generate(self, tmp: str, **kwargs) -> Tuple[dict, list]:
+        import json
+
+        from core.surrogate import training
+
+        seen = []
+
+        def fake_pipeline(inputs, **_):
+            seen.append(inputs.mesh_type)
+            raise RuntimeError("not solved in this test")
+
+        plan_path = os.path.join(tmp, "plan.json")
+        with mock.patch.object(training, "run_pipeline", side_effect=fake_pipeline):
+            training.generate_dataset(
+                ["WCB"], tmp, grid=16, geometries=[("box", _box())], voxel_size=0.2, plan_path=plan_path, **kwargs
+            )
+        with open(plan_path) as fh:
+            return json.load(fh), seen
+
+    def test_settings_default_tet_is_recorded_and_keyed(self) -> None:
+        from config.settings import get_settings
+        from core.surrogate.training import generation_plan_key
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(get_settings().mesh, "mesh_type", "tet"):
+            plan, seen = self._generate(tmp)
+        self.assertEqual(seen, ["tet"])
+        (key, entry), = plan.items()
+        self.assertEqual(key, generation_plan_key("box", "WCB", 280.0, 0.2, 16, "tet"))
+        self.assertTrue(key.endswith("|mesh=tet"))
+        self.assertEqual(entry["mesh_type"], "tet")
+
+    def test_voxel_keys_are_unchanged_so_old_plans_resume(self) -> None:
+        from core.surrogate.training import generation_plan_key
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plan, seen = self._generate(tmp, mesh_type="voxel")
+        self.assertEqual(seen, ["voxel"])
+        self.assertEqual(list(plan), ["box|WCB|mc=280.0|vs=0.200|grid=16"])
+        self.assertEqual(generation_plan_key("box", "WCB", 280.0, 0.2, 16), "box|WCB|mc=280.0|vs=0.200|grid=16")
+        self.assertEqual(plan["box|WCB|mc=280.0|vs=0.200|grid=16"]["mesh_type"], "voxel")
+
+    def test_voxel_done_entry_is_not_reused_for_a_tet_batch(self) -> None:
+        import json
+
+        with tempfile.TemporaryDirectory() as tmp:
+            record = os.path.join(tmp, "run_old.npz")
+            open(record, "wb").close()
+            with open(os.path.join(tmp, "plan.json"), "w") as fh:
+                json.dump({"box|WCB|mc=280.0|vs=0.200|grid=16": {"status": "done", "path": record}}, fh)
+            _, seen = self._generate(tmp, mesh_type="tet")
+        self.assertEqual(seen, ["tet"])
 
 
 if __name__ == "__main__":

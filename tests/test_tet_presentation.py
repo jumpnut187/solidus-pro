@@ -35,11 +35,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import vtk  # noqa: E402
 from flask import Flask  # noqa: E402
 
-from config.settings import Settings  # noqa: E402
 from core.dense_grid import sample_node_values, tet_presentation_spacing  # noqa: E402
 from core.part_manager import PART_TYPE_CAST, is_metal  # noqa: E402
 from core.tet_lattice import TetLatticeSampler  # noqa: E402
-from tests.test_tet_end_to_end import EDGE_LENGTH_IN, _assembly, _run  # noqa: E402
+from tests.test_tet_end_to_end import EDGE_LENGTH_IN, _assembly, _run, run_settings  # noqa: E402
 from ui.result_surface import ResultSurfaceRenderer, palette_hotspot  # noqa: E402
 from web import fields  # noqa: E402
 from web import repository as repo  # noqa: E402
@@ -67,7 +66,7 @@ def _linear(points: np.ndarray) -> np.ndarray:
 
 def _artifact(linear_field: bool = True) -> Dict[str, Any]:
     """``build_fork_artifact`` under default settings, optionally with a linear solidification time."""
-    with mock.patch("config.settings.get_settings", return_value=Settings()):
+    with mock.patch("config.settings.get_settings", return_value=run_settings()):
         artifact = build_fork_artifact(_result())
     if linear_field:
         nodes = np.asarray(_result().voxel_mesh.node_xyz)
@@ -206,7 +205,7 @@ class TetSidecarTests(unittest.TestCase):
             voxel_mesh=result.voxel_mesh,
             result_data={**result.result_data, **summary},
         )
-        with mock.patch("config.settings.get_settings", return_value=Settings()):
+        with mock.patch("config.settings.get_settings", return_value=run_settings()):
             labelled = build_fork_artifact(fake)["summary"]
         self.assertNotIn("fill_filled_voxel_count", labelled)
         self.assertEqual(labelled["fill_nodes_filled_count"], 5)
@@ -259,6 +258,56 @@ class TetGridEndpointTests(unittest.TestCase):
         self.assertEqual(body["code"], "tet_grid_missing")
         self.assertIn("Re-run", body["error"])
         self.assertFalse(fields.sidecar_path(self.artifact_path).exists())
+
+
+class TetLatticeTooLargeTests(unittest.TestCase):
+    """review_integration.md P2-2: an over-limit tet lattice answers 413, not 'Re-run' 404."""
+
+    def setUp(self) -> None:
+        fields.clear_cache()
+        self.temp_dir = tempfile.TemporaryDirectory()
+        root = Path(self.temp_dir.name)
+        self.database_path = root / "simulations.db"
+        self.temp_folder = root / "temp"
+        self.temp_folder.mkdir()
+        repo.init_db(self.database_path)
+        app = Flask(__name__)
+        app.config["DATABASE"] = self.database_path
+        app.config["TEMP_FOLDER"] = self.temp_folder
+        app.extensions["simulation_queue_manager"] = SimulationQueueManager()
+        app.register_blueprint(fields_bp)
+        self.client = app.test_client()
+
+        artifact = _artifact(linear_field=False)
+        self.project_id = repo.create_project(self.database_path, {"name": "Tet too fine"})
+        self.artifact_path = self.temp_folder / f"{self.project_id}.json"
+        with mock.patch("core.tet_lattice.MAX_LATTICE_CELLS", 10):
+            write_artifact(self.artifact_path, artifact)
+        self.summary = artifact["summary"]
+        repo.mark_project_completed(self.database_path, self.project_id, artifact["summary"], str(self.artifact_path))
+
+    def tearDown(self) -> None:
+        fields.clear_cache()
+        self.temp_dir.cleanup()
+
+    def test_write_time_record_reaches_the_json_and_no_sidecar_is_written(self) -> None:
+        on_disk = json.loads(self.artifact_path.read_text(encoding="utf-8"))
+        record = on_disk["summary"][fields.TET_LATTICE_TOO_LARGE_KEY]
+        self.assertEqual(record["dims"], list(_sampler().dims))
+        self.assertEqual(record["cell_count"], int(np.prod(_sampler().dims)))
+        self.assertAlmostEqual(record["spacing"], EDGE_LENGTH_IN)
+        self.assertFalse(fields.sidecar_path(self.artifact_path).exists())
+        with self.assertRaises(fields.TetLatticeTooLargeError):
+            fields.load_grids(self.project_id, self.artifact_path)
+
+    def test_every_grid_endpoint_answers_413_lattice_too_large(self) -> None:
+        for path in ["grid", "grid/mask", "grid/solidification_time"]:
+            response = self.client.get(f"/api/projects/{self.project_id}/{path}")
+            self.assertEqual(response.status_code, 413, msg=path)
+            body = response.get_json()
+            self.assertEqual(body["code"], "lattice_too_large", msg=path)
+            self.assertEqual(body["dims"], list(_sampler().dims))
+            self.assertIn("coarser element size", body["error"])
 
 
 class TetResultSurfaceTests(unittest.TestCase):
@@ -334,7 +383,7 @@ class TetVisualizerTests(unittest.TestCase):
 
     def test_set_result_mesh_builds_the_tet_lattice(self) -> None:
         viz = self._bare()
-        with mock.patch("config.settings.get_settings", return_value=Settings()):
+        with mock.patch("config.settings.get_settings", return_value=run_settings()):
             ok = self.visualizer.CastingVisualizer.set_result_mesh(viz, self.mesh)
         self.assertTrue(ok)
         self.assertIsNotNone(viz.result_surface._sampler)
@@ -374,6 +423,64 @@ class TetVisualizerTests(unittest.TestCase):
         self.assertEqual(kwargs["mesh_type"], "tet")
         self.assertIs(kwargs["voxel_neighbors"], self.mesh.voxel_neighbors)
         self.assertIs(kwargs["voxel_volumes"], self.mesh.voxel_volumes)
+
+
+class LegendPaletteTests(unittest.TestCase):
+    """Owner GUI finding (d): the legend bar uses the palette the shown mode paints with."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from ui import visualizer
+
+        cls.visualizer = visualizer
+
+    def _visualizer(self):
+        viz = self.visualizer.CastingVisualizer.__new__(self.visualizer.CastingVisualizer)
+        renderer = vtk.vtkRenderer()
+        viz.renderer = renderer
+        viz.render_window = mock.MagicMock()
+        viz.result_surface = ResultSurfaceRenderer(renderer)
+        viz._result_lattice_key = None
+        viz._result_point_volumes = None
+        viz._voxel_display_mask = None
+        viz._current_colormap = "red_gradient"
+        viz._color_scale_min, viz._color_scale_max = 0.0, 1.0
+        viz.lut = vtk.vtkLookupTable()
+        viz._update_lookup_table()
+        viz.cross_section_planes = {}
+        viz._inspector_layer = None
+        viz._feed_modulus_leader_enabled = False
+        viz._hidden_part_ids = set()
+        viz.part_actors = {}
+        viz.feed_modulus_leader = None
+        viz._configure_ssao = lambda: None
+        return viz
+
+    def _legend_rgb(self, viz, index: int) -> np.ndarray:
+        return np.round(np.asarray(viz.lut.GetTableValue(index)[:3]) * 255.0)
+
+    def _check(self, viz, centers, sizes, values) -> None:
+        hot = palette_hotspot(np.array([0.0, 1.0], dtype=np.float32)).astype(np.float64)
+        viz.load_hotspots(centers, sizes, values, 0.5)
+        np.testing.assert_allclose(self._legend_rgb(viz, 0), hot[0])  # yellow
+        np.testing.assert_allclose(self._legend_rgb(viz, 255), hot[1])  # red
+        viz.load_shrinkage(centers, sizes, values, 0.5)
+        expected = self.visualizer.get_color_for_value(1.0, "red_gradient")
+        np.testing.assert_allclose(self._legend_rgb(viz, 255), expected)
+
+    def test_tet_hot_spot_legend_is_yellow_to_red(self) -> None:
+        mesh = _result().voxel_mesh
+        viz = self._visualizer()
+        with mock.patch("config.settings.get_settings", return_value=run_settings()):
+            self.assertTrue(viz.set_result_mesh(mesh))
+        nodes = np.asarray(mesh.node_xyz)
+        values = ((nodes[:, 2] - nodes[:, 2].min()) / np.ptp(nodes[:, 2])).astype(np.float32)
+        self._check(viz, mesh.voxel_centers, mesh.voxel_sizes, values)
+
+    def test_voxel_hot_spot_legend_is_yellow_to_red(self) -> None:
+        grid = np.stack(np.meshgrid(*(np.arange(6) * 0.1,) * 3, indexing="ij"), axis=-1).reshape(-1, 3)
+        values = (grid[:, 2] / grid[:, 2].max()).astype(np.float32)
+        self._check(self._visualizer(), grid.astype(np.float32), np.full(len(grid), 0.1, dtype=np.float32), values)
 
 
 if __name__ == "__main__":

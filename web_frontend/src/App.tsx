@@ -56,6 +56,7 @@ import {
   meshDefaults,
   meshTypeOf,
   performanceDefaults,
+  tetEdgeFactorOf,
   projectNameFromFile,
   saveStoredSettings
 } from './lib/defaults';
@@ -165,6 +166,8 @@ export function App() {
   const [animationProgress, setAnimationProgress] = useState(0);
   const [animationError, setAnimationError] = useState<string | null>(null);
   const [meshEstimate, setMeshEstimate] = useState<MeshStatus>(null);
+  // settings.mesh.tet_edge_length_factor, learned from the server's mesh-preview response.
+  const [tetEdgeFactor, setTetEdgeFactor] = useState<number | null>(null);
   const [mlStatus, setMlStatus] = useState<MeshStatus>(null);
   const [loop, setLoop] = useState(true);
 
@@ -735,6 +738,7 @@ export function App() {
       const target = await ensureProject();
       const preview = await api.meshPreview(target, settings.voxel_size, meshType);
       if (preview.mesh_type === 'tet') {
+        setTetEdgeFactor((current) => tetEdgeFactorOf(preview.edge_length_in, settings.voxel_size) ?? current);
         const detail =
           `About ${formatCount(preview.estimated_nodes)} nodes at ${preview.edge_length_in.toFixed(3)} in ` +
           `(limit ${formatCount(preview.max_nodes)})`;
@@ -742,7 +746,7 @@ export function App() {
           text:
             preview.can_proceed || preview.recommended_voxel_size === null
               ? detail
-              : `${detail}. Safe element size: ${preview.recommended_voxel_size.toFixed(3)} in.`,
+              : `${detail}. Safe mesh size: ${preview.recommended_voxel_size.toFixed(3)} in.`,
           tone: preview.can_proceed ? 'success' : 'warning'
         });
         return;
@@ -759,11 +763,32 @@ export function App() {
     }
   }, [ensureProject, settings.voxel_size, meshType, fail]);
 
+  // The Mesh panel shows the tet edge length next to the size control. Ask the
+  // server once for its edge factor (a node estimate, no project changes).
+  const meshPanelOpen = shell.activePanel === 'mesh';
+  useEffect(() => {
+    if (!meshPanelOpen || meshType !== 'tet' || tetEdgeFactor !== null || !projectId || parts.length === 0) return;
+    let cancelled = false;
+    const size = settings.voxel_size;
+    api
+      .meshPreview(projectId, size, 'tet')
+      .then((preview) => {
+        if (!cancelled && preview.mesh_type === 'tet') setTetEdgeFactor(tetEdgeFactorOf(preview.edge_length_in, size));
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [meshPanelOpen, meshType, tetEdgeFactor, projectId, parts.length, settings.voxel_size]);
+
   const applyMlMesh = useCallback(async () => {
     setMlStatus({ text: 'Requesting a recommendation...', tone: 'info' });
     try {
       const target = await ensureProject();
       const recommendation = await api.mlMesh(target, meshType);
+      setTetEdgeFactor(
+        (current) => tetEdgeFactorOf(recommendation.edge_length_in, recommendation.base_voxel_size) ?? current
+      );
       setSettings((current) => ({
         ...current,
         voxel_size: recommendation.base_voxel_size,
@@ -1158,6 +1183,7 @@ export function App() {
             onEstimate={() => void estimateMesh()}
             onApplyMlMesh={() => void applyMlMesh()}
             estimate={meshEstimate}
+            tetEdgeFactor={tetEdgeFactor}
             mlStatus={mlStatus}
             busy={job.isBusy}
             hasParts={parts.length > 0}
@@ -1266,6 +1292,7 @@ export function App() {
     estimateMesh,
     applyMlMesh,
     meshEstimate,
+    tetEdgeFactor,
     mlStatus,
     job.isBusy,
     hasPourLocation,

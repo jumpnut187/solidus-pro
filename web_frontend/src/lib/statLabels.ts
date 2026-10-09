@@ -130,6 +130,22 @@ const OVERRIDES: Record<string, { label?: string; hint?: string; decimals?: numb
   shrink_scalar_formula: { label: 'Shrink scalar formula' }
 };
 
+/**
+ * Tet runs (`stats.mesh_type === 'tet'`): counts are mesh nodes, and
+ * `shrinkage_percentage` is a node-volume share (core/simulation_pipeline.py),
+ * not a count share. Every other label swaps "voxel" for "node".
+ */
+const TET_OVERRIDES: Record<string, { label?: string; hint?: string }> = {
+  shrinkage_percentage: {
+    label: 'Share of volume flagged',
+    hint: 'Volume of the flagged nodes as a share of the casting volume.'
+  }
+};
+
+function tetWording(text: string): string {
+  return text.replace(/\bVoxels\b/g, 'Nodes').replace(/\bvoxels\b/g, 'nodes').replace(/\bVoxel\b/g, 'Node').replace(/\bvoxel\b/g, 'node');
+}
+
 /** Section headings, matched against the start of a key, longest prefix first. */
 const GROUPS: { prefix: string; label: string }[] = [
   { prefix: 'niyama_metadata_', label: 'Niyama method' },
@@ -277,11 +293,13 @@ export function buildStatGroups(
     // Already shown from GridMeta's own fields, in better units.
     if (key === 'voxel_count' || key === 'total_volume' || key === 'tet_edge_length_in') continue;
     const spec = describe(key);
+    const hint = OVERRIDES[key]?.hint;
+    const tetOverride = tet ? TET_OVERRIDES[key] : undefined;
     push(groupFor(key), {
       key,
-      label: spec.label,
+      label: tetOverride?.label ?? (tet ? tetWording(spec.label) : spec.label),
       value: renderValue(value, spec),
-      hint: OVERRIDES[key]?.hint
+      hint: tetOverride?.hint ?? (tet && hint ? tetWording(hint) : hint)
     });
   }
 

@@ -1389,18 +1389,28 @@ class CastingVisualizer(QWidget):
         self.render_window.Render()
     
     def _update_lookup_table(self):
-        """Update lookup table based on current colormap"""
-        cmap = COLOR_MAPS.get(self._current_colormap, COLOR_MAPS['red_gradient'])
-        colors = cmap['colors']
-        
+        """Legend colours: the shown result's palette, else the current colormap.
+
+        Modes such as Hot Spots and Niyama paint with a fixed palette
+        (``palette_hotspot``, ...), not the colormap, so the legend samples the
+        palette the skin was painted with.
+        """
         self.lut.SetNumberOfTableValues(256)
         self.lut.SetRange(self._color_scale_min, self._color_scale_max)
-        
-        for i in range(256):
-            t = i / 255.0
-            r, g, b = get_color_for_value(t, self._current_colormap)
-            self.lut.SetTableValue(i, r/255.0, g/255.0, b/255.0, 1.0)
-        
+
+        surface = getattr(self, "result_surface", None)
+        view = getattr(surface, "view", None)
+        palette = getattr(view, "palette", None)
+        if palette is not None:
+            rgb = np.asarray(palette(np.linspace(0.0, 1.0, 256, dtype=np.float32)), dtype=np.float64) / 255.0
+            for i in range(256):
+                self.lut.SetTableValue(i, rgb[i, 0], rgb[i, 1], rgb[i, 2], 1.0)
+        else:
+            for i in range(256):
+                t = i / 255.0
+                r, g, b = get_color_for_value(t, self._current_colormap)
+                self.lut.SetTableValue(i, r/255.0, g/255.0, b/255.0, 1.0)
+
         self.lut.Build()
     
     # ==================== Color Map Methods ====================
@@ -1414,9 +1424,10 @@ class CastingVisualizer(QWidget):
         """
         if colormap in COLOR_MAPS:
             self._current_colormap = colormap
-            self._update_lookup_table()
-            # Refresh visualization if we have data
+            # Refresh visualization if we have data. The legend follows the
+            # refreshed palette, so it is rebuilt after.
             self._refresh_current_visualization()
+            self._update_lookup_table()
             self.render_window.Render()
     
     def get_available_colormaps(self) -> List[str]:
@@ -1437,9 +1448,9 @@ class CastingVisualizer(QWidget):
         """
         self._color_scale_min = min_val
         self._color_scale_max = max_val
+        self._refresh_current_visualization()
         self._update_lookup_table()
         self.scalar_bar_actor.SetLookupTable(self.lut)
-        self._refresh_current_visualization()
         self.render_window.Render()
     
     # ==================== Color Bar / Legend Methods ====================
@@ -2616,6 +2627,8 @@ class CastingVisualizer(QWidget):
             print("Result lattice unavailable; nothing drawn")
             return False
         ok = self.result_surface.show(mode, np.asarray(values, dtype=np.float32), iso=float(iso), palette=palette, **kwargs)
+        # The legend shows this mode's palette (hot spot yellow-to-red, ...).
+        self._update_lookup_table()
         self._apply_cross_section_clipping()
         self._apply_part_actor_visibility()
         self._refresh_active_inspector()

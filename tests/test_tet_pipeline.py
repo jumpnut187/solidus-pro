@@ -172,8 +172,8 @@ class _PayloadEngine:
 class MeshSettingsTetFieldTests(unittest.TestCase):
     def test_defaults(self) -> None:
         mesh = MeshSettings()
-        self.assertEqual(mesh.mesh_type, "voxel")
-        self.assertEqual(mesh.tet_edge_length_factor, 1.0)
+        self.assertEqual(mesh.mesh_type, "tet")
+        self.assertEqual(mesh.tet_edge_length_factor, 2.0)
         self.assertEqual(mesh.tet_epsilon_rel, 1e-3)
         self.assertEqual(mesh.tet_max_time_step_s, 2.0)
         self.assertEqual(mesh.tet_max_delta_t_c, 15.0)
@@ -183,10 +183,10 @@ class MeshSettingsTetFieldTests(unittest.TestCase):
     def test_mesh_type_is_case_insensitive(self) -> None:
         self.assertEqual(MeshSettings(mesh_type=" TET ").mesh_type, "tet")
 
-    def test_unknown_mesh_type_falls_back_to_voxel_with_a_warning(self) -> None:
+    def test_unknown_mesh_type_falls_back_to_tet_with_a_warning(self) -> None:
         with self.assertWarns(RuntimeWarning):
             mesh = MeshSettings(mesh_type="hex")
-        self.assertEqual(mesh.mesh_type, "voxel")
+        self.assertEqual(mesh.mesh_type, "tet")
 
     def test_non_positive_tunables_fall_back_to_defaults(self) -> None:
         for name, bad in (
@@ -211,7 +211,7 @@ class MeshSettingsTetFieldTests(unittest.TestCase):
 
     def test_environment_overrides(self) -> None:
         env = {
-            "CASTSIM_MESH_TYPE": "tet",
+            "CASTSIM_MESH_TYPE": "voxel",
             "CASTSIM_TET_EDGE_LENGTH_FACTOR": "0.75",
             "CASTSIM_TET_MAX_TIME_STEP_S": "1.5",
             "CASTSIM_TET_MAX_DELTA_T_C": "5",
@@ -220,7 +220,7 @@ class MeshSettingsTetFieldTests(unittest.TestCase):
         settings = Settings()
         with mock.patch.dict(os.environ, env):
             settings._apply_environment_variables()
-        self.assertEqual(settings.mesh.mesh_type, "tet")
+        self.assertEqual(settings.mesh.mesh_type, "voxel")
         self.assertEqual(settings.mesh.tet_edge_length_factor, 0.75)
         self.assertEqual(settings.mesh.tet_max_time_step_s, 1.5)
         self.assertEqual(settings.mesh.tet_max_delta_t_c, 5.0)
@@ -234,13 +234,13 @@ class MeshSettingsTetFieldTests(unittest.TestCase):
             os.environ, {"CASTSIM_MESH_TYPE": "hex", "CASTSIM_TET_EDGE_LENGTH_FACTOR": "-1"}
         ), self.assertWarns(RuntimeWarning):
             settings._apply_environment_variables()
-        self.assertEqual(settings.mesh.mesh_type, "voxel")
-        self.assertEqual(settings.mesh.tet_edge_length_factor, 1.0)
+        self.assertEqual(settings.mesh.mesh_type, "tet")
+        self.assertEqual(settings.mesh.tet_edge_length_factor, 2.0)
 
     def test_config_file_values_apply(self) -> None:
         settings = Settings()
-        settings._apply_config_dict({"mesh": {"mesh_type": "tet", "tet_max_nodes": 1234}})
-        self.assertEqual(settings.mesh.mesh_type, "tet")
+        settings._apply_config_dict({"mesh": {"mesh_type": "voxel", "tet_max_nodes": 1234}})
+        self.assertEqual(settings.mesh.mesh_type, "voxel")
         self.assertEqual(settings.mesh.tet_max_nodes, 1234)
 
     def test_templates_carry_every_tet_field_at_its_default(self) -> None:
@@ -256,7 +256,7 @@ class MeshSettingsTetFieldTests(unittest.TestCase):
 
     def test_to_dict_serializes_the_tet_fields(self) -> None:
         mesh = Settings().to_dict()["mesh"]
-        self.assertEqual(mesh["mesh_type"], "voxel")
+        self.assertEqual(mesh["mesh_type"], "tet")
         self.assertIn("tet_lattice_spacing_factor", mesh)
 
 
@@ -273,12 +273,12 @@ class MeshTypeResolutionTests(unittest.TestCase):
         self.assertIsNone(sp.PipelineInputs("WCB", 0.25, 0).mesh_type)
 
     def test_none_uses_settings(self) -> None:
-        self.assertEqual(sp.resolve_mesh_type(self._inputs(), _settings(mesh_type="tet").mesh), "tet")
-        self.assertEqual(sp.resolve_mesh_type(self._inputs(), _settings().mesh), "voxel")
+        self.assertEqual(sp.resolve_mesh_type(self._inputs(), _settings(mesh_type="voxel").mesh), "voxel")
+        self.assertEqual(sp.resolve_mesh_type(self._inputs(), _settings().mesh), "tet")
 
     def test_explicit_inputs_win_over_settings(self) -> None:
         self.assertEqual(sp.resolve_mesh_type(self._inputs("voxel"), _settings(mesh_type="tet").mesh), "voxel")
-        self.assertEqual(sp.resolve_mesh_type(self._inputs("Tet"), _settings().mesh), "tet")
+        self.assertEqual(sp.resolve_mesh_type(self._inputs("Tet"), _settings(mesh_type="voxel").mesh), "tet")
 
     def test_explicit_unknown_value_raises(self) -> None:
         with self.assertRaises(ValidationError):
@@ -342,20 +342,56 @@ class PrepareTetMeshTests(unittest.TestCase):
         self.assertIsInstance(result[4], AdaptiveVoxelMesh)
 
 
+def _hollow_box(outer, wall) -> trimesh.Trimesh:
+    """Closed box with a closed inner cavity: a thin-walled part."""
+    shell = _box(outer, (0.0, 0.0, 0.0))
+    cavity = _box([e - 2.0 * wall for e in outer], (0.0, 0.0, 0.0))
+    cavity.invert()
+    return trimesh.Trimesh(
+        np.vstack([shell.vertices, cavity.vertices]),
+        np.vstack([shell.faces, cavity.faces + len(shell.vertices)]),
+        process=False,
+    )
+
+
 class NodeCountGuardTests(unittest.TestCase):
-    def test_estimate_is_two_nodes_per_cubic_edge_length(self) -> None:
+    def test_estimate_has_a_volume_and_an_area_term(self) -> None:
         box = _box((2.0, 1.0, 1.0), (0.0, 0.0, 0.0))
-        self.assertEqual(sp.estimate_tet_node_count([(box, PART_TYPE_CAST)], 0.2), 500)
+        # 1.55 * 2 / 0.2^3 + 3.3 * 10 / 0.2^2 = 387.5 + 825.
+        self.assertEqual(sp.estimate_tet_node_count([(box, PART_TYPE_CAST)], 0.2), 1213)
 
     def test_open_surface_counts_its_convex_hull(self) -> None:
         box = _box((2.0, 1.0, 1.0), (0.0, 0.0, 0.0))
         open_box = trimesh.Trimesh(box.vertices, box.faces[:-2], process=False)
         self.assertFalse(open_box.is_watertight)
-        self.assertEqual(sp.estimate_tet_node_count([(open_box, PART_TYPE_CAST)], 0.2), 500)
+        expected = int(np.ceil(1.55 * 2.0 / 0.2**3 + 3.3 * open_box.area / 0.2**2))
+        self.assertEqual(sp.estimate_tet_node_count([(open_box, PART_TYPE_CAST)], 0.2), expected)
+
+    def test_estimate_bounds_measured_thin_wall_and_block_meshes(self) -> None:
+        """The old 2.0 * V / h^3 under-counted the thin-walled box (measured 2.19 x V / h^3)."""
+        for label, part, h in (("thin-walled box", _hollow_box((4.0, 3.0, 2.0), 0.3), 0.1),
+                               ("2x1x1 box", _box((2.0, 1.0, 1.0), (0.0, 0.0, 0.0)), 0.1)):
+            with self.subTest(part=label):
+                parts = [(part, PART_TYPE_CAST)]
+                measured = build_tet_mesh(parts, h).get_voxel_count()
+                estimate = sp.estimate_tet_node_count(parts, h)
+                self.assertGreaterEqual(estimate, 1.05 * measured)
+                self.assertLessEqual(estimate, 2.0 * measured)
+
+    def test_edge_length_for_node_limit_lands_at_the_limit(self) -> None:
+        parts = [(_hollow_box((4.0, 3.0, 2.0), 0.3), PART_TYPE_CAST)]
+        for max_nodes in (1_000, 250_000, 3_000_000):
+            with self.subTest(max_nodes=max_nodes):
+                h = sp.tet_edge_length_for_node_limit(parts, max_nodes)
+                self.assertLessEqual(sp.estimate_tet_node_count(parts, h), max_nodes)
+                self.assertGreater(sp.estimate_tet_node_count(parts, 0.999 * h), max_nodes)
+        with self.assertRaises(ValueError):
+            sp.tet_edge_length_for_node_limit(parts, 0)
 
     def test_guard_refuses_before_meshing(self) -> None:
         box = _box((2.0, 1.0, 1.0), (0.0, 0.0, 0.0))
-        settings = _settings(tet_max_nodes=100)
+        # Factor 1.0: the 0.2 in voxel size is the edge length the 1,213 estimate is for.
+        settings = _settings(tet_max_nodes=100, tet_edge_length_factor=1.0)
         with mock.patch.object(sp, "get_settings", return_value=settings), mock.patch.object(
             sp, "build_tet_mesh"
         ) as built:
@@ -368,8 +404,10 @@ class NodeCountGuardTests(unittest.TestCase):
         built.assert_not_called()
         message = str(caught.exception)
         self.assertIn("tet_max_nodes", message)
-        self.assertIn("500", message)
+        self.assertIn("1,213", message)
         self.assertIn("voxel size of at least", message)
+        suggested = float(message.split("voxel size of at least ")[1].split(" in")[0])
+        self.assertLessEqual(sp.estimate_tet_node_count([(box, PART_TYPE_CAST)], suggested), 100)
 
 
 # ---------------------------------------------------------------------------
@@ -510,6 +548,9 @@ class NodeMappingTests(unittest.TestCase):
         error = np.abs(mapped.fill_time_s - 100.0 * self.mesh.node_xyz[:, 2])
         self.assertLessEqual(float(error.max()), 100.0 * 0.1 + 1e-6)
 
+    def test_no_node_is_far_from_its_cell(self) -> None:
+        self.assertEqual(self.lattice.far_node_count, 0)
+
     def test_non_metal_view_falls_back_to_any_cell(self) -> None:
         view = self.lattice.view
         all_cast = mock.Mock(voxel_centers=view.voxel_centers, voxel_part_types=np.zeros(view.get_voxel_count(), dtype=np.int8))
@@ -541,6 +582,26 @@ class TetFillingGateTests(unittest.TestCase):
         built.assert_not_called()
         self.assertTrue(any("pour location" in m.lower() for m in messages))
 
+    def test_filling_does_not_build_lattice_topology(self) -> None:
+        """The fill reads centres, sizes, volumes and codes only; neighbours and the EDT stay unbuilt."""
+        import core.tet_filling as tet_filling
+
+        built: list = []
+
+        def capture(*args, **kwargs):
+            built.append(real(*args, **kwargs))
+            return built[-1]
+
+        real = tet_filling.build_filling_lattice
+        with mock.patch("core.tet_filling.build_filling_lattice", side_effect=capture):
+            result = maybe_run_tet_filling(
+                self.mesh, _Alloy(), _Options(), _Inputs(PourLocation(point_in=(0.0, 0.0, 0.95))),
+                spacing_in=0.1,
+            )
+        self.assertIsNotNone(result)
+        lazy = {"voxel_neighbors", "surface_voxels", "voxel_surface_areas", "voxel_moduli"}
+        self.assertFalse(lazy & set(vars(built[0].view)))
+
     def test_too_large_lattice_is_skipped_and_reported(self) -> None:
         messages: list = []
         with mock.patch("core.tet_lattice.MAX_LATTICE_CELLS", 10):
@@ -550,6 +611,35 @@ class TetFillingGateTests(unittest.TestCase):
             )
         self.assertIsNone(result)
         self.assertTrue(any("skipped" in m for m in messages))
+
+
+class FarNodeMappingTests(unittest.TestCase):
+    """A metal part thinner than the pitch has no cell; its nodes are counted and reported."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cast = _box((2.0, 2.0, 1.0), (0.0, 0.0, 0.5))
+        # Separate 0.04 in fin, 1 in away, between the 0.2 in lattice planes z = 0.5 and 0.7.
+        fin = _box((1.0, 1.0, 0.04), (3.0, 0.0, 0.6))
+        cls.mesh = build_tet_mesh([(cast, PART_TYPE_CAST), (fin, PART_TYPE_SPRUE)], 0.25)
+        cls.fin_nodes = int(np.sum(cls.mesh.node_xyz[:, 0] > 2.4))
+
+    def test_far_nodes_are_counted(self) -> None:
+        lattice = build_filling_lattice(self.mesh, 0.2)
+        self.assertGreater(self.fin_nodes, 0)
+        self.assertGreaterEqual(lattice.far_node_count, self.fin_nodes // 2)
+        self.assertLessEqual(lattice.far_node_count, self.fin_nodes)
+
+    def test_far_nodes_are_reported(self) -> None:
+        messages: list = []
+        with mock.patch("core.tet_filling.maybe_run_filling", return_value=None), self.assertLogs(
+            "core.tet_filling", level="WARNING"
+        ):
+            maybe_run_tet_filling(
+                self.mesh, _Alloy(), _Options(), _Inputs(PourLocation(point_in=(0.0, 0.0, 0.95))),
+                spacing_in=0.2, progress_message_callback=messages.append,
+            )
+        self.assertTrue(any("tet nodes are more than" in m for m in messages))
 
 
 # Casting at the bottom, a FILTER slab on top of it, a sprue above the filter.
@@ -649,6 +739,30 @@ class RunPipelineTetTests(unittest.TestCase):
         self.assertEqual(len(result.visualization_data["centers"]), n)
         self.assertEqual(len(result.visualization_data["solidification_times"]), n)
         self.assertEqual(result.result_data["voxel_count"], n)
+
+    def test_non_touching_two_part_assembly_runs(self) -> None:
+        """Separate components: every face is in a boundary group and every metal node solidifies."""
+        from scipy.sparse import csr_matrix
+        from scipy.sparse.csgraph import connected_components
+
+        from core.part_manager import PART_TYPE_RISER
+        from core.tet_thermal import tet_boundary_groups
+
+        parts = [
+            (_box((2.0, 1.0, 1.0), (0.0, 0.0, 0.5)), PART_TYPE_CAST),
+            (_box((1.0, 1.0, 1.0), (2.5, 0.0, 0.5)), PART_TYPE_RISER),  # 1 in gap
+        ]
+        inputs = sp.PipelineInputs("WCB", 0.25, 0, mesh_type="tet")
+        with mock.patch.object(sp, "get_settings", return_value=_settings()):
+            result = sp.run_pipeline(inputs, part_manager=_PartManager(parts))
+        mesh = result.voxel_mesh
+        n = mesh.get_voxel_count()
+        adjacency = csr_matrix((np.ones(len(mesh.adj_indices)), mesh.adj_indices, mesh.adj_indptr), shape=(n, n))
+        self.assertEqual(connected_components(adjacency, directed=False)[0], 2)
+        grouped = np.concatenate([g.face_indices for g in tet_boundary_groups(result.engine)])
+        np.testing.assert_array_equal(np.sort(grouped), np.arange(len(mesh.boundary_faces)))
+        metal = is_metal(mesh.voxel_part_types.astype(np.int32))
+        self.assertTrue(np.all(np.isfinite(result.engine.solidification_times[metal])))
 
     def test_run_pipeline_hands_node_fields_from_the_fill(self) -> None:
         result = self._run(

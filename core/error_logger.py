@@ -200,8 +200,8 @@ class SimulatorLogger:
         )
     
     def log_performance(self, operation: str, duration_seconds: float,
-                        voxel_count: Optional[int] = None):
-        """Log performance metrics"""
+                        voxel_count: Optional[int] = None, count_unit: str = "voxels"):
+        """Log performance metrics. ``count_unit`` names the counted points ("nodes" on tet runs)."""
         context = {
             'operation': operation,
             'duration_seconds': duration_seconds,
@@ -209,7 +209,7 @@ class SimulatorLogger:
         }
         rate = ""
         if voxel_count and duration_seconds > 0:
-            rate = f" ({voxel_count / duration_seconds:.0f} voxels/sec)"
+            rate = f" ({voxel_count / duration_seconds:.0f} {count_unit}/sec)"
         self.info(f"{operation} completed in {duration_seconds:.2f}s{rate}", context=context)
     
     def get_recent_entries(self, count: int = 100, 

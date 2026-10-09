@@ -21,6 +21,7 @@ adjacent non-metal cell.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Optional, Sequence, Tuple
 
@@ -32,8 +33,16 @@ from core.dense_grid import LatticeTooLargeError
 from core.filling_stage import FillFrame, FillingResult, maybe_run_filling
 from core.part_manager import PART_TYPE_FILTER, is_metal
 from core.tet_lattice import LatticeView, TetLatticeSampler
+from core.tet_mesh import winding_number_contains
+
+logger = logging.getLogger(__name__)
 
 MessageCallback = Callable[[str], None]
+
+#: A node farther than this many lattice pitches from its mapped cell centre
+#: is counted in ``FillingLattice.far_node_count``. A cell's centre is at most
+#: sqrt(3)/2 pitch from any point of the cell.
+FAR_NODE_PITCHES = float(np.sqrt(3.0))
 
 
 class FillingLatticeMesh:
@@ -82,6 +91,9 @@ class FillingLattice:
     filter_cell_count: int
     #: (N,) index into the view's cells for every tet node.
     node_cells: np.ndarray
+    #: Nodes whose mapped cell centre is farther than ``FAR_NODE_PITCHES``
+    #: pitches, e.g. a metal part thinner than the pitch with no cell of its own.
+    far_node_count: int = 0
 
     @property
     def filling_cell_count(self) -> int:
@@ -97,10 +109,11 @@ def filter_lattice_centers(
     inside each filter's bounding box, so every returned centre sits exactly
     on the sampler lattice. Containment uses the voxel path's
     ``_robust_contains_check_impl`` with the same half-pitch proximity
-    tolerance ``AdaptiveVoxelMesh.assign_part_types`` uses, which has
-    fallbacks for non-watertight meshes. Cells already inside the tet mesh
-    keep their metal or chill code. Filter parts outside the lattice box are
-    clipped to it.
+    tolerance ``AdaptiveVoxelMesh.assign_part_types`` uses. Open filter
+    surfaces use ``core.tet_mesh.winding_number_contains`` with the same
+    tolerance, because ray tests are unreliable on open surfaces. Cells
+    already inside the tet mesh keep their metal or chill code. Filter parts
+    outside the lattice box are clipped to it.
     """
     from core.voxel_mesh import _robust_contains_check_impl
 
@@ -128,9 +141,12 @@ def filter_lattice_centers(
             continue
         ijk, flat = ijk[free], flat[free]
         centers = origin + spacing * ijk.astype(np.float64)
-        inside = np.asarray(
-            _robust_contains_check_impl(mesh, centers, 0.5 * spacing), dtype=bool
-        )
+        if mesh.is_watertight:
+            inside = np.asarray(
+                _robust_contains_check_impl(mesh, centers, 0.5 * spacing), dtype=bool
+            )
+        else:
+            inside = winding_number_contains(mesh, centers, near_surface_tol=0.5 * spacing)
         taken[flat[inside]] = True
         found.append(centers[inside])
     if not found:
@@ -138,11 +154,18 @@ def filter_lattice_centers(
     return np.vstack(found)
 
 
-def node_lattice_cells(node_xyz: np.ndarray, node_part_types: np.ndarray, view: LatticeView) -> np.ndarray:
+def node_lattice_cells(
+    node_xyz: np.ndarray,
+    node_part_types: np.ndarray,
+    view: LatticeView,
+    *,
+    return_distance: bool = False,
+) -> Any:
     """(N,) int64: for each node, the nearest view cell centre of the same class (metal or not).
 
     Falls back to the nearest cell of any class when the view has no cell of
-    the node's class.
+    the node's class. With ``return_distance`` also returns the (N,) float64
+    node-to-centre distances in inches.
     """
     nodes = np.asarray(node_xyz, dtype=np.float64)
     node_metal = is_metal(np.asarray(node_part_types, dtype=np.int32))
@@ -151,6 +174,7 @@ def node_lattice_cells(node_xyz: np.ndarray, node_part_types: np.ndarray, view: 
         raise ValueError("the filling lattice has no inside cells")
     cell_metal = is_metal(np.asarray(view.voxel_part_types, dtype=np.int32))
     result = np.empty(nodes.shape[0], dtype=np.int64)
+    distances = np.empty(nodes.shape[0], dtype=np.float64)
     for metal in (True, False):
         node_ids = np.flatnonzero(node_metal == metal)
         if node_ids.size == 0:
@@ -158,8 +182,11 @@ def node_lattice_cells(node_xyz: np.ndarray, node_part_types: np.ndarray, view: 
         cell_ids = np.flatnonzero(cell_metal == metal)
         if cell_ids.size == 0:
             cell_ids = np.arange(centers.shape[0])
-        _, nearest = cKDTree(centers[cell_ids]).query(nodes[node_ids], workers=-1)
+        distance, nearest = cKDTree(centers[cell_ids]).query(nodes[node_ids], workers=-1)
         result[node_ids] = cell_ids[np.asarray(nearest, dtype=np.int64)]
+        distances[node_ids] = distance
+    if return_distance:
+        return result, distances
     return result
 
 
@@ -186,13 +213,16 @@ def build_filling_lattice(
     filling_mesh: Any = view
     if filter_centers.shape[0] > 0:
         filling_mesh = FillingLatticeMesh(view, filter_centers)
-    node_cells = node_lattice_cells(tet_mesh.node_xyz, tet_mesh.voxel_part_types, view)
+    node_cells, node_distance = node_lattice_cells(
+        tet_mesh.node_xyz, tet_mesh.voxel_part_types, view, return_distance=True
+    )
     return FillingLattice(
         sampler=sampler,
         view=view,
         filling_mesh=filling_mesh,
         filter_cell_count=int(filter_centers.shape[0]),
         node_cells=node_cells,
+        far_node_count=int(np.count_nonzero(node_distance > FAR_NODE_PITCHES * float(spacing_in))),
     )
 
 
@@ -280,6 +310,15 @@ def maybe_run_tet_filling(
         f"{lattice.sampler.dims[2]} at {spacing_in:g} in, "
         f"{lattice.view.get_voxel_count():,} cells sampled from the tet mesh"
     )
+    if lattice.far_node_count:
+        far_message = (
+            f"Filling: {lattice.far_node_count:,} tet nodes are more than "
+            f"{FAR_NODE_PITCHES * spacing_in:.3g} in from the nearest lattice cell of their "
+            f"class and copy that cell's fill values (a part thinner than the {spacing_in:g} in "
+            f"pitch has no cell of its own); lower tet_lattice_spacing_factor to resolve it"
+        )
+        logger.warning(far_message)
+        emit(far_message)
     if filter_meshes:
         emit(
             f"Filling: rasterized {lattice.filter_cell_count:,} FILTER cells from "

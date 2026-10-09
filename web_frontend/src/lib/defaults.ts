@@ -27,12 +27,13 @@ export const analysisDefaults: AnalysisOptions = {
  * `web/services/simulation_queue.py` and had no web control before; the
  * desktop defaults it on from `config.settings.use_gpu`.
  *
- * `mesh_type` ('voxel' | 'tet') reaches `PipelineInputs.mesh_type` through
+ * `mesh_type` ('tet' | 'voxel') reaches `PipelineInputs.mesh_type` through
  * `build_pipeline_inputs`. The server does not expose
- * `settings.mesh.mesh_type`, so the client default is 'voxel'.
+ * `settings.mesh.mesh_type`, so the client default mirrors its default, 'tet'.
+ * Voxel is the fallback.
  */
 export const performanceDefaults: PerformanceOptions = {
-  mesh_type: 'voxel',
+  mesh_type: 'tet',
   use_gpu: true,
   use_incremental: false,
   use_chunked_voxelization: false,
@@ -65,9 +66,18 @@ export const solidificationDefaults: SolidificationParams = buildSolidificationD
 
 export type MeshType = 'voxel' | 'tet';
 
-/** The mesh type stored in `performance_options`, 'voxel' when absent or unknown. */
+/** The mesh type stored in `performance_options`, 'tet' when absent or unknown. */
 export function meshTypeOf(options: PerformanceOptions): MeshType {
-  return options.mesh_type === 'tet' ? 'tet' : 'voxel';
+  return options.mesh_type === 'voxel' ? 'voxel' : 'tet';
+}
+
+/**
+ * Tet edge length / mesh size, i.e. the server's `settings.mesh.tet_edge_length_factor`,
+ * read back from a mesh-preview or ML-mesh response. Null when it cannot be derived.
+ */
+export function tetEdgeFactorOf(edgeLengthIn: number | undefined, sizeIn: number): number | null {
+  if (edgeLengthIn === undefined || !(sizeIn > 0) || !(edgeLengthIn > 0)) return null;
+  return Math.round((edgeLengthIn / sizeIn) * 1000) / 1000;
 }
 
 export const meshDefaults = {

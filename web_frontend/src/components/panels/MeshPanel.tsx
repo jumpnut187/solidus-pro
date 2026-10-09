@@ -10,6 +10,8 @@ export type MeshPanelProps = {
   onEstimate: () => void;
   onApplyMlMesh: () => void;
   estimate: MeshStatus;
+  /** Server tet edge factor (edge = size x factor); null until a mesh preview reports it. */
+  tetEdgeFactor: number | null;
   mlStatus: MeshStatus;
   busy: boolean;
   hasParts: boolean;
@@ -28,6 +30,7 @@ export function MeshPanel({
   onEstimate,
   onApplyMlMesh,
   estimate,
+  tetEdgeFactor,
   mlStatus,
   busy,
   hasParts,
@@ -36,7 +39,7 @@ export function MeshPanel({
 }: MeshPanelProps) {
   const meshType = meshTypeOf(settings.performance_options);
   const tet = meshType === 'tet';
-  const sizeLabel = tet ? 'Element size' : 'Base voxel size';
+  const sizeLabel = tet ? 'Mesh size' : 'Base voxel size';
   const setMeshType = (value: MeshType) =>
     onPatch({ performance_options: { ...settings.performance_options, mesh_type: value } });
 
@@ -70,10 +73,19 @@ export function MeshPanel({
             aria-label={sizeLabel}
             onChange={(event) => onPatch({ voxel_size: Number(event.target.value) })}
           />
+          {tet && (
+            <span className="field-hint">
+              {tetEdgeFactor !== null
+                ? `Tet edge \u2248 ${(settings.voxel_size * tetEdgeFactor).toFixed(3)} in`
+                : hasParts
+                  ? 'Tet edge: mesh size \u00d7 the server edge factor (Estimate mesh shows it).'
+                  : 'Tet edge: mesh size \u00d7 the server edge factor. Add a part to see it.'}
+            </span>
+          )}
           <span className="field-hint">
             {tet
-              ? 'Target tetrahedron edge length. Smaller elements resolve thin sections but cost memory and time. ' +
-                'Halving the size multiplies the node count by roughly eight.'
+              ? 'The tet edge length is this size times the server edge factor. Smaller elements resolve thin ' +
+                'sections but cost memory and time. Halving the size multiplies the node count by roughly eight.'
               : 'Smaller voxels resolve thin sections and gating channels but cost memory and time. Halving the ' +
                 'size multiplies the voxel count by roughly eight.'}
           </span>
@@ -126,7 +138,7 @@ export function MeshPanel({
           mlStatus,
           hasParts
             ? tet
-              ? 'Suggests an element size from the geometry and estimates its node count.'
+              ? 'Suggests a mesh size from the geometry and estimates its node count.'
               : 'Suggests a voxel size and refinement level from the geometry.'
             : 'Add a part to request a recommendation.'
         )}

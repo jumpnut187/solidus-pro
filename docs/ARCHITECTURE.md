@@ -41,6 +41,11 @@ main.py (desktop)                    run_web.py -> web/app_factory.py
                      PipelineResult (.mesh_type)
 ```
 
+`resolve_mesh_type` takes `PipelineInputs.mesh_type`, else
+`settings.mesh.mesh_type`, which defaults to `"tet"`. `"voxel"` is the
+fallback (`mesh.mesh_type: voxel` or `CASTSIM_MESH_TYPE=voxel`). The tet
+edge length is the voxel size times `mesh.tet_edge_length_factor` (2.0).
+
 The tet branch forces `thermal_coupled`. Lattice consumers (filling, the
 surrogate and deep-model encoding, `web/fields.py`, `ui/result_surface.py`)
 sample node values onto a uniform lattice with

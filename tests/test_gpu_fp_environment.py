@@ -27,6 +27,29 @@ class HostFloatingPointEnvironmentTests(unittest.TestCase):
 
         self.assertTrue(_restore_default_fp_environment())
 
+    def test_failed_restore_warns_on_macos(self) -> None:
+        import sys
+        import warnings
+        from unittest import mock
+
+        import core.gpu_compute  # noqa: F401  (the package re-exports a ``gpu_compute`` instance)
+
+        gpu_compute = sys.modules["core.gpu_compute"]
+
+        with mock.patch.object(gpu_compute, "_restore_default_fp_environment", return_value=False):
+            with mock.patch.object(gpu_compute.platform, "system", return_value="Darwin"):
+                with self.assertWarnsRegex(RuntimeWarning, "floating-point environment"):
+                    gpu_compute._restore_fp_environment_after_taichi_init()
+            with mock.patch.object(gpu_compute.platform, "system", return_value="Linux"):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error")
+                    gpu_compute._restore_fp_environment_after_taichi_init()
+        with mock.patch.object(gpu_compute, "_restore_default_fp_environment", return_value=True):
+            with mock.patch.object(gpu_compute.platform, "system", return_value="Darwin"):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error")
+                    gpu_compute._restore_fp_environment_after_taichi_init()
+
 
 if __name__ == "__main__":
     unittest.main()

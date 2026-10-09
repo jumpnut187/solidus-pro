@@ -144,6 +144,16 @@ class TetGridUnavailableError(RuntimeError):
     """
 
 
+#: ``summary`` key of a tet artifact whose sampler lattice was over
+#: ``MAX_LATTICE_CELLS`` when the artifact was written:
+#: ``{"dims": [nx, ny, nz], "cell_count": int, "spacing": float}``.
+TET_LATTICE_TOO_LARGE_KEY = "result_lattice_too_large"
+
+
+class TetLatticeTooLargeError(LatticeTooLargeError):
+    """A tet run's sampler lattice is over ``MAX_LATTICE_CELLS``. The fix is a coarser element size."""
+
+
 @dataclass
 class ScalarGrid:
     """One dense scalar field, quantized to bytes plus the range to undo it."""
@@ -234,6 +244,12 @@ def build_field_grids(
     summary = summary or {}
     if visualization.get("mesh_type") == TET_MESH_TYPE:
         if visualization.get("tets") is None:
+            too_large = summary.get(TET_LATTICE_TOO_LARGE_KEY)
+            if isinstance(too_large, dict):
+                # Re-running at the same size fails the same way; the sidecar
+                # was never written because the lattice was too large.
+                dims = tuple(int(v) for v in too_large["dims"])
+                raise TetLatticeTooLargeError((dims[0], dims[1], dims[2]), float(too_large["spacing"]))
             raise TetGridUnavailableError(
                 "This tet-mesh run has no saved field grid. Re-run it to regenerate the result fields."
             )
@@ -362,7 +378,10 @@ def _build_tet_field_grids(visualization: Dict[str, Any], summary: Dict[str, Any
     if not np.isfinite(spacing) or spacing <= 0.0:
         raise TetGridUnavailableError("tet grid source has no lattice_spacing")
 
-    sampler = TetLatticeSampler(nodes, tets, tet_part_types, spacing)
+    try:
+        sampler = TetLatticeSampler(nodes, tets, tet_part_types, spacing)
+    except LatticeTooLargeError as exc:
+        raise TetLatticeTooLargeError(exc.dims, exc.spacing) from exc
     lattice = _lattice_from_sampler(sampler)
     mask = sampler.mask_codes()
     nearest = _nearest_known_map(mask != 0, lattice)
@@ -788,13 +807,46 @@ def write_sidecar_for_artifact(
     must not be lost because the render sidecar could not be produced. The
     lazy path in :func:`load_grids` rebuilds it on first request.
     """
+    grids = build_artifact_grids(artifact, grid_source=grid_source)
+    if grids is None:
+        return None
+    return save_artifact_sidecar(artifact_path, grids)
+
+
+def build_artifact_grids(
+    artifact: Dict[str, Any],
+    *,
+    grid_source: Optional[Dict[str, Any]] = None,
+) -> Optional[FieldGrids]:
+    """
+    The sidecar grids for an artifact being written, or ``None``. Never raises.
+
+    A tet run whose sampler lattice is over ``MAX_LATTICE_CELLS`` is recorded
+    in ``artifact["summary"][TET_LATTICE_TOO_LARGE_KEY]``. The JSON artifact
+    has no tets to rebuild from, so without the record every later request
+    would read as a missing grid ("re-run it") instead of a lattice that
+    needs a coarser element size. Call this before the JSON is written.
+    """
     try:
         if grid_source:
             grids = build_field_grids(grid_source, artifact.get("summary", {}), downsampled=False)
         else:
             grids = build_field_grids(artifact.get("visualization", {}), artifact.get("summary", {}))
-        if grids.voxel_count == 0:
-            return None
+    except TetLatticeTooLargeError as exc:
+        artifact.setdefault("summary", {})[TET_LATTICE_TOO_LARGE_KEY] = {
+            "dims": [int(v) for v in exc.dims],
+            "cell_count": int(exc.cell_count),
+            "spacing": float(exc.spacing),
+        }
+        return None
+    except Exception:  # pragma: no cover - defensive; never fail a completed run
+        return None
+    return grids if grids.voxel_count else None
+
+
+def save_artifact_sidecar(artifact_path: Path | str, grids: FieldGrids) -> Optional[Path]:
+    """Persist ``grids`` as the artifact's sidecar. ``None`` when the write fails."""
+    try:
         path = sidecar_path(artifact_path)
         save_sidecar(path, grids)
         return path

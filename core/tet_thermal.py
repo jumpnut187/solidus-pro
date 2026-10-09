@@ -6,24 +6,37 @@ written here has one entry per node, in node order, with the voxel-path dtypes.
 
 The integration loop mirrors ``_run_thermal_coupled_integration`` (sentinels,
 termination, fraction-liquid snapshots, feeding fraction solid, peak cooling
-rate, Niyama capture) with three differences:
+rate, Niyama capture) with these differences:
 
 1. The heat step is the implicit P1 FEM step of
    :class:`physics.tet_heat_transfer.TetHeatTransferModel`.
-2. Latent heat is released by an exact per-node enthalpy inversion
-   (:func:`invert_tet_enthalpy`), not the voxel loop's correction, so
-   ``sum(C_i T_i + L_i (1 - fs_i))`` is conserved on every step size.
-3. The time step adapts: it grows x1.25 per accepted step up to
-   ``settings.mesh.tet_max_time_step_s`` and a step whose largest metal-node
-   |dT| exceeds ``settings.mesh.tet_max_delta_t_c`` is rejected and retried
-   at half the size. The loop runs on simulated time up to ``engine.max_time``.
+2. Latent heat is released by a per-node enthalpy inversion
+   (:func:`invert_tet_enthalpy`), not the voxel loop's correction.
+   ``sum(C_i T_i + L_i (1 - fs_i))`` is conserved exactly on every step size
+   only for constant properties. With temperature-dependent rho_cp the heat
+   step uses C(T_old) and the inversion uses C(T_post), which drifts (0.55 %
+   of total enthalpy with the WCB curves, adiabatic, dt 2 s).
+3. The time step adapts. A step whose largest metal-node |dT| exceeds
+   ``settings.mesh.tet_max_delta_t_c`` (the limit) is rejected and retried at
+   ``dt * clip(0.9 * limit / |dT|, 0.2, 0.5)``. The first accepted step after
+   a rejection keeps its size. Other accepted steps grow by
+   ``min(1.25, max(1, 0.9 * limit / |dT|))`` up to
+   ``settings.mesh.tet_max_time_step_s``. The loop runs on simulated time up
+   to ``engine.max_time``.
+4. Metal nodes on a chill interface start at the capacity-weighted mean of
+   the pour and chill temperatures, since part of their lumped capacity is
+   chill (:func:`blend_chill_interface_temperatures`).
+5. Niyama G and ``thermal_gradients`` average metal tets only, so a node on a
+   chill face reports the metal-side gradient. Gradients are computed only on
+   steps where a CAST node crosses the Niyama fraction solid, and once at the
+   end for ``thermal_gradients``.
 """
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 import numpy as np
 
@@ -62,6 +75,10 @@ DEFAULT_TET_MAX_DELTA_T_C = 15.0
 #: Accepted-step growth factor and the smallest step a rejection may produce.
 TET_TIME_STEP_GROWTH = 1.25
 TET_MIN_TIME_STEP_S = 1e-3
+#: A rejected step retries at dt * clip(SAFETY * limit / |dT|, MIN, MAX).
+TET_RETRY_SAFETY = 0.9
+TET_RETRY_MIN_FACTOR = 0.2
+TET_RETRY_MAX_FACTOR = 0.5
 
 METAL_MATERIAL_INDEX = 0
 CHILL_MATERIAL_INDEX = 1
@@ -207,6 +224,14 @@ def initialize_tet_thermal_models(engine: Any, *, show_progress: bool) -> None:
     initial_temperatures = engine._initial_thermal_temperatures(
         n_nodes, chill_indices, tb.chill_temperature
     )
+    initial_temperatures = blend_chill_interface_temperatures(
+        initial_temperatures,
+        tets=np.asarray(mesh.tets),
+        tet_material=tet_material_indices(mesh.tet_part_types),
+        tet_volumes=heat_model.tet_volumes,
+        materials=tet_materials(engine),
+        chill_temperature=float(tb.chill_temperature),
+    )
     heat_model.set_initial_temperature(initial_temperatures)
     engine._preset_chill_solid_state(chill_indices)
 
@@ -225,6 +250,42 @@ def initialize_tet_thermal_models(engine: Any, *, show_progress: bool) -> None:
             f"    Time step: start {engine.time_step:.3g}s, max {max_dt:.3g}s, "
             f"max metal dT per step {max_delta:.3g} C"
         )
+
+
+def blend_chill_interface_temperatures(
+    initial_temperatures: np.ndarray,
+    *,
+    tets: np.ndarray,
+    tet_material: np.ndarray,
+    tet_volumes: np.ndarray,
+    materials: List[TetMaterial],
+    chill_temperature: float,
+) -> np.ndarray:
+    """Initial field with nodes shared by metal and chill tets at the capacity-weighted mean.
+
+    Such a node is metal-coded, but ``C_i`` includes ``rho_cp_chill * V / 4``
+    from each incident chill tet. Starting the whole node at the pour
+    temperature preheats that chill share. The node starts at
+    ``(C_metal * T_init + C_chill * T_chill) / (C_metal + C_chill)``, with
+    ``C_metal`` at the node's initial temperature. Returns a new array.
+    """
+    temperatures = np.array(initial_temperatures, dtype=np.float64, copy=True)
+    flat_nodes = np.asarray(tets).ravel()
+    n_nodes = temperatures.size
+    quarter_volumes = np.repeat(np.asarray(tet_volumes, dtype=np.float64) / 4.0, 4)
+    is_chill_tet = np.repeat(np.asarray(tet_material) == CHILL_MATERIAL_INDEX, 4)
+    chill_volume = np.bincount(flat_nodes, weights=quarter_volumes * is_chill_tet, minlength=n_nodes)
+    metal_volume = np.bincount(flat_nodes, weights=quarter_volumes * ~is_chill_tet, minlength=n_nodes)
+    interface = np.flatnonzero((chill_volume > 0.0) & (metal_volume > 0.0))
+    if interface.size == 0:
+        return temperatures
+    metal = materials[METAL_MATERIAL_INDEX]
+    chill = materials[CHILL_MATERIAL_INDEX]
+    t_metal = temperatures[interface]
+    c_metal = np.interp(t_metal, metal.temp_points, metal.rho_cp) * metal_volume[interface]
+    c_chill = np.interp(chill_temperature, chill.temp_points, chill.rho_cp) * chill_volume[interface]
+    temperatures[interface] = (c_metal * t_metal + c_chill * chill_temperature) / (c_metal + c_chill)
+    return temperatures
 
 
 def invert_tet_enthalpy(
@@ -278,7 +339,7 @@ def _capture_tet_niyama_step(
     previous_temperatures: np.ndarray,
     temperatures: np.ndarray,
     cooling_rate_step: np.ndarray,
-    gradients_c_per_mm: np.ndarray,
+    gradients_c_per_mm: Callable[[np.ndarray], np.ndarray],
     cast_mask: np.ndarray,
     dt: float,
 ) -> None:
@@ -286,6 +347,7 @@ def _capture_tet_niyama_step(
 
     Same selection and interpolation as ``_capture_niyama_history_step``. The
     gradient is the P1 nodal gradient, so quality is 2 for every sampled node.
+    ``gradients_c_per_mm(nodes)`` is called only for the crossing nodes.
     """
     sampled = getattr(engine, "_thermal_niyama_sampled", None)
     if sampled is None:
@@ -302,7 +364,7 @@ def _capture_tet_niyama_step(
         temperatures[target] - previous_temperatures[target]
     ) * step_fraction
     eval_times = (engine.time - dt) + dt * step_fraction
-    gradients = gradients_c_per_mm[target].astype(np.float32)
+    gradients = gradients_c_per_mm(target).astype(np.float32)
     rates = np.maximum(np.asarray(cooling_rate_step[target], dtype=np.float32), 1e-6)
 
     engine._thermal_niyama_gradient_at_eval[target] = gradients
@@ -356,6 +418,12 @@ def run_tet_thermal_integration(
     part_types = np.asarray(engine.mesh.voxel_part_types)
     metal_mask = is_metal(part_types)
     cast_mask = part_types == PART_TYPE_CAST
+    metal_tets = tet_material_indices(engine.mesh.tet_part_types) == METAL_MATERIAL_INDEX
+
+    def metal_gradients_c_per_mm(nodes: Optional[np.ndarray] = None) -> np.ndarray:
+        return heat_model.gradient_magnitude(metal_tets, nodes) * _PER_M_TO_PER_MM
+
+    hold_growth = False
     latent_capacity = heat_model.node_latent_capacity()
     latent_nodes = np.flatnonzero(latent_capacity > 0.0)
     latent_of_latent_nodes = latent_capacity[latent_nodes]
@@ -387,12 +455,19 @@ def run_tet_thermal_integration(
                 T_post[latent_nodes], fs_prev[latent_nodes], beta, T_liq, T_sol
             )
 
+        max_change = 0.0
         if np.any(metal_mask) and step_dt > TET_MIN_TIME_STEP_S:
             max_change = float(np.max(np.abs(T_final[metal_mask] - previous_temperatures[metal_mask])))
             if max_change > max_delta_t:
                 heat_model.temperatures = previous_temperatures
                 heat_model.time = previous_time
-                dt = max(0.5 * step_dt, TET_MIN_TIME_STEP_S)
+                retry_factor = np.clip(
+                    TET_RETRY_SAFETY * max_delta_t / max_change,
+                    TET_RETRY_MIN_FACTOR,
+                    TET_RETRY_MAX_FACTOR,
+                )
+                dt = max(float(retry_factor) * step_dt, TET_MIN_TIME_STEP_S)
+                hold_growth = True
                 rejected_steps += 1
                 continue
 
@@ -407,7 +482,15 @@ def run_tet_thermal_integration(
         engine.mesh.voxel_states[:] = current_states
         engine.time = heat_model.time
         iteration += 1
-        dt = min(dt * TET_TIME_STEP_GROWTH, max_dt)
+        if hold_growth:
+            hold_growth = False
+        else:
+            # Grow by at most x1.25, and less when this step's |dT| was
+            # already close to the limit.
+            growth = TET_TIME_STEP_GROWTH
+            if max_change > 0.0:
+                growth = min(growth, max(TET_RETRY_SAFETY * max_delta_t / max_change, 1.0))
+            dt = min(dt * growth, max_dt)
 
         start_times = np.asarray(solidification_model.solidification_time, dtype=np.float64)
         end_times = np.asarray(solidification_model._solidification_end, dtype=np.float64)
@@ -448,7 +531,6 @@ def run_tet_thermal_integration(
 
         engine._thermal_latest_temperatures = temperatures.astype(np.float32, copy=True)
         if needs_thermal_history:
-            gradients_c_per_mm = heat_model.gradient_magnitude() * _PER_M_TO_PER_MM
             _capture_tet_niyama_step(
                 engine,
                 previous_states=previous_states,
@@ -456,12 +538,10 @@ def run_tet_thermal_integration(
                 previous_temperatures=previous_temperatures,
                 temperatures=temperatures,
                 cooling_rate_step=cooling_rate_step,
-                gradients_c_per_mm=gradients_c_per_mm,
+                gradients_c_per_mm=metal_gradients_c_per_mm,
                 cast_mask=cast_mask,
                 dt=step_dt,
             )
-            engine._thermal_latest_gradients = gradients_c_per_mm.astype(np.float32)
-            engine.thermal_gradients = engine._thermal_latest_gradients.copy()
 
         current_progress_pct = float(np.mean(current_states) * 100.0)
         if capture_fraction_history and current_progress_pct - last_snapshot_progress >= progress_interval:
@@ -488,6 +568,11 @@ def run_tet_thermal_integration(
     if capture_fraction_history:
         engine.fraction_liquid_history.append(np.asarray(engine.mesh.voxel_states, dtype=np.float32).copy())
         engine.fraction_liquid_times.append(engine.time)
+
+    if needs_thermal_history and iteration > 0:
+        # The heat model holds the last accepted field (a rejection restores it).
+        engine._thermal_latest_gradients = metal_gradients_c_per_mm().astype(np.float32)
+        engine.thermal_gradients = engine._thermal_latest_gradients.copy()
 
     unfinished = np.asarray(engine.mesh.voxel_states, dtype=np.float32) < 0.99
     engine.solidification_end_times[unfinished] = np.nan

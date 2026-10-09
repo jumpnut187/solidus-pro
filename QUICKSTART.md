@@ -79,9 +79,9 @@ Covers all seven alloys: WCB, CF8, C958, C964, CA6NM, MONEL400 and IN625.
    - View material properties in sidebar
 
 4. **Configure Mesh** (Optional)
-   - Mesh type: Voxel (default) or Tetrahedral
-     - Tetrahedral follows the CAD surface and solves heat flow with finite elements; the size field becomes "Element size" (target tet edge length)
-     - Default from `mesh.mesh_type` in `castsim.yaml` or `CASTSIM_MESH_TYPE`
+   - Mesh type: Tetrahedral (default) or Voxel (fallback)
+     - Tetrahedral follows the CAD surface and solves heat flow with finite elements; the size field becomes "Mesh size" (tet edge length = mesh size x `mesh.tet_edge_length_factor`, 2.0)
+     - Default from `mesh.mesh_type` in `castsim.yaml` or `CASTSIM_MESH_TYPE`; set `voxel` for the fallback
    - Base Voxel Size: 0.1 in (default)
      - Smaller = more accurate, slower
      - Larger = faster, less accurate
@@ -260,7 +260,7 @@ pip3 install -r requirements.txt
 
 **"Mesh Generation Error" on a tetrahedral run**
 - The estimated node count exceeds `mesh.tet_max_nodes` (3,000,000)
-- Increase the element size; the message gives a size that fits
+- Increase the mesh size; the message gives a size that fits
 
 **"Mesh not watertight"**
 - Repair STL file in mesh editing software

@@ -17,9 +17,15 @@ boundary group adds ``h(t) * A_face / 3`` to the diagonal of its three face
 nodes, with ``h(t) = htc * time_function(t)`` as in
 :class:`physics.heat_transfer.BoundaryCondition`.
 
-The sparsity pattern and the (tet, a, b) -> CSR scatter map are built once.
-A step only refills the CSR ``data`` array with ``np.bincount`` and solves with
-Jacobi-preconditioned CG, falling back to a direct solve if CG fails.
+The sparsity pattern is built once, together with two gather matrices: the
+stiffness gather ``S`` (nnz x T, ``K.data = S @ k_e``) and the node incidence
+``Q`` (N x T, entries ``V_e / 4``, ``C = Q @ rho_cp_e``). A step refills the
+CSR ``data`` array with one sparse product and solves with Jacobi-
+preconditioned CG, falling back to a direct solve if CG fails. With numba the
+element properties and the gathers run in parallel kernels and the CG loop in
+one compiled kernel (parallel from ``PARALLEL_CG_MIN_NODES``). Without numba
+the same products run through scipy and ``scipy.sparse.linalg.cg``. The CG
+starts from ``T_old`` plus the last step's change scaled by ``dt``.
 
 Usage::
 
@@ -39,6 +45,13 @@ from numpy.typing import NDArray
 from scipy.sparse import csr_array
 from scipy.sparse.linalg import LinearOperator, cg, spsolve
 
+try:
+    from numba import njit, prange
+
+    NUMBA_AVAILABLE = True
+except ImportError:  # pragma: no cover - numba ships with the app
+    NUMBA_AVAILABLE = False
+
 FloatArray = NDArray[np.float64]
 IntArray = NDArray[np.int64]
 
@@ -46,12 +59,153 @@ IntArray = NDArray[np.int64]
 CG_RTOL = 1e-10
 #: CG iteration cap before falling back to ``spsolve``.
 CG_MAX_ITER = 5000
+#: Node count from which the numba CG runs its parallel build. Measured on
+#: thick_thin (18 cores): serial 25 ms vs parallel 33 ms at 35k nodes,
+#: serial 315 ms vs parallel 123 ms at 215k nodes.
+PARALLEL_CG_MIN_NODES = 100_000
 #: Tets with ``|V| <= DEGENERATE_VOLUME_REL * mean(|V|)`` are rejected.
 DEGENERATE_VOLUME_REL = 1e-12
 
 # Local (a, b) index pairs of the 4x4 element matrix, row-major.
 _LOCAL_A = np.repeat(np.arange(4), 4)
 _LOCAL_B = np.tile(np.arange(4), 4)
+
+
+if NUMBA_AVAILABLE:
+
+    @njit(parallel=True, cache=True)
+    def _element_properties_kernel(
+        temperatures, tets, tet_material, temp_points, conductivity, rho_cp, n_points, k_out, rho_cp_out
+    ):  # pragma: no cover - compiled
+        """k and rho_cp per tet at the mean of its 4 nodal temperatures (np.interp clamping)."""
+        for t in prange(tets.shape[0]):
+            te = 0.25 * (
+                temperatures[tets[t, 0]]
+                + temperatures[tets[t, 1]]
+                + temperatures[tets[t, 2]]
+                + temperatures[tets[t, 3]]
+            )
+            m = tet_material[t]
+            last = n_points[m] - 1
+            if last == 0 or te <= temp_points[m, 0]:
+                k_out[t] = conductivity[m, 0]
+                rho_cp_out[t] = rho_cp[m, 0]
+            elif te >= temp_points[m, last]:
+                k_out[t] = conductivity[m, last]
+                rho_cp_out[t] = rho_cp[m, last]
+            else:
+                j = 0
+                while temp_points[m, j + 1] < te:
+                    j += 1
+                w = (te - temp_points[m, j]) / (temp_points[m, j + 1] - temp_points[m, j])
+                k_out[t] = conductivity[m, j] + w * (conductivity[m, j + 1] - conductivity[m, j])
+                rho_cp_out[t] = rho_cp[m, j] + w * (rho_cp[m, j + 1] - rho_cp[m, j])
+
+    @njit(parallel=True, cache=True)
+    def _csr_matvec_kernel(indptr, indices, data, x, out):  # pragma: no cover - compiled
+        """out = A @ x for CSR (indptr, indices, data), parallel over rows."""
+        for i in prange(indptr.shape[0] - 1):
+            s = 0.0
+            for jj in range(indptr[i], indptr[i + 1]):
+                s += data[jj] * x[indices[jj]]
+            out[i] = s
+
+    @njit(parallel=True, cache=True)
+    def _nodal_gradient_kernel(
+        nodes, incidence_indptr, incidence_tets, incidence_weight, tets, grads, temperatures, tet_mask, out
+    ):  # pragma: no cover - compiled
+        """Weighted mean of P1 tet gradients at ``nodes``; see ``nodal_gradient``.
+
+        ``tet_mask`` all True is the plain volume-weighted mean. A node with no
+        masked incident tet falls back to all incident tets.
+        """
+        for row in prange(nodes.shape[0]):
+            node = nodes[row]
+            masked = np.zeros(3)
+            masked_weight = 0.0
+            full = np.zeros(3)
+            full_weight = 0.0
+            for jj in range(incidence_indptr[node], incidence_indptr[node + 1]):
+                t = incidence_tets[jj]
+                w = incidence_weight[jj]
+                for axis in range(3):
+                    g = 0.0
+                    for a in range(4):
+                        g += temperatures[tets[t, a]] * grads[t, a, axis]
+                    full[axis] += w * g
+                    if tet_mask[t]:
+                        masked[axis] += w * g
+                full_weight += w
+                if tet_mask[t]:
+                    masked_weight += w
+            for axis in range(3):
+                if masked_weight > 0.0:
+                    out[row, axis] = masked[axis] / masked_weight
+                else:
+                    out[row, axis] = full[axis] / full_weight
+
+    def _pcg_jacobi(indptr, indices, data, inv_diag, b, x, rtol, maxiter):  # pragma: no cover - compiled
+        """Jacobi-preconditioned CG on CSR A, in place on x.
+
+        Stops when ``||b - A x|| <= rtol * ||b||`` (scipy ``cg`` criterion with
+        atol 0). Returns (iterations, converged).
+        """
+        n = b.shape[0]
+        r = np.empty(n)
+        p = np.empty(n)
+        ap = np.empty(n)
+        b_norm2 = 0.0
+        for i in prange(n):
+            b_norm2 += b[i] * b[i]
+        tol2 = rtol * rtol * b_norm2
+        rz = 0.0
+        rr = 0.0
+        for i in prange(n):
+            s = 0.0
+            for jj in range(indptr[i], indptr[i + 1]):
+                s += data[jj] * x[indices[jj]]
+            ri = b[i] - s
+            r[i] = ri
+            zi = inv_diag[i] * ri
+            p[i] = zi
+            rz += ri * zi
+            rr += ri * ri
+        if rr <= tol2:
+            return 0, True
+        for iteration in range(1, maxiter + 1):
+            pap = 0.0
+            for i in prange(n):
+                s = 0.0
+                for jj in range(indptr[i], indptr[i + 1]):
+                    s += data[jj] * p[indices[jj]]
+                ap[i] = s
+                pap += p[i] * s
+            if not pap > 0.0:
+                return iteration, False
+            alpha = rz / pap
+            rr = 0.0
+            rz_new = 0.0
+            for i in prange(n):
+                x[i] += alpha * p[i]
+                ri = r[i] - alpha * ap[i]
+                r[i] = ri
+                rr += ri * ri
+                rz_new += ri * inv_diag[i] * ri
+            if rr <= tol2:
+                return iteration, True
+            beta = rz_new / rz
+            rz = rz_new
+            for i in prange(n):
+                p[i] = inv_diag[i] * r[i] + beta * p[i]
+        return maxiter, False
+
+    #: Serial build (cached). Below ~100k nodes it beats the parallel build,
+    #: whose per-region launch and reduction overhead dominates.
+    _pcg_jacobi_kernel = njit(cache=True)(_pcg_jacobi)
+    #: Parallel build of the same body, for PARALLEL_CG_MIN_NODES and up.
+    #: Not cached: numba's cache key ignores the parallel flag, so a cached
+    #: copy would collide with the serial build.
+    _pcg_jacobi_parallel_kernel = njit(parallel=True)(_pcg_jacobi)
 
 
 def _as_float_vector(name: str, values: Any) -> FloatArray:
@@ -165,7 +319,11 @@ class TetHeatTransferModel:
         last_used_direct_solver: True when the last step fell back to spsolve.
     """
 
-    backend_description = "scipy sparse CG (Jacobi) with spsolve fallback"
+    backend_description = (
+        "numba CG (Jacobi) with spsolve fallback"
+        if NUMBA_AVAILABLE
+        else "scipy sparse CG (Jacobi) with spsolve fallback"
+    )
 
     def __init__(
         self,
@@ -236,17 +394,41 @@ class TetHeatTransferModel:
         grads[:, 0, :] = -inv_t.sum(axis=1)
         self._grads = grads  # (T,4,3) 1/m
         # V_e * grad(N_a) . grad(N_b), flattened row-major to 16 entries (m).
-        self._local_stiffness = (
+        local_stiffness = (
             np.einsum("tai,tbi->tab", grads, grads) * volumes[:, None, None]
         ).reshape(n_tets, 16)
 
-        # CSR pattern and scatter map (tet, a, b) -> data index.
+        # CSR pattern and the scatter map (tet, a, b) -> data index.
         rows = tet_idx[:, _LOCAL_A].ravel()
         cols = tet_idx[:, _LOCAL_B].ravel()
         keys, scatter = np.unique(rows * n_nodes + cols, return_inverse=True)
-        self._scatter = scatter.astype(np.int64, copy=False).ravel()
+        scatter = scatter.astype(np.int64, copy=False).ravel()
         nnz = keys.size
-        index_dtype = np.int32 if max(nnz, n_nodes) < np.iinfo(np.int32).max else np.int64
+        index_dtype = np.int32 if max(nnz, n_nodes, 16 * n_tets) < np.iinfo(np.int32).max else np.int64
+        # Stiffness gather S (nnz x T): K.data = S @ k_e. Row i lists the
+        # (tet, V * grad.grad) contributions to data entry i.
+        order = np.argsort(scatter, kind="stable")
+        gather_indptr = np.zeros(nnz + 1, dtype=index_dtype)
+        np.cumsum(np.bincount(scatter, minlength=nnz), out=gather_indptr[1:])
+        self._stiffness_gather = csr_array(
+            (
+                local_stiffness.ravel()[order],
+                (order // 16).astype(index_dtype),
+                gather_indptr,
+            ),
+            shape=(nnz, n_tets),
+        )
+        del local_stiffness, scatter, order
+        # Node incidence Q (N x T) with entries V_e / 4: C = Q @ rho_cp_e.
+        flat_nodes = tet_idx.ravel()
+        order = np.argsort(flat_nodes, kind="stable")
+        incidence_indptr = np.zeros(n_nodes + 1, dtype=index_dtype)
+        np.cumsum(np.bincount(flat_nodes, minlength=n_nodes), out=incidence_indptr[1:])
+        incidence_tets = (order // 4).astype(index_dtype)
+        self._node_incidence = csr_array(
+            (volumes[incidence_tets] / 4.0, incidence_tets, incidence_indptr),
+            shape=(n_nodes, n_tets),
+        )
         key_rows = keys // n_nodes
         indptr = np.zeros(n_nodes + 1, dtype=index_dtype)
         np.cumsum(np.bincount(key_rows, minlength=n_nodes), out=indptr[1:])
@@ -268,14 +450,27 @@ class TetHeatTransferModel:
         else:
             self.boundary_face_areas = np.zeros(0, dtype=np.float64)
 
-        # Incident tet volume per node, for the volume-weighted gradient average.
-        self._node_incident_volume = np.bincount(
-            tet_idx.ravel(), weights=np.repeat(volumes, 4), minlength=n_nodes
-        )
         latent_e = np.array([m.latent_heat_vol for m in materials], dtype=np.float64)[mat_idx]
-        self._node_latent = np.bincount(
-            tet_idx.ravel(), weights=np.repeat(latent_e * volumes / 4.0, 4), minlength=n_nodes
-        )
+        self._node_latent = self._node_incidence @ latent_e
+
+        # Material curves packed for the numba property kernel (rows padded
+        # with the last value; n_points gives the true length).
+        max_points = max(m.temp_points.size for m in materials)
+        self._curve_points = np.array([m.temp_points.size for m in materials], dtype=np.int64)
+        self._curve_temp = np.empty((len(materials), max_points), dtype=np.float64)
+        self._curve_k = np.empty_like(self._curve_temp)
+        self._curve_rho_cp = np.empty_like(self._curve_temp)
+        for m, material in enumerate(materials):
+            for target, curve in (
+                (self._curve_temp, material.temp_points),
+                (self._curve_k, material.conductivity),
+                (self._curve_rho_cp, material.rho_cp),
+            ):
+                target[m, : curve.size] = curve
+                target[m, curve.size :] = curve[-1]
+        self._k_e = np.empty(n_tets, dtype=np.float64)
+        self._rho_cp_e = np.empty(n_tets, dtype=np.float64)
+        self._node_buffer = np.empty(n_nodes, dtype=np.float64)
 
         self._groups: List[_BoundaryGroup] = []
         self._temperatures = np.zeros(n_nodes, dtype=np.float64)
@@ -283,6 +478,9 @@ class TetHeatTransferModel:
         self.last_iterations = 0
         self.last_residual = 0.0
         self.last_used_direct_solver = False
+        # Heat-step change and dt of the last solve, for the CG initial guess.
+        self._last_change: Optional[FloatArray] = None
+        self._last_dt = 0.0
 
     # ------------------------------------------------------------------ state
 
@@ -308,6 +506,7 @@ class TetHeatTransferModel:
     def set_initial_temperature(self, value: Union[float, Any]) -> None:
         """Set nodal temperatures (degC) from a scalar or an (N,) array."""
         self._temperatures[:] = self._validated_field(value)
+        self._last_change = None
 
     def add_boundary_group(
         self,
@@ -353,48 +552,50 @@ class TetHeatTransferModel:
 
     # ------------------------------------------------------------ properties
 
-    def _element_temperatures(self, temperatures: FloatArray) -> FloatArray:
-        return temperatures[self._tets].mean(axis=1)
+    def _element_properties(self, temperatures: FloatArray) -> tuple[FloatArray, FloatArray]:
+        """(k_e, rho_cp_e) per tet at the mean of its nodal temperatures.
 
-    def _element_property(self, t_elem: FloatArray, name: str) -> FloatArray:
-        """Per-tet property ``name`` ('conductivity' or 'rho_cp') at t_elem degC."""
-        out = np.empty(self.n_tets, dtype=np.float64)
+        Returns internal buffers that the next call overwrites.
+        """
+        if NUMBA_AVAILABLE:
+            _element_properties_kernel(
+                temperatures, self._tets, self._tet_material, self._curve_temp,
+                self._curve_k, self._curve_rho_cp, self._curve_points, self._k_e, self._rho_cp_e,
+            )
+            return self._k_e, self._rho_cp_e
+        t_elem = temperatures[self._tets].mean(axis=1)
         for material, tet_ids in zip(self._materials, self._material_tets):
             if tet_ids.size == 0:
                 continue
-            curve = getattr(material, name)
-            if curve.size == 1:
-                out[tet_ids] = curve[0]
-            else:
-                out[tet_ids] = np.interp(t_elem[tet_ids], material.temp_points, curve)
+            for out, curve in ((self._k_e, material.conductivity), (self._rho_cp_e, material.rho_cp)):
+                if curve.size == 1:
+                    out[tet_ids] = curve[0]
+                else:
+                    out[tet_ids] = np.interp(t_elem[tet_ids], material.temp_points, curve)
+        return self._k_e, self._rho_cp_e
+
+    @staticmethod
+    def _matvec(matrix: csr_array, x: FloatArray, out: FloatArray) -> FloatArray:
+        """out = matrix @ x (parallel numba kernel when available)."""
+        if NUMBA_AVAILABLE:
+            _csr_matvec_kernel(matrix.indptr, matrix.indices, matrix.data, x, out)
+        else:
+            out[:] = matrix @ x
         return out
-
-    def _lumped_capacity(self, rho_cp_e: FloatArray) -> FloatArray:
-        return np.bincount(
-            self._tets.ravel(),
-            weights=np.repeat(rho_cp_e * self.tet_volumes / 4.0, 4),
-            minlength=self.n_nodes,
-        )
-
-    def _stiffness_data(self, k_e: FloatArray) -> FloatArray:
-        return np.bincount(
-            self._scatter,
-            weights=(self._local_stiffness * k_e[:, None]).ravel(),
-            minlength=self._nnz,
-        )
 
     def stiffness_matrix(self) -> csr_array:
         """Return the assembled conduction matrix K (W/K) at current temperatures."""
-        k_e = self._element_property(self._element_temperatures(self._temperatures), "conductivity")
+        k_e, _ = self._element_properties(self._temperatures)
+        data = self._matvec(self._stiffness_gather, k_e, np.empty(self._nnz, dtype=np.float64))
         return csr_array(
-            (self._stiffness_data(k_e), self._indices.copy(), self._indptr.copy()),
+            (data, self._indices.copy(), self._indptr.copy()),
             shape=(self.n_nodes, self.n_nodes),
         )
 
     def node_heat_capacity(self) -> FloatArray:
         """(N,) lumped heat capacity C_i in J/K at the current temperatures."""
-        rho_cp_e = self._element_property(self._element_temperatures(self._temperatures), "rho_cp")
-        return self._lumped_capacity(rho_cp_e)
+        _, rho_cp_e = self._element_properties(self._temperatures)
+        return self._matvec(self._node_incidence, rho_cp_e, np.empty(self.n_nodes, dtype=np.float64))
 
     def node_latent_capacity(self) -> FloatArray:
         """(N,) lumped latent heat in J: sum of latent_heat_vol_e * V_e / 4."""
@@ -406,20 +607,51 @@ class TetHeatTransferModel:
 
     # ------------------------------------------------------------- gradients
 
-    def nodal_gradient(self) -> FloatArray:
-        """(N,3) temperature gradient in K/m: volume-weighted mean of P1 tet gradients."""
+    def nodal_gradient(self, tet_mask: Any = None, nodes: Any = None) -> FloatArray:
+        """(N,3) temperature gradient in K/m: volume-weighted mean of P1 tet gradients.
+
+        Args:
+            tet_mask: optional (T,) bool. Only masked tets enter the average.
+                A node with no incident masked tet gets the all-tet average.
+                Use it to keep one material's gradient at an interface with a
+                material of different conductivity, where the field has a kink.
+            nodes: optional node indices. Returns (len(nodes), 3) for those
+                nodes only, at a cost proportional to their incident tets.
+        """
+        if tet_mask is None:
+            mask = np.ones(self.n_tets, dtype=bool)
+        else:
+            mask = np.asarray(tet_mask, dtype=bool)
+            if mask.shape != (self.n_tets,):
+                raise ValueError(f"tet_mask must have shape ({self.n_tets},), got {mask.shape}")
+        if nodes is None:
+            rows = np.arange(self.n_nodes, dtype=np.int64)
+        else:
+            rows = _as_index_array("nodes", nodes, ())
+            _check_range("nodes", rows, self.n_nodes, "node count")
+        incidence = self._node_incidence
+        if NUMBA_AVAILABLE:
+            out = np.empty((rows.size, 3), dtype=np.float64)
+            _nodal_gradient_kernel(
+                rows, incidence.indptr, incidence.indices, incidence.data,
+                self._tets, self._grads, self._temperatures, mask, out,
+            )
+            return out
         grad_e = np.einsum("ta,tai->ti", self._temperatures[self._tets], self._grads)
-        weighted = np.repeat(grad_e * self.tet_volumes[:, None], 4, axis=0)
-        flat_nodes = self._tets.ravel()
-        out = np.empty((self.n_nodes, 3), dtype=np.float64)
-        for axis in range(3):
-            out[:, axis] = np.bincount(flat_nodes, weights=weighted[:, axis], minlength=self.n_nodes)
-        out /= self._node_incident_volume[:, None]
+        sub = incidence[rows]
+        out = np.asarray(sub @ grad_e, dtype=np.float64)
+        weight = np.asarray(sub @ np.ones(self.n_tets), dtype=np.float64)
+        masked = np.asarray(sub @ (grad_e * mask[:, None]), dtype=np.float64)
+        masked_weight = np.asarray(sub @ mask.astype(np.float64), dtype=np.float64)
+        covered = masked_weight > 0.0
+        out[covered] = masked[covered]
+        weight[covered] = masked_weight[covered]
+        out /= weight[:, None]
         return out
 
-    def gradient_magnitude(self) -> FloatArray:
-        """(N,) |grad T| in K/m."""
-        return np.linalg.norm(self.nodal_gradient(), axis=1)
+    def gradient_magnitude(self, tet_mask: Any = None, nodes: Any = None) -> FloatArray:
+        """|grad T| in K/m, (N,) or (len(nodes),). Arguments as in :meth:`nodal_gradient`."""
+        return np.linalg.norm(self.nodal_gradient(tet_mask, nodes), axis=1)
 
     def get_cooling_rate(self, prev: Any, dt: float) -> FloatArray:
         """(N,) cooling rate in degC/s, positive when cooling."""
@@ -435,13 +667,12 @@ class TetHeatTransferModel:
         t_old = self._temperatures.copy()
         t_new_time = self.time + dt
 
-        t_elem = self._element_temperatures(t_old)
-        k_e = self._element_property(t_elem, "conductivity")
-        rho_cp_e = self._element_property(t_elem, "rho_cp")
-        cap_over_dt = self._lumped_capacity(rho_cp_e) / dt
-
-        diag_extra = cap_over_dt.copy()
-        rhs = cap_over_dt * t_old
+        k_e, rho_cp_e = self._element_properties(t_old)
+        data = self._matrix.data
+        self._matvec(self._stiffness_gather, k_e, data)
+        diag_extra = self._matvec(self._node_incidence, rho_cp_e, self._node_buffer)
+        diag_extra /= dt  # C / dt
+        rhs = diag_extra * t_old
         for group in self._groups:
             h = group.htc_at(t_new_time)
             if h == 0.0:
@@ -449,30 +680,43 @@ class TetHeatTransferModel:
             robin = h * group.node_area
             diag_extra[group.nodes] += robin
             rhs[group.nodes] += robin * group.t_inf
-
-        data = self._matrix.data
-        data[:] = self._stiffness_data(k_e)
         data[self._diag_index] += diag_extra
         inv_diag = 1.0 / data[self._diag_index]
-        preconditioner = LinearOperator(
-            (self.n_nodes, self.n_nodes), matvec=lambda r: inv_diag * r.ravel(), dtype=np.float64
-        )
 
-        iterations = 0
+        # Initial guess: T_old plus the last heat-step change scaled to this dt.
+        guess = t_old.copy()
+        if self._last_change is not None:
+            guess += (dt / self._last_dt) * self._last_change
+        if NUMBA_AVAILABLE:
+            solution = guess
+            kernel = (
+                _pcg_jacobi_parallel_kernel
+                if self.n_nodes >= PARALLEL_CG_MIN_NODES
+                else _pcg_jacobi_kernel
+            )
+            iterations, converged = kernel(
+                self._indptr, self._indices, data, inv_diag, rhs, solution, CG_RTOL, CG_MAX_ITER
+            )
+            info = 0 if converged else 1
+        else:
+            preconditioner = LinearOperator(
+                (self.n_nodes, self.n_nodes), matvec=lambda r: inv_diag * r.ravel(), dtype=np.float64
+            )
+            iterations = 0
 
-        def _count(_: FloatArray) -> None:
-            nonlocal iterations
-            iterations += 1
+            def _count(_: FloatArray) -> None:
+                nonlocal iterations
+                iterations += 1
 
-        solution, info = cg(
-            self._matrix,
-            rhs,
-            x0=t_old,
-            rtol=CG_RTOL,
-            maxiter=CG_MAX_ITER,
-            M=preconditioner,
-            callback=_count,
-        )
+            solution, info = cg(
+                self._matrix,
+                rhs,
+                x0=guess,
+                rtol=CG_RTOL,
+                maxiter=CG_MAX_ITER,
+                M=preconditioner,
+                callback=_count,
+            )
         used_direct = info != 0 or not np.all(np.isfinite(solution))
         if used_direct:
             solution = spsolve(self._matrix.tocsc(), rhs)
@@ -484,5 +728,7 @@ class TetHeatTransferModel:
         self.last_iterations = iterations
         self.last_residual = residual / rhs_norm if rhs_norm > 0.0 else residual
         self.last_used_direct_solver = bool(used_direct)
+        self._last_change = solution - t_old
+        self._last_dt = dt
         self._temperatures[:] = solution
         self.time = t_new_time

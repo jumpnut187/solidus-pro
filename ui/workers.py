@@ -16,6 +16,15 @@ from core.mesh_ml import log_mesh_training_example, recommend_mesh_settings
 from core.simulation_pipeline import PipelineInputs, SimulationCancelledError, run_pipeline
 
 
+def resolve_run_mesh_type(requested: Optional[str]) -> str:
+    """Mesh type a run uses: ``requested``, else ``settings.mesh.mesh_type``. Lower-cased."""
+    if requested is None:
+        from config.settings import get_settings
+
+        requested = get_settings().mesh.mesh_type
+    return str(requested).strip().lower()
+
+
 class SimulationWorker(QThread):
     """Background thread for running simulation."""
 
@@ -54,6 +63,36 @@ class SimulationWorker(QThread):
         # Text of a MeshGenerationError, shown verbatim by the failure dialog.
         self.mesh_error_message: Optional[str] = None
         self._cancel_requested = threading.Event()
+
+    def run_mesh_type(self) -> str:
+        """Mesh type this run uses: ``performance_options['mesh_type']``, else ``settings.mesh.mesh_type``."""
+        return resolve_run_mesh_type(self.performance_options.get("mesh_type"))
+
+    def _is_tet_run(self) -> bool:
+        if getattr(self.voxel_mesh, "mesh_type", None) == "tet":
+            return True
+        try:
+            return self.run_mesh_type() == "tet"
+        except Exception:
+            return False
+
+    def _log_mesh_training_example(self, outcome: dict) -> None:
+        """Feed the voxel-size recommender (``data/mesh_runs.csv``). Tet runs are skipped.
+
+        The recommender fits voxel size and refinement level, and the CSV has no
+        mesh-type column, so a tet row would be read as a voxel run.
+        """
+        if self._is_tet_run():
+            return
+        log_mesh_training_example(
+            self.stl_loader,
+            {
+                "base_voxel_size": self.voxel_size,
+                "refinement_level": self.refinement_level,
+            },
+            outcome,
+            origin=self.settings_origin,
+        )
 
     def _progress_callback(self, current: int, total: int, stage: str) -> None:
         self.detailed_progress.emit(current, total, stage)
@@ -105,7 +144,7 @@ class SimulationWorker(QThread):
             # None means settings.mesh.mesh_type.
             mesh_type = self.performance_options.get("mesh_type")
 
-            if mesh_type == "tet":
+            if self.run_mesh_type() == "tet":
                 self.progress.emit(f"Generating tetrahedral mesh{perf_text}...")
             else:
                 self.progress.emit(f"Generating adaptive voxel mesh (Memory: {self.memory_mode.upper()}){perf_text}...")
@@ -151,12 +190,7 @@ class SimulationWorker(QThread):
 
             self._maybe_capture_surrogate_training_data()
 
-            log_mesh_training_example(
-                self.stl_loader,
-                {
-                    "base_voxel_size": self.voxel_size,
-                    "refinement_level": self.refinement_level,
-                },
+            self._log_mesh_training_example(
                 {
                     "success": True,
                     "voxel_count": voxel_count,
@@ -164,7 +198,6 @@ class SimulationWorker(QThread):
                     "simulation_time_s": simulation_time,
                     "applied_ml": self.settings_origin == "ml",
                 },
-                origin=self.settings_origin,
             )
         except SimulationCancelledError:
             self.progress.emit("Simulation cancelled")
@@ -190,12 +223,7 @@ class SimulationWorker(QThread):
 
             self.progress.emit(f"Error: {str(exc)}")
             voxel_count = self.voxel_mesh.get_voxel_count() if self.voxel_mesh is not None else 0
-            log_mesh_training_example(
-                self.stl_loader,
-                {
-                    "base_voxel_size": self.voxel_size,
-                    "refinement_level": self.refinement_level,
-                },
+            self._log_mesh_training_example(
                 {
                     "success": False,
                     "voxel_count": voxel_count,
@@ -204,7 +232,6 @@ class SimulationWorker(QThread):
                     "applied_ml": self.settings_origin == "ml",
                     "exception": str(exc),
                 },
-                origin=self.settings_origin,
             )
             self.finished.emit(False, "failed")
 
@@ -327,6 +354,10 @@ class SurrogateWorker(QThread):
     def cancel(self) -> None:
         """Request cancellation for the active surrogate run."""
         self._cancel_requested.set()
+
+    def run_mesh_type(self) -> str:
+        """Mesh type this run uses: ``mesh_type``, else ``settings.mesh.mesh_type``."""
+        return resolve_run_mesh_type(self.mesh_type)
 
     def _progress_callback(self, current: int, total: int, stage: str) -> None:
         self.detailed_progress.emit(current, total, stage)

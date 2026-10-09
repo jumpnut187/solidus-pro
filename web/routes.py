@@ -249,7 +249,7 @@ def tet_mesh_estimate(manager: Any, voxel_size: float) -> Dict[str, Any]:
     when the estimate is under it.
     """
     from core.part_manager import PART_TYPE_CAST
-    from core.simulation_pipeline import estimate_tet_node_count
+    from core.simulation_pipeline import estimate_tet_node_count, tet_edge_length_for_node_limit
 
     mesh_settings = get_settings().mesh
     factor = float(mesh_settings.tet_edge_length_factor)
@@ -261,9 +261,9 @@ def tet_mesh_estimate(manager: Any, voxel_size: float) -> Dict[str, Any]:
     recommended_voxel_size = None
     message = f"About {estimated_nodes:,} tet nodes at {edge_length_in:g} in edge length."
     if not can_proceed:
-        # Node count scales as h^-3, so this size lands at the limit.
+        # Rounded up to 0.001 in so the recommended size passes the guard.
         recommended_voxel_size = math.ceil(
-            1000.0 * float(voxel_size) * (estimated_nodes / max_nodes) ** (1.0 / 3.0)
+            1000.0 * tet_edge_length_for_node_limit(parts, max_nodes) / factor
         ) / 1000.0
         message = (
             f"About {estimated_nodes:,} tet nodes is above the limit of {max_nodes:,} "
@@ -353,7 +353,7 @@ def ml_mesh(project_id: str):
         "warning": recommendation.warning,
     }
     if mesh_type == "tet":
-        # The recommendation is a voxel size; on tet it is the element size.
+        # The recommendation is a voxel size; on tet it is the mesh size (edge = size x factor).
         # Report the node count it implies.
         estimate = tet_mesh_estimate(build_part_manager(parts), recommendation.base_voxel_size)
         for key in ("mesh_type", "estimated_nodes", "max_nodes", "edge_length_in", "can_proceed"):

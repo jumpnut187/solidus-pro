@@ -35,7 +35,7 @@ from core.part_manager import (
     PART_TYPE_RISER,
     is_metal,
 )
-from core.riser_design import RiserDesigner, RiserDesignParameters
+from core.riser_design import RiserDesigner, RiserDesignParameters, RiserRecommendation
 from core.solidification import SolidificationEngine, _tet_hop_length_in
 from tests.test_tet_end_to_end import _assembly
 
@@ -61,6 +61,7 @@ ALL_ANALYSES = {
 def _run_all_analyses(mesh_type: str, size_in: float):
     inputs = sp.PipelineInputs("WCB", size_in, 0, mesh_type=mesh_type, analysis_options=dict(ALL_ANALYSES))
     settings = Settings()
+    settings.mesh.tet_edge_length_factor = 1.0  # size_in is the tet edge length (TET_EDGE_IN)
     started = time.perf_counter()
     with mock.patch.object(sp, "get_settings", return_value=settings), mock.patch.object(
         tet_thermal, "get_settings", return_value=settings
@@ -411,6 +412,121 @@ class TetBranchUnitTests(unittest.TestCase):
         self.assertAlmostEqual(hotspot.volume, float(volumes[hotspot.indices].sum()))
         with self.assertRaises(ValueError):
             RiserDesigner(**common, voxel_volumes=np.ones(3))
+
+    # review_integration.md P1-2: coverage, move acceptance and hot-spot
+    # priority weight tet nodes by volume.
+
+    def _coverage_designer(self, voxel_volumes, mesh_type="tet") -> RiserDesigner:
+        # Ten small nodes at x = 0.0..0.9 (5 is L), M at 1.5 (start), R at 2.5,
+        # one big node B at 3.0. M's edges reach L and R.
+        x = np.concatenate([np.arange(10) * 0.1, [1.5, 2.5, 3.0]])
+        positions = np.stack([x, np.zeros_like(x), np.zeros_like(x)], axis=1)
+        neighbors = np.full((13, 2), -1, dtype=np.int32)
+        neighbors[10] = [5, 11]
+        designer = RiserDesigner(
+            voxel_positions=positions,
+            voxel_size=0.1,
+            neighbors=neighbors,
+            surface_mask=np.ones(13, dtype=bool),
+            alloy=None,
+            voxel_volumes=voxel_volumes,
+            mesh_type=mesh_type,
+        )
+        designer._feeding_distance = lambda diameter: 1.05
+        designer._recommendations = [
+            RiserRecommendation(
+                position=tuple(positions[10]),
+                voxel_index=10,
+                diameter=1.0,
+                feeding_zone=designer._calculate_feeding_zone(10, 1.0),
+            )
+        ]
+        return designer
+
+    def test_riser_coverage_is_a_node_volume_share_on_tets(self) -> None:
+        volumes = np.array([0.01] * 12 + [5.0])
+        designer = self._coverage_designer(volumes)
+        covered = designer._recommendations[0].feeding_zone  # x in [0.5, 2.5]: 5 small, M, R
+        self.assertEqual(len(covered), 7)
+        coverage = designer.analyze_coverage()
+        self.assertAlmostEqual(coverage["covered_fraction"], 0.07 / volumes.sum(), places=9)
+        self.assertEqual(coverage["covered_voxels"], 7)
+        # Voxel meshes keep the count share.
+        voxel = self._coverage_designer(None, mesh_type="voxel")
+        self.assertAlmostEqual(voxel.analyze_coverage()["covered_fraction"], 7 / 13)
+
+    def test_optimize_positions_moves_toward_more_volume_not_more_nodes(self) -> None:
+        # L covers 11 small nodes (0.11 in3); R covers 3 nodes incl. B (5.02 in3).
+        designer = self._coverage_designer(np.array([0.01] * 12 + [5.0]))
+        self.assertEqual(designer.optimize_positions(iterations=1)[0].voxel_index, 11)
+        # Without node volumes the count share still picks L.
+        designer = self._coverage_designer(None)
+        self.assertEqual(designer.optimize_positions(iterations=1)[0].voxel_index, 5)
+
+    def test_hot_spot_priority_weights_cluster_volume_on_tets(self) -> None:
+        positions = np.array([[0, 0, 0], [0, 0, 0.2], [0, 0, 0.4], [0, 0, 0.6]], dtype=np.float64)
+        common = dict(
+            voxel_positions=positions,
+            voxel_size=0.2,
+            neighbors=np.array([[1, -1], [0, 2], [1, 3], [2, -1]]),
+            surface_mask=np.array([True, False, False, True]),
+            alloy=None,
+            mesh_type="tet",
+        )
+        volumes = np.array([0.1, 0.2, 0.3, 0.4])
+        heuvers = RiserDesigner(**common, voxel_volumes=volumes)._heuvers
+        hotspot = heuvers.find_hotspots(n_hotspots=1)[0]
+        distance = heuvers.calculate_distance_to_surface()[hotspot.center_index]
+        self.assertAlmostEqual(hotspot.priority, distance * float(volumes[hotspot.indices].sum()))
+        heuvers = RiserDesigner(**common)._heuvers
+        hotspot = heuvers.find_hotspots(n_hotspots=1)[0]
+        self.assertAlmostEqual(hotspot.priority, distance * len(hotspot.indices))
+
+    # review_integration.md P2-1: gas porosity sees the removed cores on tets.
+
+    def _gas_porosity_engine(self, contact_codes) -> SolidificationEngine:
+        # Two tets sharing face (1, 2, 3); every node is on the boundary.
+        centers = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1]], dtype=np.float32)
+        faces = np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 4], [1, 4, 3], [2, 3, 4]], dtype=np.int32)
+        mesh = types.SimpleNamespace(
+            mesh_type="tet",
+            voxel_centers=centers,
+            voxel_part_types=np.zeros(5, dtype=np.int8),
+            boundary_faces=faces,
+            boundary_face_contact_codes=np.asarray(contact_codes, dtype=np.int8),
+            get_surface_voxel_indices=lambda: np.arange(5),
+        )
+        engine = SolidificationEngine.__new__(SolidificationEngine)
+        engine.mesh = mesh
+        engine.alloy = types.SimpleNamespace(gas_sensitivity=0.5)
+        engine.local_solidification_time = np.array([10.0, 20.0, 30.0, 40.0, 50.0], dtype=np.float32)
+        engine.niyama_risk = None
+        return engine
+
+    def _gas_generation(self, engine, venting: float) -> np.ndarray:
+        from physics import gas_porosity
+
+        original = gas_porosity.compute_surface_gas_generation
+
+        def with_venting(*args, **kwargs):
+            kwargs["core_venting_effectiveness"] = venting
+            return original(*args, **kwargs)
+
+        with mock.patch.object(gas_porosity, "compute_surface_gas_generation", side_effect=with_venting), \
+                mock.patch("builtins.print"):
+            engine._calculate_gas_porosity()
+        return np.asarray(engine.gas_generation, dtype=np.float64)
+
+    def test_core_venting_changes_the_tet_gas_result(self) -> None:
+        # Face (1, 2, 4) touches a removed CORE: nodes 1, 2, 4 are core surface.
+        engine = self._gas_porosity_engine([-1, -1, -1, 4, -1, -1])
+        unvented = self._gas_generation(engine, 0.0)
+        vented = self._gas_generation(engine, 1.0)
+        self.assertFalse(np.allclose(unvented, vented))
+        np.testing.assert_array_equal(engine.mesh.voxel_part_types, 0)  # the mesh array is not modified
+        # Without a core face venting has nothing to act on.
+        engine = self._gas_porosity_engine([-1] * 6)
+        np.testing.assert_allclose(self._gas_generation(engine, 0.0), self._gas_generation(engine, 1.0))
 
 
 if __name__ == "__main__":

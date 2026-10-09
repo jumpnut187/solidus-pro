@@ -44,6 +44,22 @@ def _restore_default_fp_environment() -> bool:
         return False
 
 
+def _restore_fp_environment_after_taichi_init() -> None:
+    """Run ``_restore_default_fp_environment`` and warn on macOS when it fails.
+
+    A silent failure leaves flush-to-zero on, and the next symptom is a
+    SIGSEGV inside scipy ``cKDTree`` with no diagnostic.
+    """
+    if not _restore_default_fp_environment() and platform.system() == "Darwin":
+        warnings.warn(
+            "Could not restore the default floating-point environment after Taichi init; "
+            "flush-to-zero may still be set and scipy cKDTree can crash (SIGSEGV). "
+            "Check np.float64(5e-324) > 0.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+
 class GPUBackend(Enum):
     """Available GPU backends"""
     NONE = "none"           # CPU-only
@@ -239,7 +255,7 @@ class GPUComputeManager:
             
             if not self._taichi_initialized:
                 ti.init(arch=ti.metal, log_level=ti.WARN)
-                _restore_default_fp_environment()
+                _restore_fp_environment_after_taichi_init()
                 self._taichi_initialized = True
                 print(f"  Metal: Taichi Metal backend initialized")
             

@@ -393,8 +393,11 @@ class HeuversCircleMethod:
             cluster_indices = np.where(cluster_mask)[0].tolist()
             if self.mesh_type == "tet" and self.voxel_volumes is not None:
                 cluster_volume = float(np.sum(self.voxel_volumes[cluster_indices]))
+                # Node volumes vary, so weight by volume, not node count.
+                cluster_size = cluster_volume
             else:
                 cluster_volume = len(cluster_indices) * (self.voxel_size ** 3)
+                cluster_size = len(cluster_indices)
             
             hotspot = HotSpot(
                 center_index=idx,
@@ -402,7 +405,7 @@ class HeuversCircleMethod:
                 indices=cluster_indices,
                 modulus=local_modulus,
                 volume=cluster_volume,
-                priority=distances[idx] * len(cluster_indices)
+                priority=distances[idx] * cluster_size
             )
             hotspots.append(hotspot)
             selected_positions.append(pos)
@@ -525,6 +528,10 @@ class RiserDesigner:
         self._heuvers = HeuversCircleMethod(
             voxel_positions, voxel_size, surface_mask,
             voxel_volumes=voxel_volumes, mesh_type=mesh_type,
+        )
+        # Tet coverage is a volume share; voxel coverage stays a count share.
+        self._node_volumes: Optional[FloatArray] = (
+            self._heuvers.voxel_volumes if mesh_type == "tet" else None
         )
         
         # Load standard riser database
@@ -760,6 +767,14 @@ class RiserDesigner:
         # Pellini's rule: Lf = T * sqrt(M)
         return self.params.feeding_constant * np.sqrt(modulus)
     
+    def _covered_fraction(self, covered: set) -> float:
+        """Fed share of the casting: node-volume share on tets, count share on voxels."""
+        if self._node_volumes is not None:
+            total = float(np.sum(self._node_volumes))
+            if total > 0.0:
+                return float(np.sum(self._node_volumes[list(covered)])) / total
+        return len(covered) / self.n_voxels
+
     def analyze_coverage(self) -> Dict[str, float]:
         """
         Analyze what fraction of the casting is covered by riser feeding.
@@ -775,7 +790,7 @@ class RiserDesigner:
         for riser in self._recommendations:
             covered.update(riser.feeding_zone)
         
-        covered_fraction = len(covered) / self.n_voxels
+        covered_fraction = self._covered_fraction(covered)
         
         return {
             'covered_fraction': covered_fraction,
@@ -837,7 +852,7 @@ class RiserDesigner:
                     covered = set()
                     for r in test_recs:
                         covered.update(r.feeding_zone)
-                    new_coverage = len(covered) / self.n_voxels
+                    new_coverage = self._covered_fraction(covered)
                     
                     if new_coverage > best_coverage:
                         best_recommendations = test_recs
