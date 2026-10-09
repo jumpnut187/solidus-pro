@@ -172,7 +172,7 @@ class _PayloadEngine:
 class MeshSettingsTetFieldTests(unittest.TestCase):
     def test_defaults(self) -> None:
         mesh = MeshSettings()
-        self.assertEqual(mesh.mesh_type, "tet")
+        self.assertEqual(mesh.mesh_type, "voxel")
         self.assertEqual(mesh.tet_edge_length_factor, 2.0)
         self.assertEqual(mesh.tet_epsilon_rel, 1e-3)
         self.assertEqual(mesh.tet_max_time_step_s, 2.0)
@@ -183,10 +183,10 @@ class MeshSettingsTetFieldTests(unittest.TestCase):
     def test_mesh_type_is_case_insensitive(self) -> None:
         self.assertEqual(MeshSettings(mesh_type=" TET ").mesh_type, "tet")
 
-    def test_unknown_mesh_type_falls_back_to_tet_with_a_warning(self) -> None:
+    def test_unknown_mesh_type_falls_back_to_voxel_with_a_warning(self) -> None:
         with self.assertWarns(RuntimeWarning):
             mesh = MeshSettings(mesh_type="hex")
-        self.assertEqual(mesh.mesh_type, "tet")
+        self.assertEqual(mesh.mesh_type, "voxel")
 
     def test_non_positive_tunables_fall_back_to_defaults(self) -> None:
         for name, bad in (
@@ -234,7 +234,7 @@ class MeshSettingsTetFieldTests(unittest.TestCase):
             os.environ, {"CASTSIM_MESH_TYPE": "hex", "CASTSIM_TET_EDGE_LENGTH_FACTOR": "-1"}
         ), self.assertWarns(RuntimeWarning):
             settings._apply_environment_variables()
-        self.assertEqual(settings.mesh.mesh_type, "tet")
+        self.assertEqual(settings.mesh.mesh_type, "voxel")
         self.assertEqual(settings.mesh.tet_edge_length_factor, 2.0)
 
     def test_config_file_values_apply(self) -> None:
@@ -256,7 +256,7 @@ class MeshSettingsTetFieldTests(unittest.TestCase):
 
     def test_to_dict_serializes_the_tet_fields(self) -> None:
         mesh = Settings().to_dict()["mesh"]
-        self.assertEqual(mesh["mesh_type"], "tet")
+        self.assertEqual(mesh["mesh_type"], "voxel")
         self.assertIn("tet_lattice_spacing_factor", mesh)
 
 
@@ -274,7 +274,8 @@ class MeshTypeResolutionTests(unittest.TestCase):
 
     def test_none_uses_settings(self) -> None:
         self.assertEqual(sp.resolve_mesh_type(self._inputs(), _settings(mesh_type="voxel").mesh), "voxel")
-        self.assertEqual(sp.resolve_mesh_type(self._inputs(), _settings().mesh), "tet")
+        self.assertEqual(sp.resolve_mesh_type(self._inputs(), _settings(mesh_type="tet").mesh), "tet")
+        self.assertEqual(sp.resolve_mesh_type(self._inputs(), _settings().mesh), "voxel")
 
     def test_explicit_inputs_win_over_settings(self) -> None:
         self.assertEqual(sp.resolve_mesh_type(self._inputs("voxel"), _settings(mesh_type="tet").mesh), "voxel")
@@ -391,7 +392,8 @@ class NodeCountGuardTests(unittest.TestCase):
     def test_guard_refuses_before_meshing(self) -> None:
         box = _box((2.0, 1.0, 1.0), (0.0, 0.0, 0.0))
         # Factor 1.0: the 0.2 in voxel size is the edge length the 1,213 estimate is for.
-        settings = _settings(tet_max_nodes=100, tet_edge_length_factor=1.0)
+        # Auto fallback off: the guard raises instead of switching to voxel.
+        settings = _settings(tet_max_nodes=100, tet_edge_length_factor=1.0, tet_auto_fallback=False)
         with mock.patch.object(sp, "get_settings", return_value=settings), mock.patch.object(
             sp, "build_tet_mesh"
         ) as built:

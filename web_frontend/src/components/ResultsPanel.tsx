@@ -109,6 +109,9 @@ export function ResultsPanel(props: ResultsPanelProps) {
   });
   const patchSection = (patch: Partial<SectionState>) =>
     onViewChange({ section: { ...view.section, ...patch } });
+  // Set by the pipeline when a tet run fell back to the voxel mesh.
+  const fallbackReason = meta?.stats.mesh_fallback_reason;
+  const meshFallbackReason = typeof fallbackReason === 'string' && fallbackReason ? fallbackReason : null;
 
   return (
     <aside className="results-panel" aria-label="Results">
@@ -134,6 +137,12 @@ export function ResultsPanel(props: ResultsPanelProps) {
           </p>
         ) : (
           <>
+            {meshFallbackReason ? (
+              <p className="status-note status-note-warning" role="status">
+                <strong>Ran on the voxel mesh.</strong> Mesh type was Tetrahedral, but the tet mesh was not used:{' '}
+                {meshFallbackReason}
+              </p>
+            ) : null}
             <CollapsibleGroup title="Field" summary={RESULT_MODE_LABELS[view.mode]} {...section('field')}>
               <label className="field">
                 <span className="visually-hidden">Result type</span>

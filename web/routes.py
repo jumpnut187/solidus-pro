@@ -243,8 +243,11 @@ def requested_mesh_type(body: Dict[str, Any]) -> str:
 def tet_mesh_estimate(manager: Any, voxel_size: float) -> Dict[str, Any]:
     """Estimated tet node count for the project's parts at ``voxel_size``.
 
-    Mirrors the pipeline's guard: edge length = ``voxel_size *
-    tet_edge_length_factor``; a run is refused above ``tet_max_nodes``.
+    Mirrors the pipeline's guards: edge length = ``voxel_size *
+    tet_edge_length_factor``. With ``tet_auto_fallback`` on, a run above
+    ``min(tet_auto_max_nodes, tet_max_nodes)`` runs on the voxel mesh instead
+    (``falls_back_to_voxel``); with it off, a run is refused above
+    ``tet_max_nodes``. ``can_proceed`` says whether the run stays on tet.
     ``recommended_voxel_size`` is the size that lands at the limit, or None
     when the estimate is under it.
     """
@@ -256,7 +259,12 @@ def tet_mesh_estimate(manager: Any, voxel_size: float) -> Dict[str, Any]:
     edge_length_in = float(voxel_size) * factor
     parts = manager.get_parts_with_types() or [(manager.get_combined_mesh(), PART_TYPE_CAST)]
     estimated_nodes = estimate_tet_node_count(parts, edge_length_in)
+    auto_fallback = bool(mesh_settings.tet_auto_fallback)
     max_nodes = int(mesh_settings.tet_max_nodes)
+    limit_name = "tet_max_nodes"
+    if auto_fallback and int(mesh_settings.tet_auto_max_nodes) < max_nodes:
+        max_nodes = int(mesh_settings.tet_auto_max_nodes)
+        limit_name = "tet_auto_max_nodes"
     can_proceed = estimated_nodes <= max_nodes
     recommended_voxel_size = None
     message = f"About {estimated_nodes:,} tet nodes at {edge_length_in:g} in edge length."
@@ -267,14 +275,17 @@ def tet_mesh_estimate(manager: Any, voxel_size: float) -> Dict[str, Any]:
         ) / 1000.0
         message = (
             f"About {estimated_nodes:,} tet nodes is above the limit of {max_nodes:,} "
-            f"(settings.mesh.tet_max_nodes)."
+            f"(settings.mesh.{limit_name})."
         )
+        if auto_fallback:
+            message += " The run will use the voxel mesh instead."
     return {
         "mesh_type": "tet",
         "estimated_nodes": estimated_nodes,
         "max_nodes": max_nodes,
         "edge_length_in": edge_length_in,
         "can_proceed": can_proceed,
+        "falls_back_to_voxel": auto_fallback and not can_proceed,
         "message": message,
         "recommended_voxel_size": recommended_voxel_size,
     }

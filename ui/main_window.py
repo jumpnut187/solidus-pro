@@ -164,6 +164,30 @@ def clamp_window_position(
     )
 
 
+def format_mesh_fallback_notice(reason: Optional[str]) -> Dict[str, str]:
+    """
+    User-facing text for a tet run that fell back to the voxel mesh
+    (``SimulationWorker.mesh_fallback_reason``). Qt-free, like
+    ``format_filling_notice``, and with the same keys: "level" is "none"
+    without a fallback, else "warning".
+    """
+    if not reason:
+        return {"level": "none", "status_line": "", "title": "", "body": "", "tag": ""}
+    return {
+        "level": "warning",
+        "status_line": "⚠ Ran on the voxel mesh: the tetrahedral mesh was not used",
+        "title": "Ran on the Voxel Mesh",
+        "body": (
+            "Mesh type was Tetrahedral, but this run used the voxel mesh at the same size.\n\n"
+            f"Reason: {reason}\n\n"
+            "The results below are voxel results. To keep a run on the tet mesh, use a\n"
+            "larger mesh size, or raise the limits in the mesh settings\n"
+            "(tet_auto_max_nodes, tet_mesh_timeout_s)."
+        ),
+        "tag": "VOXEL FALLBACK",
+    }
+
+
 def format_filling_notice(summary: Optional[Dict[str, Any]]) -> Dict[str, str]:
     """
     Translate a mold-filling summary (SolidificationEngine.get_filling_summary)
@@ -401,11 +425,13 @@ class MeshDialog(DraggableDialog):
         # Mesh type. The item data is the PipelineInputs.mesh_type value.
         self.content_layout.addWidget(QLabel("Mesh type:"))
         self.mesh_type_combo = QComboBox()
-        self.mesh_type_combo.addItem("Tetrahedral", "tet")
         self.mesh_type_combo.addItem("Voxel", "voxel")
+        self.mesh_type_combo.addItem("Tetrahedral", "tet")
         self.mesh_type_combo.setToolTip(
+            "Voxel: adaptive voxel grid (default).\n"
             "Tetrahedral: conforming tet mesh of the CAD surfaces (implicit FEM solve).\n"
-            "Voxel: adaptive voxel grid."
+            "A tet run switches to the voxel mesh, and says why, when tet meshing\n"
+            "fails, runs too long or the model is too large."
         )
         self.content_layout.addWidget(self.mesh_type_combo)
 
@@ -514,10 +540,10 @@ class MeshDialog(DraggableDialog):
         return str(self.mesh_type_combo.currentData())
 
     def set_mesh_type(self, mesh_type: str) -> None:
-        """Select ``mesh_type`` ("tet" or "voxel"); an unknown value selects Tetrahedral."""
+        """Select ``mesh_type`` ("tet" or "voxel"); an unknown value selects Voxel."""
         index = self.mesh_type_combo.findData(str(mesh_type).strip().lower())
         if index < 0:
-            index = self.mesh_type_combo.findData("tet")
+            index = self.mesh_type_combo.findData("voxel")
         self.mesh_type_combo.setCurrentIndex(index)
         self._update_size_label()
     
@@ -5618,8 +5644,23 @@ class MainWindow(QMainWindow):
         self.simulation_worker.start()
     
     def _on_simulation_progress(self, message: str):
-        """Handle simulation progress updates"""
+        """Handle simulation progress updates.
+
+        After a tet -> voxel fallback the reason stays under every later
+        message until the run ends.
+        """
+        reason = self._progress_sender_mesh_fallback_reason()
+        if reason and reason not in message:
+            message = f"{message}\n⚠ Running on the voxel mesh: {reason}"
         self.status_label.setText(message)
+
+    def _progress_sender_mesh_fallback_reason(self) -> Optional[str]:
+        """``mesh_fallback_reason`` of the worker emitting progress, or None."""
+        try:
+            reason = getattr(self.sender(), "mesh_fallback_reason", None)
+        except Exception:
+            return None
+        return reason if isinstance(reason, str) and reason else None
     
     def _on_detailed_progress(self, current: int, total: int, stage: str):
         """Handle detailed Z-slice progress with time estimation"""
@@ -5746,7 +5787,11 @@ class MainWindow(QMainWindow):
                 # information dialog rather than a warning icon.
                 QMessageBox.information(self, notice["title"], notice["body"])
 
-            self.status_label.setText(notice["status_line"] or "✓ Visualization complete")
+            status_line = notice["status_line"] or "✓ Visualization complete"
+            fallback_notice = self._show_mesh_fallback_notice(sim_worker)
+            if fallback_notice["status_line"]:
+                status_line = f"{fallback_notice['status_line']}\n{status_line}"
+            self.status_label.setText(status_line)
             # Keep the sidebar's "Analyses: ..." summary in sync with what the
             # filling stage actually concluded, not just what was requested --
             # see _update_analysis_summary for the request-time text this
@@ -6387,8 +6432,23 @@ class MainWindow(QMainWindow):
             badge += f" · conf {confidence:.2f}"
         if getattr(simulation, "surrogate_disabled_analyses", None):
             badge += " · disabled: " + ", ".join(simulation.surrogate_disabled_analyses)
-        self.status_label.setText(f"✓ {badge}")
+        fallback_notice = self._show_mesh_fallback_notice(self.simulation_worker)
+        status_line = f"✓ {badge}"
+        if fallback_notice["status_line"]:
+            status_line = f"{fallback_notice['status_line']}\n{status_line}"
+        self.status_label.setText(status_line)
         self.progress_bar.setFormat("Complete")
+
+    def _show_mesh_fallback_notice(self, worker: Any) -> Dict[str, str]:
+        """Tell the user, after the run, that a tet run used the voxel mesh; returns the notice.
+
+        Same mechanism as the stalled-fill notice: an information box.
+        """
+        reason = getattr(worker, "mesh_fallback_reason", None)
+        notice = format_mesh_fallback_notice(reason if isinstance(reason, str) else None)
+        if notice["level"] == "warning":
+            QMessageBox.information(self, notice["title"], notice["body"])
+        return notice
 
     def _setup_result_type_options(self):
         """Configure result type combo based on available analyses"""

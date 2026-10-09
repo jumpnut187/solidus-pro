@@ -27,13 +27,14 @@ export const analysisDefaults: AnalysisOptions = {
  * `web/services/simulation_queue.py` and had no web control before; the
  * desktop defaults it on from `config.settings.use_gpu`.
  *
- * `mesh_type` ('tet' | 'voxel') reaches `PipelineInputs.mesh_type` through
+ * `mesh_type` ('voxel' | 'tet') reaches `PipelineInputs.mesh_type` through
  * `build_pipeline_inputs`. The server does not expose
- * `settings.mesh.mesh_type`, so the client default mirrors its default, 'tet'.
- * Voxel is the fallback.
+ * `settings.mesh.mesh_type`, so the client default mirrors its default, 'voxel'.
+ * Tet is opt-in; the server falls back to voxel when tet meshing fails, runs
+ * too long or the model is too large (`result_data.mesh_fallback_reason`).
  */
 export const performanceDefaults: PerformanceOptions = {
-  mesh_type: 'tet',
+  mesh_type: 'voxel',
   use_gpu: true,
   use_incremental: false,
   use_chunked_voxelization: false,
@@ -66,9 +67,9 @@ export const solidificationDefaults: SolidificationParams = buildSolidificationD
 
 export type MeshType = 'voxel' | 'tet';
 
-/** The mesh type stored in `performance_options`, 'tet' when absent or unknown. */
+/** The mesh type stored in `performance_options`, 'voxel' when absent or unknown. */
 export function meshTypeOf(options: PerformanceOptions): MeshType {
-  return options.mesh_type === 'voxel' ? 'voxel' : 'tet';
+  return options.mesh_type === 'tet' ? 'tet' : 'voxel';
 }
 
 /**

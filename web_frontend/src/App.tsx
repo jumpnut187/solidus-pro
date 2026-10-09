@@ -742,11 +742,12 @@ export function App() {
         const detail =
           `About ${formatCount(preview.estimated_nodes)} nodes at ${preview.edge_length_in.toFixed(3)} in ` +
           `(limit ${formatCount(preview.max_nodes)})`;
+        const fallback = preview.falls_back_to_voxel ? ' The run will use the voxel mesh instead.' : '';
         setMeshEstimate({
           text:
             preview.can_proceed || preview.recommended_voxel_size === null
               ? detail
-              : `${detail}. Safe mesh size: ${preview.recommended_voxel_size.toFixed(3)} in.`,
+              : `${detail}.${fallback} Mesh size for tet: ${preview.recommended_voxel_size.toFixed(3)} in.`,
           tone: preview.can_proceed ? 'success' : 'warning'
         });
         return;

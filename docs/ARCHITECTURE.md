@@ -21,6 +21,7 @@ main.py (desktop)                    run_web.py -> web/app_factory.py
     prepare_mesh_and_geometry()  -- resolve_mesh_type(inputs) --
          voxel: core/voxel_mesh.py  AdaptiveVoxelMesh
          tet:   core/tet_mesh.py    build_tet_mesh -> TetVolumeMesh
+                (too large / failed / timed out -> voxel, reason recorded)
     create_analysis_options()    ->  AnalysisOptions
     run_filling_for_mesh()       ->  voxel: core/filling_stage.py
                                      tet:   core/tet_filling.py (lattice view,
@@ -42,9 +43,19 @@ main.py (desktop)                    run_web.py -> web/app_factory.py
 ```
 
 `resolve_mesh_type` takes `PipelineInputs.mesh_type`, else
-`settings.mesh.mesh_type`, which defaults to `"tet"`. `"voxel"` is the
-fallback (`mesh.mesh_type: voxel` or `CASTSIM_MESH_TYPE=voxel`). The tet
-edge length is the voxel size times `mesh.tet_edge_length_factor` (2.0).
+`settings.mesh.mesh_type`, which defaults to `"voxel"`. `"tet"` is opt-in
+(`mesh.mesh_type: tet` or `CASTSIM_MESH_TYPE=tet`). The tet edge length is
+the voxel size times `mesh.tet_edge_length_factor` (2.0).
+
+With `mesh.tet_auto_fallback` on (default), a tet run falls back to the
+voxel mesh inside `prepare_mesh_and_geometry`, so `run_pipeline` and the
+surrogate pipeline both get it: estimated nodes above
+`mesh.tet_auto_max_nodes` (300,000), `MeshGenerationError` from
+`build_tet_mesh`, or fTetWild past `mesh.tet_mesh_timeout_s` (600 s). The
+voxel mesh is built exactly as a voxel run builds it and carries
+`mesh_fallback_reason`; `PipelineResult` exposes it with
+`requested_mesh_type = "tet"`, and `result_data` / the visualization payload
+carry both keys on a fallback.
 
 The tet branch forces `thermal_coupled`. Lattice consumers (filling, the
 surrogate and deep-model encoding, `web/fields.py`, `ui/result_surface.py`)

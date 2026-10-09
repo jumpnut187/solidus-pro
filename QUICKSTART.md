@@ -79,9 +79,10 @@ Covers all seven alloys: WCB, CF8, C958, C964, CA6NM, MONEL400 and IN625.
    - View material properties in sidebar
 
 4. **Configure Mesh** (Optional)
-   - Mesh type: Tetrahedral (default) or Voxel (fallback)
+   - Mesh type: Voxel (default) or Tetrahedral (opt-in)
      - Tetrahedral follows the CAD surface and solves heat flow with finite elements; the size field becomes "Mesh size" (tet edge length = mesh size x `mesh.tet_edge_length_factor`, 2.0)
-     - Default from `mesh.mesh_type` in `castsim.yaml` or `CASTSIM_MESH_TYPE`; set `voxel` for the fallback
+     - Default from `mesh.mesh_type` in `castsim.yaml` or `CASTSIM_MESH_TYPE`; set `tet` to make tet the default
+     - A tet run that is too large (`mesh.tet_auto_max_nodes`, 300,000 nodes), fails to mesh, or meshes longer than `mesh.tet_mesh_timeout_s` (600 s) finishes on the voxel mesh and says why
    - Base Voxel Size: 0.1 in (default)
      - Smaller = more accurate, slower
      - Larger = faster, less accurate

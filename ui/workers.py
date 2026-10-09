@@ -13,7 +13,12 @@ from ui.qt import (
 
 from config.exceptions import MeshGenerationError
 from core.mesh_ml import log_mesh_training_example, recommend_mesh_settings
-from core.simulation_pipeline import PipelineInputs, SimulationCancelledError, run_pipeline
+from core.simulation_pipeline import (
+    MESH_FALLBACK_MESSAGE_PREFIX,
+    PipelineInputs,
+    SimulationCancelledError,
+    run_pipeline,
+)
 
 
 def resolve_run_mesh_type(requested: Optional[str]) -> str:
@@ -23,6 +28,13 @@ def resolve_run_mesh_type(requested: Optional[str]) -> str:
 
         requested = get_settings().mesh.mesh_type
     return str(requested).strip().lower()
+
+
+def mesh_fallback_reason_from_message(message: str) -> Optional[str]:
+    """The reason in a pipeline tet -> voxel fallback progress message, else None."""
+    if message.startswith(MESH_FALLBACK_MESSAGE_PREFIX):
+        return message[len(MESH_FALLBACK_MESSAGE_PREFIX):]
+    return None
 
 
 class SimulationWorker(QThread):
@@ -62,11 +74,26 @@ class SimulationWorker(QThread):
         self.simulation: Any = None
         # Text of a MeshGenerationError, shown verbatim by the failure dialog.
         self.mesh_error_message: Optional[str] = None
+        # Set when a tet run fell back to the voxel mesh (pipeline progress message).
+        self.mesh_fallback_reason: Optional[str] = None
         self._cancel_requested = threading.Event()
 
     def run_mesh_type(self) -> str:
-        """Mesh type this run uses: ``performance_options['mesh_type']``, else ``settings.mesh.mesh_type``."""
+        """Mesh type this run uses: ``performance_options['mesh_type']``, else ``settings.mesh.mesh_type``.
+
+        "voxel" once the pipeline has fallen back from tet.
+        """
+        if self.mesh_fallback_reason:
+            return "voxel"
         return resolve_run_mesh_type(self.performance_options.get("mesh_type"))
+
+    def _on_pipeline_message(self, message: str) -> None:
+        self._record_mesh_fallback_reason(mesh_fallback_reason_from_message(message))
+        self.progress.emit(message)
+
+    def _record_mesh_fallback_reason(self, reason: Any) -> None:
+        if isinstance(reason, str) and reason:
+            self.mesh_fallback_reason = reason
 
     def _is_tet_run(self) -> bool:
         if getattr(self.voxel_mesh, "mesh_type", None) == "tet":
@@ -172,7 +199,7 @@ class SimulationWorker(QThread):
                 inputs,
                 part_manager=self.part_manager,
                 stl_loader=self.stl_loader,
-                progress_message_callback=self.progress.emit,
+                progress_message_callback=self._on_pipeline_message,
                 detailed_progress_callback=self._progress_callback,
                 cancel_callback=self._cancel_requested.is_set,
             )
@@ -180,6 +207,7 @@ class SimulationWorker(QThread):
 
             self.voxel_mesh = result.voxel_mesh
             self.simulation = result.engine
+            self._record_mesh_fallback_reason(getattr(result, "mesh_fallback_reason", None))
             mesh_generation_time = pipeline_time
             simulation_time = pipeline_time
 
@@ -349,6 +377,8 @@ class SurrogateWorker(QThread):
         self.pour_location = pour_location
         self.voxel_mesh: Any = None
         self.simulation: Any = None
+        # Set when a tet run fell back to the voxel mesh (pipeline progress message).
+        self.mesh_fallback_reason: Optional[str] = None
         self._cancel_requested = threading.Event()
 
     def cancel(self) -> None:
@@ -356,8 +386,18 @@ class SurrogateWorker(QThread):
         self._cancel_requested.set()
 
     def run_mesh_type(self) -> str:
-        """Mesh type this run uses: ``mesh_type``, else ``settings.mesh.mesh_type``."""
+        """Mesh type this run uses: ``mesh_type``, else ``settings.mesh.mesh_type``; "voxel" after a fallback."""
+        if self.mesh_fallback_reason:
+            return "voxel"
         return resolve_run_mesh_type(self.mesh_type)
+
+    def _on_pipeline_message(self, message: str) -> None:
+        self._record_mesh_fallback_reason(mesh_fallback_reason_from_message(message))
+        self.progress.emit(message)
+
+    def _record_mesh_fallback_reason(self, reason: Any) -> None:
+        if isinstance(reason, str) and reason:
+            self.mesh_fallback_reason = reason
 
     def _progress_callback(self, current: int, total: int, stage: str) -> None:
         self.detailed_progress.emit(current, total, stage)
@@ -384,12 +424,13 @@ class SurrogateWorker(QThread):
                 model=self.model,
                 part_manager=self.part_manager,
                 stl_loader=self.stl_loader,
-                progress_message_callback=self.progress.emit,
+                progress_message_callback=self._on_pipeline_message,
                 detailed_progress_callback=self._progress_callback,
                 cancel_callback=self._cancel_requested.is_set,
             )
             self.voxel_mesh = result.voxel_mesh
             self.simulation = result.engine
+            self._record_mesh_fallback_reason(getattr(result, "mesh_fallback_reason", None))
             self.progress.emit("✓ Surrogate simulation complete!")
             self.finished.emit(True, "completed")
         except SimulationCancelledError:

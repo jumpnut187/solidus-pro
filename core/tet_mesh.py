@@ -259,6 +259,7 @@ def build_tet_mesh(
     num_threads: int = 0,
     progress_callback: ProgressCallback | None = None,
     strategy: str = "auto",
+    timeout_s: float | None = None,
 ) -> TetVolumeMesh:
     """Mesh ``parts`` (world coords, inches, part code) into one conforming tet mesh.
 
@@ -279,6 +280,11 @@ def build_tet_mesh(
     strategy. One part always uses soup, with fTetWild's filter on and every
     tet taking the part's code. The strategy used is ``mesh.meshing_strategy``.
 
+    ``timeout_s`` limits the wall time of all fTetWild attempts together,
+    counted from this call and including the wait for another mesh to finish.
+    When it runs out the child is killed and ``TetMeshTimeoutError`` is raised
+    without trying further attempts. None means no limit.
+
     Raises ``MeshGenerationError`` when every attempt fails, on empty output
     or non-finite coordinates.
     """
@@ -288,6 +294,9 @@ def build_tet_mesh(
 
     if strategy not in MESHING_STRATEGIES:
         raise ValueError(f"strategy must be one of {MESHING_STRATEGIES}, got {strategy!r}")
+    if timeout_s is not None and not (np.isfinite(timeout_s) and timeout_s > 0.0):
+        raise ValueError(f"timeout_s must be positive or None, got {timeout_s!r}")
+    deadline = None if timeout_s is None else time.monotonic() + float(timeout_s)
     meshes = [m for m, _ in parts]
     codes = np.array([int(c) for _, c in parts], dtype=np.int64)
     if len(meshes) == 0:
@@ -304,8 +313,23 @@ def build_tet_mesh(
         started = time.monotonic()
         try:
             vertices, tets, markers = _tetrahedralize_in_child(
-                used, meshes, edge_length_in, epsilon_rel, stop_energy, num_threads, report
+                used, meshes, edge_length_in, epsilon_rel, stop_energy, num_threads, report, deadline
             )
+        except _ChildTimeout:
+            logger.warning(
+                "fTetWild attempt %d/%d (%s) stopped at the %g s wall-time limit at edge length %g in",
+                number,
+                len(attempts),
+                used,
+                float(timeout_s),
+                edge_length_in,
+            )
+            raise TetMeshTimeoutError(
+                f"the tet mesher (fTetWild) did not finish within {float(timeout_s):g} s "
+                f"at edge length {edge_length_in:g} in",
+                voxel_size=edge_length_in,
+                timeout_s=float(timeout_s),
+            ) from None
         except _ChildFailure as failure:
             failures.append((used, failure))
             logger.warning(
@@ -395,6 +419,14 @@ def build_tet_mesh(
 # Meshing ----------------------------------------------------------------------
 
 
+class TetMeshTimeoutError(MeshGenerationError):
+    """fTetWild ran past ``build_tet_mesh(timeout_s=...)``; the child was killed."""
+
+    def __init__(self, message: str, *, voxel_size: float, timeout_s: float) -> None:
+        super().__init__(message, voxel_size=voxel_size)
+        self.timeout_s = timeout_s
+
+
 class _ChildFailure(Exception):
     """The fTetWild child exited abnormally or wrote no result."""
 
@@ -402,6 +434,10 @@ class _ChildFailure(Exception):
         super().__init__(description)
         self.description = description
         self.stderr_tail = stderr_tail
+
+
+class _ChildTimeout(Exception):
+    """The wall-time deadline passed while waiting for or running the child."""
 
 
 _STRATEGY_LABELS = {"csg": "CSG union", "soup": "merged part surfaces"}
@@ -424,6 +460,7 @@ def _tetrahedralize_in_child(
     stop_energy: float,
     num_threads: int,
     report: ProgressCallback,
+    deadline: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Run fTetWild in ``mode`` ("csg" or "soup") in a child. Returns vertices (in), tets, 1-based markers.
 
@@ -466,7 +503,7 @@ def _tetrahedralize_in_child(
         with open(os.path.join(workdir, tetwild_child.REQUEST_FILE), "w", encoding="utf-8") as handle:
             json.dump(request, handle)
 
-        _run_child(workdir, f"Tetrahedralizing parts ({_STRATEGY_LABELS[mode]})", report)
+        _run_child(workdir, f"Tetrahedralizing parts ({_STRATEGY_LABELS[mode]})", report, deadline=deadline)
 
         with np.load(os.path.join(workdir, tetwild_child.RESULT_FILE)) as result:
             vertices = np.asarray(result["vertices"], dtype=np.float64)
@@ -479,17 +516,23 @@ def _tetrahedralize_in_child(
     return vertices, tets, markers
 
 
-def _run_child(workdir: str, message: str, report: ProgressCallback) -> None:
+def _run_child(
+    workdir: str, message: str, report: ProgressCallback, *, deadline: float | None = None
+) -> None:
     """Run ``tetwild_child.py workdir`` under ``_NATIVE_MESH_LOCK``, polling ``report``.
 
     The child's cwd is ``workdir`` (fTetWild writes ``__tracked_surface.stl``
     to the cwd), stdout goes to devnull and stderr to a file in ``workdir``.
     If ``report`` raises, the child is terminated (killed after
-    ``_CHILD_TERMINATE_GRACE_S``) and the exception propagates.
+    ``_CHILD_TERMINATE_GRACE_S``) and the exception propagates. Past
+    ``deadline`` (``time.monotonic()``) the child is stopped the same way and
+    ``_ChildTimeout`` is raised.
     """
     start = time.monotonic()
     while not _NATIVE_MESH_LOCK.acquire(timeout=_CHILD_POLL_S):
         report(0.0, "Waiting for another tet mesh to finish")
+        if deadline is not None and time.monotonic() > deadline:
+            raise _ChildTimeout()
     try:
         stderr_path = os.path.join(workdir, "child_stderr.log")
         with open(stderr_path, "wb") as stderr_file:
@@ -503,6 +546,8 @@ def _run_child(workdir: str, message: str, report: ProgressCallback) -> None:
         try:
             while process.poll() is None:
                 report(0.05, f"{message}, {time.monotonic() - start:.0f} s")
+                if deadline is not None and time.monotonic() > deadline:
+                    raise _ChildTimeout()
                 try:
                     process.wait(timeout=_CHILD_POLL_S)
                 except subprocess.TimeoutExpired:

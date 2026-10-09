@@ -64,3 +64,6 @@ web/static/uploads/
 # Trained deep-model artifacts (~256 MB). Build outputs, not source; git
 # stores large binaries poorly and every clone would pay the cost forever.
 models/deep_model/
+
+# fTetWild writes this into the working directory
+__tracked_surface.stl

@@ -34,12 +34,14 @@ Load your full casting assembly in one go:
 
 Automatic part-type detection from filenames. Parallel point-containment assignment that scales to massive assemblies.
 
-### Mesh Type — Tetrahedral (default) or Voxel (fallback)
+### Mesh Type — Voxel (default) or Tetrahedral (opt-in)
 The Mesh dialog (desktop) and Mesh panel (web) choose the simulation mesh:
-- **Tetrahedral** (default) — conforming tet mesh from fTetWild (`pytetwild`), implicit P1 finite-element thermal solve. It follows the CAD surface, so metal volume matches the CAD instead of overshooting at coarse sizes. The tet edge length is the mesh size times `mesh.tet_edge_length_factor` (2.0). Requires `thermal_coupled` (forced).
-- **Voxel** (fallback) — adaptive voxel grid, explicit thermal solver.
+- **Voxel** (default) — adaptive voxel grid, explicit thermal solver.
+- **Tetrahedral** (opt-in) — conforming tet mesh from fTetWild (`pytetwild`), implicit P1 finite-element thermal solve. It follows the CAD surface, so metal volume matches the CAD instead of overshooting at coarse sizes. The tet edge length is the mesh size times `mesh.tet_edge_length_factor` (2.0). Requires `thermal_coupled` (forced). Tet results are the accuracy reference for the voxel path.
 
-Projects saved without a mesh type open as Tetrahedral in both UIs. Select the voxel fallback with `mesh.mesh_type: voxel` in `castsim.yaml` or `CASTSIM_MESH_TYPE=voxel`. Tet meshes above `mesh.tet_max_nodes` (3,000,000) are refused with a message giving a safe mesh size.
+Projects saved without a mesh type open as Voxel in both UIs. Select tet with `mesh.mesh_type: tet` in `castsim.yaml`, `CASTSIM_MESH_TYPE=tet`, or the Mesh dialog/panel.
+
+A tet run falls back to the voxel mesh automatically (`mesh.tet_auto_fallback`, on by default) and finishes as a voxel run when the estimated node count is above `mesh.tet_auto_max_nodes` (300,000), when fTetWild fails on every attempt, or when fTetWild runs longer than `mesh.tet_mesh_timeout_s` (600 s). The reason shows in the status line and an after-run notice on the desktop, and in a banner on the web Results panel. With the fallback off, those cases stop the run with an error, and tet meshes above `mesh.tet_max_nodes` (3,000,000) are refused with a message giving a safe mesh size.
 
 ### GPU Acceleration — Pick Your Weapon
 | Hardware | Backend | Status |

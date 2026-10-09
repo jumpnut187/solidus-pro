@@ -14,12 +14,12 @@ import numpy as np
 
 from core.filling_stage import maybe_run_filling
 from core.tet_filling import maybe_run_tet_filling
-from core.tet_mesh import TetVolumeMesh, build_tet_mesh
+from core.tet_mesh import TetMeshTimeoutError, TetVolumeMesh, build_tet_mesh
 
 try:
-    from core.error_logger import logger as _filling_logger
+    from core.error_logger import logger as _error_logger
 except ImportError:  # pragma: no cover - headless/dummy fallback
-    from core.error_logger_dummy import logger as _filling_logger  # type: ignore
+    from core.error_logger_dummy import logger as _error_logger  # type: ignore
 from core.materials import get_alloy
 from core.part_manager import (
     PART_TYPE_CAST,
@@ -56,6 +56,10 @@ SimulationMesh = Union[AdaptiveVoxelMesh, TetVolumeMesh]
 #: docs/tet_migration/fix_geometry.md.
 TET_NODES_PER_UNIT_VOLUME = 1.55
 TET_NODES_PER_UNIT_AREA = 3.3
+
+#: Progress message that announces a tet -> voxel fallback; the reason follows
+#: the prefix verbatim. ``ui/workers.py`` reads the reason from it mid-run.
+MESH_FALLBACK_MESSAGE_PREFIX = "Tet mesh fallback, running on the voxel mesh: "
 
 
 ProgressMessageCallback = Callable[[str], None]
@@ -129,7 +133,10 @@ class PipelineResult:
     """Simulation pipeline outputs.
 
     ``voxel_mesh`` is the simulation mesh of either kind; ``mesh_type`` says
-    which ("voxel" or "tet").
+    which ("voxel" or "tet"). After an automatic tet -> voxel fallback,
+    ``mesh_type`` is "voxel", ``requested_mesh_type`` is "tet" and
+    ``mesh_fallback_reason`` says why; otherwise ``requested_mesh_type`` equals
+    ``mesh_type`` and ``mesh_fallback_reason`` is None.
     """
 
     def __init__(
@@ -146,11 +153,24 @@ class PipelineResult:
         self.result_data = result_data
         self.visualization_data = visualization_data
         self.mesh_type = mesh_type_of(voxel_mesh)
+        self.mesh_fallback_reason = mesh_fallback_reason_of(voxel_mesh)
+        self.requested_mesh_type = "tet" if self.mesh_fallback_reason else self.mesh_type
 
 
 def mesh_type_of(mesh: Any) -> str:
     """"tet" for a ``TetVolumeMesh``, else "voxel"."""
     return "tet" if getattr(mesh, "mesh_type", "voxel") == "tet" else "voxel"
+
+
+def mesh_fallback_reason_of(mesh: Any) -> Optional[str]:
+    """Why a tet run fell back to this voxel mesh, or None when it did not.
+
+    ``prepare_mesh_and_geometry`` records the reason on the voxel mesh it
+    builds instead, so every pipeline that reuses it (``run_pipeline``, the
+    surrogate pipeline) carries it to its result.
+    """
+    reason = getattr(mesh, "mesh_fallback_reason", None)
+    return reason if isinstance(reason, str) and reason else None
 
 
 def resolve_mesh_type(inputs: PipelineInputs, mesh_settings: Optional[MeshSettings] = None) -> str:
@@ -367,6 +387,11 @@ def build_visualization_payload(
     else:
         indices = np.arange(n_voxels)
 
+    fallback_reason = mesh_fallback_reason_of(voxel_mesh)
+    if fallback_reason is not None:
+        result_data["requested_mesh_type"] = "tet"
+        result_data["mesh_fallback_reason"] = fallback_reason
+
     if mesh_type == "tet":
         result_data["tet_count"] = int(len(cast(TetVolumeMesh, voxel_mesh).tets))
         # Requested tet edge length (in); the web Overview shows it as "Element size".
@@ -377,6 +402,9 @@ def build_visualization_payload(
         "centers": voxel_centers[indices].tolist(),
         "sizes": voxel_sizes[indices].tolist() if voxel_sizes is not None else [0.1] * len(indices),
     }
+    if fallback_reason is not None:
+        visualization_data["requested_mesh_type"] = "tet"
+        visualization_data["mesh_fallback_reason"] = fallback_reason
     if voxel_mesh.surface_voxels is not None:
         surface_voxels = np.asarray(voxel_mesh.surface_voxels, dtype=bool)
         if len(surface_voxels) == n_voxels:
@@ -710,6 +738,17 @@ def prepare_mesh_and_geometry(
     identical geometry work. The mesh is an ``AdaptiveVoxelMesh`` or, when
     :func:`resolve_mesh_type` returns "tet", a ``TetVolumeMesh``.
 
+    With ``settings.mesh.tet_auto_fallback`` on, a tet run builds the voxel
+    mesh instead (same inputs, same ``AdaptiveVoxelMesh.generate`` memory
+    checks) when the estimated node count is above ``tet_auto_max_nodes``,
+    when ``build_tet_mesh`` raises ``MeshGenerationError`` (every fTetWild
+    attempt failed, or the ``tet_max_nodes`` guard), or when fTetWild runs
+    past ``tet_mesh_timeout_s``. The reason is recorded on the voxel mesh as
+    ``mesh_fallback_reason`` (see :func:`mesh_fallback_reason_of`), logged,
+    and emitted as a progress message starting with
+    ``MESH_FALLBACK_MESSAGE_PREFIX``. Cancellation still raises
+    ``SimulationCancelledError``. With the setting off, tet errors raise.
+
     Returns:
         ``(mesh_to_use, bounds_to_use, total_volume, parts_with_types,
         voxel_mesh, mem_stats)``. ``parts_with_types`` is empty when the
@@ -747,25 +786,57 @@ def prepare_mesh_and_geometry(
             expected="A non-empty PartManager or an initialized STLLoader",
         )
 
+    fallback_reason: Optional[str] = None
     if mesh_type == "tet":
-        tet_mesh = _build_tet_simulation_mesh(
-            inputs,
-            mesh_settings,
-            parts_with_types or [(mesh_to_use, PART_TYPE_CAST)],
-            progress_message_callback=progress_message_callback,
-            detailed_progress_callback=detailed_progress_callback,
-            cancel_callback=cancel_callback,
+        tet_parts = parts_with_types or [(mesh_to_use, PART_TYPE_CAST)]
+        auto_fallback = bool(mesh_settings.tet_auto_fallback)
+        fallback_trigger = "size"
+        fallback_reason = _tet_size_gate_reason(inputs, mesh_settings, tet_parts) if auto_fallback else None
+        if fallback_reason is None:
+            try:
+                tet_mesh = _build_tet_simulation_mesh(
+                    inputs,
+                    mesh_settings,
+                    tet_parts,
+                    progress_message_callback=progress_message_callback,
+                    detailed_progress_callback=detailed_progress_callback,
+                    cancel_callback=cancel_callback,
+                    timeout_s=float(mesh_settings.tet_mesh_timeout_s) if auto_fallback else None,
+                )
+            except MeshGenerationError as exc:
+                if not auto_fallback:
+                    raise
+                if isinstance(exc, TetMeshTimeoutError):
+                    fallback_trigger = "timeout"
+                    fallback_reason = (
+                        f"Tet meshing did not finish within {exc.timeout_s:g} s "
+                        f"(settings.mesh.tet_mesh_timeout_s)."
+                    )
+                else:
+                    fallback_trigger = "error"
+                    fallback_reason = str(exc)
+            else:
+                mem_stats = tet_mesh.get_memory_stats()
+                _emit_message(
+                    progress_message_callback,
+                    (
+                        f"Memory: RAM={mem_stats['ram_mb']:.1f}MB, "
+                        f"Disk={mem_stats['disk_mb']:.1f}MB, "
+                        f"Available={mem_stats['available_gb']:.1f}GB"
+                    ),
+                )
+                return mesh_to_use, bounds_to_use, total_volume, parts_with_types, tet_mesh, mem_stats
+        _error_logger.warning(
+            f"Tet mesh fallback to voxel ({fallback_trigger}): {fallback_reason}",
+            context={
+                "requested_mesh_type": "tet",
+                "trigger": fallback_trigger,
+                "voxel_size": float(inputs.voxel_size),
+                "tet_edge_length_in": float(inputs.voxel_size) * float(mesh_settings.tet_edge_length_factor),
+            },
         )
-        mem_stats = tet_mesh.get_memory_stats()
-        _emit_message(
-            progress_message_callback,
-            (
-                f"Memory: RAM={mem_stats['ram_mb']:.1f}MB, "
-                f"Disk={mem_stats['disk_mb']:.1f}MB, "
-                f"Available={mem_stats['available_gb']:.1f}GB"
-            ),
-        )
-        return mesh_to_use, bounds_to_use, total_volume, parts_with_types, tet_mesh, mem_stats
+        _emit_message(progress_message_callback, f"{MESH_FALLBACK_MESSAGE_PREFIX}{fallback_reason}")
+        _check_cancel(cancel_callback)
 
     _emit_message(
         progress_message_callback,
@@ -810,6 +881,10 @@ def prepare_mesh_and_geometry(
         _apply_thread_budget(inputs.thread_budget_provider)
         voxel_mesh.assign_part_types(parts_with_types)
 
+    if fallback_reason is not None:
+        # Read back through mesh_fallback_reason_of; AdaptiveVoxelMesh does not declare it.
+        voxel_mesh.mesh_fallback_reason = fallback_reason  # type: ignore[attr-defined]
+
     mem_stats = voxel_mesh.get_memory_stats()
     _emit_message(
         progress_message_callback,
@@ -830,11 +905,13 @@ def _build_tet_simulation_mesh(
     progress_message_callback: Optional[ProgressMessageCallback],
     detailed_progress_callback: Optional[DetailedProgressCallback],
     cancel_callback: Optional[CancelCallback],
+    timeout_s: Optional[float] = None,
 ) -> TetVolumeMesh:
     """Tet-mesh ``parts`` at ``inputs.voxel_size * tet_edge_length_factor``.
 
     Raises ``MeshGenerationError`` before meshing when the estimated node
-    count exceeds ``mesh_settings.tet_max_nodes``.
+    count exceeds ``mesh_settings.tet_max_nodes``, and ``TetMeshTimeoutError``
+    when fTetWild runs past ``timeout_s`` (None: no limit).
     """
     edge_length_in = float(inputs.voxel_size) * float(mesh_settings.tet_edge_length_factor)
     estimated_nodes = estimate_tet_node_count(parts, edge_length_in)
@@ -874,6 +951,7 @@ def _build_tet_simulation_mesh(
         epsilon_rel=float(mesh_settings.tet_epsilon_rel),
         num_threads=int(budget) if budget else 0,
         progress_callback=on_tet_progress,
+        timeout_s=timeout_s,
     )
     _check_cancel(cancel_callback)
     # Record the run's lattice pitch on the mesh so rendering does not depend
@@ -887,6 +965,28 @@ def _build_tet_simulation_mesh(
         f"{len(tet_mesh.boundary_faces):,} boundary faces",
     )
     return tet_mesh
+
+
+def _tet_size_gate_reason(
+    inputs: PipelineInputs, mesh_settings: MeshSettings, parts: Sequence[Tuple[Any, int]]
+) -> Optional[str]:
+    """Fallback reason when the estimated tet node count is above ``tet_auto_max_nodes``, else None."""
+    factor = float(mesh_settings.tet_edge_length_factor)
+    edge_length_in = float(inputs.voxel_size) * factor
+    estimated_nodes = estimate_tet_node_count(parts, edge_length_in)
+    limit = int(mesh_settings.tet_auto_max_nodes)
+    if estimated_nodes <= limit:
+        return None
+    # Rounded up to 0.001 in so the suggested size passes this gate.
+    suggested_voxel_in = float(
+        np.ceil(1000.0 * tet_edge_length_for_node_limit(parts, limit) / factor) / 1000.0
+    )
+    return (
+        f"The tet mesh at edge length {edge_length_in:g} in would have about "
+        f"{estimated_nodes:,} nodes, above the automatic limit of {limit:,} "
+        f"(settings.mesh.tet_auto_max_nodes). A mesh size of at least "
+        f"{suggested_voxel_in:g} in stays on tet."
+    )
 
 
 def run_filling_for_mesh(
@@ -985,7 +1085,7 @@ def run_pipeline(
         # as work. Every other long stage in this pipeline prints; this one
         # was the exception.
         print(f"  {message}", flush=True)
-        _filling_logger.info(message)
+        _error_logger.info(message)
         _emit_message(progress_message_callback, message)
 
     filling_result = run_filling_for_mesh(

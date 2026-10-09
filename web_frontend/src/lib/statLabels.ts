@@ -292,6 +292,8 @@ export function buildStatGroups(
   for (const [key, value] of Object.entries(stats)) {
     // Already shown from GridMeta's own fields, in better units.
     if (key === 'voxel_count' || key === 'total_volume' || key === 'tet_edge_length_in') continue;
+    // A sentence, shown as the Results panel's fallback banner.
+    if (key === 'mesh_fallback_reason') continue;
     const spec = describe(key);
     const hint = OVERRIDES[key]?.hint;
     const tetOverride = tet ? TET_OVERRIDES[key] : undefined;

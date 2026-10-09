@@ -49,13 +49,19 @@ export function MeshPanel({
         <div className="field">
           <span className="field-label">Mesh type</span>
           <div className="segmented segmented-block" role="group" aria-label="Mesh type">
-            <button type="button" aria-pressed={tet} onClick={() => setMeshType('tet')}>
-              Tetrahedral
-            </button>
             <button type="button" aria-pressed={!tet} onClick={() => setMeshType('voxel')}>
               Voxel
             </button>
+            <button type="button" aria-pressed={tet} onClick={() => setMeshType('tet')}>
+              Tetrahedral
+            </button>
           </div>
+          {tet && (
+            <span className="field-hint">
+              The run switches to the voxel mesh, and says why on the Results panel, when tet meshing fails, runs
+              too long or the model is too large.
+            </span>
+          )}
         </div>
 
         <label className="field">

@@ -303,16 +303,40 @@ class WebMeshPreviewTetTests(unittest.TestCase):
         edge = 0.2 * float(mesh_settings.tet_edge_length_factor)
         self.assertAlmostEqual(payload["edge_length_in"], edge)
         self.assertEqual(payload["estimated_nodes"], _box_node_estimate(edge))
-        self.assertEqual(payload["max_nodes"], int(mesh_settings.tet_max_nodes))
+        # Auto fallback on (default): the limit is the lower of the two node limits.
+        self.assertEqual(
+            payload["max_nodes"], min(int(mesh_settings.tet_auto_max_nodes), int(mesh_settings.tet_max_nodes))
+        )
         self.assertTrue(payload["can_proceed"])
+        self.assertFalse(payload["falls_back_to_voxel"])
         self.assertIsNone(payload["recommended_voxel_size"])
         self.assertNotIn("estimated_voxels", payload)
+
+    def test_tet_preview_without_auto_fallback_uses_tet_max_nodes(self) -> None:
+        mesh_settings = get_settings().mesh
+        with patch.object(mesh_settings, "tet_auto_fallback", False), patch.object(
+            mesh_settings, "tet_auto_max_nodes", 10
+        ):
+            payload = self._preview({"voxel_size": 0.2, "mesh_type": "tet"}).get_json()
+        self.assertEqual(payload["max_nodes"], int(mesh_settings.tet_max_nodes))
+        self.assertTrue(payload["can_proceed"])
+        self.assertFalse(payload["falls_back_to_voxel"])
+
+    def test_tet_preview_above_the_auto_limit_says_the_run_uses_voxel(self) -> None:
+        with patch.object(get_settings().mesh, "tet_auto_max_nodes", 100):
+            payload = self._preview({"voxel_size": 0.1, "mesh_type": "tet"}).get_json()
+        self.assertFalse(payload["can_proceed"])
+        self.assertTrue(payload["falls_back_to_voxel"])
+        self.assertEqual(payload["max_nodes"], 100)
+        self.assertIn("tet_auto_max_nodes", payload["message"])
+        self.assertIn("voxel mesh instead", payload["message"])
 
     def test_tet_preview_above_the_limit_suggests_a_size(self) -> None:
         with patch.object(get_settings().mesh, "tet_max_nodes", 100):
             payload = self._preview({"voxel_size": 0.1, "mesh_type": "tet"}).get_json()
         self.assertFalse(payload["can_proceed"])
         self.assertIn("tet_max_nodes", payload["message"])
+        self.assertTrue(payload["falls_back_to_voxel"])
         suggested = payload["recommended_voxel_size"]
         self.assertGreater(suggested, 0.1)
         factor = float(get_settings().mesh.tet_edge_length_factor)
@@ -346,7 +370,8 @@ class WebMeshPreviewTetTests(unittest.TestCase):
         edge = tet["base_voxel_size"] * float(get_settings().mesh.tet_edge_length_factor)
         self.assertAlmostEqual(tet["edge_length_in"], edge)
         self.assertEqual(tet["estimated_nodes"], _box_node_estimate(edge))
-        self.assertEqual(tet["max_nodes"], int(get_settings().mesh.tet_max_nodes))
+        mesh_settings = get_settings().mesh
+        self.assertEqual(tet["max_nodes"], min(int(mesh_settings.tet_auto_max_nodes), int(mesh_settings.tet_max_nodes)))
         self.assertIsInstance(tet["can_proceed"], bool)
 
 
@@ -377,9 +402,8 @@ class MeshDialogMeshTypeTests(unittest.TestCase):
         self.assertEqual(dialog.get_mesh_type(), "tet")
         dialog.set_values(0.25, 2, "ram")  # mesh_type None leaves it alone
         self.assertEqual(dialog.get_mesh_type(), "tet")
-        dialog.set_mesh_type("voxel")
-        dialog.set_mesh_type("hex")  # unknown falls back to the tet default
-        self.assertEqual(dialog.get_mesh_type(), "tet")
+        dialog.set_mesh_type("hex")  # unknown falls back to the voxel default
+        self.assertEqual(dialog.get_mesh_type(), "voxel")
         dialog.deleteLater()
 
     def test_tet_shows_the_effective_edge_length(self) -> None:

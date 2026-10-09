@@ -206,13 +206,17 @@ export type VoxelMeshPreview = {
   recommended_voxel_size: number;
 };
 
-/** `web/routes.py::tet_mesh_estimate`; `recommended_voxel_size` is null under the node limit. */
+/**
+ * `web/routes.py::tet_mesh_estimate`; `recommended_voxel_size` is null under the node limit.
+ * `can_proceed` false with `falls_back_to_voxel` true: the run uses the voxel mesh instead.
+ */
 export type TetMeshPreview = {
   mesh_type: 'tet';
   estimated_nodes: number;
   max_nodes: number;
   edge_length_in: number;
   can_proceed: boolean;
+  falls_back_to_voxel: boolean;
   message: string;
   recommended_voxel_size: number | null;
 };
