@@ -50,7 +50,7 @@ def find_initial_front(voxel_states: np.ndarray,
     
     Args:
         voxel_states: Array of solidification states (0=liquid, 1=solid)
-        neighbors: Neighbor connectivity (n_voxels x 26)
+        neighbors: Neighbor connectivity (n_voxels x K; K = 26 on voxels)
         n_voxels: Total number of voxels
     
     Returns:
@@ -189,9 +189,10 @@ def expand_front(front_indices: np.ndarray,
     for idx in range(n_front):
         in_front[front_indices[idx]] = True
     
-    # Collect new front candidates from neighbors of newly solid voxels
-    # Max size: each newly solid voxel can add up to 26 neighbors
-    max_new_front = n_front + n_newly_solid * 26
+    # Collect new front candidates from neighbors of newly solid voxels.
+    # Max size: each newly solid point adds at most one row of neighbors
+    # (26 lattice slots on voxels, K = max node degree on tets).
+    max_new_front = n_front + n_newly_solid * neighbors.shape[1]
     new_front = np.empty(max_new_front, dtype=np.int32)
     new_front_count = 0
     

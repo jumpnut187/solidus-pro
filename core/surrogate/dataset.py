@@ -3,6 +3,11 @@
 Every traditional simulation can opt-in (``surrogate.auto_capture``) to append
 its input channels and schedule fields as a compact ``.npz`` record.  The
 trainer aggregates these records to fit a surrogate model.
+
+Records and index rows carry ``mesh_type`` ("voxel" or "tet"). Records and
+rows written before it existed read as "voxel". ``mesh_type`` is metadata
+only: it is not part of the conditioning vector, so model input shapes do not
+change.
 """
 
 from __future__ import annotations
@@ -18,11 +23,21 @@ import numpy as np
 
 from core.part_manager import PART_TYPE_CHILL
 from core.surrogate.conditioning import Conditioning, build_conditioning_vector
-from core.surrogate.fields import CHANNELS, PART_TYPE_DIVISOR, GridMeta, encode_channels, encode_field
+from core.surrogate.fields import (
+    CHANNELS,
+    PART_TYPE_DIVISOR,
+    GridMeta,
+    encode_channels,
+    encode_field,
+    encoding_points,
+    is_tet_mesh,
+)
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEFAULT_DATASET_DIR = os.path.join(PROJECT_ROOT, "data", "surrogate_dataset")
 INDEX_FILENAME = "index.csv"
+#: ``mesh_type`` of records and index rows captured before the field existed.
+DEFAULT_MESH_TYPE = "voxel"
 
 #: Tolerance around ``PART_TYPE_CHILL / PART_TYPE_DIVISOR`` in channel 1 that
 #: marks a chill cell (same window as ``core.deep_model.dataset._occupancy_mask``).
@@ -43,9 +58,19 @@ ZERO_BOOST_TOL = 1e-6
 _LAST_LOAD_SKIPS: List[Tuple[str, str]] = []
 
 
+def _mesh_type(mesh: Any) -> str:
+    return "tet" if is_tet_mesh(mesh) else DEFAULT_MESH_TYPE
+
+
 def _config_for_engine(engine: Any, voxel_size: float) -> Dict[str, float]:
-    """Extract the conditioning config scalars from an engine + mesh."""
+    """Extract the conditioning config scalars from an engine + mesh.
+
+    On a tet mesh the ``voxel_size`` feature is the tet edge length
+    (``mesh.base_voxel_size``), not the caller's ``voxel_size``.
+    """
     mesh = getattr(engine, "mesh", None)
+    if is_tet_mesh(mesh):
+        voxel_size = float(getattr(mesh, "base_voxel_size", voxel_size) or voxel_size)
     centers = getattr(mesh, "voxel_centers", None)
     max_dim = 1.0
     if centers is not None and len(centers) > 0:
@@ -85,12 +110,17 @@ def capture_run(
 
     Args:
         engine: A completed ``SolidificationEngine``.
-        voxel_size: The voxel size used for the mesh (inches).
+        voxel_size: The voxel size used for the mesh (inches). Ignored on a
+            tet mesh, whose edge length is used instead.
         resolution: Grid resolution for the stored channels.
         out_dir: Output directory (default ``data/surrogate_dataset``).
 
     Returns:
         Path of the written ``.npz`` file, or ``None`` when capture failed.
+
+    On a tet mesh the channels and the start/end/local targets are encoded
+    from lattice cell centres (``fields.encoding_points``), and the index
+    ``voxel_count`` column holds the node count.
     """
     try:
         if getattr(engine, "mesh", None) is None:
@@ -110,14 +140,18 @@ def capture_run(
             chill_boost = engine._calculate_chill_influence()
         riser_slowdown = engine._calculate_riser_influence()
 
-        channels, meta = encode_channels(engine, chill_boost, riser_slowdown, resolution=resolution)
+        mesh_type = _mesh_type(engine.mesh)
+        points = encoding_points(engine.mesh, resolution)
+        channels, meta = encode_channels(
+            engine, chill_boost, riser_slowdown, resolution=resolution, points=points
+        )
         conditioning = build_conditioning_vector(
             engine.alloy, _config_for_engine(engine, voxel_size)
         )
         centers = np.asarray(engine.mesh.voxel_centers, dtype=np.float64)
-        start_grid = encode_field(centers, engine.solidification_start_times, meta)
-        end_grid = encode_field(centers, engine.solidification_times, meta)
-        local_grid = encode_field(centers, engine.local_solidification_time, meta)
+        start_grid = encode_field(points.centers, points.values(engine.solidification_start_times), meta)
+        end_grid = encode_field(points.centers, points.values(engine.solidification_times), meta)
+        local_grid = encode_field(points.centers, points.values(engine.local_solidification_time), meta)
 
         os.makedirs(out_dir, exist_ok=True)
         h = hashlib.sha1()
@@ -137,6 +171,7 @@ def capture_run(
             alloy_name=engine.alloy.name,
             grid_resolution=int(resolution),
             grid_meta=json.dumps(meta.to_dict()),
+            mesh_type=mesh_type,
         )
         _append_index(out_dir, {
             "sample_id": sample_id,
@@ -145,6 +180,7 @@ def capture_run(
             "voxel_count": len(centers),
             "resolution": int(resolution),
             "path": path,
+            "mesh_type": mesh_type,
         })
         return path
     except Exception:
@@ -152,6 +188,12 @@ def capture_run(
 
 
 def _append_index(out_dir: str, row: Dict[str, Any]) -> None:
+    """Append one row. An existing index is never rewritten.
+
+    ``mesh_type`` is the last column. A legacy index whose header predates it
+    gets the value as an unnamed trailing field, which :func:`dataset_summary`
+    reads back as ``mesh_type``.
+    """
     index_path = os.path.join(out_dir, INDEX_FILENAME)
     exists = os.path.exists(index_path)
     with open(index_path, "a", newline="") as fh:
@@ -170,6 +212,9 @@ def dataset_summary(out_dir: str = DEFAULT_DATASET_DIR) -> Dict[str, Any]:
     if os.path.exists(index_path):
         with open(index_path, newline="") as fh:
             for row in csv.DictReader(fh):
+                trailing = row.pop(None, None)
+                if not row.get("mesh_type"):
+                    row["mesh_type"] = trailing[0] if trailing else DEFAULT_MESH_TYPE
                 runs.append(row)
     alloys = sorted({r.get("alloy", "?") for r in runs})
     return {"count": len(runs), "alloys": alloys, "runs": runs}
@@ -262,9 +307,11 @@ def load_record(path: str) -> Dict[str, Any]:
         end = np.asarray(npz["solidification_end_times"], dtype=np.float32)
         if end.size != channels[0].size:
             raise ValueError("grid_size_mismatch")
+        mesh_type = str(npz["mesh_type"]) if "mesh_type" in npz.files else DEFAULT_MESH_TYPE
         return {
             "path": path,
             "alloy_name": str(npz["alloy_name"]),
+            "mesh_type": mesh_type,
             "meta": meta,
             "channels": channels,
             "start": np.asarray(npz["solidification_start_times"], dtype=np.float32),
@@ -287,7 +334,9 @@ def load_dataset(
 
     Returns:
         List of records with ``channels``, ``conditioning`` (Conditioning),
-        ``end``/``start``/``local`` fields, and ``meta``.
+        ``end``/``start``/``local`` fields, ``meta`` and ``mesh_type``
+        ("voxel" for records captured before the field existed). Voxel and
+        tet records load together.
     """
     records: List[Dict[str, Any]] = []
     _LAST_LOAD_SKIPS.clear()

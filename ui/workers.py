@@ -11,6 +11,7 @@ from ui.qt import (
     Signal,
 )
 
+from config.exceptions import MeshGenerationError
 from core.mesh_ml import log_mesh_training_example, recommend_mesh_settings
 from core.simulation_pipeline import PipelineInputs, SimulationCancelledError, run_pipeline
 
@@ -50,6 +51,8 @@ class SimulationWorker(QThread):
         self.pour_location = pour_location
         self.voxel_mesh: Any = None
         self.simulation: Any = None
+        # Text of a MeshGenerationError, shown verbatim by the failure dialog.
+        self.mesh_error_message: Optional[str] = None
         self._cancel_requested = threading.Event()
 
     def _progress_callback(self, current: int, total: int, stage: str) -> None:
@@ -99,8 +102,13 @@ class SimulationWorker(QThread):
             if use_incremental:
                 perf_flags.append("Incremental")
             perf_text = f" [{', '.join(perf_flags)}]" if perf_flags else ""
+            # None means settings.mesh.mesh_type.
+            mesh_type = self.performance_options.get("mesh_type")
 
-            self.progress.emit(f"Generating adaptive voxel mesh (Memory: {self.memory_mode.upper()}){perf_text}...")
+            if mesh_type == "tet":
+                self.progress.emit(f"Generating tetrahedral mesh{perf_text}...")
+            else:
+                self.progress.emit(f"Generating adaptive voxel mesh (Memory: {self.memory_mode.upper()}){perf_text}...")
 
             inputs = PipelineInputs(
                 alloy_name=self.alloy_name,
@@ -117,6 +125,7 @@ class SimulationWorker(QThread):
                 show_progress=True,
                 solidification_params=self.solidification_params,
                 pour_location=self.pour_location,
+                mesh_type=mesh_type,
             )
 
             pipeline_start = time.perf_counter()
@@ -161,6 +170,8 @@ class SimulationWorker(QThread):
             self.progress.emit("Simulation cancelled")
             self.finished.emit(False, "cancelled")
         except Exception as exc:
+            if isinstance(exc, MeshGenerationError):
+                self.mesh_error_message = str(exc)
             try:
                 from core.error_logger import logger as error_logger
 
@@ -294,10 +305,13 @@ class SurrogateWorker(QThread):
         analysis_options: Optional[dict] = None,
         solidification_params: Optional[dict] = None,
         pour_location: Optional[dict] = None,
+        mesh_type: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.stl_loader = stl_loader
         self.model = model
+        # None means settings.mesh.mesh_type.
+        self.mesh_type = mesh_type
         self.alloy_name = alloy_name
         self.voxel_size = voxel_size
         self.refinement_level = refinement_level
@@ -332,6 +346,7 @@ class SurrogateWorker(QThread):
                 show_progress=True,
                 solidification_params=self.solidification_params,
                 pour_location=self.pour_location,
+                mesh_type=self.mesh_type,
             )
             result = run_surrogate_pipeline(
                 inputs,

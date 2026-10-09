@@ -35,7 +35,7 @@ from core.solidification import SOLVER_MODE_SCHEDULE_LEGACY, SolidificationEngin
 from core.part_manager import is_chill
 from core.solidification_loop import build_schedule_fraction_history, compute_schedule_fraction_solid
 from core.surrogate.conditioning import Conditioning, build_conditioning_vector
-from core.surrogate.fields import encode_channels, unproject_grid
+from core.surrogate.fields import encode_channels, is_tet_mesh, unproject_grid
 from core.surrogate.model import SurrogateModel
 from config.exceptions import SimulationError
 
@@ -228,6 +228,9 @@ def run_surrogate_pipeline(
     engine._air_gap_slowdown = np.ones(len(voxel_mesh.voxel_centers), dtype=np.float32)
 
     config = _build_config(inputs, bounds_to_use, analysis_options)
+    if is_tet_mesh(voxel_mesh):
+        # Same feature capture_run records on a tet run: the tet edge length.
+        config["voxel_size"] = float(voxel_mesh.base_voxel_size)
     conditioning = build_conditioning_vector(alloy, config)
     resolution = int(getattr(model.manifest, "grid_resolution", 64) or 64)
 

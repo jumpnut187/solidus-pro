@@ -118,6 +118,9 @@ const OVERRIDES: Record<string, { label?: string; hint?: string; decimals?: numb
   fill_max_time_s: { label: 'Fill time' },
   fill_filled_voxel_count: { label: 'Filled voxels' },
   fill_unfilled_voxel_count: { label: 'Unfilled voxels' },
+  // Tet runs: web/payloads.py renames the fill counts; they count mesh nodes.
+  fill_nodes_filled_count: { label: 'Filled nodes' },
+  fill_nodes_unfilled_count: { label: 'Unfilled nodes' },
   fraction_liquid_snapshots: { label: 'Liquid-fraction frames' },
   shrink_scalar: {
     label: 'Shrink scalar',
@@ -236,15 +239,19 @@ export function buildStatGroups(
     else byGroup.set(group, [row]);
   };
 
+  // On a tet run GridMeta's counts are mesh nodes (web/fields.py).
+  const tet = stats.mesh_type === 'tet';
   if (extras.voxelCount > 0) {
-    push('Overview', { key: '_voxels', label: 'Voxels', value: formatCount(extras.voxelCount) });
+    push('Overview', { key: '_voxels', label: tet ? 'Nodes' : 'Voxels', value: formatCount(extras.voxelCount) });
   }
   if (extras.castVoxelCount > 0) {
     push('Overview', {
       key: '_cast_voxels',
-      label: 'Cast voxels',
+      label: tet ? 'Cast nodes' : 'Cast voxels',
       value: formatCount(extras.castVoxelCount),
-      hint: 'Voxels belonging to cast, riser and riser-post bodies.'
+      hint: tet
+        ? 'Mesh nodes belonging to cast, riser and riser-post bodies.'
+        : 'Voxels belonging to cast, riser and riser-post bodies.'
     });
   }
   if (extras.totalVolumeIn3 > 0) {
@@ -254,17 +261,21 @@ export function buildStatGroups(
       value: `${formatNumber(extras.totalVolumeIn3, 1)} in³`
     });
   }
-  if (extras.spacing > 0) {
+  // Tet: the element size is the requested edge length from the run summary;
+  // GridMeta's spacing is only the display-lattice pitch.
+  const edgeLength = tet ? Number(stats.tet_edge_length_in) : NaN;
+  const size = tet && Number.isFinite(edgeLength) && edgeLength > 0 ? edgeLength : extras.spacing;
+  if (size > 0) {
     push('Overview', {
       key: '_spacing',
-      label: 'Voxel size',
-      value: `${formatNumber(extras.spacing, 3)} in`
+      label: tet ? 'Element size' : 'Voxel size',
+      value: `${formatNumber(size, 3)} in`
     });
   }
 
   for (const [key, value] of Object.entries(stats)) {
     // Already shown from GridMeta's own fields, in better units.
-    if (key === 'voxel_count' || key === 'total_volume') continue;
+    if (key === 'voxel_count' || key === 'total_volume' || key === 'tet_edge_length_in') continue;
     const spec = describe(key);
     push(groupFor(key), {
       key,

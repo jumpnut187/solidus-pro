@@ -18,20 +18,34 @@ main.py (desktop)                    run_web.py -> web/app_factory.py
                      v               v
         core/simulation_pipeline.py :: run_pipeline(PipelineInputs)
                             |
-    prepare_mesh_and_geometry()  ->  core/voxel_mesh.py  AdaptiveVoxelMesh
+    prepare_mesh_and_geometry()  -- resolve_mesh_type(inputs) --
+         voxel: core/voxel_mesh.py  AdaptiveVoxelMesh
+         tet:   core/tet_mesh.py    build_tet_mesh -> TetVolumeMesh
     create_analysis_options()    ->  AnalysisOptions
+    run_filling_for_mesh()       ->  voxel: core/filling_stage.py
+                                     tet:   core/tet_filling.py (lattice view,
+                                            fill mapped back to nodes)
     SolidificationEngine(...)    ->  core/solidification.py
         .initialize()
         .run_simulation()
-             -> core/solidification_loop.py  run_time_integration
+             voxel -> core/solidification_loop.py  run_time_integration
                   -> physics/heat_transfer.py         HeatTransferModel
+                  -> physics/solidification_physics.py SolidificationModel
+             tet   -> core/tet_thermal.py  run_tet_thermal_integration
+                  -> physics/tet_heat_transfer.py     TetHeatTransferModel
                   -> physics/solidification_physics.py SolidificationModel
              -> core/analysis_strategies.py  run_post_analyses
         .export_results()
     build_visualization_payload()
                             |
-                     PipelineResult
+                     PipelineResult (.mesh_type)
 ```
+
+The tet branch forces `thermal_coupled`. Lattice consumers (filling, the
+surrogate and deep-model encoding, `web/fields.py`, `ui/result_surface.py`)
+sample node values onto a uniform lattice with
+`core/tet_lattice.py::TetLatticeSampler` and never see tets. Contracts:
+`docs/tet_migration/DESIGN.md`.
 
 `run_pipeline` has three production callers: `ui/workers.py`,
 `web/services/simulation_queue.py` and `core/surrogate/training.py`.
@@ -88,6 +102,30 @@ gravity 9.81 m/s²). Use `physics.units`; never add another bare `0.0254`.
 - `voxel_states` — fraction solid. Physics state living on the mesh object.
 - `voxel_part_types` — int32 codes, see below.
 - `surface_voxels` — bool mask.
+
+### Mesh object contract
+
+`TetVolumeMesh` (`core/tet_mesh.py`) duck-types `AdaptiveVoxelMesh`. It
+exposes the same `voxel_*` names and methods (`get_voxel_count`,
+`get_voxels_by_type`, `get_surface_voxel_indices`, ...) with **node**
+semantics, so the engine and the graph-generic post-analyses run unchanged.
+The DOF is the mesh node: every engine per-point array has length N nodes.
+
+| attribute | voxel mesh | tet mesh |
+|---|---|---|
+| `mesh_type` | absent (`"voxel"`) | `"tet"` |
+| `voxel_centers` | cell centres | node coordinates (`node_xyz` as float32) |
+| `voxel_sizes` | cell pitch | mean incident edge length |
+| `voxel_volumes` | cell volume | lumped node volume (sum of incident tet volume / 4) |
+| `voxel_neighbors` | (N, 26) canonical slots | (N, K max degree), ascending, -1 padded |
+| `voxel_moduli` | distance to surface cell centre | distance to nearest boundary face, 0 on boundary |
+| `grid_shape` | bbox estimate | `None` |
+| extra | | `tets`, `tet_part_types`, `boundary_faces`, `adj_indptr`/`adj_indices`, `mean_edge_length`, `quality_summary()` |
+
+Code that needs tet semantics branches on
+`getattr(mesh, "mesh_type", "voxel") == "tet"`. Volume shares, length
+scales and adjacency counts must use `voxel_volumes`, per-node `voxel_sizes`
+and the row's valid entries, not a scalar pitch or 26.
 
 ### Part types
 

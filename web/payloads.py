@@ -419,6 +419,11 @@ def build_fork_artifact(result: PipelineResult) -> Dict[str, Any]:
     if isinstance(niyama_metadata, dict):
         summary["niyama_metadata"] = dict(niyama_metadata)
     summary["raw_ranges"] = raw_ranges
+    if _is_tet_mesh(mesh):
+        # The JSON keeps a strided node preview (centers, part types and
+        # fields stay per node); the field grid comes from the tet source.
+        visualization["mesh_type"] = TET_MESH_TYPE
+        _label_tet_fill_counts(summary)
 
     return {
         "summary": summary,
@@ -440,6 +445,33 @@ def build_fork_artifact(result: PipelineResult) -> Dict[str, Any]:
 #: Stripped before the JSON is written; never present in a file on disk.
 GRID_SOURCE_KEY = "_grid_source"
 
+#: ``mesh_type`` of a tet-mesh run (``core.tet_mesh.TetVolumeMesh``).
+TET_MESH_TYPE = "tet"
+
+#: Summary keys renamed on tet runs. The fill-time counts are counted over
+#: the node-length arrival times, so "voxels" would mislabel them; the
+#: client derives the label from the key.
+_TET_FILL_COUNT_KEYS = {
+    "fill_filled_voxel_count": "fill_nodes_filled_count",
+    "fill_unfilled_voxel_count": "fill_nodes_unfilled_count",
+}
+
+
+def _is_tet_mesh(mesh: Any) -> bool:
+    return getattr(mesh, "mesh_type", "voxel") == TET_MESH_TYPE
+
+
+def _label_tet_fill_counts(summary: Dict[str, Any]) -> None:
+    """Rename the tet run's fill counts to say they count nodes."""
+    for old_key, new_key in _TET_FILL_COUNT_KEYS.items():
+        if old_key in summary:
+            summary[new_key] = summary.pop(old_key)
+    fill_stats = summary.get("fill_time_stats")
+    if isinstance(fill_stats, dict):
+        summary["fill_time_stats"] = {
+            key.replace("_voxels", "_nodes"): value for key, value in fill_stats.items()
+        }
+
 
 def _full_grid_source(engine: Any, mesh: Any, source_centers: np.ndarray) -> Dict[str, Any]:
     """
@@ -456,6 +488,19 @@ def _full_grid_source(engine: Any, mesh: Any, source_centers: np.ndarray) -> Dic
         "sizes": _full_array(getattr(mesh, "voxel_sizes", None), count),
         "part_types": _full_array(getattr(mesh, "voxel_part_types", None), count),
     }
+    if _is_tet_mesh(mesh):
+        # ``centers`` are the nodes and every field below is per node.
+        # web.fields samples them onto a lattice through the tets; these
+        # stay numpy and never reach JSON.
+        from core.dense_grid import tet_presentation_spacing
+
+        source["mesh_type"] = TET_MESH_TYPE
+        # float64 nodes, so the lattice matches the one every other tet
+        # consumer builds from ``node_xyz`` (float32 can shift the box by a cell).
+        source["centers"] = np.asarray(mesh.node_xyz, dtype=np.float64)
+        source["tets"] = np.asarray(mesh.tets, dtype=np.int32)
+        source["tet_part_types"] = np.asarray(mesh.tet_part_types, dtype=np.int8)
+        source["lattice_spacing"] = tet_presentation_spacing(mesh)
 
     for key, attribute in (
         ("shrinkage", "shrinkage_probability"),

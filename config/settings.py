@@ -61,7 +61,7 @@ _TET_POSITIVE_DEFAULTS: Dict[str, float] = {
     "tet_edge_length_factor": 1.0,
     "tet_epsilon_rel": 1e-3,
     "tet_max_time_step_s": 2.0,
-    "tet_max_delta_t_c": 10.0,
+    "tet_max_delta_t_c": 15.0,
     "tet_lattice_spacing_factor": 1.0,
 }
 
@@ -81,7 +81,7 @@ class MeshSettings:
     tet_edge_length_factor: float = 1.0      # tet edge length = factor * base_voxel_size
     tet_epsilon_rel: float = 1e-3            # fTetWild envelope, relative to bbox diagonal
     tet_max_time_step_s: float = 2.0         # implicit tet solver dt ceiling, seconds
-    tet_max_delta_t_c: float = 10.0          # halve dt above this max metal |dT| per step, degC
+    tet_max_delta_t_c: float = 15.0          # halve dt above this max metal |dT| per step, degC
     tet_lattice_spacing_factor: float = 1.0  # filling/ML lattice pitch = factor * base_voxel_size
     tet_max_nodes: int = 3_000_000           # refuse tet meshing above this estimated node count
     
@@ -751,7 +751,7 @@ mesh:
   tet_edge_length_factor: 1.0      # tet edge length = factor * base_voxel_size
   tet_epsilon_rel: 0.001           # fTetWild envelope, relative to bbox diagonal
   tet_max_time_step_s: 2.0         # implicit tet solver dt ceiling (s)
-  tet_max_delta_t_c: 10.0          # halve dt above this metal |dT| per step (C)
+  tet_max_delta_t_c: 15.0          # halve dt above this metal |dT| per step (C)
   tet_lattice_spacing_factor: 1.0  # filling/ML lattice pitch = factor * base_voxel_size
   tet_max_nodes: 3000000           # refuse tet meshing above this estimated node count
 
@@ -821,7 +821,7 @@ mesh_type = "voxel"
 tet_edge_length_factor = 1.0
 tet_epsilon_rel = 0.001
 tet_max_time_step_s = 2.0
-tet_max_delta_t_c = 10.0
+tet_max_delta_t_c = 15.0
 tet_lattice_spacing_factor = 1.0
 tet_max_nodes = 3000000
 

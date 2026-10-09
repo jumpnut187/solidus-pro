@@ -54,6 +54,7 @@ import {
   isPlaceholderProjectName,
   loadStoredSettings,
   meshDefaults,
+  meshTypeOf,
   performanceDefaults,
   projectNameFromFile,
   saveStoredSettings
@@ -728,10 +729,24 @@ export function App() {
   }, [applyPositions, parts, warn]);
 
   // --- Mesh ----------------------------------------------------------------
+  const meshType = meshTypeOf(settings.performance_options);
   const estimateMesh = useCallback(async () => {
     try {
       const target = await ensureProject();
-      const preview = await api.meshPreview(target, settings.voxel_size);
+      const preview = await api.meshPreview(target, settings.voxel_size, meshType);
+      if (preview.mesh_type === 'tet') {
+        const detail =
+          `About ${formatCount(preview.estimated_nodes)} nodes at ${preview.edge_length_in.toFixed(3)} in ` +
+          `(limit ${formatCount(preview.max_nodes)})`;
+        setMeshEstimate({
+          text:
+            preview.can_proceed || preview.recommended_voxel_size === null
+              ? detail
+              : `${detail}. Safe element size: ${preview.recommended_voxel_size.toFixed(3)} in.`,
+          tone: preview.can_proceed ? 'success' : 'warning'
+        });
+        return;
+      }
       const detail = `${formatCount(preview.estimated_voxels)} voxels, ${preview.estimated_memory_mb.toFixed(0)} MB`;
       setMeshEstimate({
         text: preview.can_proceed
@@ -742,30 +757,38 @@ export function App() {
     } catch (error) {
       fail(error, 'Mesh estimate failed');
     }
-  }, [ensureProject, settings.voxel_size, fail]);
+  }, [ensureProject, settings.voxel_size, meshType, fail]);
 
   const applyMlMesh = useCallback(async () => {
     setMlStatus({ text: 'Requesting a recommendation...', tone: 'info' });
     try {
       const target = await ensureProject();
-      const recommendation = await api.mlMesh(target);
+      const recommendation = await api.mlMesh(target, meshType);
       setSettings((current) => ({
         ...current,
         voxel_size: recommendation.base_voxel_size,
         refinement_level: recommendation.refinement_level
       }));
       const source = recommendation.used_model ? 'ML model' : 'heuristic';
+      const nodes =
+        recommendation.mesh_type === 'tet' && recommendation.estimated_nodes !== undefined
+          ? ` About ${formatCount(recommendation.estimated_nodes)} tet nodes` +
+            (recommendation.can_proceed === false
+              ? `, above the limit of ${formatCount(recommendation.max_nodes ?? 0)}.`
+              : '.')
+          : '';
       setMlStatus({
         text:
           `${source}: ${recommendation.base_voxel_size.toFixed(3)} in at refinement ${recommendation.refinement_level} ` +
           `(confidence ${recommendation.confidence.toFixed(2)}). ${recommendation.reason}` +
+          nodes +
           (recommendation.warning ? ` Warning: ${recommendation.warning}` : ''),
-        tone: recommendation.warning ? 'warning' : 'success'
+        tone: recommendation.warning || recommendation.can_proceed === false ? 'warning' : 'success'
       });
     } catch (error) {
       setMlStatus({ text: error instanceof Error ? error.message : 'ML mesh failed', tone: 'warning' });
     }
-  }, [ensureProject]);
+  }, [ensureProject, meshType]);
 
   // --- Run -----------------------------------------------------------------
   const runSimulation = useCallback(async () => {
@@ -1143,7 +1166,8 @@ export function App() {
                 ...current,
                 voxel_size: meshDefaults.voxelSize,
                 refinement_level: meshDefaults.refinement,
-                memory_mode: 'auto'
+                memory_mode: 'auto',
+                performance_options: { ...current.performance_options, mesh_type: performanceDefaults.mesh_type }
               }))
             }
             onClose={closePanel}
@@ -1183,7 +1207,11 @@ export function App() {
               }))
             }
             onReset={() =>
-              setSettings((current) => ({ ...current, performance_options: { ...performanceDefaults } }))
+              // mesh_type belongs to the Mesh panel; its reset is there.
+              setSettings((current) => ({
+                ...current,
+                performance_options: { ...performanceDefaults, mesh_type: meshTypeOf(current.performance_options) }
+              }))
             }
             onClose={closePanel}
           />

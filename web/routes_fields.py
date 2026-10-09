@@ -424,6 +424,20 @@ def _grids_or_error(project_id: str) -> Tuple[Optional[fields.FieldGrids], Optio
         )
         response.status_code = 413
         return None, response
+    except fields.TetGridUnavailableError:
+        # A tet run's grid is sampled through the tets, which only the
+        # in-memory result carries. Without the sidecar it cannot be rebuilt.
+        response = jsonify(
+            {
+                "error": (
+                    "This tet-mesh run has no saved field grid. "
+                    "Re-run it to regenerate the result fields."
+                ),
+                "code": "tet_grid_missing",
+            }
+        )
+        response.status_code = 404
+        return None, response
     if grids is None:
         response = jsonify({"error": "Results not found"})
         response.status_code = 404

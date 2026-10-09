@@ -34,6 +34,13 @@ Load your full casting assembly in one go:
 
 Automatic part-type detection from filenames. Parallel point-containment assignment that scales to massive assemblies.
 
+### Mesh Type — Voxel or Tetrahedral
+The Mesh dialog (desktop) and Mesh panel (web) choose the simulation mesh:
+- **Voxel** (default) — adaptive voxel grid, explicit thermal solver.
+- **Tetrahedral** — conforming tet mesh from fTetWild (`pytetwild`), implicit P1 finite-element thermal solve. It follows the CAD surface, so metal volume matches the CAD instead of overshooting at coarse sizes. The element size slider sets the target edge length. Requires `thermal_coupled` (forced).
+
+Set the default with `mesh.mesh_type` in `castsim.yaml` or `CASTSIM_MESH_TYPE=tet`. Tet meshes above `mesh.tet_max_nodes` (3,000,000) are refused with a message giving a safe element size.
+
 ### GPU Acceleration — Pick Your Weapon
 | Hardware | Backend | Status |
 |---|---|---|
@@ -196,6 +203,7 @@ References: [NIST Scheil notes](https://www.ctcms.nist.gov/~kattner/solidifc/sch
 | CPU Accel | Numba (JIT + parallel), joblib |
 | GPU Accel | MLX, Taichi (Metal) · CuPy (CUDA) · PyOpenCL (OpenCL) |
 | Mesh I/O | Trimesh, numpy-stl, cascadio (optional, for STEP) |
+| Tet meshing | pytetwild (fTetWild, MPL-2.0) + pyvista |
 | Persistence | SQLite (web projects) |
 | Reports | Jinja2 (HTML / PDF / Markdown) |
 | Plugin System | Custom materials, analysis types, viz modes |

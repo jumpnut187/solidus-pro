@@ -10,7 +10,9 @@ rate, Niyama capture) with three differences:
 
 1. The heat step is the implicit P1 FEM step of
    :class:`physics.tet_heat_transfer.TetHeatTransferModel`.
-2. The latent-heat correction uses a per-node ``beta_i = L_i / C_i`` (K).
+2. Latent heat is released by an exact per-node enthalpy inversion
+   (:func:`invert_tet_enthalpy`), not the voxel loop's correction, so
+   ``sum(C_i T_i + L_i (1 - fs_i))`` is conserved on every step size.
 3. The time step adapts: it grows x1.25 per accepted step up to
    ``settings.mesh.tet_max_time_step_s`` and a step whose largest metal-node
    |dT| exceeds ``settings.mesh.tet_max_delta_t_c`` is rejected and retried
@@ -45,7 +47,6 @@ from core.solidification_loop import (
     NIYAMA_EVAL_FRACTION_SOLID,
     THREAD_BUDGET_CHECK_INTERVAL,
     ProgressCallback,
-    _apply_enthalpy_correction_numpy,
     _apply_live_thread_budget,
 )
 from core.stepping import should_capture_fraction_history
@@ -53,9 +54,11 @@ from physics.solidification_physics import SolidificationModel
 from physics.tet_heat_transfer import TetHeatTransferModel, TetMaterial
 from physics.units import inches_to_meters, inches_to_mm
 
-#: Defaults for the settings the pipeline worker adds to ``MeshSettings``.
+#: Fallbacks for ``settings.mesh.tet_max_time_step_s`` / ``tet_max_delta_t_c``.
+#: Total solidification time is within 1.5 % of the dt-converged value on the
+#: 2x2x1 box and the box + riser (docs/tet_migration/wave3_enthalpy.md).
 DEFAULT_TET_MAX_TIME_STEP_S = 2.0
-DEFAULT_TET_MAX_DELTA_T_C = 10.0
+DEFAULT_TET_MAX_DELTA_T_C = 15.0
 #: Accepted-step growth factor and the smallest step a rejection may produce.
 TET_TIME_STEP_GROWTH = 1.25
 TET_MIN_TIME_STEP_S = 1e-3
@@ -224,6 +227,41 @@ def initialize_tet_thermal_models(engine: Any, *, show_progress: bool) -> None:
         )
 
 
+def invert_tet_enthalpy(
+    T_post: np.ndarray,
+    fs_prev: np.ndarray,
+    beta: np.ndarray,
+    T_liq: float,
+    T_sol: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Per-node (T_new, fs_new) that hold the step's enthalpy exactly. Arrays in degC and K.
+
+    With ``beta_i = L_i / C_i`` the node enthalpy per unit capacity is
+    ``h = T + beta * (1 - fs)``. The heat step left ``h_new = T_post + beta *
+    (1 - fs_prev)``. Solve ``h_new = T_new + beta * (1 - fs_new)`` with
+    ``fs_new = max(fs_prev, lever(T_new))``, the irreversible lever rule that
+    ``SolidificationModel.update`` applies. The right side is continuous and
+    strictly increasing in ``T_new`` with three linear segments:
+
+    - ``T_new >= T_p = T_liq - fs_prev * dT``: fs stays fs_prev, so T_new = T_post.
+    - ``T_sol <= T_new < T_p``: mushy, T_new = (T_post * dT + beta * T_p) / (dT + beta).
+    - ``T_new < T_sol``: fully solid, T_new = h_new.
+
+    ``fs_new`` is computed with the model's own formula from ``T_new``, so
+    ``SolidificationModel.update(T_new)`` reproduces it bit for bit.
+    """
+    T_post = np.asarray(T_post, dtype=np.float64)
+    fs_prev = np.clip(np.asarray(fs_prev, dtype=np.float64), 0.0, 1.0)
+    beta = np.asarray(beta, dtype=np.float64)
+    dT = max(float(T_liq) - float(T_sol), 1e-6)
+    h_new = T_post + beta * (1.0 - fs_prev)
+    T_p = T_liq - fs_prev * dT
+    T_mush = (T_post * dT + beta * T_p) / (dT + beta)
+    T_new = np.where(T_post >= T_p, T_post, np.where(h_new < T_sol, h_new, T_mush))
+    fs_new = np.maximum(fs_prev, np.clip((T_liq - T_new) / dT, 0.0, 1.0))
+    return T_new, fs_new
+
+
 def tet_time_step_limits() -> Tuple[float, float]:
     """(max time step s, max metal |dT| per step C) from ``settings.mesh``."""
     mesh_settings = getattr(get_settings(), "mesh", None)
@@ -323,10 +361,8 @@ def run_tet_thermal_integration(
     latent_of_latent_nodes = latent_capacity[latent_nodes]
     T_liq = float(engine.alloy.liquidus_temp)
     T_sol = float(engine.alloy.solidus_temp)
-    dT = max(T_liq - T_sol, 1e-6)
     T_final = np.empty(n_nodes, dtype=np.float64)
     fs_prev = np.empty(n_nodes, dtype=np.float64)
-    corrected = np.empty(latent_nodes.size, dtype=np.float64)
 
     while heat_model.time < max_time - 1e-9:
         previous_states = np.asarray(engine.mesh.voxel_states, dtype=np.float32).copy()
@@ -338,18 +374,18 @@ def run_tet_thermal_integration(
         previous_temperatures = heat_model.temperatures.copy()
         heat_model.step(step_dt)  # diffusion + Robin only
 
-        # Operator-split enthalpy correction, per node: beta_i = L_i / C_i (K
-        # of recalescence per unit fraction solid). See the derivation in
-        # _run_thermal_coupled_integration. Nodes without latent heat keep T_post.
+        # Operator-split latent heat: exact per-node enthalpy inversion with
+        # beta_i = L_i / C_i(T_post) (K per unit fraction solid). Nodes without
+        # latent heat keep T_post. solidification_model.update(T_final) below
+        # recomputes the same fs from T_final.
         np.copyto(fs_prev, np.asarray(solidification_model.fraction_solid, dtype=np.float64))
         T_post = heat_model.temperatures
         np.copyto(T_final, T_post)
         if latent_nodes.size:
             beta = latent_of_latent_nodes / heat_model.node_heat_capacity()[latent_nodes]
-            _apply_enthalpy_correction_numpy(
-                T_post[latent_nodes], fs_prev[latent_nodes], corrected, T_liq, T_sol, dT, beta
+            T_final[latent_nodes], _ = invert_tet_enthalpy(
+                T_post[latent_nodes], fs_prev[latent_nodes], beta, T_liq, T_sol
             )
-            T_final[latent_nodes] = corrected
 
         if np.any(metal_mask) and step_dt > TET_MIN_TIME_STEP_S:
             max_change = float(np.max(np.abs(T_final[metal_mask] - previous_temperatures[metal_mask])))

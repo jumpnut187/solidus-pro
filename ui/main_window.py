@@ -79,6 +79,7 @@ from core.part_manager import (
     PART_TYPE_TO_CODE,
     part_type_from_display_name,
 )
+from config.exceptions import MeshGenerationError
 from core.materials import get_all_alloy_names, get_alloy
 from core.gpu_compute import GPUComputeManager
 from core.memory_limits import (
@@ -383,6 +384,9 @@ class MeshDialog(DraggableDialog):
     
     settings_changed = Signal(float, int, str)  # voxel_size, refinement, memory_mode
     apply_ml_requested = Signal()
+
+    VOXEL_SIZE_LABEL = "Base Voxel Size (inches):"
+    ELEMENT_SIZE_LABEL = "Element size (in):"
     
     def __init__(self, parent=None):
         super().__init__(parent, "Mesh Parameters")
@@ -392,8 +396,22 @@ class MeshDialog(DraggableDialog):
     
     def _setup_ui(self):
         """Set up the mesh dialog UI"""
-        # Voxel size
-        self.content_layout.addWidget(QLabel("Base Voxel Size (inches):"))
+        from config.settings import get_settings
+
+        # Mesh type. The item data is the PipelineInputs.mesh_type value.
+        self.content_layout.addWidget(QLabel("Mesh type:"))
+        self.mesh_type_combo = QComboBox()
+        self.mesh_type_combo.addItem("Tetrahedral", "tet")
+        self.mesh_type_combo.addItem("Voxel", "voxel")
+        self.mesh_type_combo.setToolTip(
+            "Tetrahedral: conforming tet mesh of the CAD surfaces (implicit FEM solve).\n"
+            "Voxel: adaptive voxel grid."
+        )
+        self.content_layout.addWidget(self.mesh_type_combo)
+
+        # Voxel size (tet edge length = this * settings.mesh.tet_edge_length_factor)
+        self.voxel_size_label = QLabel(self.VOXEL_SIZE_LABEL)
+        self.content_layout.addWidget(self.voxel_size_label)
         self.voxel_size_spin = QDoubleSpinBox()
         self.voxel_size_spin.setRange(0.02, 0.5)
         self.voxel_size_spin.setValue(0.1)
@@ -436,13 +454,22 @@ class MeshDialog(DraggableDialog):
         self.content_layout.addWidget(self.ml_status_label)
         
         self.content_layout.addStretch()
+
+        self.mesh_type_combo.currentIndexChanged.connect(self._update_size_label)
+        self.set_mesh_type(get_settings().mesh.mesh_type)
+
+    def _update_size_label(self, *_args):
+        """Name the size control for the selected mesh type."""
+        tet = self.get_mesh_type() == "tet"
+        self.voxel_size_label.setText(self.ELEMENT_SIZE_LABEL if tet else self.VOXEL_SIZE_LABEL)
     
     def store_original_values(self):
         """Store current settings"""
         self._original_values = {
             'voxel_size': self.voxel_size_spin.value(),
             'refinement': int(self.refinement_spin.value()),
-            'memory_mode': self.memory_mode_combo.currentIndex()
+            'memory_mode': self.memory_mode_combo.currentIndex(),
+            'mesh_type': self.mesh_type_combo.currentIndex(),
         }
     
     def restore_original_values(self):
@@ -451,6 +478,7 @@ class MeshDialog(DraggableDialog):
             self.voxel_size_spin.setValue(self._original_values['voxel_size'])
             self.refinement_spin.setValue(self._original_values['refinement'])
             self.memory_mode_combo.setCurrentIndex(self._original_values['memory_mode'])
+            self.mesh_type_combo.setCurrentIndex(self._original_values['mesh_type'])
     
     def apply_values(self):
         """Emit signal with current settings"""
@@ -471,13 +499,27 @@ class MeshDialog(DraggableDialog):
     def get_memory_mode(self):
         memory_modes = {"Auto (Recommended)": "auto", "Force RAM": "ram", "Force Disk": "disk"}
         return memory_modes.get(self.memory_mode_combo.currentText(), "auto")
+
+    def get_mesh_type(self) -> str:
+        """"tet" or "voxel"."""
+        return str(self.mesh_type_combo.currentData())
+
+    def set_mesh_type(self, mesh_type: str) -> None:
+        """Select ``mesh_type`` ("tet" or "voxel"); an unknown value selects Voxel."""
+        index = self.mesh_type_combo.findData(str(mesh_type).strip().lower())
+        if index < 0:
+            index = self.mesh_type_combo.findData("voxel")
+        self.mesh_type_combo.setCurrentIndex(index)
+        self._update_size_label()
     
-    def set_values(self, voxel_size, refinement, memory_mode="auto"):
-        """Set current values"""
+    def set_values(self, voxel_size, refinement, memory_mode="auto", mesh_type=None):
+        """Set current values. ``mesh_type`` None leaves the mesh type unchanged."""
         self.voxel_size_spin.setValue(voxel_size)
         self.refinement_spin.setValue(refinement)
         mode_map = {"auto": 0, "ram": 1, "disk": 2}
         self.memory_mode_combo.setCurrentIndex(mode_map.get(memory_mode, 0))
+        if mesh_type is not None:
+            self.set_mesh_type(mesh_type)
 
 
 
@@ -1742,6 +1784,34 @@ class ConsoleWindow(QDialog):
 
 # ==================== Riser Design Dialog ====================
 
+def build_riser_design_tet_mesh(cast_mesh, voxel_size: float):
+    """Tet-mesh the cast part for the riser analysis at the simulation edge length.
+
+    Edge length = ``voxel_size * settings.mesh.tet_edge_length_factor``, as in
+    ``core.simulation_pipeline``. Raises ``MeshGenerationError`` before meshing
+    when the estimated node count exceeds ``settings.mesh.tet_max_nodes``.
+    """
+    from config.settings import get_settings
+    from core.part_manager import PART_TYPE_CAST
+    from core.simulation_pipeline import estimate_tet_node_count
+    from core.tet_mesh import build_tet_mesh
+
+    mesh_settings = get_settings().mesh
+    parts = [(cast_mesh, PART_TYPE_CAST)]
+    edge_length_in = float(voxel_size) * float(mesh_settings.tet_edge_length_factor)
+    estimated_nodes = estimate_tet_node_count(parts, edge_length_in)
+    max_nodes = int(mesh_settings.tet_max_nodes)
+    if estimated_nodes > max_nodes:
+        raise MeshGenerationError(
+            f"tet mesh at edge length {edge_length_in:g} in would have about "
+            f"{estimated_nodes:,} nodes, above the limit of {max_nodes:,} "
+            f"(settings.mesh.tet_max_nodes). Increase the element size",
+            voxel_size=edge_length_in,
+            estimated_voxels=estimated_nodes,
+        )
+    return build_tet_mesh(parts, edge_length_in, epsilon_rel=float(mesh_settings.tet_epsilon_rel))
+
+
 class RiserDesignDialog(DraggableDialog):
     """Modal dialog for automatic riser design using Heuvers' circle method"""
     
@@ -1851,6 +1921,9 @@ class RiserDesignDialog(DraggableDialog):
         if self._voxel_mesh is None:
             try:
                 self._prepare_mesh_from_parent()
+            except MeshGenerationError as e:
+                QMessageBox.warning(self, "Mesh Generation Error", str(e))
+                return
             except Exception as e:
                 QMessageBox.warning(self, "Mesh Error", f"Failed to prepare mesh: {str(e)}")
                 return
@@ -1861,6 +1934,7 @@ class RiserDesignDialog(DraggableDialog):
         
         try:
             from core.riser_design import RiserDesigner, RiserDesignParameters
+            from core.simulation_pipeline import mesh_type_of
             
             self.analyze_btn.setEnabled(False)
             self.analyze_btn.setText("Analyzing...")
@@ -1877,14 +1951,18 @@ class RiserDesignDialog(DraggableDialog):
                 max_diameter=12.0   # 12 inch maximum
             )
             
-            # Create designer
+            # Create designer. On a tet mesh every array is per node and
+            # voxel_volumes are the lumped node volumes.
+            mesh = self._voxel_mesh
             designer = RiserDesigner(
-                voxel_positions=self._voxel_mesh.voxel_centers,
-                voxel_size=self._voxel_mesh.base_voxel_size,
-                neighbors=self._voxel_mesh.neighbors if hasattr(self._voxel_mesh, 'neighbors') else self._create_neighbor_array(),
-                surface_mask=self._voxel_mesh.surface_voxels if hasattr(self._voxel_mesh, 'surface_voxels') else self._create_surface_mask(),
+                voxel_positions=mesh.voxel_centers,
+                voxel_size=mesh.base_voxel_size,
+                neighbors=mesh.voxel_neighbors if getattr(mesh, 'voxel_neighbors', None) is not None else self._create_neighbor_array(),
+                surface_mask=mesh.surface_voxels if getattr(mesh, 'surface_voxels', None) is not None else self._create_surface_mask(),
                 alloy=self._alloy,
-                params=params
+                params=params,
+                voxel_volumes=getattr(mesh, 'voxel_volumes', None),
+                mesh_type=mesh_type_of(mesh),
             )
             
             # Debug: print modulus info
@@ -1963,16 +2041,19 @@ class RiserDesignDialog(DraggableDialog):
         mesh = casting_part.get_transformed_mesh()
         bounds = np.array([mesh.bounds[0], mesh.bounds[1]]).T
         
-        # Create voxel mesh
         voxel_size = main_window._current_voxel_size
-        self._voxel_mesh = AdaptiveVoxelMesh(
-            base_voxel_size=voxel_size,
-            max_refinement_level=3
-        )
-        success = self._voxel_mesh.generate(mesh, bounds)
-        
-        if not success or self._voxel_mesh.voxel_centers is None:
-            raise ValueError("Failed to create voxel mesh")
+        if main_window._performance_options.get('mesh_type') == 'tet':
+            self._voxel_mesh = build_riser_design_tet_mesh(mesh, voxel_size)
+        else:
+            # Create voxel mesh
+            self._voxel_mesh = AdaptiveVoxelMesh(
+                base_voxel_size=voxel_size,
+                max_refinement_level=3
+            )
+            success = self._voxel_mesh.generate(mesh, bounds)
+            
+            if not success or self._voxel_mesh.voxel_centers is None:
+                raise ValueError("Failed to create voxel mesh")
         
         # Get alloy properties
         try:
@@ -2602,6 +2683,8 @@ class MainWindow(QMainWindow):
         self._performance_options['use_gpu'] = bool(
             getattr(_settings, 'use_gpu', self._performance_options.get('use_gpu', True))
         )
+        # The mesh dialog starts on settings.mesh.mesh_type.
+        self._performance_options['mesh_type'] = self.mesh_dialog.get_mesh_type()
         self._update_performance_summary()
     
     def _create_menu_bar(self):
@@ -3504,7 +3587,8 @@ class MainWindow(QMainWindow):
         self.mesh_dialog.set_values(
             self._current_voxel_size,
             self._current_refinement,
-            self._current_memory_mode
+            self._current_memory_mode,
+            mesh_type=self._performance_options.get('mesh_type'),
         )
         # Enable ML button if STL is loaded
         self.mesh_dialog.apply_ml_button.setEnabled(self.stl_loader.is_valid())
@@ -4451,6 +4535,9 @@ class MainWindow(QMainWindow):
         self._current_voxel_size = voxel_size
         self._current_refinement = refinement
         self._current_memory_mode = memory_mode
+        # mesh_type rides in performance_options so it reaches the worker and
+        # the project file without a new signal argument or schema field.
+        self._performance_options['mesh_type'] = self.mesh_dialog.get_mesh_type()
         # CAD is tessellated when the file is opened, but the voxel size is
         # chosen here -- afterwards. Picking a finer grid now would otherwise
         # leave the geometry coarser than the grid can resolve, so the STEP
@@ -4506,6 +4593,9 @@ class MainWindow(QMainWindow):
     
     def _update_mesh_summary(self):
         """Update mesh summary label in sidebar"""
+        if self._performance_options.get('mesh_type') == 'tet':
+            self.mesh_summary_label.setText(f"Tet: {self._current_voxel_size:.3f}\"")
+            return
         self.mesh_summary_label.setText(
             f"Voxel: {self._current_voxel_size:.3f}\", Ref: {int(self._current_refinement)}"
         )
@@ -5238,10 +5328,16 @@ class MainWindow(QMainWindow):
 
         self._on_alloy_confirmed(simulation_state["alloy_name"])
         self.material_dialog.set_alloy(simulation_state["alloy_name"])
+        from config.settings import get_settings as _get_settings
+
         self.mesh_dialog.set_values(
             simulation_state["voxel_size"],
             simulation_state["refinement_level"],
             simulation_state["memory_mode"],
+            # Absent on projects saved before the mesh-type toggle.
+            mesh_type=simulation_state["performance_options"].get(
+                "mesh_type", _get_settings().mesh.mesh_type
+            ),
         )
         self._on_mesh_settings_confirmed(
             simulation_state["voxel_size"],
@@ -5374,10 +5470,16 @@ class MainWindow(QMainWindow):
         
         voxel_size = self._current_voxel_size
         
-        # Validate memory requirements
-        validation = validate_mesh_parameters(bounds_tuple, voxel_size, fill_ratio)
+        # Validate memory requirements. A tet run skips the voxel memory model:
+        # the pipeline checks its estimated node count against
+        # settings.mesh.tet_max_nodes and raises MeshGenerationError, which the
+        # failure dialog shows verbatim.
+        if self._performance_options.get('mesh_type') == 'tet':
+            validation = None
+        else:
+            validation = validate_mesh_parameters(bounds_tuple, voxel_size, fill_ratio)
         
-        if not validation.can_proceed:
+        if validation is not None and not validation.can_proceed:
             # CRITICAL or ERROR - Cannot proceed
             if validation.recommended_voxel_size:
                 reply = QMessageBox.critical(
@@ -5417,7 +5519,7 @@ class MainWindow(QMainWindow):
                 )
                 return
         
-        elif validation.severity == MemorySeverity.WARNING:
+        elif validation is not None and validation.severity == MemorySeverity.WARNING:
             # Warning - Ask user to confirm
             mem_info = get_system_memory_info()
             reply = QMessageBox.warning(
@@ -5442,7 +5544,10 @@ class MainWindow(QMainWindow):
         self._stop_fraction_liquid_playback()
 
         # Update status with memory info
-        self.status_label.setText(f"Starting simulation ({validation.estimated_voxels:,} estimated voxels)...")
+        if validation is None:
+            self.status_label.setText("Starting simulation (tetrahedral mesh)...")
+        else:
+            self.status_label.setText(f"Starting simulation ({validation.estimated_voxels:,} estimated voxels)...")
         
         # Clear previous simulation outputs without removing loaded parts.
         self._purge_previous_simulation_memory()
@@ -5460,8 +5565,9 @@ class MainWindow(QMainWindow):
             'voxel_size': voxel_size,
             'refinement': int(self._current_refinement),
             'memory_mode': memory_mode,
-            'estimated_voxels': validation.estimated_voxels,
-            'estimated_memory_mb': validation.estimated_memory_mb
+            'mesh_type': self._performance_options.get('mesh_type'),
+            'estimated_voxels': validation.estimated_voxels if validation is not None else None,
+            'estimated_memory_mb': validation.estimated_memory_mb if validation is not None else None
         })
         
         # Start simulation in background thread
@@ -5621,7 +5727,11 @@ class MainWindow(QMainWindow):
             logger.error("Simulation failed", context={'alloy': self._current_alloy})
             self.status_label.setText("Simulation failed")
             self.progress_bar.setFormat("Failed")
-            QMessageBox.critical(self, "Error", "Simulation failed. Check console for details.")
+            mesh_error = getattr(self.simulation_worker, "mesh_error_message", None)
+            if mesh_error:
+                QMessageBox.critical(self, "Mesh Generation Error", mesh_error)
+            else:
+                QMessageBox.critical(self, "Error", "Simulation failed. Check console for details.")
 
     # ------------------------------------------------------------------
     # Surrogate simulation handlers
@@ -6200,6 +6310,7 @@ class MainWindow(QMainWindow):
             analysis_options=self._get_effective_analysis_options(),
             solidification_params=self._solidification_params,
             pour_location=self._pour_location,
+            mesh_type=self._performance_options.get('mesh_type'),
         )
         self.surrogate_worker.progress.connect(self._on_simulation_progress)
         self.surrogate_worker.detailed_progress.connect(self._on_detailed_progress)

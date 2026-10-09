@@ -35,12 +35,17 @@ from core.solidification import (
 )
 from core.solidification_loop import _apply_enthalpy_correction_numpy
 from core.tet_mesh import TetVolumeMesh, build_tet_mesh
+from config.settings import MeshSettings
 from core.tet_thermal import (
+    DEFAULT_TET_MAX_DELTA_T_C,
+    DEFAULT_TET_MAX_TIME_STEP_S,
+    invert_tet_enthalpy,
     tet_boundary_groups,
     tet_materials,
 )
 from core.voxel_mesh import AdaptiveVoxelMesh
-from physics.tet_heat_transfer import TetHeatTransferModel
+from physics.solidification_physics import SolidificationModel
+from physics.tet_heat_transfer import TetHeatTransferModel, TetMaterial
 
 EDGE_IN = 0.2
 #: Voxel pitch for the voxel-path comparison. At 0.2 in the voxel mesh holds
@@ -147,6 +152,12 @@ class TetEngineRiserAssemblyTest(unittest.TestCase):
         riser_last = float(np.max(e.solidification_times[self.types == PART_TYPE_RISER]))
         self.assertGreater(riser_last, cast_last)
         self.assertAlmostEqual(riser_last, e.time, delta=2.0)
+
+    def test_default_step_control_within_2_percent_of_converged(self) -> None:
+        # wave3_enthalpy.md: default (2 s, 15 C) 144.9 s, converged 143.5 s.
+        with mock.patch("core.tet_thermal.tet_time_step_limits", return_value=(0.1, 0.5)):
+            fine = _run(_fresh(self.mesh))
+        self.assertAlmostEqual(self.engine.time / fine.time, 1.0, delta=0.02)
 
     def test_time_step_and_max_time_are_sane(self) -> None:
         e = self.engine
@@ -295,15 +306,12 @@ class TetEngineChillTest(unittest.TestCase):
         low_run = _run(_fresh(self.plain_mesh), alloy=low)
         self.assertLess(low_run.time, 0.9 * self.plain.time)
 
-    def test_time_step_refinement_changes_total_time_little(self) -> None:
-        # Measured on this box: defaults (2 s, 10 C) 93.0 s, (0.5 s, 3 C) 97.9 s,
-        # converged (0.05 s, 0.25 C) 99.7 s. The default step control finishes
-        # about 7 % early.
-        with mock.patch("core.tet_thermal.tet_time_step_limits", return_value=(0.5, 3.0)):
+    def test_default_step_control_within_2_percent_of_converged(self) -> None:
+        # wave3_enthalpy.md: default (2 s, 15 C) 101.3 s, converged 99.9 s.
+        with mock.patch("core.tet_thermal.tet_time_step_limits", return_value=(0.1, 0.5)):
             fine = _run(_fresh(self.plain_mesh))
-        self.assertLessEqual(fine.time_step, 0.5)
-        self.assertGreaterEqual(fine.time, self.plain.time)
-        self.assertAlmostEqual(fine.time / self.plain.time, 1.0, delta=0.10)
+        self.assertLessEqual(fine.time_step, 0.1)
+        self.assertAlmostEqual(self.plain.time / fine.time, 1.0, delta=0.02)
 
     def test_progress_callback_and_cancellation(self) -> None:
         calls = []
@@ -362,6 +370,129 @@ class TetBoundaryContactCodeTest(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             tet_boundary_groups(engine)
+
+
+class InvertTetEnthalpyTest(unittest.TestCase):
+    """invert_tet_enthalpy against hand-computed single-node cases.
+
+    T_liq 1460, T_sol 1400 (dT 60), beta 300 K. Enthalpy per unit capacity is
+    h = T + beta * (1 - fs).
+    """
+
+    T_LIQ, T_SOL, BETA = 1460.0, 1400.0, 300.0
+
+    def _invert(self, T_post: float, fs_prev: float) -> Tuple[float, float]:
+        T_new, fs_new = invert_tet_enthalpy(
+            np.array([T_post]), np.array([fs_prev]), np.array([self.BETA]), self.T_LIQ, self.T_SOL
+        )
+        h_before = T_post + self.BETA * (1.0 - fs_prev)
+        self.assertAlmostEqual(float(T_new[0] + self.BETA * (1.0 - fs_new[0])), h_before, places=9)
+        self.assertGreaterEqual(float(fs_new[0]), fs_prev)
+        return float(T_new[0]), float(fs_new[0])
+
+    def test_all_liquid_is_unchanged(self) -> None:
+        self.assertEqual(self._invert(1500.0, 0.0), (1500.0, 0.0))
+
+    def test_liquid_entering_mushy_zone(self) -> None:
+        # T = (1450*60 + 300*1460) / 360 = 1458.333..., fs = (1460 - T) / 60.
+        T_new, fs_new = self._invert(1450.0, 0.0)
+        self.assertAlmostEqual(T_new, 525000.0 / 360.0, places=9)
+        self.assertAlmostEqual(fs_new, (1460.0 - 525000.0 / 360.0) / 60.0, places=12)
+
+    def test_mushy_step(self) -> None:
+        # fs_prev 0.5 -> T_p 1430. T = (1420*60 + 300*1430) / 360 = 1428.333...
+        T_new, fs_new = self._invert(1420.0, 0.5)
+        self.assertAlmostEqual(T_new, 514200.0 / 360.0, places=9)
+        self.assertAlmostEqual(fs_new, (1460.0 - 514200.0 / 360.0) / 60.0, places=12)
+
+    def test_step_below_solidus_recalesces_into_mushy_zone(self) -> None:
+        # T_post 1395 < T_sol but h = 1545 > T_sol: T = (1395*60 + 300*1430) / 360
+        # = 1424.1667, fs 0.5972. The voxel correction caps this node at T_sol.
+        T_new, fs_new = self._invert(1395.0, 0.5)
+        self.assertAlmostEqual(T_new, 512700.0 / 360.0, places=9)
+        self.assertAlmostEqual(fs_new, (1460.0 - 512700.0 / 360.0) / 60.0, places=12)
+
+    def test_crossing_solidus_in_one_step(self) -> None:
+        # fs_prev 0.9, T_post 1350: h = 1380 < T_sol, so T = 1380 and fs = 1.
+        self.assertEqual(self._invert(1350.0, 0.9), (1380.0, 1.0))
+
+    def test_liquid_crossing_liquidus_and_solidus_in_one_step(self) -> None:
+        # fs_prev 0, T_post 1000: h = 1300 < T_sol, all latent released.
+        self.assertEqual(self._invert(1000.0, 0.0), (1300.0, 1.0))
+
+    def test_fully_solid_below_solidus_is_unchanged(self) -> None:
+        self.assertEqual(self._invert(1300.0, 1.0), (1300.0, 1.0))
+
+    def test_reheated_mushy_node_keeps_fraction_solid(self) -> None:
+        # T_post 1440 > T_p 1430: fs never decreases, T stays.
+        self.assertEqual(self._invert(1440.0, 0.5), (1440.0, 0.5))
+
+    def test_fraction_solid_matches_solidification_model_update(self) -> None:
+        alloy = get_alloy("WCB")
+        rng = np.random.default_rng(11)
+        n = 2000
+        T_post = rng.uniform(alloy.solidus_temp - 200.0, alloy.liquidus_temp + 50.0, n)
+        fs_prev = np.where(rng.uniform(size=n) < 0.3, 0.0, rng.uniform(size=n))
+        beta = rng.uniform(1.0, 600.0, n)
+        T_new, fs_new = invert_tet_enthalpy(
+            T_post, fs_prev, beta, alloy.liquidus_temp, alloy.solidus_temp
+        )
+        np.testing.assert_allclose(
+            T_new + beta * (1.0 - fs_new), T_post + beta * (1.0 - fs_prev), rtol=0.0, atol=1e-9
+        )
+        model = SolidificationModel(n_voxels=n, alloy=alloy)
+        model._fraction_solid[:] = fs_prev
+        model.update(T_new, 1.0)
+        np.testing.assert_array_equal(model.fraction_solid, fs_new)
+
+
+class TetAdiabaticEnthalpyConservationTest(unittest.TestCase):
+    """Adiabatic box, constant properties, dt up to 20 s: sum(C T + L (1 - fs)) is conserved."""
+
+    def test_full_solidification_conserves_enthalpy(self) -> None:
+        mesh = _fresh(build_tet_mesh([(CASTING, PART_TYPE_CAST)], 0.25))
+        alloy = get_alloy("WCB")
+        rho_cp = float(alloy.density_solid * alloy.specific_heat)
+        metal = TetMaterial(
+            temp_points=np.zeros(1),
+            conductivity=np.array([30.0]),
+            rho_cp=np.array([rho_cp]),
+            latent_heat_vol=float(alloy.latent_heat * (alloy.density_liquid + alloy.density_solid) / 2.0),
+        )
+        chill = TetMaterial(temp_points=np.zeros(1), conductivity=np.ones(1), rho_cp=np.ones(1))
+        # Top half poured hot, bottom half cold: the mean enthalpy lies below
+        # the solidus, so the closed box solidifies completely.
+        initial = np.where(mesh.node_xyz[:, 2] > 0.5, 1600.0, 100.0)
+
+        engine = SolidificationEngine(mesh, alloy, AnalysisOptions())
+        with contextlib.redirect_stdout(io.StringIO()), mock.patch(
+            "core.tet_thermal.tet_materials", return_value=[metal, chill]
+        ), mock.patch("core.tet_thermal.tet_boundary_groups", return_value=[]), mock.patch(
+            "core.tet_thermal.tet_time_step_limits", return_value=(20.0, 1e9)
+        ):
+            engine.initialize()
+            engine.time_step = 20.0  # every step is 20 s: no growth ramp, no rejection
+            engine.set_initial_temperature_field(initial)
+            engine.run_simulation(show_progress=False)
+
+        heat_model = engine._thermal_heat_model
+        capacity = heat_model.node_heat_capacity()
+        latent = heat_model.node_latent_capacity()
+        fs = np.asarray(engine._thermal_solidification_model.fraction_solid)
+        initial_enthalpy = float(np.dot(capacity, initial) + np.sum(latent))
+        final_enthalpy = float(np.dot(capacity, heat_model.temperatures) + np.dot(latent, 1.0 - fs))
+
+        self.assertAlmostEqual(final_enthalpy / initial_enthalpy, 1.0, delta=1e-6)
+        self.assertTrue(np.all(fs >= 0.99))
+        self.assertEqual(engine.time_step, 20.0)
+        np.testing.assert_array_equal(engine.mesh.voxel_states, fs.astype(np.float32))
+
+
+class TetStepControlDefaultsTest(unittest.TestCase):
+    def test_fallbacks_match_mesh_settings_defaults(self) -> None:
+        defaults = MeshSettings()
+        self.assertEqual(DEFAULT_TET_MAX_TIME_STEP_S, defaults.tet_max_time_step_s)
+        self.assertEqual(DEFAULT_TET_MAX_DELTA_T_C, defaults.tet_max_delta_t_c)
 
 
 class PerNodeEnthalpyCorrectionTest(unittest.TestCase):

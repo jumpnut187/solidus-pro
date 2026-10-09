@@ -18,6 +18,10 @@ voxel with the canonical layout documented in
 
 6-connectivity uses slots 0-5 (face-adjacent only) so two defect
 volumes that touch only at a corner remain separate pockets.
+
+Tet meshes (``mesh_type="tet"``) store the node's edge adjacency in each row
+(ascending node ids, -1 padded), not lattice slots. There the full row is the
+connectivity and the 6/18/26 argument is ignored.
 """
 
 from __future__ import annotations
@@ -132,20 +136,26 @@ def extract_pocket_at(
     threshold: float,
     connectivity: int = 6,
     pocket_id: int = 0,
+    mesh_type: str = "voxel",
 ) -> Optional[DefectPocket]:
     """Extract the connected shrink/porosity pocket that contains ``voxel_index``.
 
     Args:
         voxel_index: Global voxel index that the user clicked on.
         display_intensity: Per-voxel merged shrink/porosity intensity.
-        voxel_neighbors: ``(N, 26)`` int32 neighbor table (see module docstring).
+        voxel_neighbors: ``(N, 26)`` int32 neighbor table, or ``(N, K)`` tet
+            edge adjacency (see module docstring).
         voxel_centers: ``(N, 3)`` float array of voxel center positions.
         voxel_volumes: ``(N,)`` float array of per-voxel volumes in cubic inches.
         shrinkage_risk: Optional per-voxel shrinkage probability (cast to float32).
         porosity_risk: Optional per-voxel porosity probability (cast to float32).
         threshold: Minimum display intensity to retain a voxel in the pocket.
         connectivity: ``6`` (face), ``18`` (face+edge), or ``26`` (face+edge+corner).
+            Ignored when ``mesh_type == "tet"``.
         pocket_id: Identifier stamped onto the returned ``DefectPocket``.
+        mesh_type: ``"voxel"`` (26-slot lattice rows) or ``"tet"`` (edge
+            adjacency rows: every listed neighbour connects, and
+            ``voxel_volumes`` are lumped node volumes).
 
     Returns:
         The connected pocket, or ``None`` if the anchor voxel is below
@@ -159,7 +169,8 @@ def extract_pocket_at(
     n_voxels = display_intensity.shape[0]
     if voxel_centers.shape[0] != n_voxels or voxel_volumes.shape[0] != n_voxels:
         return None
-    if voxel_neighbors.ndim != 2 or voxel_neighbors.shape[1] < 6:
+    is_tet = mesh_type == "tet"
+    if voxel_neighbors.ndim != 2 or (not is_tet and voxel_neighbors.shape[1] < 6):
         return None
     if voxel_neighbors.shape[0] != n_voxels:
         return None
@@ -171,7 +182,10 @@ def extract_pocket_at(
     if float(display_intensity[voxel_index]) < float(threshold):
         return None
 
-    slot_count = _resolve_connectivity_slot_count(connectivity)
+    if is_tet:
+        slot_count = voxel_neighbors.shape[1]
+    else:
+        slot_count = _resolve_connectivity_slot_count(connectivity)
 
     visited = np.zeros(n_voxels, dtype=bool)
     visited[voxel_index] = True

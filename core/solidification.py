@@ -58,7 +58,9 @@ from core.acceleration import (
     compute_mold_air_gap_effect_parallel,
     compute_riser_influence_parallel,
     compute_solid_path_strain_parallel,
+    compute_solid_path_strain_local,
     compute_isolation_score_parallel,
+    compute_isolation_score_volume_weighted,
 )
 from core.materials import AlloyProperties
 from core.voxel_mesh import AdaptiveVoxelMesh, _build_kdtree
@@ -142,6 +144,58 @@ VALID_SOLVER_MODES = {
     SOLVER_MODE_SCHEDULE_LEGACY,
     SOLVER_MODE_THERMAL_COUPLED,
 }
+
+#: Shrinkage/porosity probability above which a point counts as affected in
+#: the run statistics (``affected_voxel_count``, ``shrinkage_percentage``).
+SHRINKAGE_STATISTICS_THRESHOLD = 0.20
+
+
+def _is_tet_mesh(mesh) -> bool:
+    """True for a ``TetVolumeMesh`` (node DOFs, edge-adjacency rows)."""
+    return getattr(mesh, "mesh_type", "voxel") == "tet"
+
+
+def _tet_graph_length_in(mesh, sources: np.ndarray, traversable: np.ndarray) -> np.ndarray:
+    """Shortest path length (inches) along tet edges from any source node.
+
+    Multi-source Dijkstra over the edges whose two ends are both traversable,
+    weighted by the edge length ``|c_i - c_j|``. Unreached nodes are ``inf``.
+    """
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import dijkstra
+
+    n_points = len(traversable)
+    sources = np.asarray(sources, dtype=np.int64)
+    sources = sources[traversable[sources]]
+    if sources.size == 0:
+        return np.full(n_points, np.inf, dtype=np.float64)
+    neighbors = np.asarray(mesh.voxel_neighbors)
+    rows = np.repeat(np.arange(n_points, dtype=np.int64), neighbors.shape[1])
+    cols = neighbors.reshape(-1).astype(np.int64)
+    keep = (cols > rows) & traversable[rows] & traversable[np.maximum(cols, 0)]
+    edge_i, edge_j = rows[keep], cols[keep]
+    centers = np.asarray(mesh.voxel_centers, dtype=np.float64)
+    lengths = np.linalg.norm(centers[edge_i] - centers[edge_j], axis=1)
+    graph = coo_matrix((lengths, (edge_i, edge_j)), shape=(n_points, n_points)).tocsr()
+    return np.asarray(dijkstra(graph, directed=False, indices=sources, min_only=True), dtype=np.float64)
+
+
+def _tet_hop_length_in(mesh) -> float:
+    """Length of one graph hop on a tet mesh: the mean edge length (inches)."""
+    hop = float(getattr(mesh, "mean_edge_length", 0.0) or 0.0)
+    if hop <= 0.0:
+        hop = float(mesh.base_voxel_size)
+    return max(hop, 1e-9)
+
+
+def _local_length_scale_in(mesh) -> np.ndarray:
+    """Per-point length scale (inches) on a tet mesh: the local mean edge length."""
+    sizes = np.asarray(mesh.voxel_sizes, dtype=np.float64).reshape(-1)
+    n_points = len(mesh.voxel_centers)
+    if sizes.size != n_points:
+        return np.full(n_points, float(mesh.base_voxel_size), dtype=np.float64)
+    return sizes
+
 
 #: B4 graphite chill: k=150 W/(m K), rho=1800 kg/m^3, cp=710 J/(kg K).
 #: Shared by the voxel and tet thermal paths.
@@ -1079,12 +1133,22 @@ class SolidificationEngine:
         return True
 
     def _compute_graph_distance_to_riser(self, active_mask: np.ndarray) -> np.ndarray:
-        """Compute shortest topological distance from each active voxel to any riser voxel."""
+        """Compute shortest topological distance from each active voxel to any riser voxel.
+
+        Units are graph hops (the schedule normalises by the maximum and
+        floors at 1 hop). On a tet mesh the hop count of an irregular graph
+        is not a length, so the geometric shortest path along edges is used
+        and divided by the mean edge length: inches = hops * mean_edge_length.
+        """
         n_voxels = len(self.mesh.voxel_centers)
         distances = np.full(n_voxels, np.inf, dtype=np.float32)
         riser_indices = self._get_riser_voxel_indices()
         if len(riser_indices) == 0:
             return distances
+
+        if _is_tet_mesh(self.mesh):
+            length_in = _tet_graph_length_in(self.mesh, riser_indices, np.asarray(active_mask, dtype=bool))
+            return (length_in / _tet_hop_length_in(self.mesh)).astype(np.float32)
 
         q: deque[int] = deque()
         for idx in riser_indices:
@@ -1105,16 +1169,24 @@ class SolidificationEngine:
         return distances
 
     def _compute_graph_distance_to_chill(self, active_mask: np.ndarray) -> np.ndarray:
-        """Compute shortest topological distance from each active voxel to any chill voxel."""
+        """Compute shortest topological distance from each active voxel to any chill voxel.
+
+        Graph hops, as :meth:`_compute_graph_distance_to_riser` (tet meshes:
+        geometric edge-path length / mean edge length).
+        """
         n_voxels = len(self.mesh.voxel_centers)
         distances = np.full(n_voxels, np.inf, dtype=np.float32)
         chill_indices = self._get_chill_voxel_indices()
         if len(chill_indices) == 0:
             return distances
 
-        q: deque[int] = deque()
         traversable = active_mask.copy()
         traversable[chill_indices] = True
+        if _is_tet_mesh(self.mesh):
+            length_in = _tet_graph_length_in(self.mesh, chill_indices, np.asarray(traversable, dtype=bool))
+            return (length_in / _tet_hop_length_in(self.mesh)).astype(np.float32)
+
+        q: deque[int] = deque()
         for idx in chill_indices:
             distances[idx] = 0.0
             q.append(int(idx))
@@ -1576,6 +1648,7 @@ class SolidificationEngine:
            least as many as metal neighbors. Real metal at a flat chill face
            sees at most ~9 of 26; a gap-fill sliver wedged against graphite
            sees far more. (Physically such a sliver freezes instantly anyway.)
+           Tet meshes: at least 8/26 of the node degree instead of 8.
         3. Disconnected: after removing 1/2, metal components with no
            connection to the main body (and smaller than 5% of it, so a
            genuine second cavity is never dropped) are gap-fill pockets.
@@ -1627,7 +1700,18 @@ class SolidificationEngine:
         n_metal_nb = (
             (nbr_types == 0) | (nbr_types == 1) | (nbr_types == 3)
         ).sum(axis=1)
-        smothered = metal & (n_chillcore >= 8) & (n_chillcore >= n_metal_nb)
+        if _is_tet_mesh(self.mesh):
+            # Tet rows hold the node's edges, not 26 lattice slots. "At least
+            # 8 of 26 slots" maps to at least 8/26 of the node degree.
+            degree = valid_nbr.sum(axis=1)
+            smothered = (
+                metal
+                & (n_chillcore > 0)
+                & (26 * n_chillcore >= 8 * degree)
+                & (n_chillcore >= n_metal_nb)
+            )
+        else:
+            smothered = metal & (n_chillcore >= 8) & (n_chillcore >= n_metal_nb)
 
         # 3. Connectivity on the remaining metal.
         from scipy.sparse import coo_matrix
@@ -2241,6 +2325,11 @@ class SolidificationEngine:
         cp = self.analysis_options.solidification_params.chill
         if self._chill_thicknesses is not None and len(self._chill_thicknesses) > 0:
             chill_thickness = np.max(self._chill_thicknesses)
+        elif _is_tet_mesh(self.mesh):
+            # Fallback in local edge lengths: ~5 chill-node spacings deep.
+            chill_thickness = float(
+                np.mean(_local_length_scale_in(self.mesh)[chill_indices])
+            ) * cp.thickness_fallback_voxels
         else:
             # Fallback: estimate based on voxel size
             chill_thickness = self.mesh.base_voxel_size * cp.thickness_fallback_voxels  # ~5 voxels deep
@@ -2629,6 +2718,9 @@ class SolidificationEngine:
 
         valid_neighbors = np.where(neighbors_arr >= 0, neighbors_arr, 0)
         neighbor_is_post = riser_post_mask[valid_neighbors]
+        if _is_tet_mesh(self.mesh):
+            # Tet rows are -1 padded to the max degree; padding is not node 0.
+            neighbor_is_post &= neighbors_arr >= 0
         any_post_neighbor = np.any(neighbor_is_post, axis=1)
         factors[cast_indices[any_post_neighbor[cast_indices]]] = 1.35
 
@@ -4121,7 +4213,15 @@ class SolidificationEngine:
         else:
             part_types = np.zeros(n_voxels, dtype=np.int32)
 
-        isolation_score = compute_isolation_score_parallel(solid_times, neighbors, part_types)
+        if _is_tet_mesh(self.mesh):
+            isolation_score = compute_isolation_score_volume_weighted(
+                solid_times,
+                neighbors,
+                part_types,
+                np.ascontiguousarray(self.mesh.voxel_volumes, dtype=np.float64),
+            )
+        else:
+            isolation_score = compute_isolation_score_parallel(solid_times, neighbors, part_types)
 
         surface_distances = self._get_cast_surface_distances()
         surface_factor = surface_distances / np.max(surface_distances + 0.1)
@@ -4474,7 +4574,11 @@ class SolidificationEngine:
         if surface_distances is None:
             return np.zeros(n_voxels, dtype=np.float32)
 
-        influence_distance = max(0.5, float(self.mesh.base_voxel_size) * 5.0)
+        if _is_tet_mesh(self.mesh):
+            # Five local edge lengths per node instead of five lattice pitches.
+            influence_distance = np.maximum(0.5, _local_length_scale_in(self.mesh) * 5.0)
+        else:
+            influence_distance = max(0.5, float(self.mesh.base_voxel_size) * 5.0)
         distances = np.asarray(surface_distances, dtype=np.float32)
         weights = np.clip(1.0 - distances / influence_distance, 0.0, 1.0)
         return weights.astype(np.float32)
@@ -4669,15 +4773,28 @@ class SolidificationEngine:
 
         voxel_size = float(getattr(self.mesh, "base_voxel_size", 0.5))
         search_depth = int(getattr(hot_tear_params, "solid_path_search_depth", 8))
-        max_path_length = max(voxel_size * search_depth, voxel_size)
-        path_strain = compute_solid_path_strain_parallel(
-            solidification_times,
-            voxel_centers,
-            neighbors,
-            np.float32(solid_expansion),
-            np.float32(btr_temp_range),
-            np.float32(max_path_length),
-        )
+        if _is_tet_mesh(self.mesh):
+            # Cap the path at search_depth local edge lengths per node; the
+            # kernel already measures the true edge length |c_i - c_j|.
+            local_size = _local_length_scale_in(self.mesh)
+            path_strain = compute_solid_path_strain_local(
+                solidification_times,
+                voxel_centers,
+                neighbors,
+                np.float32(solid_expansion),
+                np.float32(btr_temp_range),
+                np.ascontiguousarray(local_size * max(search_depth, 1), dtype=np.float64),
+            )
+        else:
+            max_path_length = max(voxel_size * search_depth, voxel_size)
+            path_strain = compute_solid_path_strain_parallel(
+                solidification_times,
+                voxel_centers,
+                neighbors,
+                np.float32(solid_expansion),
+                np.float32(btr_temp_range),
+                np.float32(max_path_length),
+            )
 
         section_change = np.abs(modulus_variance) / (np.max(modulus_variance) + 1e-6)
 
@@ -5098,6 +5215,10 @@ class SolidificationEngine:
                     # uses it as distance_upper_bound.
                     if self._chill_thicknesses is not None and len(self._chill_thicknesses) > 0:
                         chill_thickness = np.mean(self._chill_thicknesses)
+                    elif _is_tet_mesh(self.mesh):
+                        chill_thickness = float(
+                            np.mean(_local_length_scale_in(self.mesh)[chill_indices])
+                        ) * 5.0
                     else:
                         chill_thickness = self.mesh.base_voxel_size * 5.0
                     chill_burn_in_radius = chill_thickness * 1.5  # Same as shrinkage reduction zone
@@ -5333,7 +5454,7 @@ class SolidificationEngine:
         statistics["unfinished_voxel_count"] = int(np.sum(~finished & cast_mask))
 
         # Lower threshold to catch more potential shrinkage
-        shrinkage_threshold = 0.20  # 20% probability (was 30%)
+        shrinkage_threshold = SHRINKAGE_STATISTICS_THRESHOLD  # 20% probability (was 30%)
         
         # Shrinkage statistics
         if self.analysis_options.shrinkage and self.shrinkage_probability is not None:
@@ -5391,6 +5512,28 @@ class SolidificationEngine:
 
         return statistics
     
+    def get_shrinkage_percentage(self) -> float:
+        """Share of the mesh flagged by the shrinkage statistics, in percent.
+
+        Voxel meshes: affected voxel count / voxel count (cells are near
+        uniform). Tet meshes: affected lumped node volume / total node volume,
+        because node volumes vary with the local edge length.
+        """
+        n_points = len(self.mesh.voxel_centers)
+        if n_points == 0:
+            return 0.0
+        if not _is_tet_mesh(self.mesh):
+            return float(self.affected_voxel_count / n_points * 100)
+        shrink = getattr(self, "shrinkage_probability", None)
+        poro = getattr(self, "porosity_probability", None)
+        if shrink is None or poro is None:
+            return 0.0
+        threshold = SHRINKAGE_STATISTICS_THRESHOLD
+        affected = (np.asarray(shrink) > threshold) | (np.asarray(poro) > threshold)
+        volumes = np.asarray(self.mesh.voxel_volumes, dtype=np.float64)
+        total = float(np.sum(volumes))
+        return float(np.sum(volumes[affected]) / total * 100.0) if total > 0.0 else 0.0
+
     def _get_normalized_heights(self) -> np.ndarray:
         """
         Get normalized height (Z-coordinate) for each voxel
@@ -5948,8 +6091,11 @@ class SolidificationEngine:
                 shrink_scalar = self._get_shrink_scalar()
             results['affected_voxels'] = self.affected_voxel_count
             results['shrinkage_volume'] = self.total_shrinkage_volume
-            results['shrinkage_percentage'] = (self.affected_voxel_count / 
-                                               len(self.mesh.voxel_centers) * 100)
+            if _is_tet_mesh(self.mesh):
+                results['shrinkage_percentage'] = SolidificationEngine.get_shrinkage_percentage(self)
+            else:
+                results['shrinkage_percentage'] = (self.affected_voxel_count / 
+                                                   len(self.mesh.voxel_centers) * 100)
             results['shrink_scalar'] = float(shrink_scalar)
             results['shrink_scalar_formula'] = getattr(self, 'shrink_scalar_formula', SHRINK_SCALAR_FORMULA)
             results['shrinkage_risk'] = self.shrinkage_risk

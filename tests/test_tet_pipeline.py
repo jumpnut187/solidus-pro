@@ -176,7 +176,7 @@ class MeshSettingsTetFieldTests(unittest.TestCase):
         self.assertEqual(mesh.tet_edge_length_factor, 1.0)
         self.assertEqual(mesh.tet_epsilon_rel, 1e-3)
         self.assertEqual(mesh.tet_max_time_step_s, 2.0)
-        self.assertEqual(mesh.tet_max_delta_t_c, 10.0)
+        self.assertEqual(mesh.tet_max_delta_t_c, 15.0)
         self.assertEqual(mesh.tet_lattice_spacing_factor, 1.0)
         self.assertEqual(mesh.tet_max_nodes, 3_000_000)
 

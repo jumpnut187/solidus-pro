@@ -314,6 +314,8 @@ def build_visualization_payload(
 
     if mesh_type == "tet":
         result_data["tet_count"] = int(len(cast(TetVolumeMesh, voxel_mesh).tets))
+        # Requested tet edge length (in); the web Overview shows it as "Element size".
+        result_data["tet_edge_length_in"] = float(cast(TetVolumeMesh, voxel_mesh).base_voxel_size)
 
     visualization_data: Dict[str, Any] = {
         "mesh_type": mesh_type,
@@ -579,7 +581,10 @@ def _add_summary_statistics(result_data: Dict[str, Any], engine: SolidificationE
     if affected is not None:
         put("shrinkage_voxel_count", affected)
         voxel_count = _optional_int(result_data.get("voxel_count"))
-        if voxel_count:
+        if mesh_type_of(getattr(engine, "mesh", None)) == "tet":
+            # Tet node volumes vary with the local edge length: volume share.
+            put("shrinkage_percentage", _optional_float(engine.get_shrinkage_percentage()))
+        elif voxel_count:
             put("shrinkage_percentage", 100.0 * affected / voxel_count)
 
     put("hotspot_voxel_count", _optional_int(getattr(engine, "hotspot_count", None)))

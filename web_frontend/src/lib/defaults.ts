@@ -26,8 +26,13 @@ export const analysisDefaults: AnalysisOptions = {
  * Performance options. `use_gpu` is read by
  * `web/services/simulation_queue.py` and had no web control before; the
  * desktop defaults it on from `config.settings.use_gpu`.
+ *
+ * `mesh_type` ('voxel' | 'tet') reaches `PipelineInputs.mesh_type` through
+ * `build_pipeline_inputs`. The server does not expose
+ * `settings.mesh.mesh_type`, so the client default is 'voxel'.
  */
 export const performanceDefaults: PerformanceOptions = {
+  mesh_type: 'voxel',
   use_gpu: true,
   use_incremental: false,
   use_chunked_voxelization: false,
@@ -57,6 +62,13 @@ export function buildSolidificationDefaults(): SolidificationParams {
 }
 
 export const solidificationDefaults: SolidificationParams = buildSolidificationDefaults();
+
+export type MeshType = 'voxel' | 'tet';
+
+/** The mesh type stored in `performance_options`, 'voxel' when absent or unknown. */
+export function meshTypeOf(options: PerformanceOptions): MeshType {
+  return options.mesh_type === 'tet' ? 'tet' : 'voxel';
+}
 
 export const meshDefaults = {
   voxelSize: 0.1,

@@ -1,5 +1,5 @@
 import { Group, SetupPanel } from '../SetupPanel';
-import { meshDefaults } from '../../lib/defaults';
+import { meshDefaults, meshTypeOf, type MeshType } from '../../lib/defaults';
 import type { ProjectSettings } from '../../lib/api';
 
 export type MeshStatus = { text: string; tone: 'info' | 'warning' | 'success' } | null;
@@ -34,12 +34,30 @@ export function MeshPanel({
   onReset,
   onClose
 }: MeshPanelProps) {
+  const meshType = meshTypeOf(settings.performance_options);
+  const tet = meshType === 'tet';
+  const sizeLabel = tet ? 'Element size' : 'Base voxel size';
+  const setMeshType = (value: MeshType) =>
+    onPatch({ performance_options: { ...settings.performance_options, mesh_type: value } });
+
   return (
     <SetupPanel title="Mesh" onClose={onClose} onReset={onReset}>
       <Group title="Resolution">
+        <div className="field">
+          <span className="field-label">Mesh type</span>
+          <div className="segmented segmented-block" role="group" aria-label="Mesh type">
+            <button type="button" aria-pressed={tet} onClick={() => setMeshType('tet')}>
+              Tetrahedral
+            </button>
+            <button type="button" aria-pressed={!tet} onClick={() => setMeshType('voxel')}>
+              Voxel
+            </button>
+          </div>
+        </div>
+
         <label className="field">
           <span className="field-label">
-            Base voxel size
+            {sizeLabel}
             <span className="field-unit">{settings.voxel_size.toFixed(3)} in</span>
           </span>
           <input
@@ -49,12 +67,15 @@ export function MeshPanel({
             max={meshDefaults.voxelSizeMax}
             step={meshDefaults.voxelSizeStep}
             value={settings.voxel_size}
-            aria-label="Base voxel size"
+            aria-label={sizeLabel}
             onChange={(event) => onPatch({ voxel_size: Number(event.target.value) })}
           />
           <span className="field-hint">
-            Smaller voxels resolve thin sections and gating channels but cost memory and time. Halving the
-            size multiplies the voxel count by roughly eight.
+            {tet
+              ? 'Target tetrahedron edge length. Smaller elements resolve thin sections but cost memory and time. ' +
+                'Halving the size multiplies the node count by roughly eight.'
+              : 'Smaller voxels resolve thin sections and gating channels but cost memory and time. Halving the ' +
+                'size multiplies the voxel count by roughly eight.'}
           </span>
         </label>
 
@@ -104,7 +125,9 @@ export function MeshPanel({
         {note(
           mlStatus,
           hasParts
-            ? 'Suggests a voxel size and refinement level from the geometry.'
+            ? tet
+              ? 'Suggests an element size from the geometry and estimates its node count.'
+              : 'Suggests a voxel size and refinement level from the geometry.'
             : 'Add a part to request a recommendation.'
         )}
       </Group>
