@@ -256,3 +256,36 @@ class TetLatticeSampler:
 - Keep the layer contract (`tests/test_architecture_boundaries.py`).
 - Report: files changed, public API, test commands run with pass/fail counts,
   open risks.
+
+## Wave 1 outcomes (binding for later waves)
+
+Reports: `wave1_mesh.md`, `wave1_solver.md`, `wave1_lattice.md`. Commit 20e098d.
+
+- `TetVolumeMesh.__init__(node_xyz, tets, tet_part_types, boundary_faces,
+  boundary_face_part_types, boundary_face_contact_codes, *, base_voxel_size,
+  metal_part_bounds=())` builds a mesh from arrays (useful in tests).
+- `voxel_neighbors` on a tet mesh is (N, K) with K = max degree (23-29 measured),
+  ascending node ids, -1 padded. It is NOT 26-slot canonical.
+- Faces against a removed FILTER have contact code 8. Use `htc_gating` (400,
+  flow path) for them. Faces against CORE use the CORE h0.
+- `TetHeatTransferModel.temperatures` is a property over a live buffer.
+  In-place edits are seen by the next `step`; assignment copies into it.
+  Extra API: `stiffness_matrix()`, `last_used_direct_solver`, `n_nodes`,
+  `n_tets`, `tet_volumes` (m3), `boundary_face_areas` (m2). Nodes not used by any
+  tet raise ValueError.
+- Solver cost (Jacobi CG): ~30-90 ms/step at 200-330k tets for dt 0.1-2 s.
+- fTetWild is multithreaded and not bit-deterministic (node counts vary ~0.5 %).
+  Tests must use tolerances. 2 M tets takes ~1 min to mesh.
+- `LatticeView.voxel_moduli` = distance to the nearest surface cell centre
+  (voxel-path semantics). `TetLatticeSampler` raises
+  `core.dense_grid.LatticeTooLargeError` above `MAX_LATTICE_CELLS`.
+- Host FP fix: `ti.init` (Taichi Metal) left flush-to-zero on the main thread,
+  which made scipy `cKDTree` recurse forever and segfault. `core/gpu_compute.py`
+  now restores the default FP environment after init
+  (`tests/test_gpu_fp_environment.py`). If you see a SIGSEGV inside scipy,
+  check `np.float64(5e-324) > 0` first.
+- Full-suite baseline before the migration (1810 tests): 3 pre-existing
+  failures, `test_filling_stability...test_a_deeper_tower_leaves_none_either`,
+  `test_porosity_benchmark_case_pack...test_case_pack_reference_targets`
+  (riser_post_block), `test_shrinkage_display_intensity...test_shrink_scalar_below_one...`.
+  Do not chase these.
