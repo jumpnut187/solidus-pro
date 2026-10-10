@@ -187,6 +187,10 @@ class HeatTransferModel:
         diffusivity_overrides: Optional[tuple[np.ndarray, np.ndarray]] = None,
         property_curves: Optional[Dict[str, np.ndarray]] = None,
         rho_cp_overrides: Optional[tuple[np.ndarray, np.ndarray]] = None,
+        capacity_weights: Optional[np.ndarray] = None,
+        boundary_areas: Optional[np.ndarray] = None,
+        slave_cells: Optional[tuple[np.ndarray, np.ndarray]] = None,
+        cut_cell_apertures: bool = True,
     ):
         """
         Initialize heat transfer model.
@@ -206,6 +210,23 @@ class HeatTransferModel:
                 (kg/m³) for temperature-dependent properties
             rho_cp_overrides: Optional ``(indices, rho_cp_values)`` pair for
                 per-voxel volumetric heat capacity (e.g., graphite chills)
+            capacity_weights: Optional (N,) share of each cell's dx_i^3 that
+                holds material (cut cells). Heat capacity becomes
+                rho_cp * w_i * dx_i^3. A weight of 0 marks a slaved cell
+                (see ``slave_cells``). A link i-j carries
+                min(f_i, f_j) * (a_i + a_j) / 2 (``cut_cell_conductance_factors``,
+                ``cut_cell_link_apertures``): symmetric, so conservative, and
+                no cell's explicit rate exceeds the full-cell rate. With
+                property curves, capacity is rho(T)*cp(T) from the curves.
+            boundary_areas: Optional (N,) boundary area per cell in m^2.
+                Robin and heat-flux terms then use A_i / (w_i * dx_i^3)
+                instead of 1/dx_i.
+            cut_cell_apertures: Scale cut-cell links by the open-face
+                estimate (a_i + a_j) / 2 with a = clip(w, 0, 1)
+                (``cut_cell_link_apertures``). False keeps full links.
+            slave_cells: Optional ``(slaves, masters)`` index pair. After
+                each step a slave copies its master's temperature; the
+                caller has moved the slave's capacity and area to the master.
         """
         self.n_voxels = n_voxels
         self.voxel_size = voxel_size
@@ -262,6 +283,52 @@ class HeatTransferModel:
         )
         self._numba_parallel_eligible = bool(NUMBA_AVAILABLE and not use_temperature_dependent)
         self._last_step_used_numba = False
+
+        # Cut cells (all None when not supplied: the full-cell code paths
+        # below stay exactly as they were).
+        self._capacity_weights: Optional[FloatArray] = None
+        self._conductance_factors: Optional[FloatArray] = None
+        self._link_apertures: Optional[FloatArray] = None
+        self._boundary_area_per_volume: Optional[FloatArray] = None
+        self._slave_cells: Optional[tuple[IntArray, IntArray]] = None
+        # rho*cp at the curve points (J/m3/K). Cut cells with property curves
+        # use rho(T)*cp(T) for capacity, Robin and latent beta, the same
+        # interpolation of the product the tet solver uses.
+        self._capacity_curve: Optional[FloatArray] = None
+        self._step_rho_cp: Optional[FloatArray] = None
+        if capacity_weights is None and boundary_areas is not None:
+            capacity_weights = np.ones(n_voxels, dtype=np.float64)
+        if capacity_weights is not None:
+            weights = np.ascontiguousarray(capacity_weights, dtype=np.float64).reshape(-1)
+            if weights.shape != (n_voxels,) or np.any(weights < 0.0) or not np.all(np.isfinite(weights)):
+                raise ValueError("capacity_weights must be (n_voxels,) finite and >= 0")
+            self._capacity_weights = weights
+            self._link_apertures = (
+                cut_cell_link_apertures(weights) if cut_cell_apertures else np.ones(n_voxels, dtype=np.float64)
+            )
+            self._conductance_factors = cut_cell_conductance_factors(weights, neighbors, self._link_apertures)
+            if property_curves is not None and use_temperature_dependent:
+                self._capacity_curve = np.ascontiguousarray(self._curve_rho * self._curve_cp)
+        if boundary_areas is not None:
+            areas = np.asarray(boundary_areas, dtype=np.float64).reshape(-1)
+            if areas.shape != (n_voxels,):
+                raise ValueError("boundary_areas must be (n_voxels,)")
+            sizes = (
+                self._voxel_sizes
+                if self._voxel_sizes is not None
+                else np.full(n_voxels, voxel_size, dtype=np.float64)
+            )
+            weights = self._capacity_weights if self._capacity_weights is not None else np.ones(n_voxels)
+            cell_volume = weights * sizes ** 3
+            self._boundary_area_per_volume = np.divide(
+                areas, cell_volume, out=np.zeros(n_voxels, dtype=np.float64), where=cell_volume > 0.0
+            )
+        if slave_cells is not None:
+            slaves, masters = slave_cells
+            self._slave_cells = (
+                np.asarray(slaves, dtype=np.int64).reshape(-1),
+                np.asarray(masters, dtype=np.int64).reshape(-1),
+            )
         
         # Count neighbors for each voxel (kept for API compatibility; the
         # weighted 27-point Laplacian no longer normalizes by neighbor count).
@@ -397,7 +464,75 @@ class HeatTransferModel:
             min_dx2 = 1.0 / float(np.max(self._inv_dx2))
         else:
             min_dx2 = 1.0 / float(self._inv_dx2)
+        if self._capacity_weights is not None:
+            return self._cut_cell_stable_timestep(alpha)
         return 0.9 * min_dx2 / (4.0 * self._get_alpha_max(alpha))
+
+    def volumetric_heat_capacity(self, temperatures: Optional[FloatArray] = None) -> FloatArray:
+        """(N,) rho*cp in J/m3/K at ``temperatures`` (default: the current field).
+
+        Cut cells with property curves: rho(T)*cp(T) from the curves, chill
+        overrides applied. Otherwise the scalar rho_l*cp with the overrides.
+        """
+        T = self._temperatures if temperatures is None else np.asarray(temperatures, dtype=np.float64)
+        if self._capacity_curve is not None:
+            if NUMBA_AVAILABLE:
+                rho_cp = interpolate_curve_parallel(
+                    np.ascontiguousarray(T, dtype=np.float64), self._curve_temp, self._capacity_curve
+                )
+            else:
+                rho_cp = np.interp(T, self._curve_temp, self._capacity_curve)
+        else:
+            rho_cp = np.full(len(T), self._rho_cp_scalar, dtype=np.float64)
+        if self._rho_cp_overrides is not None:
+            rcp_idx, rcp_vals = self._rho_cp_overrides
+            rho_cp[rcp_idx] = rcp_vals
+        return rho_cp
+
+    def _cut_cell_stable_timestep(self, alpha: Optional[FloatArray] = None) -> float:
+        """0.9 / max_i(conduction rate_i + Robin rate_i), the exact per-cell explicit bound.
+
+        rate_i = sum_j w_slot * min(f_i, f_j) * k_ij / (rho_cp_i * w_i * dx_i^2)
+               + h(t) * A_i / (rho_cp_i * w_i * dx_i^3)
+        with rho_cp_i at the current field (the minimum capacity governs).
+        """
+        T = self._temperatures
+        if self.use_temperature_dependent:
+            alpha_arr = (
+                np.array(alpha, dtype=np.float64, copy=True)
+                if alpha is not None
+                else self._get_temperature_dependent_diffusivity(T)
+            )
+        else:
+            alpha_arr = np.full(self.n_voxels, float(self._alpha), dtype=np.float64)
+        if self._diffusivity_overrides is not None:
+            override_idx, override_vals = self._diffusivity_overrides
+            alpha_arr[override_idx] = override_vals
+        rho_cp = self.volumetric_heat_capacity(T)
+        rates = (cut_cell_conduction_rates_parallel if NUMBA_AVAILABLE else cut_cell_conduction_rates_numpy)(
+            self.neighbors,
+            np.ascontiguousarray(alpha_arr),
+            rho_cp,
+            self._capacity_weights,
+            self._conductance_factors,
+            self._link_apertures,
+            self._inv_dx2_arr,
+        )
+        if self._boundary_area_per_volume is not None:
+            apv = self._boundary_area_per_volume
+            for bc in self._boundaries:
+                if bc.type not in (BoundaryType.CONVECTION, BoundaryType.INTERFACE) or len(bc.indices) == 0:
+                    continue
+                h = bc.htc
+                if bc.type == BoundaryType.INTERFACE and bc.time_function is not None:
+                    h = bc.htc * bc.time_function(self.time)
+                idx = bc.indices
+                rates[idx] += float(h) * apv[idx] / rho_cp[idx]
+        max_rate = float(np.max(rates)) if len(rates) else 0.0
+        if not np.isfinite(max_rate) or max_rate <= 0.0:
+            min_dx2 = 1.0 / float(np.max(self._inv_dx2_arr))
+            return 0.9 * min_dx2 / (4.0 * float(self._alpha))
+        return 0.9 / max_rate
 
     def _get_alpha_max(self, alpha: Optional[FloatArray] = None) -> float:
         """
@@ -500,6 +635,10 @@ class HeatTransferModel:
         else:
             self._step_internal(dt, alpha_precomputed=alpha0)
 
+        if self._slave_cells is not None and len(self._slave_cells[0]) > 0:
+            slaves, masters = self._slave_cells
+            self._temperatures[slaves] = self._temperatures[masters]
+
         self.time += dt
 
     def _step_internal(self, dt: float, alpha_precomputed: Optional[FloatArray] = None) -> None:
@@ -535,12 +674,14 @@ class HeatTransferModel:
             override_idx, override_vals = self._diffusivity_overrides
             alpha[override_idx] = override_vals
 
+        cut_cells = self._capacity_weights is not None
         use_numba_kernels = bool(
             self._numba_parallel_eligible
             and not isinstance(alpha, np.ndarray)
             and self._rho_cp_overrides is None
+            and not cut_cells
         )
-        heterogeneous = isinstance(alpha, np.ndarray) or self._rho_cp_overrides is not None
+        heterogeneous = isinstance(alpha, np.ndarray) or self._rho_cp_overrides is not None or cut_cells
         use_heterogeneous_numba = bool(NUMBA_AVAILABLE and heterogeneous)
         self._last_step_used_numba = use_numba_kernels or use_heterogeneous_numba
 
@@ -634,7 +775,32 @@ class HeatTransferModel:
             if self._rho_cp_overrides is not None:
                 rcp_idx, rcp_vals = self._rho_cp_overrides
                 rho_cp_arr[rcp_idx] = rcp_vals
-            if use_heterogeneous_numba:
+            if cut_cells:
+                rho_cp_arr = self.volumetric_heat_capacity(T)
+                self._step_rho_cp = rho_cp_arr
+                alpha_arr = (
+                    alpha
+                    if isinstance(alpha, np.ndarray)
+                    else np.full(self.n_voxels, alpha, dtype=np.float64)
+                )
+                cut_cell_update = (
+                    update_heterogeneous_cut_cell_parallel
+                    if use_heterogeneous_numba
+                    else update_heterogeneous_cut_cell_numpy
+                )
+                T_new[:] = cut_cell_update(
+                    T,
+                    self.neighbors,
+                    np.ascontiguousarray(alpha_arr, dtype=np.float64),
+                    rho_cp_arr,
+                    self._capacity_weights,
+                    self._conductance_factors,
+                    self._link_apertures,
+                    self._inv_dx2_arr,
+                    source_term,
+                    dt,
+                )
+            elif use_heterogeneous_numba:
                 alpha_arr = (
                     alpha
                     if isinstance(alpha, np.ndarray)
@@ -733,6 +899,12 @@ class HeatTransferModel:
             rcp_idx, rcp_vals = self._rho_cp_overrides
             rho_cp_arr = np.full(self.n_voxels, rho_cp, dtype=np.float64)
             rho_cp_arr[rcp_idx] = rcp_vals
+        if self._boundary_area_per_volume is not None:
+            step_rho_cp = self._step_rho_cp
+            self._apply_cut_cell_boundaries(
+                T_new, T_old, dt, step_rho_cp if step_rho_cp is not None else rho_cp_arr
+            )
+            return
         for bc in self._boundaries:
             if bc.type == BoundaryType.FIXED_TEMPERATURE:
                 # Dirichlet: T = T_boundary
@@ -791,6 +963,35 @@ class HeatTransferModel:
                 # No-flux boundary: ∂T/∂n = 0
                 # Nothing to do (handled by finite difference stencil)
                 pass
+
+    def _apply_cut_cell_boundaries(
+        self,
+        T_new: FloatArray,
+        T_old: FloatArray,
+        dt: float,
+        rho_cp_arr: Optional[FloatArray],
+    ) -> None:
+        """``_apply_boundaries`` with area per volume A_i/(w_i dx_i^3) in place of 1/dx_i.
+
+        Same explicit form, evaluated against the pre-update field:
+            T_new[i] -= dt * h * (T_old[i] - T_inf) * A_i / (rho_cp_i * w_i * dx_i^3)
+        A cell with no boundary area (or a slaved cell) gets no flux even
+        when it is listed in a boundary set.
+        """
+        apv = self._boundary_area_per_volume
+        rho_cp = self._rho_cp_scalar
+        for bc in self._boundaries:
+            idx = bc.indices
+            rc_i = rho_cp_arr[idx] if rho_cp_arr is not None else rho_cp
+            if bc.type == BoundaryType.FIXED_TEMPERATURE:
+                T_new[idx] = bc.get_effective_value(self.time)
+            elif bc.type == BoundaryType.CONVECTION:
+                T_new[idx] -= dt * bc.htc * (T_old[idx] - bc.T_infinity) * apv[idx] / rc_i
+            elif bc.type == BoundaryType.INTERFACE:
+                h = bc.htc * (bc.time_function(self.time) if bc.time_function else 1.0)
+                T_new[idx] -= dt * h * (T_old[idx] - bc.T_infinity) * apv[idx] / rc_i
+            elif bc.type == BoundaryType.HEAT_FLUX:
+                T_new[idx] += dt * bc.get_effective_value(self.time) * apv[idx] / rc_i
     
     def _get_temperature_dependent_diffusivity(self, T: FloatArray) -> FloatArray:
         """
@@ -856,6 +1057,153 @@ class HeatTransferModel:
             Cooling rate in °C/s
         """
         return (prev_temperatures - self._temperatures) / dt
+
+
+def _stencil_slot_weights(max_slot: int) -> np.ndarray:
+    """Per-slot weights of the 27-point stencil: faces 0.5, edges 0, corners 0.125."""
+    weights = np.zeros(max_slot, dtype=np.float64)
+    weights[: min(6, max_slot)] = 0.5
+    weights[min(18, max_slot) : min(26, max_slot)] = 0.125
+    return weights
+
+
+#: Cut-cell link scaling lets a cell's explicit rate reach this multiple of
+#: the full-cell rate 4*alpha/dx^2 before its links are scaled down. 1.0 keeps
+#: the flag-off time step; larger values keep more of the conduction between
+#: a cut cell and its neighbours at the price of a smaller time step.
+CUT_CELL_RATE_ALLOWANCE = 1.0
+
+
+def cut_cell_link_apertures(capacity_weights: FloatArray) -> FloatArray:
+    """a_i = clip(w_i, 0, 1). A link carries the open-face estimate (a_i + a_j) / 2.
+
+    A cheap stand-in for FAVOR face apertures: the face between a cut cell
+    and a full cell is estimated half open, the face between two equal cut
+    cells as open as the cells are full.
+    """
+    return np.clip(np.asarray(capacity_weights, dtype=np.float64), 0.0, 1.0)
+
+
+def cut_cell_conductance_factors(
+    capacity_weights: FloatArray,
+    neighbors: IntArray,
+    apertures: Optional[FloatArray] = None,
+    rate_allowance: float = CUT_CELL_RATE_ALLOWANCE,
+) -> FloatArray:
+    """f_i = min(1, allowance * S_full * w_i / S_i): link scale that caps cell i's explicit rate.
+
+    S_i = sum_j w_slot_j * (a_i + a_j) / 2 over the neighbours cell i has
+    (a = 1 without apertures), S_full = 4 for the 26-slot stencil. With
+    pair scale s_ij = min(f_i, f_j) * (a_i + a_j) / 2 the explicit rate of
+    cell i, alpha * sum_j w_slot_j * s_ij / (w_i dx^2), stays at or below
+    allowance * alpha * S_full / dx^2, so allowance 1 keeps every cell
+    stable at the full-cell step. A cut cell at a wall has lost neighbours
+    and open face, so it needs little or no scaling. Cells with w_i = 0
+    (slaves) get f_i = 0 and lose every link.
+    """
+    nbrs = np.asarray(neighbors)
+    weights = np.asarray(capacity_weights, dtype=np.float64)
+    a = np.ones(len(weights)) if apertures is None else np.asarray(apertures, dtype=np.float64)
+    slot_weights = _stencil_slot_weights(nbrs.shape[1])
+    valid = nbrs >= 0
+    pair = 0.5 * (a[:, None] + a[np.maximum(nbrs, 0)])
+    present = np.sum(np.where(valid, slot_weights[None, :] * pair, 0.0), axis=1)
+    full = float(np.sum(slot_weights))
+    factors = np.ones(len(weights), dtype=np.float64)
+    linked = present > 0.0
+    factors[linked] = np.minimum(1.0, rate_allowance * full * weights[linked] / present[linked])
+    factors[weights <= 0.0] = 0.0
+    return factors
+
+
+def update_heterogeneous_cut_cell_numpy(
+    T: FloatArray,
+    neighbors: IntArray,
+    alpha: FloatArray,
+    rho_cp: FloatArray,
+    capacity_weights: FloatArray,
+    conductance_factors: FloatArray,
+    apertures: FloatArray,
+    inv_dx2: FloatArray,
+    source: FloatArray,
+    dt: float,
+) -> FloatArray:
+    """NumPy reference for ``update_heterogeneous_cut_cell_parallel``.
+
+    The conservative two-point flux update with cut cells:
+        T_new[i] = T[i] + dt / (rho_cp_i * w_i * dx_i^2)
+                   * sum_j w_slot_j * min(f_i, f_j) * k_ij * (T_j - T_i)
+                   + dt * source[i]
+    Cells with w_i = 0 keep T[i]. Slots are summed in the same symmetric
+    pairs as ``update_heterogeneous_parallel``.
+    """
+    n = len(T)
+    max_slot = neighbors.shape[1]
+    k_arr = alpha * rho_cp
+    f = conductance_factors
+    flux = np.zeros(n, dtype=np.float64)
+
+    def pair_term(slot: int) -> FloatArray:
+        nb = neighbors[:, slot]
+        valid = nb >= 0
+        safe = np.maximum(nb, 0)
+        k_n = np.where(valid, k_arr[safe], 0.0)
+        s = np.minimum(f, np.where(valid, f[safe], 0.0)) * 0.5 * (apertures + apertures[safe])
+        k_in = s * (2.0 * k_arr * k_n / (k_arr + k_n + 1e-30))
+        return np.where(valid, k_in * (T[safe] - T), 0.0)
+
+    for j_a in range(0, min(6, max_slot) - 1, 2):
+        flux += 0.5 * (pair_term(j_a) + pair_term(j_a + 1))
+    j = min(18, max_slot)
+    corner_end = min(26, max_slot)
+    while j < corner_end - 1:
+        flux += 0.125 * (pair_term(j) + pair_term(j + 1))
+        j += 2
+    if j < corner_end:
+        flux += 0.125 * pair_term(j)
+
+    capacity = rho_cp * capacity_weights
+    T_new = np.array(T, dtype=np.float64, copy=True)
+    active = capacity_weights > 0.0
+    T_new[active] = (
+        T[active]
+        + dt * (flux[active] * inv_dx2[active]) / capacity[active]
+        + dt * source[active]
+    )
+    return T_new
+
+
+def cut_cell_conduction_rates_numpy(
+    neighbors: IntArray,
+    alpha: FloatArray,
+    rho_cp: FloatArray,
+    capacity_weights: FloatArray,
+    conductance_factors: FloatArray,
+    apertures: FloatArray,
+    inv_dx2: FloatArray,
+) -> FloatArray:
+    """(N,) explicit conduction rate per cell, 1/s (NumPy reference of the Numba kernel).
+
+    rate_i = sum_j w_slot_j * min(f_i, f_j) * k_ij * inv_dx2_i / (rho_cp_i * w_i),
+    the diagonal of the cut-cell update; 0 for cells with w_i = 0. A step
+    dt <= 1 / max(rate) keeps every cell a convex combination of its
+    neighbours.
+    """
+    max_slot = neighbors.shape[1]
+    slot_weights = _stencil_slot_weights(max_slot)
+    k_arr = alpha * rho_cp
+    total = np.zeros(len(alpha), dtype=np.float64)
+    for slot in range(max_slot):
+        if slot_weights[slot] == 0.0:
+            continue
+        nb = neighbors[:, slot]
+        valid = nb >= 0
+        safe = np.maximum(nb, 0)
+        k_n = k_arr[safe]
+        s = np.minimum(conductance_factors, conductance_factors[safe]) * 0.5 * (apertures + apertures[safe])
+        total += np.where(valid, slot_weights[slot] * s * (2.0 * k_arr * k_n / (k_arr + k_n + 1e-30)), 0.0)
+    capacity = rho_cp * capacity_weights
+    return np.divide(total * inv_dx2, capacity, out=np.zeros(len(alpha)), where=capacity_weights > 0.0)
 
 
 # ============================================================================
@@ -1087,6 +1435,163 @@ if NUMBA_AVAILABLE:
             )
 
         return T_new
+
+    @njit(parallel=True, fastmath=True, cache=True)
+    def update_heterogeneous_cut_cell_parallel(
+        T: FloatArray,
+        neighbors: IntArray,
+        alpha: FloatArray,
+        rho_cp: FloatArray,
+        capacity_weights: FloatArray,
+        conductance_factors: FloatArray,
+        apertures: FloatArray,
+        inv_dx2: FloatArray,
+        source: FloatArray,
+        dt: float,
+    ) -> FloatArray:
+        """Cut-cell form of ``update_heterogeneous_parallel``.
+
+            T_new[i] = T[i] + dt / (rho_cp_i * w_i * dx_i^2)
+                       * sum_j w_slot_j * min(f_i, f_j) * k_ij * (T_j - T_i)
+                       + dt * source[i]
+
+        ``capacity_weights`` w_i scale the heat capacity, and
+        ``conductance_factors`` f_i scale each link (pair value min(f_i, f_j),
+        so the flux stays antisymmetric). Cells with w_i = 0 keep T[i].
+        NumPy reference: ``update_heterogeneous_cut_cell_numpy``.
+        """
+        n = len(T)
+        max_slot = neighbors.shape[1]
+        slot_face_end = min(6, max_slot)
+        slot_corner_start = min(18, max_slot)
+        slot_corner_end = min(26, max_slot)
+        T_new = np.empty(n, dtype=np.float64)
+
+        for i in prange(n):
+            t_i = T[i]
+            w_i = capacity_weights[i]
+            if w_i <= 0.0:
+                T_new[i] = t_i
+                continue
+            k_i = alpha[i] * rho_cp[i]
+            f_i = conductance_factors[i]
+            a_i = apertures[i]
+            flux_sum = 0.0
+
+            for j in range(0, slot_face_end - 1, 2):
+                x_a = 0.0
+                n_a = neighbors[i, j]
+                if n_a >= 0:
+                    k_a = alpha[n_a] * rho_cp[n_a]
+                    s_a = min(f_i, conductance_factors[n_a]) * 0.5 * (a_i + apertures[n_a])
+                    x_a = s_a * ((2.0 * k_i * k_a) / (k_i + k_a + 1e-30)) * (T[n_a] - t_i)
+                x_b = 0.0
+                n_b = neighbors[i, j + 1]
+                if n_b >= 0:
+                    k_b = alpha[n_b] * rho_cp[n_b]
+                    s_b = min(f_i, conductance_factors[n_b]) * 0.5 * (a_i + apertures[n_b])
+                    x_b = s_b * ((2.0 * k_i * k_b) / (k_i + k_b + 1e-30)) * (T[n_b] - t_i)
+                flux_sum += 0.5 * (x_a + x_b)
+
+            j = slot_corner_start
+            while j < slot_corner_end - 1:
+                x_a = 0.0
+                n_a = neighbors[i, j]
+                if n_a >= 0:
+                    k_a = alpha[n_a] * rho_cp[n_a]
+                    s_a = min(f_i, conductance_factors[n_a]) * 0.5 * (a_i + apertures[n_a])
+                    x_a = s_a * ((2.0 * k_i * k_a) / (k_i + k_a + 1e-30)) * (T[n_a] - t_i)
+                x_b = 0.0
+                n_b = neighbors[i, j + 1]
+                if n_b >= 0:
+                    k_b = alpha[n_b] * rho_cp[n_b]
+                    s_b = min(f_i, conductance_factors[n_b]) * 0.5 * (a_i + apertures[n_b])
+                    x_b = s_b * ((2.0 * k_i * k_b) / (k_i + k_b + 1e-30)) * (T[n_b] - t_i)
+                flux_sum += 0.125 * (x_a + x_b)
+                j += 2
+            if j < slot_corner_end:
+                n_a = neighbors[i, j]
+                if n_a >= 0:
+                    k_a = alpha[n_a] * rho_cp[n_a]
+                    s_a = min(f_i, conductance_factors[n_a]) * 0.5 * (a_i + apertures[n_a])
+                    flux_sum += 0.125 * (
+                        s_a * ((2.0 * k_i * k_a) / (k_i + k_a + 1e-30)) * (T[n_a] - t_i)
+                    )
+
+            T_new[i] = (
+                t_i
+                + (dt * (flux_sum * inv_dx2[i]) / (rho_cp[i] * w_i))
+                + dt * source[i]
+            )
+
+        return T_new
+
+    @njit(parallel=True, cache=True)
+    def interpolate_curve_parallel(
+        T: FloatArray,
+        temp_points: FloatArray,
+        values: FloatArray,
+    ) -> FloatArray:
+        """``np.interp(T, temp_points, values)`` in one parallel pass (same forward scan as the diffusivity kernel)."""
+        n = len(T)
+        m = len(temp_points)
+        out = np.empty(n, dtype=np.float64)
+        t_lo = temp_points[0]
+        t_hi = temp_points[m - 1]
+        for i in prange(n):
+            t = T[i]
+            if t <= t_lo:
+                out[i] = values[0]
+            elif t >= t_hi:
+                out[i] = values[m - 1]
+            else:
+                j = 0
+                for s in range(m - 1):
+                    if t < temp_points[s + 1]:
+                        j = s
+                        break
+                x0 = temp_points[j]
+                inv_dx = 1.0 / (temp_points[j + 1] - x0)
+                out[i] = (values[j + 1] - values[j]) * inv_dx * (t - x0) + values[j]
+        return out
+
+    @njit(parallel=True, cache=True)
+    def cut_cell_conduction_rates_parallel(
+        neighbors: IntArray,
+        alpha: FloatArray,
+        rho_cp: FloatArray,
+        capacity_weights: FloatArray,
+        conductance_factors: FloatArray,
+        apertures: FloatArray,
+        inv_dx2: FloatArray,
+    ) -> FloatArray:
+        """Numba form of ``cut_cell_conduction_rates_numpy``."""
+        n = len(alpha)
+        max_slot = neighbors.shape[1]
+        slot_face_end = min(6, max_slot)
+        slot_corner_start = min(18, max_slot)
+        slot_corner_end = min(26, max_slot)
+        rates = np.zeros(n, dtype=np.float64)
+        for i in prange(n):
+            w_i = capacity_weights[i]
+            if w_i <= 0.0:
+                continue
+            k_i = alpha[i] * rho_cp[i]
+            f_i = conductance_factors[i]
+            a_i = apertures[i]
+            total = 0.0
+            for j in range(slot_face_end):
+                n_a = neighbors[i, j]
+                if n_a >= 0:
+                    k_a = alpha[n_a] * rho_cp[n_a]
+                    total += 0.5 * min(f_i, conductance_factors[n_a]) * 0.5 * (a_i + apertures[n_a]) * (2.0 * k_i * k_a / (k_i + k_a + 1e-30))
+            for j in range(slot_corner_start, slot_corner_end):
+                n_a = neighbors[i, j]
+                if n_a >= 0:
+                    k_a = alpha[n_a] * rho_cp[n_a]
+                    total += 0.125 * min(f_i, conductance_factors[n_a]) * 0.5 * (a_i + apertures[n_a]) * (2.0 * k_i * k_a / (k_i + k_a + 1e-30))
+            rates[i] = total * inv_dx2[i] / (rho_cp[i] * w_i)
+        return rates
 
     @njit(parallel=True, cache=True)
     def compute_gradient_magnitude_parallel(

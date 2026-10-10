@@ -459,11 +459,17 @@ class StressAnalyzer:
         if show_progress:
             print("  Computing distortion magnitude...")
         
-        distortion_magnitude = compute_distortion_magnitude(
-            distortion_vectors,
-            constraint_strain,
-            self.mesh.base_voxel_size
-        )
+        is_tet = getattr(self.mesh, "mesh_type", "voxel") == "tet"
+        if is_tet:
+            # Tet nodes have no single pitch: scale by the local mean edge length.
+            local_size = np.asarray(self.mesh.voxel_sizes, dtype=np.float64).reshape(-1)
+            distortion_magnitude = local_size * np.linalg.norm(distortion_vectors, axis=1)
+        else:
+            distortion_magnitude = compute_distortion_magnitude(
+                distortion_vectors,
+                constraint_strain,
+                self.mesh.base_voxel_size
+            )
         
         # Step 5: Compute crack susceptibility
         if show_progress:
@@ -482,9 +488,16 @@ class StressAnalyzer:
         
         # Calculate statistics
         max_stress = np.max(effective_stress)
-        avg_stress = np.mean(effective_stress)
         max_distortion = np.max(distortion_magnitude)
-        high_stress_fraction = np.sum(high_stress_zones) / n_voxels
+        if is_tet:
+            # Node volumes vary with edge length: weight averages by lumped volume.
+            volumes = np.asarray(self.mesh.voxel_volumes, dtype=np.float64)
+            total_volume = max(float(np.sum(volumes)), 1e-30)
+            avg_stress = float(np.sum(effective_stress * volumes) / total_volume)
+            high_stress_fraction = float(np.sum(volumes[high_stress_zones]) / total_volume)
+        else:
+            avg_stress = np.mean(effective_stress)
+            high_stress_fraction = np.sum(high_stress_zones) / n_voxels
         
         self.result = StressAnalysisResult(
             thermal_strain=thermal_strain.astype(np.float32),

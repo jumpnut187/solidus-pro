@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any, Dict, cast
 
@@ -11,6 +12,7 @@ from core.materials import get_all_alloy_names, get_alloy
 from core.memory_limits import estimate_voxel_count, validate_mesh_parameters
 from core.mesh_ml import MeshRecommendation, recommend_mesh_settings
 from core.stl_loader import STLLoader
+from config.settings import MESH_TYPES, get_settings
 from web.services.simulation_queue import SimulationQueueManager
 from web import repository as repo
 from web.payloads import (
@@ -224,16 +226,88 @@ def delete_part(project_id: str, part_id: str):
     return jsonify({"status": "deleted"})
 
 
+def requested_mesh_type(body: Dict[str, Any]) -> str:
+    """``body["mesh_type"]`` normalized, or ``settings.mesh.mesh_type`` when absent.
+
+    Raises ``ValueError`` for an unknown mesh type.
+    """
+    requested = body.get("mesh_type")
+    if requested is None:
+        return str(get_settings().mesh.mesh_type)
+    mesh_type = str(requested).strip().lower()
+    if mesh_type not in MESH_TYPES:
+        raise ValueError(f"Unknown mesh type {requested!r}; expected one of {', '.join(MESH_TYPES)}")
+    return mesh_type
+
+
+def tet_mesh_estimate(manager: Any, voxel_size: float) -> Dict[str, Any]:
+    """Estimated tet node count for the project's parts at ``voxel_size``.
+
+    Mirrors the pipeline's guards: edge length = ``voxel_size *
+    tet_edge_length_factor``. With ``tet_auto_fallback`` on, a run above
+    ``min(tet_auto_max_nodes, tet_max_nodes)`` runs on the voxel mesh instead
+    (``falls_back_to_voxel``); with it off, a run is refused above
+    ``tet_max_nodes``. ``can_proceed`` says whether the run stays on tet.
+    ``recommended_voxel_size`` is the size that lands at the limit, or None
+    when the estimate is under it.
+    """
+    from core.part_manager import PART_TYPE_CAST
+    from core.simulation_pipeline import estimate_tet_node_count, tet_edge_length_for_node_limit
+
+    mesh_settings = get_settings().mesh
+    factor = float(mesh_settings.tet_edge_length_factor)
+    edge_length_in = float(voxel_size) * factor
+    parts = manager.get_parts_with_types() or [(manager.get_combined_mesh(), PART_TYPE_CAST)]
+    estimated_nodes = estimate_tet_node_count(parts, edge_length_in)
+    auto_fallback = bool(mesh_settings.tet_auto_fallback)
+    max_nodes = int(mesh_settings.tet_max_nodes)
+    limit_name = "tet_max_nodes"
+    if auto_fallback and int(mesh_settings.tet_auto_max_nodes) < max_nodes:
+        max_nodes = int(mesh_settings.tet_auto_max_nodes)
+        limit_name = "tet_auto_max_nodes"
+    can_proceed = estimated_nodes <= max_nodes
+    recommended_voxel_size = None
+    message = f"About {estimated_nodes:,} tet nodes at {edge_length_in:g} in edge length."
+    if not can_proceed:
+        # Rounded up to 0.001 in so the recommended size passes the guard.
+        recommended_voxel_size = math.ceil(
+            1000.0 * tet_edge_length_for_node_limit(parts, max_nodes) / factor
+        ) / 1000.0
+        message = (
+            f"About {estimated_nodes:,} tet nodes is above the limit of {max_nodes:,} "
+            f"(settings.mesh.{limit_name})."
+        )
+        if auto_fallback:
+            message += " The run will use the voxel mesh instead."
+    return {
+        "mesh_type": "tet",
+        "estimated_nodes": estimated_nodes,
+        "max_nodes": max_nodes,
+        "edge_length_in": edge_length_in,
+        "can_proceed": can_proceed,
+        "falls_back_to_voxel": auto_fallback and not can_proceed,
+        "message": message,
+        "recommended_voxel_size": recommended_voxel_size,
+    }
+
+
 @api_bp.route("/projects/<project_id>/mesh-preview", methods=["POST"])
 def mesh_preview(project_id: str):
     parts = repo.get_parts(database_path(), project_id)
     if not parts:
         return jsonify({"error": "No parts in project"}), 400
-    voxel_size = float((request.json or {}).get("voxel_size", 0.1))
+    body = request.json or {}
+    voxel_size = float(body.get("voxel_size", 0.1))
+    try:
+        mesh_type = requested_mesh_type(body)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     manager = build_part_manager(parts)
     bounds = manager.get_combined_bounds()
     if bounds is None:
         return jsonify({"error": "Unable to calculate bounds"}), 400
+    if mesh_type == "tet":
+        return jsonify(tet_mesh_estimate(manager, voxel_size))
     bounds_tuple = (
         (float(bounds[0][0]), float(bounds[0][1])),
         (float(bounds[1][0]), float(bounds[1][1])),
@@ -269,23 +343,33 @@ def ml_mesh(project_id: str):
     loader = STLLoader()
     if not loader.load_stl(stl_filepath):
         return jsonify({"error": "Failed to load CAD file"}), 400
-    target_accuracy = (request.json or {}).get("target_accuracy")
+    body = request.json or {}
+    try:
+        mesh_type = requested_mesh_type(body)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    target_accuracy = body.get("target_accuracy")
     try:
         recommendation: MeshRecommendation = recommend_mesh_settings(
             loader, target_accuracy=target_accuracy
         )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    return jsonify(
-        {
-            "base_voxel_size": recommendation.base_voxel_size,
-            "refinement_level": recommendation.refinement_level,
-            "confidence": recommendation.confidence,
-            "reason": recommendation.reason,
-            "used_model": recommendation.used_model,
-            "warning": recommendation.warning,
-        }
-    )
+    response: Dict[str, Any] = {
+        "base_voxel_size": recommendation.base_voxel_size,
+        "refinement_level": recommendation.refinement_level,
+        "confidence": recommendation.confidence,
+        "reason": recommendation.reason,
+        "used_model": recommendation.used_model,
+        "warning": recommendation.warning,
+    }
+    if mesh_type == "tet":
+        # The recommendation is a voxel size; on tet it is the mesh size (edge = size x factor).
+        # Report the node count it implies.
+        estimate = tet_mesh_estimate(build_part_manager(parts), recommendation.base_voxel_size)
+        for key in ("mesh_type", "estimated_nodes", "max_nodes", "edge_length_in", "can_proceed"):
+            response[key] = estimate[key]
+    return jsonify(response)
 
 
 @api_bp.route("/projects/<project_id>/run", methods=["POST"])

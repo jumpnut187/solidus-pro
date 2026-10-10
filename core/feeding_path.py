@@ -444,6 +444,25 @@ class FeedingPathAnalyzer:
         self._edge_cache = (neighbors, edge_i, edge_j)
         return edge_i, edge_j
 
+    def _tet_volumes(self) -> Optional[np.ndarray]:
+        """Lumped node volumes on a tet mesh, ``None`` on a voxel mesh."""
+        if getattr(self.mesh, "mesh_type", "voxel") != "tet":
+            return None
+        return np.asarray(self.mesh.voxel_volumes, dtype=np.float64)
+
+    def _fed_statistics(self, fed_mask: np.ndarray, path_length: np.ndarray) -> Tuple[float, float]:
+        """``(fed_fraction, avg_path_length)`` for a tet mesh, weighted by node volume."""
+        volumes = self._tet_volumes()
+        total = float(np.sum(volumes))
+        fed_volume = float(np.sum(volumes[fed_mask]))
+        fed_fraction = fed_volume / total if total > 0.0 else 0.0
+        avg_length = (
+            float(np.sum(path_length[fed_mask] * volumes[fed_mask]) / fed_volume)
+            if fed_volume > 0.0
+            else 0.0
+        )
+        return fed_fraction, avg_length
+
     def liquid_network_cutoff(
         self,
         riser_mask: np.ndarray,
@@ -560,6 +579,10 @@ class FeedingPathAnalyzer:
         blocked_voxels |= self.liquid_network_cutoff(riser_mask, fraction_solid, neighbors)
         open_mask = path_length >= 0.0
         latest_open_time = np.where(open_mask, 0.0, -1.0).astype(np.float32)
+        fed_fraction = n_fed / n_voxels if n_voxels > 0 else 0.0
+        avg_path_length = total_path_length / n_fed if n_fed > 0 else 0.0
+        if self._tet_volumes() is not None:
+            fed_fraction, avg_path_length = self._fed_statistics(fed_mask, path_length)
 
         return FeedingPathResult(
             feeding_quality=feeding_quality,
@@ -569,8 +592,8 @@ class FeedingPathAnalyzer:
             blocked_voxels=blocked_voxels,
             history_open_fraction=open_mask.astype(np.float32),
             latest_open_time=latest_open_time,
-            fed_fraction=n_fed / n_voxels if n_voxels > 0 else 0.0,
-            avg_path_length=total_path_length / n_fed if n_fed > 0 else 0.0,
+            fed_fraction=fed_fraction,
+            avg_path_length=avg_path_length,
             max_path_length=max_path_len,
             n_blocked=n_blocked,
         )
@@ -833,6 +856,10 @@ class FeedingPathAnalyzer:
 
             fed_count = int(np.sum(fed_mask))
             valid_lengths = path_length[fed_mask]
+            fed_fraction = fed_count / n_voxels if n_voxels > 0 else 0.0
+            avg_path_length = float(np.mean(valid_lengths)) if valid_lengths.size > 0 else 0.0
+            if self._tet_volumes() is not None:
+                fed_fraction, avg_path_length = self._fed_statistics(fed_mask, path_length)
             self.result = FeedingPathResult(
                 feeding_quality=feeding_quality,
                 path_length=path_length,
@@ -841,8 +868,8 @@ class FeedingPathAnalyzer:
                 blocked_voxels=blocked_voxels,
                 history_open_fraction=history_open_fraction,
                 latest_open_time=latest_open_time,
-                fed_fraction=fed_count / n_voxels if n_voxels > 0 else 0.0,
-                avg_path_length=float(np.mean(valid_lengths)) if valid_lengths.size > 0 else 0.0,
+                fed_fraction=fed_fraction,
+                avg_path_length=avg_path_length,
                 max_path_length=float(np.max(valid_lengths)) if valid_lengths.size > 0 else 0.0,
                 n_blocked=int(np.sum(blocked_voxels)),
             )

@@ -391,7 +391,7 @@ def build_fork_artifact(result: PipelineResult) -> Dict[str, Any]:
         "crack_susceptibility": getattr(engine, "crack_susceptibility", None),
         "sdas": _normalize(getattr(engine, "sdas", None)),
         "predicted_uts": _invert(_normalize(getattr(engine, "predicted_uts", None))),
-        "porosity": getattr(engine, "porosity_probability", None),
+        "porosity": _display_field(engine, "get_microporosity_display_intensity", "porosity_probability"),
         "feeding_blocked": getattr(engine, "feeding_blocked", None),
         "feeding_path_lengths": getattr(engine, "feeding_path_lengths", None),
         "feeding_open_fraction": getattr(engine, "feeding_open_fraction", None),
@@ -419,6 +419,11 @@ def build_fork_artifact(result: PipelineResult) -> Dict[str, Any]:
     if isinstance(niyama_metadata, dict):
         summary["niyama_metadata"] = dict(niyama_metadata)
     summary["raw_ranges"] = raw_ranges
+    if _is_tet_mesh(mesh):
+        # The JSON keeps a strided node preview (centers, part types and
+        # fields stay per node); the field grid comes from the tet source.
+        visualization["mesh_type"] = TET_MESH_TYPE
+        _label_tet_fill_counts(summary)
 
     return {
         "summary": summary,
@@ -440,6 +445,33 @@ def build_fork_artifact(result: PipelineResult) -> Dict[str, Any]:
 #: Stripped before the JSON is written; never present in a file on disk.
 GRID_SOURCE_KEY = "_grid_source"
 
+#: ``mesh_type`` of a tet-mesh run (``core.tet_mesh.TetVolumeMesh``).
+TET_MESH_TYPE = "tet"
+
+#: Summary keys renamed on tet runs. The fill-time counts are counted over
+#: the node-length arrival times, so "voxels" would mislabel them; the
+#: client derives the label from the key.
+_TET_FILL_COUNT_KEYS = {
+    "fill_filled_voxel_count": "fill_nodes_filled_count",
+    "fill_unfilled_voxel_count": "fill_nodes_unfilled_count",
+}
+
+
+def _is_tet_mesh(mesh: Any) -> bool:
+    return getattr(mesh, "mesh_type", "voxel") == TET_MESH_TYPE
+
+
+def _label_tet_fill_counts(summary: Dict[str, Any]) -> None:
+    """Rename the tet run's fill counts to say they count nodes."""
+    for old_key, new_key in _TET_FILL_COUNT_KEYS.items():
+        if old_key in summary:
+            summary[new_key] = summary.pop(old_key)
+    fill_stats = summary.get("fill_time_stats")
+    if isinstance(fill_stats, dict):
+        summary["fill_time_stats"] = {
+            key.replace("_voxels", "_nodes"): value for key, value in fill_stats.items()
+        }
+
 
 def _full_grid_source(engine: Any, mesh: Any, source_centers: np.ndarray) -> Dict[str, Any]:
     """
@@ -456,10 +488,30 @@ def _full_grid_source(engine: Any, mesh: Any, source_centers: np.ndarray) -> Dic
         "sizes": _full_array(getattr(mesh, "voxel_sizes", None), count),
         "part_types": _full_array(getattr(mesh, "voxel_part_types", None), count),
     }
+    if _is_tet_mesh(mesh):
+        # ``centers`` are the nodes and every field below is per node.
+        # web.fields samples them onto a lattice through the tets; these
+        # stay numpy and never reach JSON.
+        from core.dense_grid import tet_presentation_spacing
+
+        source["mesh_type"] = TET_MESH_TYPE
+        # float64 nodes, so the lattice matches the one every other tet
+        # consumer builds from ``node_xyz`` (float32 can shift the box by a cell).
+        source["centers"] = np.asarray(mesh.node_xyz, dtype=np.float64)
+        source["tets"] = np.asarray(mesh.tets, dtype=np.int32)
+        source["tet_part_types"] = np.asarray(mesh.tet_part_types, dtype=np.int8)
+        source["lattice_spacing"] = tet_presentation_spacing(mesh)
+
+    # Shrink and Microporosity: the same display arrays the desktop paints.
+    for key, method_name, attribute in (
+        ("shrinkage", "get_shrink_display_intensity", "shrinkage_probability"),
+        ("porosity", "get_microporosity_display_intensity", "porosity_probability"),
+    ):
+        values = _full_array(_display_field(engine, method_name, attribute), count)
+        if values is not None:
+            source[key] = values
 
     for key, attribute in (
-        ("shrinkage", "shrinkage_probability"),
-        ("porosity", "porosity_probability"),
         ("feed_modulus", "local_modulus"),
         ("hotspot", "hotspot_intensity"),
         ("solidification_times", "solidification_times"),
@@ -558,6 +610,15 @@ def write_artifact(path: Path, artifact: Dict[str, Any]) -> None:
     # payload the JSON carries.
     grid_source = artifact.pop(GRID_SOURCE_KEY, None)
 
+    # Imported here rather than at module scope: web.fields pulls in scipy,
+    # and this module is imported by paths that only need the CAD helpers.
+    from web.fields import TET_MESH_TYPE, build_artifact_grids, save_artifact_sidecar, write_sidecar_for_artifact
+
+    # A tet grid is built before the JSON is written: a lattice over the cell
+    # limit is recorded in the summary, because the JSON cannot rebuild it.
+    tet_run = (grid_source or artifact.get("visualization") or {}).get("mesh_type") == TET_MESH_TYPE
+    tet_grids = build_artifact_grids(artifact, grid_source=grid_source) if tet_run else None
+
     handle_fd, temporary_name = tempfile.mkstemp(
         prefix=path.name + ".", suffix=".tmp", dir=str(path.parent)
     )
@@ -570,11 +631,12 @@ def write_artifact(path: Path, artifact: Dict[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
         raise
 
-    # Imported here rather than at module scope: web.fields pulls in scipy,
-    # and this module is imported by paths that only need the CAD helpers.
-    from web.fields import write_sidecar_for_artifact
-
-    write_sidecar_for_artifact(path, artifact, grid_source=grid_source)
+    # The sidecar is saved after the JSON so its mtime is not older.
+    if tet_run:
+        if tet_grids is not None:
+            save_artifact_sidecar(path, tet_grids)
+    else:
+        write_sidecar_for_artifact(path, artifact, grid_source=grid_source)
 
 
 def _matching_indices(source_centers: np.ndarray, sampled_centers: np.ndarray) -> np.ndarray:
@@ -607,6 +669,22 @@ def _normalize(values: Any) -> Optional[np.ndarray]:
     if max_v <= min_v:
         return np.zeros_like(arr, dtype=np.float32)
     return np.clip((arr - min_v) / (max_v - min_v), 0.0, 1.0).astype(np.float32)
+
+
+def _display_field(engine: Any, method_name: str, attribute: str) -> Any:
+    """The engine's display array for a result (``method_name()``), else the raw attribute.
+
+    Shrink and Microporosity go through ``get_shrink_display_intensity`` and
+    ``get_microporosity_display_intensity`` so the web shows the same arrays
+    as the desktop (chill points at 0). An engine without the method, or
+    without the attribute, falls back to the attribute (or None).
+    """
+    if getattr(engine, attribute, None) is None:
+        return None
+    method = getattr(engine, method_name, None)
+    if callable(method):
+        return method()
+    return getattr(engine, attribute)
 
 
 def _invert(values: Any) -> Optional[np.ndarray]:

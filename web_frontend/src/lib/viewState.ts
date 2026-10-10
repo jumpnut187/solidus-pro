@@ -8,6 +8,8 @@
  * in `defaultResultViewState`). The shell owner consumes them.
  */
 import type { PourLocationPayload, ProjectPart } from './api';
+// Shared with the desktop app (core/result_help.py reads the same file).
+import resultHelp from '../../../core/result_help.json';
 import type { ModelingEvent, ModelingViewState, Vec3 } from './modeling/types';
 
 // ---------------------------------------------------------------------------
@@ -42,8 +44,8 @@ export const RESULT_MODE_IDS = [
 export type ResultModeId = (typeof RESULT_MODE_IDS)[number];
 
 export const RESULT_MODE_LABELS: Record<ResultModeId, string> = {
-  shrinkage: 'Shrinkage / Porosity',
-  porosity: 'Porosity',
+  shrinkage: 'Shrink',
+  porosity: 'Microporosity',
   feed_modulus: 'Feed Modulus',
   hotspot: 'Hot Spots',
   solidification_time: 'Solidification Time',
@@ -65,6 +67,14 @@ export const RESULT_MODE_LABELS: Record<ResultModeId, string> = {
   sdas: 'SDAS (Microstructure)',
   predicted_uts: 'Predicted UTS'
 };
+
+/**
+ * One-paragraph help per result mode: what it shows, units, how to read high
+ * values, how it is computed and its default threshold. The text lives in
+ * core/result_help.json so the desktop shows the same wording; typing it as a
+ * Record makes the build fail if a mode has no entry.
+ */
+export const RESULT_MODE_HELP: Record<ResultModeId, string> = resultHelp;
 
 /** Display unit for the legend; empty string means a dimensionless 0..1 risk field. */
 export const RESULT_MODE_UNITS: Partial<Record<ResultModeId, string>> = {
@@ -108,8 +118,8 @@ export function isTimeMode(mode: ResultModeId): boolean {
 
 /** Recommended envelope threshold (percent) per mode, mirroring the desktop defaults. */
 export const DEFAULT_THRESHOLD: Record<ResultModeId, number> = {
-  shrinkage: 30,
-  porosity: 30,
+  shrinkage: 70,
+  porosity: 70,
   feed_modulus: 1,
   hotspot: 30,
   solidification_time: 50,

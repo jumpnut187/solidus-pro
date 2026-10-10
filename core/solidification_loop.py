@@ -818,15 +818,17 @@ def _apply_enthalpy_correction_numpy(
     T_liq: float,
     T_sol: float,
     dT: float,
-    beta: float,
+    beta: float | np.ndarray,
 ) -> None:
     """
     NumPy reference for the implicit latent-heat correction.
 
     Fallback for when the Numba kernel is unavailable, and the parity
     reference the kernel is tested against. Writes into ``T_final``; see
-    ``_run_thermal_coupled_integration`` for the derivation.
+    ``_run_thermal_coupled_integration`` for the derivation. ``beta`` is a
+    scalar (voxel path) or a per-point array (tet path, ``L_i / C_i``).
     """
+    beta_all = np.broadcast_to(np.asarray(beta, dtype=np.float64), T_post.shape)
     T_final[:] = T_post
     below_liq = T_post < T_liq
     if not np.any(below_liq):
@@ -837,7 +839,8 @@ def _apply_enthalpy_correction_numpy(
     active = (fs_max > fs_prev[liq_idx]) & (T_post[liq_idx] > T_sol)
     if np.any(active):
         sel = liq_idx[active]
-        T_mush = (T_post[sel] + beta * (T_liq / dT - fs_prev[sel])) / (1.0 + beta / dT)
+        beta_sel = beta_all[sel]
+        T_mush = (T_post[sel] + beta_sel * (T_liq / dT - fs_prev[sel])) / (1.0 + beta_sel / dT)
         # Branch: implicit solve leaves the mushy zone upward (would
         # remelt -> no latent, keep T_post) or downward (all latent
         # released at solidus -> recalesce by the remaining fraction).
@@ -848,7 +851,7 @@ def _apply_enthalpy_correction_numpy(
             T_post[sel],
             np.where(
                 all_solid,
-                T_post[sel] + beta * (1.0 - fs_prev[sel]),
+                T_post[sel] + beta_sel * (1.0 - fs_prev[sel]),
                 T_mush,
             ),
         )
@@ -868,9 +871,61 @@ def _apply_enthalpy_correction_numpy(
         # T_sol makes coarse-step crossings consistent with the
         # fine-step limit.
         T_final[sel2] = np.minimum(
-            T_post[sel2] + beta * np.clip(remaining, 0.0, 1.0),
+            T_post[sel2] + beta_all[sel2] * np.clip(remaining, 0.0, 1.0),
             T_sol,
         )
+
+
+def _invert_enthalpy_numpy(
+    T_post: np.ndarray,
+    fs_prev: np.ndarray,
+    T_final: np.ndarray,
+    T_liq: float,
+    T_sol: float,
+    beta: np.ndarray,
+) -> None:
+    """Exact enthalpy inversion per point (``core.tet_thermal.invert_tet_enthalpy`` semantics).
+
+    The heat step left h = T_post + beta * (1 - fs_prev). T_final solves
+    h = T + beta * (1 - fs(T)) with fs(T) = max(fs_prev, lever(T)):
+    T_post where T_post >= T_p = T_liq - fs_prev * dT (no new solid), h when
+    h < T_sol (fully solid, all remaining latent released, no cap), else
+    the mushy root (T_post * dT + beta * T_p) / (dT + beta). Unlike
+    ``_apply_enthalpy_correction_numpy`` it never caps recalescence, so no
+    latent heat is discarded. Writes into ``T_final``.
+    """
+    dT = max(float(T_liq) - float(T_sol), 1e-6)
+    fs = np.clip(fs_prev, 0.0, 1.0)
+    h = T_post + beta * (1.0 - fs)
+    T_p = T_liq - fs * dT
+    T_mush = (T_post * dT + beta * T_p) / (dT + beta)
+    T_final[:] = np.where(T_post >= T_p, T_post, np.where(h < T_sol, h, T_mush))
+
+
+@_jit
+def _invert_enthalpy_kernel(
+    T_post: np.ndarray,
+    fs_prev: np.ndarray,
+    T_final: np.ndarray,
+    T_liq: float,
+    T_sol: float,
+    beta: np.ndarray,
+) -> None:  # pragma: no cover - numba
+    """Numba form of ``_invert_enthalpy_numpy``."""
+    dT = max(T_liq - T_sol, 1e-6)
+    for i in prange(T_post.shape[0]):
+        fs = min(max(fs_prev[i], 0.0), 1.0)
+        t = T_post[i]
+        b = beta[i]
+        t_p = T_liq - fs * dT
+        if t >= t_p:
+            T_final[i] = t
+        else:
+            h = t + b * (1.0 - fs)
+            if h < T_sol:
+                T_final[i] = h
+            else:
+                T_final[i] = (t * dT + b * t_p) / (dT + b)
 
 
 def _run_thermal_coupled_integration(
@@ -917,6 +972,8 @@ def _run_thermal_coupled_integration(
     n_voxels = int(np.asarray(heat_model.temperatures).size)
     T_final = np.empty(n_voxels, dtype=np.float64)
     fs_prev = np.empty(n_voxels, dtype=np.float64)
+    # Voxel cut cells (core/cut_cells.py) take the exact enthalpy inversion.
+    cut_cell_mode = getattr(engine, "_cut_cell_merge", None) is not None
 
     while iteration < max_iterations:
         previous_states = np.asarray(engine.mesh.voxel_states, dtype=np.float32).copy()
@@ -955,7 +1012,18 @@ def _run_thermal_coupled_integration(
         )
         beta = l_vol / rho_cp  # K of recalescence per unit fraction solid
 
-        if ENTHALPY_KERNEL_AVAILABLE:
+        if cut_cell_mode:
+            # Cut cells: exact inversion with beta_i = L_vol / rho_cp_i(T_post)
+            # (rho(T)*cp(T) on curve runs). The heat step used rho_cp at the
+            # pre-step temperature; the lag is O(dt) (tests/test_cut_cells.py
+            # LatentHeatTest). phi scales latent and sensible capacity alike,
+            # so it cancels.
+            beta_cells = l_vol / heat_model.volumetric_heat_capacity(T_post)
+            if NUMBA_THREADING_AVAILABLE:
+                _invert_enthalpy_kernel(T_post, fs_prev, T_final, T_liq, T_sol, beta_cells)
+            else:
+                _invert_enthalpy_numpy(T_post, fs_prev, T_final, T_liq, T_sol, beta_cells)
+        elif ENTHALPY_KERNEL_AVAILABLE:
             apply_enthalpy_correction_parallel(
                 T_post, fs_prev, T_final, T_liq, T_sol, dT, beta
             )
@@ -1131,6 +1199,15 @@ def run_time_integration(
     Execute the solidification time loop and update engine state in place.
     """
     _configure_numba_threads_for_solidification(engine, show_progress=show_progress)
+
+    if getattr(getattr(engine, "mesh", None), "mesh_type", "voxel") == "tet":
+        from core.tet_thermal import run_tet_thermal_integration
+
+        return run_tet_thermal_integration(
+            engine,
+            show_progress=show_progress,
+            progress_callback=progress_callback,
+        )
 
     solver_mode = getattr(getattr(engine, "analysis_options", None), "solver_mode", None)
     if solver_mode == THERMAL_COUPLED_SOLVER_MODE:

@@ -1058,7 +1058,8 @@ Thirteen analysis overlay modes are available:
 
 | Mode | Data Source | Units | Description |
 |------|-------------|-------|-------------|
-| Shrinkage/Porosity | `shrinkage_probability` | probability (0-1) | Predicted shrinkage defect probability |
+| Shrink | `shrinkage_probability` | probability (0-1) | Predicted macro-shrinkage defect probability |
+| Microporosity | `porosity_probability` | probability (0-1) | Niyama + feed-path blockage + Darcy margin porosity risk |
 | Feed Modulus | `local_modulus` | inches | industry-standard feed modulus |
 | Hot Spots | `hotspot_intensity` | 0-1 | Hot spot intensity |
 | Niyama Criterion | `niyama_values` | $K^{1/2} \cdot s^{1/2} \cdot cm^{-1}$ | Niyama criterion values |

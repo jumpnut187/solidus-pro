@@ -325,6 +325,60 @@ def estimate_cooling_rate_from_solidification(
     return cooling_rates
 
 
+@jit(nopython=True, parallel=True, fastmath=True, cache=True)
+def estimate_cooling_rate_from_solidification_edges(
+    solidification_times: np.ndarray,
+    neighbors: np.ndarray,
+    point_centers: np.ndarray,
+    local_sizes: np.ndarray,
+    liquidus_temp: float,
+    solidus_temp: float,
+) -> np.ndarray:
+    """Tet-mesh variant of :func:`estimate_cooling_rate_from_solidification`.
+
+    Tet edges vary in length, so each neighbour time difference is turned
+    into a time gradient with the true edge length ``|c_i - c_j|`` and scaled
+    back to one local spacing ``local_sizes[i]`` (inches). On a uniform mesh
+    this equals the lattice rule; the same bounded refinement then applies.
+    """
+    n_points = len(solidification_times)
+    width = neighbors.shape[1]
+    cooling_rates = np.zeros(n_points, dtype=np.float64)
+    freezing_range = liquidus_temp - solidus_temp
+
+    for i in prange(n_points):
+        my_time = solidification_times[i]
+        if my_time <= 0:
+            cooling_rates[i] = 10.0
+            continue
+        base_rate = freezing_range / my_time
+
+        max_time_diff = 0.0
+        neighbor_count = 0
+        for j in range(width):
+            neighbor_idx = neighbors[i, j]
+            if neighbor_idx < 0:
+                continue
+            dx = point_centers[i, 0] - point_centers[neighbor_idx, 0]
+            dy = point_centers[i, 1] - point_centers[neighbor_idx, 1]
+            dz = point_centers[i, 2] - point_centers[neighbor_idx, 2]
+            dist = np.sqrt(dx * dx + dy * dy + dz * dz)
+            if dist <= 1e-12:
+                continue
+            time_diff = abs(my_time - solidification_times[neighbor_idx]) * (local_sizes[i] / dist)
+            max_time_diff = max(max_time_diff, time_diff)
+            neighbor_count += 1
+
+        if neighbor_count > 0 and max_time_diff > 0:
+            gradient_factor = min(1.5, 1.0 + (max_time_diff / my_time) * 0.5)
+            cooling_rates[i] = base_rate * gradient_factor
+        else:
+            cooling_rates[i] = base_rate
+        cooling_rates[i] = max(0.01, min(100.0, cooling_rates[i]))
+
+    return cooling_rates
+
+
 class MicrostructurePredictor:
     """
     Predicts microstructure (SDAS) and mechanical properties from cooling rate.
@@ -415,7 +469,12 @@ class MicrostructurePredictor:
         )
         
         # Step 3: Identify fine/coarse structure zones
-        avg_sdas = np.mean(sdas)
+        if getattr(self.mesh, "mesh_type", "voxel") == "tet":
+            # Node volumes vary with edge length: volume-weighted averages.
+            volumes = np.asarray(self.mesh.voxel_volumes, dtype=np.float64)
+            avg_sdas = float(np.average(sdas, weights=volumes))
+        else:
+            avg_sdas = np.mean(sdas)
         fine_threshold = avg_sdas * 0.7  # 30% below average
         coarse_threshold = avg_sdas * 1.3  # 30% above average
         
@@ -425,7 +484,10 @@ class MicrostructurePredictor:
         # Statistics
         min_sdas = np.min(sdas)
         max_sdas = np.max(sdas)
-        avg_uts = np.mean(uts)
+        if getattr(self.mesh, "mesh_type", "voxel") == "tet":
+            avg_uts = float(np.average(uts, weights=volumes))
+        else:
+            avg_uts = np.mean(uts)
         
         self.result = MicrostructureResult(
             sdas=sdas.astype(np.float32),
@@ -470,13 +532,23 @@ class MicrostructurePredictor:
         
         neighbors = np.ascontiguousarray(self.mesh.voxel_neighbors, dtype=np.int32)
         
-        cooling_rates = estimate_cooling_rate_from_solidification(
-            np.ascontiguousarray(solidification_times, dtype=np.float64),
-            neighbors,
-            self.liquidus_temp,
-            self.solidus_temp,
-            self.mesh.base_voxel_size
-        )
+        if getattr(self.mesh, "mesh_type", "voxel") == "tet":
+            cooling_rates = estimate_cooling_rate_from_solidification_edges(
+                np.ascontiguousarray(solidification_times, dtype=np.float64),
+                neighbors,
+                np.ascontiguousarray(self.mesh.voxel_centers, dtype=np.float64),
+                np.ascontiguousarray(self.mesh.voxel_sizes, dtype=np.float64),
+                self.liquidus_temp,
+                self.solidus_temp,
+            )
+        else:
+            cooling_rates = estimate_cooling_rate_from_solidification(
+                np.ascontiguousarray(solidification_times, dtype=np.float64),
+                neighbors,
+                self.liquidus_temp,
+                self.solidus_temp,
+                self.mesh.base_voxel_size
+            )
         
         if show_progress:
             print(f"    Cooling rate range: {np.min(cooling_rates):.2f} - {np.max(cooling_rates):.2f} °C/s")

@@ -376,7 +376,7 @@ class PartsDialog(DraggableDialog):
             type_combo = QComboBox()
             type_combo.addItems(self.PART_TYPE_OPTIONS)
             type_combo.setToolTip(
-                "Cast: Actual casting - analyzed for shrinkage/porosity\n"
+                "Cast: Actual casting - analyzed for shrink and microporosity\n"
                 "Riser: Feeder with exothermic effect - slows cooling\n"
                 "Riser Post: Riser neck/post connecting riser to casting\n"
                 "Chill: External chill - accelerates cooling"

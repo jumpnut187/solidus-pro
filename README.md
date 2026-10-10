@@ -34,6 +34,29 @@ Load your full casting assembly in one go:
 
 Automatic part-type detection from filenames. Parallel point-containment assignment that scales to massive assemblies.
 
+### Mesh Type — Voxel (default) or Tetrahedral (opt-in)
+The Mesh dialog (desktop) and Mesh panel (web) choose the simulation mesh:
+- **Voxel** (default) — adaptive voxel grid, explicit thermal solver.
+- **Tetrahedral** (opt-in) — conforming tet mesh from fTetWild (`pytetwild`), implicit P1 finite-element thermal solve. It follows the CAD surface, so metal volume matches the CAD instead of overshooting at coarse sizes. The tet edge length is the mesh size times `mesh.tet_edge_length_factor` (2.0). Requires `thermal_coupled` (forced). Tet results are the accuracy reference for the voxel path.
+
+Projects saved without a mesh type open as Voxel in both UIs. Select tet with `mesh.mesh_type: tet` in `castsim.yaml`, `CASTSIM_MESH_TYPE=tet`, or the Mesh dialog/panel.
+
+A tet run falls back to the voxel mesh automatically (`mesh.tet_auto_fallback`, on by default) and finishes as a voxel run when the estimated node count is above `mesh.tet_auto_max_nodes` (300,000), when fTetWild fails on every attempt, or when fTetWild runs longer than `mesh.tet_mesh_timeout_s` (600 s). The reason shows in the status line and an after-run notice on the desktop, and in a banner on the web Results panel. With the fallback off, those cases stop the run with an error, and tet meshes above `mesh.tet_max_nodes` (3,000,000) are refused with a message giving a safe mesh size.
+
+### Cut Cells — CAD-Accurate Voxel Boundary (default on)
+"Cut cells (CAD-accurate boundary)" in the Mesh dialog (desktop) and Mesh panel (web), `mesh.voxel_cut_cells` in `castsim.yaml`, or `CASTSIM_VOXEL_CUT_CELLS`. Each boundary voxel carries the metal fraction and the mold-contact area of the CAD inside it (`core/cut_cells.py`), so the voxel mesh holds the CAD metal volume and cooling surface instead of a staircase. It applies to voxel runs, including a tet run that falls back to voxel. Turn it off to reproduce results from before the option existed, bit for bit.
+
+Measured against a tet reference at 0.05 in (`tools/benchmark_cut_cells.py`), voxel size 0.1 in:
+
+| case | total time, plain voxels | total time, cut cells | field error, cut cells | wall time on/off |
+|---|---|---|---|---|
+| thick_thin | +2.2 % | +0.8 % | 0.78 % | 1.3x |
+| l_bracket | +14.2 % | +1.0 % | 1.55 % | 1.2x |
+| box + riser + chill | +17.1 % | +0.3 % | 1.83 % | 0.8x |
+| C05813 (17 parts, vs tet 0.2 in) | +9.8 % | +1.0 % | - | 0.8x |
+
+At 0.2 in: C05813 +18.0 % plain, +2.3 % with cut cells. At 0.1 in, metal volume is within 0.6 % of CAD with cut cells (C05813: 0.04 %) and 7 to 28 % over without.
+
 ### GPU Acceleration — Pick Your Weapon
 | Hardware | Backend | Status |
 |---|---|---|
@@ -60,7 +83,7 @@ Three modes for any hardware budget:
 
 | Analysis | What It Tells You |
 |---|---|
-| **Shrinkage / Porosity** | Where the metal will pull away — your primary defect map |
+| **Shrink and Microporosity** | Shrink: where the metal will pull away into a cavity — your primary defect map. Microporosity: dispersed porosity from poor Niyama, blocked feed paths and Darcy margin |
 | **Hot Spots** | Last-to-freeze zones begging for a riser |
 | **Niyama Criterion** | `G / √R` — the gold-standard directional solidification check |
 | **Fraction Liquid** | Time-resolved melt progression, full timeline playback |
@@ -196,6 +219,7 @@ References: [NIST Scheil notes](https://www.ctcms.nist.gov/~kattner/solidifc/sch
 | CPU Accel | Numba (JIT + parallel), joblib |
 | GPU Accel | MLX, Taichi (Metal) · CuPy (CUDA) · PyOpenCL (OpenCL) |
 | Mesh I/O | Trimesh, numpy-stl, cascadio (optional, for STEP) |
+| Tet meshing | pytetwild (fTetWild, MPL-2.0) + pyvista |
 | Persistence | SQLite (web projects) |
 | Reports | Jinja2 (HTML / PDF / Markdown) |
 | Plugin System | Custom materials, analysis types, viz modes |

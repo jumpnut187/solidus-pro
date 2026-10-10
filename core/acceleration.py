@@ -962,5 +962,106 @@ def compute_isolation_score_parallel(
     return isolation_score
 
 
+@jit(nopython=True, parallel=True, fastmath=True, cache=True)
+def compute_isolation_score_volume_weighted(
+    solid_times: np.ndarray,
+    neighbors: np.ndarray,
+    part_types: np.ndarray,
+    volumes: np.ndarray,
+) -> np.ndarray:
+    """Tet-mesh isolation score: volume fraction of neighbours frozen first.
+
+    Same rule as :func:`compute_isolation_score_parallel` (chill and core
+    neighbours skipped, absent slots skipped), but each neighbour counts with
+    its lumped node volume instead of 1. Tet node degree and neighbour size
+    vary (unlike the uniform 26-cell stencil), so an unweighted count lets a
+    cluster of small neighbours dominate. With uniform volumes the result is
+    identical to the count fraction. Range stays [0, 1].
+    """
+    n_points = solid_times.shape[0]
+    isolation_score = np.zeros(n_points, dtype=np.float32)
+    width = neighbors.shape[1]
+
+    for i in prange(n_points):
+        my_solid_time = solid_times[i]
+        if my_solid_time <= 0.0:
+            continue
+
+        volume_before = 0.0
+        volume_total = 0.0
+        for j in range(width):
+            neighbor_idx = neighbors[i, j]
+            if neighbor_idx < 0:
+                continue
+            neighbor_type = part_types[neighbor_idx]
+            if neighbor_type == 2 or neighbor_type == 4:
+                continue
+            weight = volumes[neighbor_idx]
+            volume_total += weight
+            neighbor_time = solid_times[neighbor_idx]
+            if neighbor_time > 0.0 and neighbor_time < my_solid_time:
+                volume_before += weight
+
+        if volume_total > 0.0:
+            isolation_score[i] = volume_before / volume_total
+
+    return isolation_score
+
+
+@jit(nopython=True, parallel=True, fastmath=True, cache=True)
+def compute_solid_path_strain_local(
+    solidification_times: np.ndarray,
+    point_centers: np.ndarray,
+    neighbor_matrix: np.ndarray,
+    thermal_expansion: float,
+    temp_range: float,
+    max_path_lengths: np.ndarray,
+) -> np.ndarray:
+    """Tet-mesh variant of :func:`compute_solid_path_strain_parallel`.
+
+    Identical rule, but the path-length cap is per point
+    (``max_path_lengths[i]``, inches) so it follows the local tet edge length
+    instead of one lattice pitch for the whole mesh.
+    """
+    n_points = solidification_times.shape[0]
+    width = neighbor_matrix.shape[1]
+    path_strain = np.zeros(n_points, dtype=np.float32)
+
+    max_time = 0.0
+    for i in range(n_points):
+        if solidification_times[i] > max_time:
+            max_time = solidification_times[i]
+    if max_time <= 0:
+        return path_strain
+
+    early_solid_threshold = max_time * 0.4
+    for i in prange(n_points):
+        my_time = solidification_times[i]
+        if my_time < early_solid_threshold:
+            continue
+        max_solid_path = 0.0
+        for j in range(width):
+            neighbor_idx = neighbor_matrix[i, j]
+            if 0 <= neighbor_idx < n_points:
+                neighbor_time = solidification_times[neighbor_idx]
+                if neighbor_time < my_time * 0.8 and neighbor_time > 0:
+                    dx = point_centers[i, 0] - point_centers[neighbor_idx, 0]
+                    dy = point_centers[i, 1] - point_centers[neighbor_idx, 1]
+                    dz = point_centers[i, 2] - point_centers[neighbor_idx, 2]
+                    dist = np.sqrt(dx * dx + dy * dy + dz * dz)
+                    time_weight = (my_time - neighbor_time) / max_time
+                    effective_path = dist * (1.0 + time_weight * 2.0)
+                    if effective_path > max_solid_path:
+                        max_solid_path = effective_path
+        cap = max_path_lengths[i]
+        if cap <= 0.0:
+            continue
+        if max_solid_path > cap:
+            max_solid_path = cap
+        path_strain[i] = thermal_expansion * temp_range * (max_solid_path / cap)
+
+    return path_strain
+
+
 # Global acceleration manager instance
 accelerator = AccelerationManager()

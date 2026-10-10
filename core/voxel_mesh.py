@@ -130,6 +130,16 @@ _PROXIMITY_CHUNK_POINTS = 512
 _WORKER_BASE_BYTES = 256 * 1024 ** 2
 
 
+def _cut_cells_enabled() -> bool:
+    """``settings.mesh.voxel_cut_cells`` (False when the settings cannot be read)."""
+    try:
+        from config.settings import get_settings
+
+        return bool(getattr(get_settings().mesh, "voxel_cut_cells", False))
+    except Exception:
+        return False
+
+
 def _available_memory_bytes() -> int:
     """Live available RAM. ``hardware.available_memory`` is an import-time snapshot."""
     try:
@@ -664,7 +674,8 @@ class AdaptiveVoxelMesh:
                  use_chunked_voxelization: bool = False,
                  part_assignment_mode: str = "auto",
                  part_assignment_workers: int = 0,
-                 part_assignment_batch_size: int = 2500):
+                 part_assignment_batch_size: int = 2500,
+                 voxel_cut_cells: Optional[bool] = None):
         """
         Args:
             base_voxel_size: Base voxel size in inches
@@ -675,6 +686,8 @@ class AdaptiveVoxelMesh:
             part_assignment_mode: "auto", "parallel", or "legacy"
             part_assignment_workers: Worker count for parallel part assignment (0 = auto)
             part_assignment_batch_size: Candidate points per containment batch
+            voxel_cut_cells: Cut cells on or off for this mesh; None reads
+                ``settings.mesh.voxel_cut_cells`` in generate()
         """
         self.base_voxel_size = base_voxel_size
         self.original_voxel_size = base_voxel_size  # Track if we had to adjust
@@ -713,6 +726,16 @@ class AdaptiveVoxelMesh:
         # Bounding boxes of metal parts (CAST/RISER/RISER_POST), recorded in
         # assign_part_types; used to detect phantom gap-fill voxels.
         self.metal_part_bounds = None
+        # Cut cells (``voxel_cut_cells``, else settings.mesh.voxel_cut_cells
+        # read in generate()). When on, voxel_volumes = phi * size^3 and
+        # voxel_surface_areas = exterior CAD area inside the cell; see
+        # core/cut_cells.py.
+        self._voxel_cut_cells_requested = voxel_cut_cells
+        self.cut_cells = False
+        self.voxel_metal_fractions = None
+        self._cut_cell_part_counts = None
+        self._cut_cell_part_meshes = None
+        self.cut_cell_stats = None
 
         # Spatial index for fast queries
         self._spatial_index = None
@@ -855,12 +878,25 @@ class AdaptiveVoxelMesh:
             print("Step 2: Skipping refinement (using uniform mesh for memory efficiency)...")
         
         refined_voxels = initial_voxels  # No refinement to save memory
+
+        cut_geometry = None
+        requested_cut_cells = getattr(self, "_voxel_cut_cells_requested", None)
+        use_cut_cells = _cut_cells_enabled() if requested_cut_cells is None else bool(requested_cut_cells)
+        if use_cut_cells and len(refined_voxels) > 0:
+            if progress_callback:
+                progress_callback(0, 100, 'cut_cells')
+            cut_geometry = self._compute_cut_cells(refined_voxels, trimesh_obj, part_meshes)
+            refined_voxels = cut_geometry.centers
+            if progress_callback:
+                progress_callback(100, 100, 'cut_cells')
         
         # Step 3: Calculate voxel properties (parallel)
         if show_progress:
             print("Step 3: Computing voxel properties (parallel)...")
         
         self._calculate_voxel_properties(refined_voxels, trimesh_obj)
+        if cut_geometry is not None:
+            self._apply_cut_cell_geometry(cut_geometry)
         
         # Check memory after property calculation
         can_continue, mem_status = self.memory_monitor.check()
@@ -905,6 +941,75 @@ class AdaptiveVoxelMesh:
         logger.log_performance("Voxel mesh generation", 0, len(self.voxel_centers))  # Duration tracked elsewhere
         return True
     
+    def _compute_cut_cells(
+        self,
+        voxels: Union[List[Dict], np.ndarray],
+        trimesh_obj: trimesh.Trimesh,
+        part_meshes: Optional[Sequence[trimesh.Trimesh]],
+    ):
+        """Cut-cell geometry for the voxelizer output (both voxelization paths)."""
+        from core.cut_cells import compute_cut_cell_geometry
+
+        if isinstance(voxels, np.ndarray):
+            centers = np.asarray(voxels, dtype=np.float64)
+        else:
+            centers = np.array([v['center'] for v in voxels], dtype=np.float64)
+        meshes = list(part_meshes) if part_meshes else [trimesh_obj]
+        geometry = compute_cut_cell_geometry(centers, float(self.base_voxel_size), meshes)
+        self._cut_cell_part_meshes = meshes
+        print(
+            f"  Cut cells: {geometry.n_input:,} voxelized, {geometry.n_duplicates:,} duplicates, {geometry.n_added:,} added, "
+            f"{geometry.n_dropped:,} dropped, {int(np.count_nonzero(geometry.sampled)):,} sampled "
+            f"({geometry.timings.get('total_s', 0.0):.1f} s)"
+        )
+        return geometry
+
+    def _apply_cut_cell_geometry(self, geometry) -> None:
+        """voxel_volumes = phi * size^3, voxel_surface_areas = exterior CAD area."""
+        n_voxels = len(self.voxel_centers)
+        self.voxel_metal_fractions = create_managed_array(
+            n_voxels, dtype=np.float32, name="voxel_metal_fractions", manager=self.memory_manager
+        )
+        self.voxel_metal_fractions[:] = geometry.metal_fractions
+        sizes = np.asarray(self.voxel_sizes, dtype=np.float64)
+        self.voxel_volumes[:] = (geometry.metal_fractions.astype(np.float64) * sizes ** 3).astype(np.float32)
+        self.voxel_surface_areas[:] = geometry.surface_areas
+        self._cut_cell_part_counts = geometry.part_counts
+        self.cut_cells = True
+        self.cut_cell_stats = {
+            "input_voxels": geometry.n_input,
+            "duplicate_voxels": geometry.n_duplicates,
+            "added_voxels": geometry.n_added,
+            "dropped_voxels": geometry.n_dropped,
+            "sampled_voxels": int(np.count_nonzero(geometry.sampled)),
+            "metal_volume_in3": float(np.sum(self.voxel_volumes, dtype=np.float64)),
+            "surface_area_in2": float(np.sum(geometry.surface_areas, dtype=np.float64)),
+            **{key: float(value) for key, value in geometry.timings.items()},
+        }
+
+    def _apply_cut_cell_part_types(self, parts_data: list) -> None:
+        """Boundary cut cells take the part code holding most of their sampled metal.
+
+        Centre containment with a half-voxel tolerance misses cells added by
+        the cut-cell pass (centres up to half a cell diagonal outside), and
+        the boundary claim is skipped on large models, so those cells would
+        default to CAST. Ties go to the higher code.
+        """
+        from core.cut_cells import dominant_part_codes
+
+        counts = self._cut_cell_part_counts
+        meshes = self._cut_cell_part_meshes
+        if not self.cut_cells or counts is None or not meshes or self.voxel_part_types is None:
+            return
+        code_by_mesh = {id(mesh): int(code) for mesh, code in parts_data if mesh is not None}
+        codes = [code_by_mesh.get(id(mesh)) for mesh in meshes]
+        if any(code is None for code in codes):
+            logger.warning("Cut-cell part types skipped: voxelized meshes differ from the part list")
+            return
+        dominant = dominant_part_codes(counts, codes)
+        sampled = dominant >= 0
+        self.voxel_part_types[sampled] = dominant[sampled].astype(np.int8)
+
     def _create_uniform_grid(self, trimesh_obj: trimesh.Trimesh, progress_callback=None,
                              part_meshes: Optional[Sequence[trimesh.Trimesh]] = None) -> Union[List[Dict], np.ndarray]:
         """Create initial uniform voxel grid - optimized using trimesh voxelization"""
@@ -1836,6 +1941,7 @@ class AdaptiveVoxelMesh:
             self._shutdown_part_assignment_pool()
 
         self._claim_unowned_boundary_voxels(cast_parts, all_parts)
+        self._apply_cut_cell_part_types(parts_data)
 
         # Count voxels by type
         counts = {

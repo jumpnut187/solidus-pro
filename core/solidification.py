@@ -58,7 +58,9 @@ from core.acceleration import (
     compute_mold_air_gap_effect_parallel,
     compute_riser_influence_parallel,
     compute_solid_path_strain_parallel,
+    compute_solid_path_strain_local,
     compute_isolation_score_parallel,
+    compute_isolation_score_volume_weighted,
 )
 from core.materials import AlloyProperties
 from core.voxel_mesh import AdaptiveVoxelMesh, _build_kdtree
@@ -142,6 +144,73 @@ VALID_SOLVER_MODES = {
     SOLVER_MODE_SCHEDULE_LEGACY,
     SOLVER_MODE_THERMAL_COUPLED,
 }
+
+#: Shrinkage/porosity probability above which a point counts as affected in
+#: the run statistics (``affected_voxel_count``, ``shrinkage_percentage``).
+SHRINKAGE_STATISTICS_THRESHOLD = 0.20
+
+
+def _is_tet_mesh(mesh) -> bool:
+    """True for a ``TetVolumeMesh`` (node DOFs, edge-adjacency rows)."""
+    return getattr(mesh, "mesh_type", "voxel") == "tet"
+
+
+def _has_cut_cells(mesh) -> bool:
+    """True for a voxel mesh built with cut cells (``core/cut_cells.py``)."""
+    return bool(getattr(mesh, "cut_cells", False)) and getattr(mesh, "voxel_metal_fractions", None) is not None
+
+
+def _volume_shares_by_point_volume(mesh) -> bool:
+    """Volume shares must weight points by ``voxel_volumes`` (tet nodes and cut cells vary in size)."""
+    return _is_tet_mesh(mesh) or _has_cut_cells(mesh)
+
+
+def _tet_graph_length_in(mesh, sources: np.ndarray, traversable: np.ndarray) -> np.ndarray:
+    """Shortest path length (inches) along tet edges from any source node.
+
+    Multi-source Dijkstra over the edges whose two ends are both traversable,
+    weighted by the edge length ``|c_i - c_j|``. Unreached nodes are ``inf``.
+    """
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import dijkstra
+
+    n_points = len(traversable)
+    sources = np.asarray(sources, dtype=np.int64)
+    sources = sources[traversable[sources]]
+    if sources.size == 0:
+        return np.full(n_points, np.inf, dtype=np.float64)
+    neighbors = np.asarray(mesh.voxel_neighbors)
+    rows = np.repeat(np.arange(n_points, dtype=np.int64), neighbors.shape[1])
+    cols = neighbors.reshape(-1).astype(np.int64)
+    keep = (cols > rows) & traversable[rows] & traversable[np.maximum(cols, 0)]
+    edge_i, edge_j = rows[keep], cols[keep]
+    centers = np.asarray(mesh.voxel_centers, dtype=np.float64)
+    lengths = np.linalg.norm(centers[edge_i] - centers[edge_j], axis=1)
+    graph = coo_matrix((lengths, (edge_i, edge_j)), shape=(n_points, n_points)).tocsr()
+    return np.asarray(dijkstra(graph, directed=False, indices=sources, min_only=True), dtype=np.float64)
+
+
+def _tet_hop_length_in(mesh) -> float:
+    """Length of one graph hop on a tet mesh: the mean edge length (inches)."""
+    hop = float(getattr(mesh, "mean_edge_length", 0.0) or 0.0)
+    if hop <= 0.0:
+        hop = float(mesh.base_voxel_size)
+    return max(hop, 1e-9)
+
+
+def _local_length_scale_in(mesh) -> np.ndarray:
+    """Per-point length scale (inches) on a tet mesh: the local mean edge length."""
+    sizes = np.asarray(mesh.voxel_sizes, dtype=np.float64).reshape(-1)
+    n_points = len(mesh.voxel_centers)
+    if sizes.size != n_points:
+        return np.full(n_points, float(mesh.base_voxel_size), dtype=np.float64)
+    return sizes
+
+
+#: B4 graphite chill: k=150 W/(m K), rho=1800 kg/m^3, cp=710 J/(kg K).
+#: Shared by the voxel and tet thermal paths.
+CHILL_THERMAL_DIFFUSIVITY_M2_S = 1.17e-4
+CHILL_RHO_CP_J_M3_K = 1800.0 * 710.0
 
 
 # Niyama critical thresholds by alloy (values below indicate defect risk)
@@ -394,6 +463,10 @@ class SolidificationEngine:
     def _get_solver_mode(self) -> str:
         """Return a normalized solver mode, defaulting to the new thermal path."""
         solver_mode = getattr(self.analysis_options, "solver_mode", SOLVER_MODE_THERMAL_COUPLED)
+        if getattr(self.mesh, "mesh_type", "voxel") == "tet":
+            from core.tet_thermal import resolve_tet_solver_mode
+
+            return resolve_tet_solver_mode(self, solver_mode)
         if solver_mode not in VALID_SOLVER_MODES:
             return SOLVER_MODE_THERMAL_COUPLED
         return solver_mode
@@ -408,8 +481,122 @@ class SolidificationEngine:
             return float(base_voxel_size)
         return 0.1
 
+    def _alloy_property_curves(self) -> Dict[str, np.ndarray]:
+        """B6: 6-point k, cp, rho curves from room temperature to liquidus + 100 C."""
+        solidus = float(self.alloy.solidus_temp)
+        liquidus = float(self.alloy.liquidus_temp)
+        k_s = float(self.alloy.thermal_conductivity)
+        cp = float(self.alloy.specific_heat)
+        rho_s = float(self.alloy.density_solid)
+        rho_l = float(self.alloy.density_liquid)
+        return {
+            "temp_points": np.array(
+                [20.0, 0.5 * solidus, solidus, (solidus + liquidus) / 2, liquidus, liquidus + 100]
+            ),
+            "conductivity": k_s * np.array([1.0, 0.95, 0.85, 0.77, 0.70, 0.665]),
+            "specific_heat": cp * np.array([0.85, 0.92, 1.0, 1.05, 1.10, 1.15]),
+            "density": np.array(
+                [rho_s, 0.98 * rho_s, 0.96 * rho_s, (rho_s + rho_l) / 2, rho_l, 0.98 * rho_l]
+            ),
+        }
+
+    def _allocate_thermal_tracking_arrays(self, n_voxels: int) -> None:
+        """Per-point peak cooling rate and Niyama capture buffers for the thermal loop."""
+        self._thermal_peak_cooling_rates = np.zeros(n_voxels, dtype=np.float32)
+        self._thermal_niyama_sampled = np.zeros(n_voxels, dtype=bool)
+        self._thermal_niyama_gradient_at_eval = np.zeros(n_voxels, dtype=np.float32)
+        self._thermal_niyama_cooling_rate_at_eval = np.zeros(n_voxels, dtype=np.float32)
+        self._thermal_niyama_temperature_at_eval = np.zeros(n_voxels, dtype=np.float32)
+        self._thermal_niyama_time_at_eval = np.zeros(n_voxels, dtype=np.float32)
+        self._thermal_niyama_values_at_eval = np.full(n_voxels, np.inf, dtype=np.float32)
+        self._thermal_niyama_quality = np.zeros(n_voxels, dtype=np.int8)
+
+    def _initial_thermal_temperatures(
+        self, n_voxels: int, chill_indices: np.ndarray, chill_temperature: float
+    ) -> np.ndarray:
+        """Fill field (or pouring temperature) with chills forced to chill temperature."""
+        if self._initial_temperature_field is not None:
+            # A pour/filling stage computed where the metal actually is and how
+            # much heat it lost on the way in. Use it instead of assuming the
+            # cavity filled instantaneously at pouring temperature.
+            initial_temperatures = np.array(
+                self._initial_temperature_field, dtype=np.float64, copy=True
+            )
+        else:
+            initial_temperatures = np.full(n_voxels, self.alloy.pouring_temp, dtype=np.float64)
+
+        # Chills are mold material: they start at mold temperature no matter
+        # what the metal did, so this override applies in both cases.
+        if len(chill_indices) > 0:
+            initial_temperatures[chill_indices] = chill_temperature
+        # Cut cells: a slaved cell starts at its master's temperature, as it is
+        # after every step. fs starts at 0 (1 for chills, and a slave shares its
+        # master's part code), so the two then invert identically.
+        cut_cell_merge = getattr(self, "_cut_cell_merge", None)
+        if cut_cell_merge is not None and len(cut_cell_merge.slaves) > 0:
+            initial_temperatures[cut_cell_merge.slaves] = initial_temperatures[cut_cell_merge.masters]
+        return initial_temperatures
+
+    def _preset_chill_solid_state(self, chill_indices: np.ndarray) -> None:
+        """Chills start pre-solid: fs = 1, start/end/local times 0, feeding fs 1."""
+        if len(chill_indices) > 0:
+            thermal_model = self._thermal_solidification_model
+            thermal_model._fraction_solid[chill_indices] = 1.0
+            thermal_model._fraction_solid_prev[chill_indices] = 1.0
+            thermal_model._solidification_start[chill_indices] = 0.0
+            thermal_model._solidification_end[chill_indices] = 0.0
+
+        self.mesh.voxel_states[:] = 0.0
+        if len(chill_indices) > 0:
+            self.mesh.voxel_states[chill_indices] = 1.0
+            self.solidification_start_times[chill_indices] = 0.0
+            self.solidification_end_times[chill_indices] = 0.0
+            self.local_solidification_time[chill_indices] = 0.0
+            self.solidification_times[chill_indices] = 0.0
+            if self.feeding_fraction_solid is not None:
+                self.feeding_fraction_solid[chill_indices] = 1.0
+
+    def _mold_interface_decay(self, h0: float, floor: Optional[float] = None) -> Callable[[float], float]:
+        """
+        Time multiplier anchored at 1.0 for contact conductance h0.
+
+        Mold heat-absorption model: the effective interface HTC combines the
+        contact conductance (h0) in series with the semi-infinite sand mold
+        penetration resistance. A constant h0 toward a constant sink
+        temperature would flash-cool the casting (a 2" WCB block froze in
+        ~12 s) because a real sand mold heats up; the penetration term
+        reproduces that ~1/sqrt(t) decay.
+
+        The INTERFACE branch multiplies bc.htc by this function, so it
+        returns the RATIO h_eff(t)/h0:
+            h_eff(t) = 1 / (1/h0 + 1/h_pen(t))
+            h_pen(t) = k_mold / sqrt(pi * alpha_mold * t)
+        floored at ``floor`` (default: the air-gap floor fraction).
+        """
+        tb = self.analysis_options.solidification_params.thermal_boundary
+        if floor is None:
+            ap = getattr(self.analysis_options.solidification_params, "air_gap", None)
+            floor = float(getattr(ap, "htc_floor_fraction", 0.35))
+        mold_k = float(getattr(tb, "mold_thermal_conductivity", 0.6))
+        mold_alpha = float(getattr(tb, "mold_thermal_diffusivity", 3.3e-7))
+        pen_prefactor = mold_k / np.sqrt(np.pi * max(mold_alpha, 1e-12))
+
+        def multiplier(t: float) -> float:
+            if t <= 0.0:
+                return 1.0
+            h_pen = pen_prefactor / np.sqrt(max(t, 1e-9))
+            h_eff = 1.0 / (1.0 / max(h0, 1e-9) + 1.0 / max(h_pen, 1e-9))
+            return max(h_eff / max(h0, 1e-9), floor)
+
+        return multiplier
+
     def _initialize_thermal_models(self, show_progress: bool) -> None:
         """Create the coupled thermal and fraction-solid models for the new solver path."""
+        if getattr(self.mesh, "mesh_type", "voxel") == "tet":
+            from core.tet_thermal import initialize_tet_thermal_models
+
+            initialize_tet_thermal_models(self, show_progress=show_progress)
+            return
         n_voxels = len(self.mesh.voxel_centers)
         voxel_size_in = self._get_mean_voxel_size_inches()
         voxel_size_m = max(inches_to_meters(voxel_size_in), 1e-6)
@@ -432,8 +619,8 @@ class SolidificationEngine:
         # The conservative two-point-flux stencil in HeatTransferModel uses
         # these per-voxel values so the cast/chill interface conserves energy.
         chill_indices = self._get_chill_voxel_indices()
-        chill_alpha = 1.17e-4
-        chill_rho_cp = 1800.0 * 710.0
+        chill_alpha = CHILL_THERMAL_DIFFUSIVITY_M2_S
+        chill_rho_cp = CHILL_RHO_CP_J_M3_K
         diffusivity_overrides = None
         rho_cp_overrides = None
         if len(chill_indices) > 0:
@@ -449,64 +636,33 @@ class SolidificationEngine:
 
         # B6: temperature-dependent material property curves (k, cp, rho) with
         # reference points spanning room temperature through above-liquidus.
-        solidus = float(self.alloy.solidus_temp)
-        liquidus = float(self.alloy.liquidus_temp)
-        k_s = float(self.alloy.thermal_conductivity)
-        cp = float(self.alloy.specific_heat)
-        rho_s = float(self.alloy.density_solid)
-        rho_l = float(self.alloy.density_liquid)
-        property_curves = {
-            "temp_points": np.array(
-                [20.0, 0.5 * solidus, solidus, (solidus + liquidus) / 2, liquidus, liquidus + 100]
-            ),
-            "conductivity": k_s * np.array([1.0, 0.95, 0.85, 0.77, 0.70, 0.665]),
-            "specific_heat": cp * np.array([0.85, 0.92, 1.0, 1.05, 1.10, 1.15]),
-            "density": np.array(
-                [rho_s, 0.98 * rho_s, 0.96 * rho_s, (rho_s + rho_l) / 2, rho_l, 0.98 * rho_l]
-            ),
-        }
+        property_curves = self._alloy_property_curves()
+        neighbors = np.asarray(self.mesh.voxel_neighbors, dtype=np.int32)
 
         self._thermal_heat_model = HeatTransferModel(
             n_voxels=n_voxels,
             voxel_size=voxel_size_m,
-            neighbors=np.asarray(self.mesh.voxel_neighbors, dtype=np.int32),
+            neighbors=neighbors,
             alloy=self.alloy,
             use_temperature_dependent=True,
             voxel_sizes=voxel_sizes_m,
             diffusivity_overrides=diffusivity_overrides,
             property_curves=property_curves,
             rho_cp_overrides=rho_cp_overrides,
+            **self._cut_cell_solver_inputs(neighbors),
         )
         self._thermal_solidification_model = ThermalSolidificationModel(
             n_voxels=n_voxels,
             alloy=self.alloy,
         )
-        self._thermal_peak_cooling_rates = np.zeros(n_voxels, dtype=np.float32)
-        self._thermal_niyama_sampled = np.zeros(n_voxels, dtype=bool)
-        self._thermal_niyama_gradient_at_eval = np.zeros(n_voxels, dtype=np.float32)
-        self._thermal_niyama_cooling_rate_at_eval = np.zeros(n_voxels, dtype=np.float32)
-        self._thermal_niyama_temperature_at_eval = np.zeros(n_voxels, dtype=np.float32)
-        self._thermal_niyama_time_at_eval = np.zeros(n_voxels, dtype=np.float32)
-        self._thermal_niyama_values_at_eval = np.full(n_voxels, np.inf, dtype=np.float32)
-        self._thermal_niyama_quality = np.zeros(n_voxels, dtype=np.int8)
+        self._allocate_thermal_tracking_arrays(n_voxels)
 
         boundary_params = self.analysis_options.solidification_params.thermal_boundary
         mold_temperature = boundary_params.mold_temperature
         chill_temperature = boundary_params.chill_temperature
-        if self._initial_temperature_field is not None:
-            # A pour/filling stage computed where the metal actually is and how
-            # much heat it lost on the way in. Use it instead of assuming the
-            # cavity filled instantaneously at pouring temperature.
-            initial_temperatures = np.array(
-                self._initial_temperature_field, dtype=np.float64, copy=True
-            )
-        else:
-            initial_temperatures = np.full(n_voxels, self.alloy.pouring_temp, dtype=np.float64)
-
-        # Chills are mold material: they start at mold temperature no matter
-        # what the metal did, so this override applies in both cases.
-        if len(chill_indices) > 0:
-            initial_temperatures[chill_indices] = chill_temperature
+        initial_temperatures = self._initial_thermal_temperatures(
+            n_voxels, chill_indices, chill_temperature
+        )
 
         self._thermal_heat_model.set_initial_temperature(initial_temperatures)
         self._thermal_heat_model.set_heat_source(np.zeros(n_voxels, dtype=np.float64))
@@ -514,22 +670,7 @@ class SolidificationEngine:
             mold_temperature=mold_temperature, chill_temperature=chill_temperature
         )
 
-        if len(chill_indices) > 0:
-            thermal_model = self._thermal_solidification_model
-            thermal_model._fraction_solid[chill_indices] = 1.0
-            thermal_model._fraction_solid_prev[chill_indices] = 1.0
-            thermal_model._solidification_start[chill_indices] = 0.0
-            thermal_model._solidification_end[chill_indices] = 0.0
-
-        self.mesh.voxel_states[:] = 0.0
-        if len(chill_indices) > 0:
-            self.mesh.voxel_states[chill_indices] = 1.0
-            self.solidification_start_times[chill_indices] = 0.0
-            self.solidification_end_times[chill_indices] = 0.0
-            self.local_solidification_time[chill_indices] = 0.0
-            self.solidification_times[chill_indices] = 0.0
-            if self.feeding_fraction_solid is not None:
-                self.feeding_fraction_solid[chill_indices] = 1.0
+        self._preset_chill_solid_state(chill_indices)
 
         self._thermal_latest_temperatures = initial_temperatures.astype(np.float32, copy=True)
         self._thermal_latest_gradients = np.zeros(n_voxels, dtype=np.float32)
@@ -571,47 +712,47 @@ class SolidificationEngine:
                     if show_progress:
                         print(f"    Adaptive thermal timestep: {self.time_step:.4f}s (CFL)")
 
+    def _cut_cell_solver_inputs(self, neighbors: np.ndarray) -> Dict[str, Any]:
+        """HeatTransferModel cut-cell arguments, empty for a mesh without cut cells.
+
+        Cells below ``core.cut_cells.DEFAULT_PHI_MIN`` are slaved to a
+        same-part face neighbour (volume and area move to the master), see
+        ``core.cut_cells.merge_small_cut_cells``.
+        """
+        self._cut_cell_merge = None
+        if not _has_cut_cells(self.mesh):
+            return {}
+        from core.cut_cells import DEFAULT_PHI_MIN, merge_small_cut_cells
+
+        part_types = getattr(self.mesh, "voxel_part_types", None)
+        merge = merge_small_cut_cells(
+            np.asarray(self.mesh.voxel_metal_fractions, dtype=np.float64),
+            np.asarray(self.mesh.voxel_surface_areas, dtype=np.float64),
+            neighbors,
+            None if part_types is None else np.asarray(part_types),
+            DEFAULT_PHI_MIN,
+        )
+        self._cut_cell_merge = merge
+        return {
+            "capacity_weights": merge.capacity_weights,
+            "boundary_areas": inches_to_meters(inches_to_meters(merge.boundary_areas)),
+            "slave_cells": (merge.slaves, merge.masters),
+        }
+
     def _configure_thermal_boundaries(self, *, mold_temperature: float, chill_temperature: float) -> None:
         """Map current part types to simple thermal boundary conditions."""
         if self._thermal_heat_model is None:
             return
 
         tb = self.analysis_options.solidification_params.thermal_boundary
+        _mold_interface_decay = self._mold_interface_decay
 
-        # Mold heat-absorption model: the effective interface HTC combines the
-        # contact conductance (h0) in series with the semi-infinite sand mold
-        # penetration resistance h_pen(t) = k_mold / sqrt(pi * alpha_mold * t).
-        # A constant h0 toward a constant sink temperature would flash-cool
-        # the casting (a 2" WCB block froze in ~12 s) because a real sand mold
-        # heats up; the penetration term reproduces that ~1/sqrt(t) decay.
-        # h_eff(t) = 1 / (1/h0 + 1/h_pen(t)), floored at the air-gap floor.
-        ap = getattr(self.analysis_options.solidification_params, "air_gap", None)
-        floor = float(getattr(ap, "htc_floor_fraction", 0.35))
-        mold_k = float(getattr(tb, "mold_thermal_conductivity", 0.6))
-        mold_alpha = float(getattr(tb, "mold_thermal_diffusivity", 3.3e-7))
-
-        def _mold_interface_decay(h0: float, floor: float = floor):
-            """
-            Time multiplier anchored at 1.0 for contact conductance h0.
-
-            The INTERFACE branch multiplies bc.htc by this function, so it
-            returns the RATIO h_eff(t)/h0:
-                h_eff(t) = 1 / (1/h0 + 1/h_pen(t))
-                h_pen(t) = k_mold / sqrt(pi * alpha_mold * t)
-            floored at the given floor fraction.
-            """
-            pen_prefactor = mold_k / np.sqrt(np.pi * max(mold_alpha, 1e-12))
-
-            def multiplier(t: float) -> float:
-                if t <= 0.0:
-                    return 1.0
-                h_pen = pen_prefactor / np.sqrt(max(t, 1e-9))
-                h_eff = 1.0 / (1.0 / max(h0, 1e-9) + 1.0 / max(h_pen, 1e-9))
-                return max(h_eff / max(h0, 1e-9), floor)
-
-            return multiplier
-
-        surface_indices = np.asarray(self.mesh.get_surface_voxel_indices(), dtype=np.int32)
+        cut_cell_merge = getattr(self, "_cut_cell_merge", None)
+        if cut_cell_merge is not None:
+            # Cut cells: the cells holding exterior CAD area after merging.
+            surface_indices = np.flatnonzero(cut_cell_merge.boundary_areas > 0.0).astype(np.int32)
+        else:
+            surface_indices = np.asarray(self.mesh.get_surface_voxel_indices(), dtype=np.int32)
         if surface_indices.size == 0:
             return
 
@@ -1042,12 +1183,22 @@ class SolidificationEngine:
         return True
 
     def _compute_graph_distance_to_riser(self, active_mask: np.ndarray) -> np.ndarray:
-        """Compute shortest topological distance from each active voxel to any riser voxel."""
+        """Compute shortest topological distance from each active voxel to any riser voxel.
+
+        Units are graph hops (the schedule normalises by the maximum and
+        floors at 1 hop). On a tet mesh the hop count of an irregular graph
+        is not a length, so the geometric shortest path along edges is used
+        and divided by the mean edge length: inches = hops * mean_edge_length.
+        """
         n_voxels = len(self.mesh.voxel_centers)
         distances = np.full(n_voxels, np.inf, dtype=np.float32)
         riser_indices = self._get_riser_voxel_indices()
         if len(riser_indices) == 0:
             return distances
+
+        if _is_tet_mesh(self.mesh):
+            length_in = _tet_graph_length_in(self.mesh, riser_indices, np.asarray(active_mask, dtype=bool))
+            return (length_in / _tet_hop_length_in(self.mesh)).astype(np.float32)
 
         q: deque[int] = deque()
         for idx in riser_indices:
@@ -1068,16 +1219,24 @@ class SolidificationEngine:
         return distances
 
     def _compute_graph_distance_to_chill(self, active_mask: np.ndarray) -> np.ndarray:
-        """Compute shortest topological distance from each active voxel to any chill voxel."""
+        """Compute shortest topological distance from each active voxel to any chill voxel.
+
+        Graph hops, as :meth:`_compute_graph_distance_to_riser` (tet meshes:
+        geometric edge-path length / mean edge length).
+        """
         n_voxels = len(self.mesh.voxel_centers)
         distances = np.full(n_voxels, np.inf, dtype=np.float32)
         chill_indices = self._get_chill_voxel_indices()
         if len(chill_indices) == 0:
             return distances
 
-        q: deque[int] = deque()
         traversable = active_mask.copy()
         traversable[chill_indices] = True
+        if _is_tet_mesh(self.mesh):
+            length_in = _tet_graph_length_in(self.mesh, chill_indices, np.asarray(traversable, dtype=bool))
+            return (length_in / _tet_hop_length_in(self.mesh)).astype(np.float32)
+
+        q: deque[int] = deque()
         for idx in chill_indices:
             distances[idx] = 0.0
             q.append(int(idx))
@@ -1539,6 +1698,7 @@ class SolidificationEngine:
            least as many as metal neighbors. Real metal at a flat chill face
            sees at most ~9 of 26; a gap-fill sliver wedged against graphite
            sees far more. (Physically such a sliver freezes instantly anyway.)
+           Tet meshes: at least 8/26 of the node degree instead of 8.
         3. Disconnected: after removing 1/2, metal components with no
            connection to the main body (and smaller than 5% of it, so a
            genuine second cavity is never dropped) are gap-fill pockets.
@@ -1590,7 +1750,18 @@ class SolidificationEngine:
         n_metal_nb = (
             (nbr_types == 0) | (nbr_types == 1) | (nbr_types == 3)
         ).sum(axis=1)
-        smothered = metal & (n_chillcore >= 8) & (n_chillcore >= n_metal_nb)
+        if _is_tet_mesh(self.mesh):
+            # Tet rows hold the node's edges, not 26 lattice slots. "At least
+            # 8 of 26 slots" maps to at least 8/26 of the node degree.
+            degree = valid_nbr.sum(axis=1)
+            smothered = (
+                metal
+                & (n_chillcore > 0)
+                & (26 * n_chillcore >= 8 * degree)
+                & (n_chillcore >= n_metal_nb)
+            )
+        else:
+            smothered = metal & (n_chillcore >= 8) & (n_chillcore >= n_metal_nb)
 
         # 3. Connectivity on the remaining metal.
         from scipy.sparse import coo_matrix
@@ -2204,6 +2375,11 @@ class SolidificationEngine:
         cp = self.analysis_options.solidification_params.chill
         if self._chill_thicknesses is not None and len(self._chill_thicknesses) > 0:
             chill_thickness = np.max(self._chill_thicknesses)
+        elif _is_tet_mesh(self.mesh):
+            # Fallback in local edge lengths: ~5 chill-node spacings deep.
+            chill_thickness = float(
+                np.mean(_local_length_scale_in(self.mesh)[chill_indices])
+            ) * cp.thickness_fallback_voxels
         else:
             # Fallback: estimate based on voxel size
             chill_thickness = self.mesh.base_voxel_size * cp.thickness_fallback_voxels  # ~5 voxels deep
@@ -2592,6 +2768,9 @@ class SolidificationEngine:
 
         valid_neighbors = np.where(neighbors_arr >= 0, neighbors_arr, 0)
         neighbor_is_post = riser_post_mask[valid_neighbors]
+        if _is_tet_mesh(self.mesh):
+            # Tet rows are -1 padded to the max degree; padding is not node 0.
+            neighbor_is_post &= neighbors_arr >= 0
         any_post_neighbor = np.any(neighbor_is_post, axis=1)
         factors[cast_indices[any_post_neighbor[cast_indices]]] = 1.35
 
@@ -4084,7 +4263,15 @@ class SolidificationEngine:
         else:
             part_types = np.zeros(n_voxels, dtype=np.int32)
 
-        isolation_score = compute_isolation_score_parallel(solid_times, neighbors, part_types)
+        if _is_tet_mesh(self.mesh):
+            isolation_score = compute_isolation_score_volume_weighted(
+                solid_times,
+                neighbors,
+                part_types,
+                np.ascontiguousarray(self.mesh.voxel_volumes, dtype=np.float64),
+            )
+        else:
+            isolation_score = compute_isolation_score_parallel(solid_times, neighbors, part_types)
 
         surface_distances = self._get_cast_surface_distances()
         surface_factor = surface_distances / np.max(surface_distances + 0.1)
@@ -4437,7 +4624,11 @@ class SolidificationEngine:
         if surface_distances is None:
             return np.zeros(n_voxels, dtype=np.float32)
 
-        influence_distance = max(0.5, float(self.mesh.base_voxel_size) * 5.0)
+        if _is_tet_mesh(self.mesh):
+            # Five local edge lengths per node instead of five lattice pitches.
+            influence_distance = np.maximum(0.5, _local_length_scale_in(self.mesh) * 5.0)
+        else:
+            influence_distance = max(0.5, float(self.mesh.base_voxel_size) * 5.0)
         distances = np.asarray(surface_distances, dtype=np.float32)
         weights = np.clip(1.0 - distances / influence_distance, 0.0, 1.0)
         return weights.astype(np.float32)
@@ -4632,15 +4823,28 @@ class SolidificationEngine:
 
         voxel_size = float(getattr(self.mesh, "base_voxel_size", 0.5))
         search_depth = int(getattr(hot_tear_params, "solid_path_search_depth", 8))
-        max_path_length = max(voxel_size * search_depth, voxel_size)
-        path_strain = compute_solid_path_strain_parallel(
-            solidification_times,
-            voxel_centers,
-            neighbors,
-            np.float32(solid_expansion),
-            np.float32(btr_temp_range),
-            np.float32(max_path_length),
-        )
+        if _is_tet_mesh(self.mesh):
+            # Cap the path at search_depth local edge lengths per node; the
+            # kernel already measures the true edge length |c_i - c_j|.
+            local_size = _local_length_scale_in(self.mesh)
+            path_strain = compute_solid_path_strain_local(
+                solidification_times,
+                voxel_centers,
+                neighbors,
+                np.float32(solid_expansion),
+                np.float32(btr_temp_range),
+                np.ascontiguousarray(local_size * max(search_depth, 1), dtype=np.float64),
+            )
+        else:
+            max_path_length = max(voxel_size * search_depth, voxel_size)
+            path_strain = compute_solid_path_strain_parallel(
+                solidification_times,
+                voxel_centers,
+                neighbors,
+                np.float32(solid_expansion),
+                np.float32(btr_temp_range),
+                np.float32(max_path_length),
+            )
 
         section_change = np.abs(modulus_variance) / (np.max(modulus_variance) + 1e-6)
 
@@ -5061,6 +5265,10 @@ class SolidificationEngine:
                     # uses it as distance_upper_bound.
                     if self._chill_thicknesses is not None and len(self._chill_thicknesses) > 0:
                         chill_thickness = np.mean(self._chill_thicknesses)
+                    elif _is_tet_mesh(self.mesh):
+                        chill_thickness = float(
+                            np.mean(_local_length_scale_in(self.mesh)[chill_indices])
+                        ) * 5.0
                     else:
                         chill_thickness = self.mesh.base_voxel_size * 5.0
                     chill_burn_in_radius = chill_thickness * 1.5  # Same as shrinkage reduction zone
@@ -5220,10 +5428,16 @@ class SolidificationEngine:
         entrapment_exponent = 2.0
         niyama_coupling_alpha = 0.5
 
-        # 1. Compute SGI₀ per surface voxel
+        # 1. Compute SGI₀ per surface voxel. Tet meshes remove CORE tets, so
+        # the metal nodes on core-contact faces stand in for the core surface.
+        gas_part_types = self.mesh.voxel_part_types
+        if _is_tet_mesh(self.mesh):
+            gas_part_types = np.asarray(gas_part_types, dtype=np.int32).copy()
+            core_faces = np.asarray(self.mesh.boundary_face_contact_codes) == PART_TYPE_CORE
+            gas_part_types[np.asarray(self.mesh.boundary_faces)[core_faces].reshape(-1)] = PART_TYPE_CORE
         sgi0 = compute_surface_gas_generation(
             surface_indices=surface_indices,
-            voxel_part_types=self.mesh.voxel_part_types,
+            voxel_part_types=gas_part_types,
             local_solidification_times=self.local_solidification_time,
             humidity=humidity,
             binder_type=binder_type,
@@ -5296,7 +5510,7 @@ class SolidificationEngine:
         statistics["unfinished_voxel_count"] = int(np.sum(~finished & cast_mask))
 
         # Lower threshold to catch more potential shrinkage
-        shrinkage_threshold = 0.20  # 20% probability (was 30%)
+        shrinkage_threshold = SHRINKAGE_STATISTICS_THRESHOLD  # 20% probability (was 30%)
         
         # Shrinkage statistics
         if self.analysis_options.shrinkage and self.shrinkage_probability is not None:
@@ -5354,6 +5568,29 @@ class SolidificationEngine:
 
         return statistics
     
+    def get_shrinkage_percentage(self) -> float:
+        """Share of the mesh flagged by the shrinkage statistics, in percent.
+
+        Voxel meshes: affected voxel count / voxel count (cells are near
+        uniform). Tet meshes and cut-cell voxel meshes: affected volume /
+        total volume, because node volumes vary with the local edge length
+        and cut-cell volumes with the metal fraction.
+        """
+        n_points = len(self.mesh.voxel_centers)
+        if n_points == 0:
+            return 0.0
+        if not _volume_shares_by_point_volume(self.mesh):
+            return float(self.affected_voxel_count / n_points * 100)
+        shrink = getattr(self, "shrinkage_probability", None)
+        poro = getattr(self, "porosity_probability", None)
+        if shrink is None or poro is None:
+            return 0.0
+        threshold = SHRINKAGE_STATISTICS_THRESHOLD
+        affected = (np.asarray(shrink) > threshold) | (np.asarray(poro) > threshold)
+        volumes = np.asarray(self.mesh.voxel_volumes, dtype=np.float64)
+        total = float(np.sum(volumes))
+        return float(np.sum(volumes[affected]) / total * 100.0) if total > 0.0 else 0.0
+
     def _get_normalized_heights(self) -> np.ndarray:
         """
         Get normalized height (Z-coordinate) for each voxel
@@ -5403,14 +5640,48 @@ class SolidificationEngine:
             return 0.0
         return float(intensities[voxel_index])
 
+    def _mask_display_risk(self, values: Optional[np.ndarray]) -> np.ndarray:
+        """Clip a 0-1 risk field and force CHILL and orphan-metal points to 0."""
+        if values is None:
+            return np.zeros(0, dtype=np.float32)
+        display = np.asarray(values, dtype=np.float32).copy()
+        part_types = getattr(self.mesh, "voxel_part_types", None)
+        if part_types is not None and len(part_types) == len(display):
+            chill_mask = np.asarray(part_types, dtype=np.int32) == 2
+            if np.any(chill_mask):
+                display[chill_mask] = 0.0
+            orphan_mask = self._get_orphan_metal_mask()
+            if len(orphan_mask) == len(display) and np.any(orphan_mask):
+                display[orphan_mask] = 0.0
+        return np.clip(display, 0.0, 1.0).astype(np.float32, copy=False)
+
+    def get_shrink_display_intensity(self) -> np.ndarray:
+        """The Shrink result: macro-shrinkage risk as both apps display it.
+
+        ``shrinkage_probability`` (after the shrink scalar) with CHILL and
+        orphan-metal points forced to 0. Microporosity is not mixed in.
+        """
+        return self._mask_display_risk(getattr(self, "shrinkage_probability", None))
+
+    def get_microporosity_display_intensity(self) -> np.ndarray:
+        """The Microporosity result as both apps display it.
+
+        ``porosity_probability`` (Niyama + feed-path blockage + Darcy margin,
+        after the shrink scalar) with CHILL and orphan-metal points forced to 0.
+        """
+        return self._mask_display_risk(getattr(self, "porosity_probability", None))
+
     def get_shrinkage_display_intensity(self) -> np.ndarray:
         """
-        Build display-ready shrinkage/porosity intensity by part type.
+        Combined shrink/microporosity intensity, max(shrink, microporosity).
 
-        All CAST, RISER, and RISER_POST voxels use combined risk via
-        max(shrinkage_probability, porosity_probability) so the Shrinkage/Porosity
-        view reflects the dominant defect mode.  CHILL voxels are forced to 0.0
-        so external cooling devices remain hidden from shrinkage visualization.
+        This is the field the old "Shrinkage/Porosity" result showed. The
+        result views now show Shrink (:meth:`get_shrink_display_intensity`)
+        and Microporosity (:meth:`get_microporosity_display_intensity`)
+        separately; this combined field remains for
+        :meth:`get_shrinkage_intensity`, ``core.defect_regions`` and the
+        regression tests that check overall defect coverage. CHILL and
+        orphan-metal voxels are forced to 0.0.
         """
         shrink = getattr(self, "shrinkage_probability", None)
         poro = getattr(self, "porosity_probability", None)
@@ -5911,8 +6182,11 @@ class SolidificationEngine:
                 shrink_scalar = self._get_shrink_scalar()
             results['affected_voxels'] = self.affected_voxel_count
             results['shrinkage_volume'] = self.total_shrinkage_volume
-            results['shrinkage_percentage'] = (self.affected_voxel_count / 
-                                               len(self.mesh.voxel_centers) * 100)
+            if _volume_shares_by_point_volume(self.mesh):
+                results['shrinkage_percentage'] = SolidificationEngine.get_shrinkage_percentage(self)
+            else:
+                results['shrinkage_percentage'] = (self.affected_voxel_count / 
+                                                   len(self.mesh.voxel_centers) * 100)
             results['shrink_scalar'] = float(shrink_scalar)
             results['shrink_scalar_formula'] = getattr(self, 'shrink_scalar_formula', SHRINK_SCALAR_FORMULA)
             results['shrinkage_risk'] = self.shrinkage_risk

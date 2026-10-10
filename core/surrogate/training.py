@@ -22,7 +22,7 @@ from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 
 from core.materials import get_all_alloy_names
-from core.simulation_pipeline import PipelineInputs, run_pipeline
+from core.simulation_pipeline import PipelineInputs, resolve_mesh_type, run_pipeline
 from core.surrogate.dataset import DEFAULT_DATASET_DIR, capture_run, load_dataset
 from core.surrogate.metrics import (
     aggregate_schedule_metrics,
@@ -112,9 +112,23 @@ def _run_on_large_stack(fn: Callable[[], Any]) -> Any:
     return result["value"]
 
 
-def generation_plan_key(geometry_name: str, alloy: str, mold_constant: float, voxel_size: float, grid: int) -> str:
-    """Deterministic key for one (geometry, alloy, mold constant) run."""
-    return f"{geometry_name}|{alloy}|mc={float(mold_constant):.1f}|vs={float(voxel_size):.3f}|grid={int(grid)}"
+def generation_plan_key(
+    geometry_name: str,
+    alloy: str,
+    mold_constant: float,
+    voxel_size: float,
+    grid: int,
+    mesh_type: str = "voxel",
+) -> str:
+    """Deterministic key for one (geometry, alloy, mold constant, mesh type) run.
+
+    Voxel keys have no mesh suffix, so plans written before tet runs existed
+    (all voxel) still resume. Tet keys end in ``|mesh=tet``.
+    """
+    key = f"{geometry_name}|{alloy}|mc={float(mold_constant):.1f}|vs={float(voxel_size):.3f}|grid={int(grid)}"
+    if mesh_type != "voxel":
+        key += f"|mesh={mesh_type}"
+    return key
 
 
 def _load_plan(plan_path: Optional[str]) -> Dict[str, Dict[str, Any]]:
@@ -185,6 +199,7 @@ def generate_dataset(
     mold_constants: Optional[List[float]] = None,
     plan_path: Optional[str] = None,
     retry_failed: bool = True,
+    mesh_type: Optional[str] = None,
 ) -> int:
     """Run the full solver over geometries x alloys x mold constants and capture runs.
 
@@ -211,6 +226,10 @@ def generate_dataset(
             ``invalid`` are skipped, which makes a batch resumable even though
             ``capture_run`` names files from a time hash.
         retry_failed: Re-run combinations the plan marks ``failed``.
+        mesh_type: "voxel" or "tet"; ``None`` uses ``settings.mesh.mesh_type``.
+            Resolved once per call, recorded in each plan entry and part of
+            the plan key, so a resumed plan never counts voxel records as
+            done for a tet batch.
 
     Every run executes on a 256 MB-stack thread (``_run_on_large_stack``) and
     inside ``try/except`` so one failure does not stop the batch.
@@ -236,6 +255,8 @@ def generate_dataset(
     specs = _as_geometry_specs(geometries)
     mold_constants = [float(m) for m in (mold_constants or [280.0])]
 
+    run_mesh_type = resolve_mesh_type(PipelineInputs(alloy_name="", voxel_size=0.0, refinement_level=1, mesh_type=mesh_type))
+    count_unit = "nodes" if run_mesh_type == "tet" else "voxels"
     plan = _load_plan(plan_path)
     total = len(specs) * len(alloys) * len(mold_constants)
     generated = 0
@@ -249,7 +270,7 @@ def generate_dataset(
             for mold_constant in mold_constants:
                 _check_cancel(cancel_cb)
                 done += 1
-                key = generation_plan_key(spec.name, alloy, mold_constant, run_voxel_size, grid)
+                key = generation_plan_key(spec.name, alloy, mold_constant, run_voxel_size, grid, run_mesh_type)
                 entry = plan.get(key)
                 if entry is not None:
                     status = entry.get("status")
@@ -271,10 +292,12 @@ def generate_dataset(
                     analysis_options={"shrinkage": False, "hotspot": False, "fraction_liquid": False},
                     show_progress=False,
                     solidification_params={"timing": {"chvorinov_mold_constant": mold_constant}},
+                    mesh_type=run_mesh_type,
                 )
                 started = time.time()
                 entry = {"geometry": spec.name, "family": spec.family, "alloy": alloy,
-                         "mold_constant": mold_constant, "voxel_size": run_voxel_size, "grid": int(grid)}
+                         "mold_constant": mold_constant, "voxel_size": run_voxel_size, "grid": int(grid),
+                         "mesh_type": run_mesh_type}
                 try:
                     def _solve():
                         with contextlib.redirect_stdout(io.StringIO()):
@@ -297,7 +320,7 @@ def generate_dataset(
                         entry["status"] = "done"
                         generated += 1
                         if progress_cb:
-                            progress_cb(f"    ok: {entry['voxels']} voxels, {entry['wall_s']:.1f}s -> {os.path.basename(captured)}")
+                            progress_cb(f"    ok: {entry['voxels']} {count_unit}, {entry['wall_s']:.1f}s -> {os.path.basename(captured)}")
                     else:
                         entry["status"] = "invalid"
                         entry["error"] = reason

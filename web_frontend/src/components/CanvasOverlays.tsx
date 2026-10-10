@@ -15,15 +15,17 @@ import type { Toast } from '../hooks/useToasts';
 export function StatsChip({ meta }: { meta: GridMeta | null }) {
   if (!meta || meta.voxelCount <= 0) return null;
   const showCast = meta.castVoxelCount > 0 && meta.castVoxelCount !== meta.voxelCount;
+  // On a tet run the counts are mesh nodes and the spacing is the display-lattice pitch.
+  const tet = meta.stats.mesh_type === 'tet';
   return (
     <div className="stats-chip" aria-label="Model statistics">
       <div className="stat">
-        <span className="stat-label">Voxels</span>
+        <span className="stat-label">{tet ? 'Nodes' : 'Voxels'}</span>
         <span className="stat-value">{formatCount(meta.voxelCount)}</span>
       </div>
       {showCast ? (
         <div className="stat">
-          <span className="stat-label">Cast voxels</span>
+          <span className="stat-label">{tet ? 'Cast nodes' : 'Cast voxels'}</span>
           <span className="stat-value">{formatCount(meta.castVoxelCount)}</span>
         </div>
       ) : null}
@@ -35,7 +37,7 @@ export function StatsChip({ meta }: { meta: GridMeta | null }) {
       ) : null}
       {meta.spacing > 0 ? (
         <div className="stat">
-          <span className="stat-label">Voxel</span>
+          <span className="stat-label">{tet ? 'Lattice' : 'Voxel'}</span>
           <span className="stat-value">{formatNumber(meta.spacing, 3)} in</span>
         </div>
       ) : null}

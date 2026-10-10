@@ -1,5 +1,5 @@
 import { Group, SetupPanel } from '../SetupPanel';
-import { meshDefaults } from '../../lib/defaults';
+import { meshDefaults, meshTypeOf, voxelCutCellsOf, type MeshType } from '../../lib/defaults';
 import type { ProjectSettings } from '../../lib/api';
 
 export type MeshStatus = { text: string; tone: 'info' | 'warning' | 'success' } | null;
@@ -10,6 +10,8 @@ export type MeshPanelProps = {
   onEstimate: () => void;
   onApplyMlMesh: () => void;
   estimate: MeshStatus;
+  /** Server tet edge factor (edge = size x factor); null until a mesh preview reports it. */
+  tetEdgeFactor: number | null;
   mlStatus: MeshStatus;
   busy: boolean;
   hasParts: boolean;
@@ -28,18 +30,58 @@ export function MeshPanel({
   onEstimate,
   onApplyMlMesh,
   estimate,
+  tetEdgeFactor,
   mlStatus,
   busy,
   hasParts,
   onReset,
   onClose
 }: MeshPanelProps) {
+  const meshType = meshTypeOf(settings.performance_options);
+  const tet = meshType === 'tet';
+  const sizeLabel = tet ? 'Mesh size' : 'Base voxel size';
+  const setMeshType = (value: MeshType) =>
+    onPatch({ performance_options: { ...settings.performance_options, mesh_type: value } });
+  const cutCells = voxelCutCellsOf(settings.performance_options);
+  const setCutCells = (value: boolean) =>
+    onPatch({ performance_options: { ...settings.performance_options, voxel_cut_cells: value } });
+
   return (
     <SetupPanel title="Mesh" onClose={onClose} onReset={onReset}>
       <Group title="Resolution">
+        <div className="field">
+          <span className="field-label">Mesh type</span>
+          <div className="segmented segmented-block" role="group" aria-label="Mesh type">
+            <button type="button" aria-pressed={!tet} onClick={() => setMeshType('voxel')}>
+              Voxel
+            </button>
+            <button type="button" aria-pressed={tet} onClick={() => setMeshType('tet')}>
+              Tetrahedral
+            </button>
+          </div>
+          {tet && (
+            <span className="field-hint">
+              The run switches to the voxel mesh, and says why on the Results panel, when tet meshing fails, runs
+              too long or the model is too large.
+            </span>
+          )}
+        </div>
+
+        <label className="check">
+          <input type="checkbox" checked={cutCells} onChange={(event) => setCutCells(event.target.checked)} />
+          <span className="check-body">
+            <span>Cut cells (CAD-accurate boundary)</span>
+            <span className="check-note">
+              Voxel mesh only. Boundary voxels carry the CAD metal fraction and mold-contact area, so metal volume
+              and cooling surface match the CAD. Measured at 0.1 in: total solidification time within about 1 % of
+              a fine tet reference (plain voxels: up to +17 %).
+            </span>
+          </span>
+        </label>
+
         <label className="field">
           <span className="field-label">
-            Base voxel size
+            {sizeLabel}
             <span className="field-unit">{settings.voxel_size.toFixed(3)} in</span>
           </span>
           <input
@@ -49,12 +91,24 @@ export function MeshPanel({
             max={meshDefaults.voxelSizeMax}
             step={meshDefaults.voxelSizeStep}
             value={settings.voxel_size}
-            aria-label="Base voxel size"
+            aria-label={sizeLabel}
             onChange={(event) => onPatch({ voxel_size: Number(event.target.value) })}
           />
+          {tet && (
+            <span className="field-hint">
+              {tetEdgeFactor !== null
+                ? `Tet edge \u2248 ${(settings.voxel_size * tetEdgeFactor).toFixed(3)} in`
+                : hasParts
+                  ? 'Tet edge: mesh size \u00d7 the server edge factor (Estimate mesh shows it).'
+                  : 'Tet edge: mesh size \u00d7 the server edge factor. Add a part to see it.'}
+            </span>
+          )}
           <span className="field-hint">
-            Smaller voxels resolve thin sections and gating channels but cost memory and time. Halving the
-            size multiplies the voxel count by roughly eight.
+            {tet
+              ? 'The tet edge length is this size times the server edge factor. Smaller elements resolve thin ' +
+                'sections but cost memory and time. Halving the size multiplies the node count by roughly eight.'
+              : 'Smaller voxels resolve thin sections and gating channels but cost memory and time. Halving the ' +
+                'size multiplies the voxel count by roughly eight.'}
           </span>
         </label>
 
@@ -104,7 +158,9 @@ export function MeshPanel({
         {note(
           mlStatus,
           hasParts
-            ? 'Suggests a voxel size and refinement level from the geometry.'
+            ? tet
+              ? 'Suggests a mesh size from the geometry and estimates its node count.'
+              : 'Suggests a voxel size and refinement level from the geometry.'
             : 'Add a part to request a recommendation.'
         )}
       </Group>

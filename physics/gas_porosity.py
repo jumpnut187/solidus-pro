@@ -122,16 +122,13 @@ def compute_surface_gas_generation(
         weight = SURFACE_TYPE_WEIGHTS.get(stype, 0.6)
         sgi0[idx] = source_scale * weight * time_factor[idx]
 
-    if stype == "core":
-        sgi0[sgi0 > 0] = np.maximum(
-            sgi0[surface_types == "core"] * (1.0 - core_venting_effectiveness), 0.0
-        )
-        # Re-apply: core venting reduces effective gas retained
-        core_mask = surface_types == "core"
-        if np.any(core_mask):
-            sgi0_core = source_scale * 1.0 * time_factor[core_mask]
-            sgi0_core *= (1.0 - core_venting_effectiveness)
-            sgi0[core_mask] = sgi0_core.astype(np.float32)
+    # Core venting reduces the gas a core surface retains, wherever the core
+    # entries sit in ``surface_indices``.
+    core_mask = surface_types == "core"
+    if np.any(core_mask):
+        sgi0_core = source_scale * SURFACE_TYPE_WEIGHTS["core"] * time_factor[core_mask]
+        sgi0_core *= (1.0 - core_venting_effectiveness)
+        sgi0[core_mask] = sgi0_core.astype(np.float32)
 
     return np.clip(sgi0, 0.0, 1.0).astype(np.float32)
 

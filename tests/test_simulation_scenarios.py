@@ -38,7 +38,16 @@ def _run_pipeline_with_patched_memory(
     stress_analysis: bool = False,
     sand_restraint_index: float = 0.5,
     extra_analysis_options: dict | None = None,
+    mesh_type: str = "voxel",
+    voxel_cut_cells: bool | None = None,
 ) -> object:
+    """Run the pipeline with the voxel memory checks patched out.
+
+    ``mesh_type`` defaults to "voxel": the patches target ``core.voxel_mesh``,
+    the 0.5 in size leaves 2-4 tet elements across these parts, and the
+    expected values were calibrated on the voxel solver. ``voxel_cut_cells``
+    None follows ``settings.mesh.voxel_cut_cells``.
+    """
     analysis_options = {
         "shrinkage": True,
         "hotspot": True,
@@ -61,6 +70,8 @@ def _run_pipeline_with_patched_memory(
         use_incremental=False,
         show_progress=False,
         max_voxels_for_visualization=5_000,
+        mesh_type=mesh_type,
+        voxel_cut_cells=voxel_cut_cells,
     )
 
     with ExitStack() as stack:
@@ -328,10 +339,11 @@ class ScenarioRegressionTests(unittest.TestCase):
         )
 
     def test_riser_reduces_cast_shrinkage_and_keeps_pipe_behavior_in_riser(self) -> None:
+        # Plain voxels: the shrinkage thresholds (> 0.15 counts) were calibrated on old-voxel geometry at 0.5 in.
         baseline_engine = _run_pipeline_with_patched_memory(
-            _single_cast_manager("sample_stl_files/small_block.stl")
+            _single_cast_manager("sample_stl_files/small_block.stl"), voxel_cut_cells=False
         )
-        riser_engine = _run_pipeline_with_patched_memory(_cast_with_riser_manager())
+        riser_engine = _run_pipeline_with_patched_memory(_cast_with_riser_manager(), voxel_cut_cells=False)
 
         cast_mask = riser_engine.mesh.voxel_part_types == 0
         riser_mask = riser_engine.mesh.voxel_part_types == 1
@@ -374,10 +386,11 @@ class ScenarioRegressionTests(unittest.TestCase):
         )
 
     def test_riser_post_behaves_like_feeder_neck_not_primary_defect_sink(self) -> None:
+        # Plain voxels: the fixture post stops 0.5 in below the riser; only 0.5 in voxels close that gap.
         baseline_engine = _run_pipeline_with_patched_memory(
-            _single_cast_manager("sample_stl_files/block_2inch.stl")
+            _single_cast_manager("sample_stl_files/block_2inch.stl"), voxel_cut_cells=False
         )
-        feeder_engine = _run_pipeline_with_patched_memory(_cast_with_riser_post_manager())
+        feeder_engine = _run_pipeline_with_patched_memory(_cast_with_riser_post_manager(), voxel_cut_cells=False)
 
         cast_mask = feeder_engine.mesh.voxel_part_types == 0
         riser_mask = feeder_engine.mesh.voxel_part_types == 1
@@ -410,10 +423,11 @@ class ScenarioRegressionTests(unittest.TestCase):
         )
 
     def test_two_risers_reduce_cast_shrinkage_more_than_single_riser(self) -> None:
+        # Plain voxels: at CAD size the 1 in risers freeze before the 2 in casting (cut cells: 130 s vs 166 s).
         baseline_engine = _run_pipeline_with_patched_memory(
-            _single_cast_manager("sample_stl_files/block_2inch.stl")
+            _single_cast_manager("sample_stl_files/block_2inch.stl"), voxel_cut_cells=False
         )
-        two_riser_engine = _run_pipeline_with_patched_memory(_cast_with_two_risers_manager())
+        two_riser_engine = _run_pipeline_with_patched_memory(_cast_with_two_risers_manager(), voxel_cut_cells=False)
 
         two_cast_mask = two_riser_engine.mesh.voxel_part_types == 0
         two_riser_mask = two_riser_engine.mesh.voxel_part_types == 1

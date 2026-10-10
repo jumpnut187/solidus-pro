@@ -25,10 +25,14 @@ class TestSurfaceGasGeneration(unittest.TestCase):
         part_types[6] = 4
         local_st = np.ones(n * 3, dtype=np.float32) * 10.0
 
+        # An unvented core (weight 1.0) out-gasses more than the mold wall
+        # (0.6). This test used the default venting 0.5 and passed only
+        # because venting was skipped unless the last surface entry was a core.
         sgi0 = compute_surface_gas_generation(
             surface_indices=surface_indices,
             voxel_part_types=part_types,
             local_solidification_times=local_st,
+            core_venting_effectiveness=0.0,
         )
 
         self.assertEqual(len(sgi0), n)
@@ -40,6 +44,43 @@ class TestSurfaceGasGeneration(unittest.TestCase):
             wall_avg = np.mean(sgi0[wall_indices])
             self.assertGreater(core_avg, wall_avg,
                                "Core surfaces should produce higher SGI than mold wall")
+
+    def test_core_venting_applies_wherever_core_entries_sit(self):
+        # Before the fix venting was applied only when the last surface entry
+        # was a core: here the cores are entries 5 and 6 of 100.
+        n = 100
+        surface_indices = np.arange(n, dtype=np.int32)
+        part_types = np.zeros(n, dtype=np.int32)
+        part_types[[5, 6]] = 4
+        local_st = np.full(n, 10.0, dtype=np.float32)
+        by_venting = {
+            venting: compute_surface_gas_generation(
+                surface_indices=surface_indices,
+                voxel_part_types=part_types,
+                local_solidification_times=local_st,
+                core_venting_effectiveness=venting,
+            )
+            for venting in (0.0, 0.5, 1.0)
+        }
+        np.testing.assert_allclose(by_venting[0.5][[5, 6]], 0.5 * by_venting[0.0][[5, 6]], rtol=1e-6)
+        np.testing.assert_array_equal(by_venting[1.0][[5, 6]], 0.0)
+        # Mold-wall entries do not depend on core venting.
+        np.testing.assert_array_equal(by_venting[0.0][:5], by_venting[1.0][:5])
+
+    def test_core_last_with_other_entries_does_not_raise(self):
+        # Before the fix: last entry core, 2 core entries against 4 positive
+        # entries -> "sgi0[sgi0 > 0] = sgi0[core]" raised a shape ValueError.
+        surface_indices = np.arange(4, dtype=np.int32)
+        part_types = np.array([0, 4, 0, 4], dtype=np.int32)
+        local_st = np.full(4, 10.0, dtype=np.float32)
+        sgi0 = compute_surface_gas_generation(
+            surface_indices=surface_indices,
+            voxel_part_types=part_types,
+            local_solidification_times=local_st,
+            core_venting_effectiveness=0.5,
+        )
+        self.assertAlmostEqual(float(sgi0[1]), float(sgi0[3]))
+        self.assertAlmostEqual(float(sgi0[1]) / float(sgi0[0]), 0.5 / 0.6, places=5)
 
     def test_chill_surfaces_have_zero_sgi(self):
         n = 20

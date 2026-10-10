@@ -31,8 +31,10 @@ Usage:
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional, Any, Dict, List, Union, TypeVar, Type
+import math
 import os
 import json
+import warnings
 
 # Import exception classes
 from config.exceptions import (
@@ -51,9 +53,22 @@ T = TypeVar('T')
 # Configuration Data Classes
 # ============================================================================
 
+#: Simulation mesh kinds. "voxel" is AdaptiveVoxelMesh, "tet" is TetVolumeMesh.
+MESH_TYPES = ("voxel", "tet")
+
+#: Positive tet-mesh tunables and their defaults, restored when a loaded value is invalid.
+_TET_POSITIVE_DEFAULTS: Dict[str, float] = {
+    "tet_edge_length_factor": 2.0,
+    "tet_epsilon_rel": 1e-3,
+    "tet_max_time_step_s": 2.0,
+    "tet_max_delta_t_c": 15.0,
+    "tet_lattice_spacing_factor": 1.0,
+}
+
+
 @dataclass
 class MeshSettings:
-    """Voxel mesh generation settings"""
+    """Simulation mesh settings (voxel and tet)."""
     base_voxel_size: float = 0.1  # inches
     max_refinement_level: int = 3
     min_voxel_size: float = 0.02  # inches
@@ -62,6 +77,17 @@ class MeshSettings:
     use_octree: bool = True
     use_chunked_voxelization: bool = True
     neighbor_search_radius_factor: float = 2.0
+    mesh_type: str = "voxel"                 # "voxel" (default) or "tet" (opt-in)
+    tet_edge_length_factor: float = 2.0      # tet edge length = factor * base_voxel_size
+    tet_epsilon_rel: float = 1e-3            # fTetWild envelope, relative to bbox diagonal
+    tet_max_time_step_s: float = 2.0         # implicit tet solver dt ceiling, seconds
+    tet_max_delta_t_c: float = 15.0          # halve dt above this max metal |dT| per step, degC
+    tet_lattice_spacing_factor: float = 1.0  # filling/ML lattice pitch = factor * base_voxel_size
+    tet_max_nodes: int = 3_000_000           # refuse tet meshing above this estimated node count
+    tet_auto_fallback: bool = True           # a failed, slow or oversized tet mesh falls back to voxel
+    tet_mesh_timeout_s: float = 600.0        # fTetWild wall-time limit when tet_auto_fallback is on
+    tet_auto_max_nodes: int = 300_000        # skip tet (fall back) above this estimated node count
+    voxel_cut_cells: bool = True             # FAVOR-style cut cells on the voxel grid (core/cut_cells.py)
     
     def __post_init__(self) -> None:
         """Validate mesh settings"""
@@ -71,6 +97,103 @@ class MeshSettings:
             self.base_voxel_size = self.max_voxel_size
         if self.memory_mode not in ("auto", "ram", "disk"):
             self.memory_mode = "auto"
+        self.normalize_tet_fields()
+
+    def normalize_tet_fields(self) -> None:
+        """Validate ``mesh_type`` and the ``tet_*`` fields; called at construction and after load.
+
+        An unknown mesh type falls back to "voxel" and a non-positive or
+        non-numeric tunable falls back to its default, each with a warning.
+        """
+        mesh_type = str(self.mesh_type or "").strip().lower()
+        if mesh_type not in MESH_TYPES:
+            warnings.warn(
+                f"Unknown mesh_type {self.mesh_type!r}; using 'voxel'. Valid: {', '.join(MESH_TYPES)}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            mesh_type = "voxel"
+        self.mesh_type = mesh_type
+
+        for name, default in _TET_POSITIVE_DEFAULTS.items():
+            raw = getattr(self, name)
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                value = math.nan
+            if not (math.isfinite(value) and value > 0.0):
+                warnings.warn(
+                    f"mesh.{name} must be a positive number, got {raw!r}; using {default}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                value = default
+            setattr(self, name, value)
+
+        try:
+            max_nodes = int(self.tet_max_nodes)
+        except (TypeError, ValueError):
+            max_nodes = 0
+        if max_nodes <= 0:
+            warnings.warn(
+                f"mesh.tet_max_nodes must be a positive integer, got {self.tet_max_nodes!r}; "
+                f"using 3000000",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            max_nodes = 3_000_000
+        self.tet_max_nodes = max_nodes
+
+        self.tet_auto_fallback = _coerce_bool(self.tet_auto_fallback, "tet_auto_fallback", True)
+        self.voxel_cut_cells = _coerce_bool(self.voxel_cut_cells, "voxel_cut_cells", True)
+
+        try:
+            timeout_s = float(self.tet_mesh_timeout_s)
+        except (TypeError, ValueError):
+            timeout_s = math.nan
+        if not (math.isfinite(timeout_s) and timeout_s > 0.0):
+            warnings.warn(
+                f"mesh.tet_mesh_timeout_s must be a positive number, got {self.tet_mesh_timeout_s!r}; "
+                f"using 600.0",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            timeout_s = 600.0
+        self.tet_mesh_timeout_s = timeout_s
+
+        try:
+            auto_max_nodes = int(self.tet_auto_max_nodes)
+        except (TypeError, ValueError):
+            auto_max_nodes = 0
+        if auto_max_nodes <= 0:
+            warnings.warn(
+                f"mesh.tet_auto_max_nodes must be a positive integer, got {self.tet_auto_max_nodes!r}; "
+                f"using 300000",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            auto_max_nodes = 300_000
+        self.tet_auto_max_nodes = auto_max_nodes
+
+
+def _coerce_bool(raw: Any, name: str, default: bool) -> bool:
+    """Read a bool from a settings file value (bool, 0/1, or a yes/no string)."""
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)) and raw in (0, 1):
+        return bool(raw)
+    if isinstance(raw, str):
+        text = raw.strip().lower()
+        if text in ("true", "1", "yes", "on"):
+            return True
+        if text in ("false", "0", "no", "off"):
+            return False
+    warnings.warn(
+        f"mesh.{name} must be a boolean, got {raw!r}; using {default}",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+    return default
 
 
 @dataclass
@@ -403,6 +526,15 @@ class Settings:
             # Mesh settings
             f"{env_prefix}VOXEL_SIZE": ("mesh", "base_voxel_size", float),
             f"{env_prefix}MEMORY_MODE": ("mesh", "memory_mode", str),
+            f"{env_prefix}MESH_TYPE": ("mesh", "mesh_type", str),
+            f"{env_prefix}TET_EDGE_LENGTH_FACTOR": ("mesh", "tet_edge_length_factor", float),
+            f"{env_prefix}TET_MAX_TIME_STEP_S": ("mesh", "tet_max_time_step_s", float),
+            f"{env_prefix}TET_MAX_DELTA_T_C": ("mesh", "tet_max_delta_t_c", float),
+            f"{env_prefix}TET_LATTICE_SPACING_FACTOR": ("mesh", "tet_lattice_spacing_factor", float),
+            f"{env_prefix}TET_AUTO_FALLBACK": ("mesh", "tet_auto_fallback", self._parse_bool),
+            f"{env_prefix}TET_MESH_TIMEOUT_S": ("mesh", "tet_mesh_timeout_s", float),
+            f"{env_prefix}TET_AUTO_MAX_NODES": ("mesh", "tet_auto_max_nodes", int),
+            f"{env_prefix}VOXEL_CUT_CELLS": ("mesh", "voxel_cut_cells", self._parse_bool),
 
             # Simulation settings
             f"{env_prefix}DEFAULT_ALLOY": ("simulation", "default_alloy", str),
@@ -498,6 +630,7 @@ class Settings:
         self.solidification_params = solid_params if solid_params else None
 
         # Re-normalize loaded sections (file + env values are set post-init).
+        self.mesh.normalize_tet_fields()
         self.deep.normalize()
         
     @staticmethod
@@ -673,6 +806,17 @@ mesh:
   max_refinement_level: 3
   memory_mode: auto         # auto, ram, or disk
   use_octree: true
+  mesh_type: voxel          # voxel (default) or tet (opt-in, falls back to voxel)
+  tet_edge_length_factor: 2.0      # tet edge length = factor * base_voxel_size
+  tet_epsilon_rel: 0.001           # fTetWild envelope, relative to bbox diagonal
+  tet_max_time_step_s: 2.0         # implicit tet solver dt ceiling (s)
+  tet_max_delta_t_c: 15.0          # halve dt above this metal |dT| per step (C)
+  tet_lattice_spacing_factor: 1.0  # filling/ML lattice pitch = factor * base_voxel_size
+  tet_max_nodes: 3000000           # refuse tet meshing above this estimated node count
+  tet_auto_fallback: true          # failed, slow or oversized tet mesh -> voxel run
+  tet_mesh_timeout_s: 600.0        # fTetWild wall-time limit (s) when auto fallback is on
+  tet_auto_max_nodes: 300000       # fall back to voxel above this estimated tet node count
+  voxel_cut_cells: true            # CAD metal fraction + mold-contact area per voxel (false = plain voxels)
 
 simulation:
   default_alloy: WCB
@@ -736,6 +880,17 @@ base_voxel_size = 0.1
 max_refinement_level = 3
 memory_mode = "auto"
 use_octree = true
+mesh_type = "voxel"
+tet_edge_length_factor = 2.0
+tet_epsilon_rel = 0.001
+tet_max_time_step_s = 2.0
+tet_max_delta_t_c = 15.0
+tet_lattice_spacing_factor = 1.0
+tet_max_nodes = 3000000
+tet_auto_fallback = true
+tet_mesh_timeout_s = 600.0
+tet_auto_max_nodes = 300000
+voxel_cut_cells = true
 
 [simulation]
 default_alloy = "WCB"

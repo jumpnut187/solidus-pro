@@ -408,12 +408,14 @@ def _grids_or_error(project_id: str) -> Tuple[Optional[fields.FieldGrids], Optio
     try:
         grids = _load_grids(project_id)
     except fields.LatticeTooLargeError as exc:
+        # A tet run records this at write time (fields.TET_LATTICE_TOO_LARGE_KEY).
+        size_name = "element size" if isinstance(exc, fields.TetLatticeTooLargeError) else "voxel size"
         response = jsonify(
             {
                 "error": (
                     "This run's result lattice is too large to display "
                     f"({exc.cell_count:,} cells at {exc.spacing:g} in). "
-                    "Re-run it at a coarser voxel size."
+                    f"Re-run it at a coarser {size_name}."
                 ),
                 "code": "lattice_too_large",
                 "dims": list(exc.dims),
@@ -423,6 +425,20 @@ def _grids_or_error(project_id: str) -> Tuple[Optional[fields.FieldGrids], Optio
             }
         )
         response.status_code = 413
+        return None, response
+    except fields.TetGridUnavailableError:
+        # A tet run's grid is sampled through the tets, which only the
+        # in-memory result carries. Without the sidecar it cannot be rebuilt.
+        response = jsonify(
+            {
+                "error": (
+                    "This tet-mesh run has no saved field grid. "
+                    "Re-run it to regenerate the result fields."
+                ),
+                "code": "tet_grid_missing",
+            }
+        )
+        response.status_code = 404
         return None, response
     if grids is None:
         response = jsonify({"error": "Results not found"})

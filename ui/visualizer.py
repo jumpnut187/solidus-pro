@@ -680,7 +680,8 @@ class MeasurementTool:
         self.point2 = None
     
     def calculate_defect_volume(self, voxel_centers: np.ndarray, voxel_sizes: np.ndarray,
-                                 intensities: np.ndarray, threshold: float) -> float:
+                                 intensities: np.ndarray, threshold: float,
+                                 voxel_volumes: Optional[np.ndarray] = None) -> float:
         """
         Calculate total volume of defect voxels above minimum risk.
         
@@ -689,11 +690,15 @@ class MeasurementTool:
             voxel_sizes: N array of voxel sizes
             intensities: N array of intensity values
             threshold: Minimum risk as 0-1 fraction (0.7 = 70%-100% risk)
+            voxel_volumes: N array of per-point volumes (in3). Given on tet
+                runs, where voxel_sizes is an edge length, not a cube side.
             
         Returns:
             Total volume in cubic inches
         """
         mask = intensities >= threshold
+        if voxel_volumes is not None:
+            return float(np.sum(np.asarray(voxel_volumes, dtype=np.float64)[mask]))
         defect_sizes = voxel_sizes[mask]
         total_volume = np.sum(defect_sizes ** 3)  # Volume of cubes
         return total_volume
@@ -981,6 +986,9 @@ class CastingVisualizer(QWidget):
         # Built in _init_ui once the renderer exists.
         self.result_surface = None
         self._result_lattice_key = None
+        # Lumped node volumes (in3) of a registered tet mesh; defect volume
+        # sums these, because a node's voxel_sizes is an edge length.
+        self._result_point_volumes: Optional[np.ndarray] = None
 
         # Data the main window reads back (mode -> (centers, sizes, values))
         self.current_mesh = None
@@ -1338,7 +1346,7 @@ class CastingVisualizer(QWidget):
         Update the legend title and scale
         
         Args:
-            title: Legend title (e.g., "Shrinkage/Porosity Risk")
+            title: Legend title (e.g., "Shrink Risk")
             min_val: Minimum value for scale
             max_val: Maximum value for scale
             units: Units string (e.g., "MPa", "μm")
@@ -1381,18 +1389,28 @@ class CastingVisualizer(QWidget):
         self.render_window.Render()
     
     def _update_lookup_table(self):
-        """Update lookup table based on current colormap"""
-        cmap = COLOR_MAPS.get(self._current_colormap, COLOR_MAPS['red_gradient'])
-        colors = cmap['colors']
-        
+        """Legend colours: the shown result's palette, else the current colormap.
+
+        Modes such as Hot Spots and Niyama paint with a fixed palette
+        (``palette_hotspot``, ...), not the colormap, so the legend samples the
+        palette the skin was painted with.
+        """
         self.lut.SetNumberOfTableValues(256)
         self.lut.SetRange(self._color_scale_min, self._color_scale_max)
-        
-        for i in range(256):
-            t = i / 255.0
-            r, g, b = get_color_for_value(t, self._current_colormap)
-            self.lut.SetTableValue(i, r/255.0, g/255.0, b/255.0, 1.0)
-        
+
+        surface = getattr(self, "result_surface", None)
+        view = getattr(surface, "view", None)
+        palette = getattr(view, "palette", None)
+        if palette is not None:
+            rgb = np.asarray(palette(np.linspace(0.0, 1.0, 256, dtype=np.float32)), dtype=np.float64) / 255.0
+            for i in range(256):
+                self.lut.SetTableValue(i, rgb[i, 0], rgb[i, 1], rgb[i, 2], 1.0)
+        else:
+            for i in range(256):
+                t = i / 255.0
+                r, g, b = get_color_for_value(t, self._current_colormap)
+                self.lut.SetTableValue(i, r/255.0, g/255.0, b/255.0, 1.0)
+
         self.lut.Build()
     
     # ==================== Color Map Methods ====================
@@ -1406,9 +1424,10 @@ class CastingVisualizer(QWidget):
         """
         if colormap in COLOR_MAPS:
             self._current_colormap = colormap
-            self._update_lookup_table()
-            # Refresh visualization if we have data
+            # Refresh visualization if we have data. The legend follows the
+            # refreshed palette, so it is rebuilt after.
             self._refresh_current_visualization()
+            self._update_lookup_table()
             self.render_window.Render()
     
     def get_available_colormaps(self) -> List[str]:
@@ -1429,9 +1448,9 @@ class CastingVisualizer(QWidget):
         """
         self._color_scale_min = min_val
         self._color_scale_max = max_val
+        self._refresh_current_visualization()
         self._update_lookup_table()
         self.scalar_bar_actor.SetLookupTable(self.lut)
-        self._refresh_current_visualization()
         self.render_window.Render()
     
     # ==================== Color Bar / Legend Methods ====================
@@ -2153,6 +2172,9 @@ class CastingVisualizer(QWidget):
                 porosity_risk=data["porosity_risk"],
                 threshold=data["threshold"],
                 connectivity=data["connectivity"],
+                # On a tet mesh the neighbour rows are node adjacency, not
+                # 26 lattice slots; defect_regions then uses the full row.
+                mesh_type=getattr(mesh, "mesh_type", "voxel"),
             )
             if pocket is None:
                 return None
@@ -2213,8 +2235,11 @@ class CastingVisualizer(QWidget):
             return None
         
         voxel_centers, voxel_sizes, intensities = self.current_shrinkage_data
+        volumes = self._result_point_volumes
+        if volumes is not None and len(volumes) != len(intensities):
+            volumes = None
         return self.measurement_tool.calculate_defect_volume(
-            voxel_centers, voxel_sizes, intensities, threshold
+            voxel_centers, voxel_sizes, intensities, threshold, voxel_volumes=volumes
         )
     
     # ==================== Animation Export Methods ====================
@@ -2544,13 +2569,28 @@ class CastingVisualizer(QWidget):
         key = (id(voxel_mesh), int(len(centers)))
         if key == self._result_lattice_key and self.result_surface.lattice is not None:
             return True
-        sizes = getattr(voxel_mesh, "voxel_sizes", None)
-        part_types = getattr(voxel_mesh, "voxel_part_types", None)
-        ok = self.result_surface.set_voxels(
-            centers,
-            None if sizes is None else np.asarray(sizes),
-            None if part_types is None else np.asarray(part_types),
-        )
+        self._result_point_volumes = None
+        if getattr(voxel_mesh, "mesh_type", "voxel") == "tet":
+            # Tet nodes are not on a lattice: sample through the tets at the
+            # pitch the web sidecar and the fill use.
+            from core.dense_grid import tet_presentation_spacing
+
+            ok = self.result_surface.set_tet_mesh(
+                np.asarray(voxel_mesh.node_xyz),
+                np.asarray(voxel_mesh.tets),
+                np.asarray(voxel_mesh.tet_part_types),
+                tet_presentation_spacing(voxel_mesh),
+            )
+            if ok:
+                self._result_point_volumes = np.asarray(voxel_mesh.voxel_volumes, dtype=np.float64)
+        else:
+            sizes = getattr(voxel_mesh, "voxel_sizes", None)
+            part_types = getattr(voxel_mesh, "voxel_part_types", None)
+            ok = self.result_surface.set_voxels(
+                centers,
+                None if sizes is None else np.asarray(sizes),
+                None if part_types is None else np.asarray(part_types),
+            )
         self._result_lattice_key = key if ok else None
         if ok and self._voxel_display_mask is not None:
             self.result_surface.set_display_mask(self._voxel_display_mask)
@@ -2587,6 +2627,8 @@ class CastingVisualizer(QWidget):
             print("Result lattice unavailable; nothing drawn")
             return False
         ok = self.result_surface.show(mode, np.asarray(values, dtype=np.float32), iso=float(iso), palette=palette, **kwargs)
+        # The legend shows this mode's palette (hot spot yellow-to-red, ...).
+        self._update_lookup_table()
         self._apply_cross_section_clipping()
         self._apply_part_actor_visibility()
         self._refresh_active_inspector()
@@ -2606,7 +2648,7 @@ class CastingVisualizer(QWidget):
     def load_shrinkage(self, voxel_centers: np.ndarray, voxel_sizes: np.ndarray,
                        shrinkage_intensity: np.ndarray, threshold: float = 0.3,
                        vmin: float = 0.0, vmax: float = 1.0):
-        """Shrinkage / porosity risk (also feed modulus, in inches, via vmin/vmax)."""
+        """Shrink or Microporosity risk (also feed modulus, in inches, via vmin/vmax)."""
         self.current_shrinkage_data = (voxel_centers, voxel_sizes, shrinkage_intensity)
         if self.feed_modulus_leader:
             self.feed_modulus_leader.clear()
@@ -2772,6 +2814,7 @@ class CastingVisualizer(QWidget):
             self.result_surface.clear()
             self.result_surface.clear_skins()
         self._result_lattice_key = None
+        self._result_point_volumes = None
         # The voxel array is about to change; the hidden component ids are
         # kept so the main window can rebuild the mask for the next mesh.
         self._voxel_display_mask = None

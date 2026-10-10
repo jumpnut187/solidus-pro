@@ -37,6 +37,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from config.settings import get_settings
 from core.materials import get_all_alloy_names
 from core.surrogate.dataset import DEFAULT_DATASET_DIR, last_load_skips, load_dataset
 from core.surrogate.geometries import FAMILIES, iter_geometries, named_catalog, voxel_size_for
@@ -78,10 +79,12 @@ def main() -> int:
         specs = list(iter_geometries(args.count, seed=args.seed, families=families))
     plan_path = os.path.join(args.out_dir, PLAN_FILENAME)
     plan = _load_plan(plan_path)
+    # Same resolution as generate_dataset(mesh_type=None); CASTSIM_MESH_TYPE=voxel selects voxel.
+    mesh_type = str(get_settings().mesh.mesh_type)
 
     total = len(specs) * len(alloys) * len(mold_constants)
     print(f"Plan: {len(specs)} geometries x {len(alloys)} alloys x {len(mold_constants)} mold constants = {total} runs")
-    print(f"  out-dir: {args.out_dir}  grid: {args.grid}  plan: {plan_path}")
+    print(f"  out-dir: {args.out_dir}  grid: {args.grid}  mesh: {mesh_type}  plan: {plan_path}")
     pending = 0
     for spec in specs:
         vs = float(args.voxel_size) if args.voxel_size is not None else voxel_size_for(
@@ -93,7 +96,7 @@ def main() -> int:
         statuses = []
         for alloy in alloys:
             for mc in mold_constants:
-                entry = plan.get(generation_plan_key(spec.name, alloy, mc, vs, args.grid))
+                entry = plan.get(generation_plan_key(spec.name, alloy, mc, vs, args.grid, mesh_type))
                 status = entry.get("status") if entry else "pending"
                 if status == "done" and not _plan_record_exists(entry, args.out_dir):
                     status = "pending"
@@ -123,6 +126,7 @@ def main() -> int:
         mold_constants=mold_constants,
         plan_path=plan_path,
         retry_failed=not args.no_retry_failed,
+        mesh_type=mesh_type,
     )
     elapsed = time.time() - started
     plan = _load_plan(plan_path)

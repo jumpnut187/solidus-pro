@@ -194,7 +194,7 @@ class MainWindowFillTimeModeMappingTests(unittest.TestCase):
     def test_other_modes_still_hide_time_slider(self) -> None:
         host = self._make_host()
 
-        MainWindow._on_result_type_changed(host, "Shrinkage/Porosity")
+        MainWindow._on_result_type_changed(host, "Shrink")
 
         self.assertEqual(host._current_vis_mode, "shrinkage")
         host.time_slider_widget.setVisible.assert_called_with(False)

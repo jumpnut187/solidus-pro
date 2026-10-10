@@ -8,8 +8,10 @@ import math
 import os
 from typing import Any, Dict, List, Optional
 
+from config.settings import MESH_TYPES
 from core.part_manager import PartManager
 from core.solidification_params import migrate_legacy_pour_rate
+from ui.result_types import canonical_result_type
 
 
 #: Version stamped on every project this build saves.
@@ -165,7 +167,7 @@ def load_project_state(payload: Dict[str, Any]) -> ProjectState:
             "refinement_level": int(simulation.get("refinement_level", 3)),
             "memory_mode": str(simulation.get("memory_mode", "auto")),
             "analysis_options": dict(simulation.get("analysis_options", {})),
-            "performance_options": dict(simulation.get("performance_options", {})),
+            "performance_options": _normalize_performance_options(simulation.get("performance_options")),
             "solidification_params": solidification_params,
             # Absent on any project saved before pour locations existed --
             # None is the correct "not set" value for those older files.
@@ -179,14 +181,38 @@ def load_project_state(payload: Dict[str, Any]) -> ProjectState:
     return ProjectState(normalized)
 
 
+def _normalize_performance_options(value: Any) -> Dict[str, Any]:
+    """Copy ``performance_options``, keeping ``mesh_type`` only when it names a known mesh.
+
+    ``mesh_type`` ("voxel" or "tet") lives here so it round-trips without a
+    schema bump. Absent (projects saved before the toggle) or unknown means
+    "use ``settings.mesh.mesh_type``", so an unknown value is dropped.
+    ``voxel_cut_cells`` works the same way: kept when it is a bool,
+    dropped otherwise (absent means ``settings.mesh.voxel_cut_cells``).
+    """
+    options = dict(value) if isinstance(value, dict) else {}
+    if "mesh_type" in options:
+        mesh_type = str(options["mesh_type"] or "").strip().lower()
+        if mesh_type in MESH_TYPES:
+            options["mesh_type"] = mesh_type
+        else:
+            del options["mesh_type"]
+    if "voxel_cut_cells" in options and not isinstance(options["voxel_cut_cells"], bool):
+        del options["voxel_cut_cells"]
+    return options
+
+
 def _normalize_ui_state(value: Any) -> Dict[str, Any]:
     """Copy ``ui_state``, keeping ``parting_line`` only when it is well formed.
 
     A missing ``parting_line`` (projects saved before the Orient & Parting
     Line tool) means "not set yet", so a malformed one is dropped rather than
-    guessed at.
+    guessed at. A legacy ``result_type`` (``"Shrinkage/Porosity"``) is renamed
+    to its current label (``"Shrink"``).
     """
     ui_state = dict(value) if isinstance(value, dict) else {}
+    if isinstance(ui_state.get("result_type"), str):
+        ui_state["result_type"] = canonical_result_type(ui_state["result_type"])
     if "parting_line" in ui_state:
         parting_line = normalize_parting_line(ui_state["parting_line"])
         if parting_line is None:

@@ -18,8 +18,8 @@ type Toggle = { key: string; label: string; note: string };
 const CORE_TOGGLES: Toggle[] = [
   {
     key: 'shrinkage',
-    label: 'Shrinkage / porosity',
-    note: 'Volumetric shrinkage risk from feeding distance, modulus and solidification sequence.'
+    label: 'Shrink and microporosity',
+    note: 'Shrink: macro-shrinkage risk from feeding distance, modulus and solidification sequence. Microporosity: dispersed porosity risk from Niyama, feed-path blockage and Darcy margin.'
   },
   {
     key: 'hotspot',

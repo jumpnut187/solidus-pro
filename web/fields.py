@@ -16,7 +16,9 @@ HTTP request.
 Three things matter about the layout and are relied on by the client:
 
 1. The lattice is uniform. Every voxel is ``base_voxel_size`` on a side, so
-   ``dims``, ``origin`` and ``spacing`` fully describe it.
+   ``dims``, ``origin`` and ``spacing`` fully describe it. A tet run has no
+   lattice of its own: its nodal fields are sampled barycentrically onto one
+   at ``base_voxel_size * tet_lattice_spacing_factor`` (``_build_tet_field_grids``).
 2. Cells are indexed x-fastest: ``index = ix + nx * (iy + ny * iz)``. That is
    exactly a WebGL 3D texture of width ``nx``, height ``ny``, depth ``nz``.
 3. Scalar grids are *hole-filled*. A cell outside the metal carries the value
@@ -120,9 +122,36 @@ from core.dense_grid import (  # noqa: E402
     LatticeTooLargeError,
     derive_lattice,
     flat_indices as _flat_indices,
+    NODE_SAMPLE_FRAME_BATCH as _NODE_SAMPLE_FRAME_BATCH,
+    lattice_from_sampler as _lattice_from_sampler,
     nearest_known_map as _nearest_known_map,
+    sample_node_values as _sample_node_values,
     scatter_and_fill as _scatter_and_fill,
 )
+
+#: ``mesh_type`` of a tet-mesh run in the visualization payload and grid source.
+TET_MESH_TYPE = "tet"
+
+
+class TetGridUnavailableError(RuntimeError):
+    """A tet-mesh run has no field grid and none can be built.
+
+    The grid of a tet run is sampled from the tet connectivity, which only the
+    in-memory grid source carries; the JSON artifact holds a strided node
+    preview. When the sidecar is gone there is nothing correct to rebuild it
+    from, and a lattice derived from scattered nodes would be wrong, so the
+    run has to be re-run.
+    """
+
+
+#: ``summary`` key of a tet artifact whose sampler lattice was over
+#: ``MAX_LATTICE_CELLS`` when the artifact was written:
+#: ``{"dims": [nx, ny, nz], "cell_count": int, "spacing": float}``.
+TET_LATTICE_TOO_LARGE_KEY = "result_lattice_too_large"
+
+
+class TetLatticeTooLargeError(LatticeTooLargeError):
+    """A tet run's sampler lattice is over ``MAX_LATTICE_CELLS``. The fix is a coarser element size."""
 
 
 @dataclass
@@ -180,6 +209,9 @@ class FieldGrids:
     #: rather than from the full mesh, so the mask has holes the casting does
     #: not. The shell warns rather than pretending the sieve is the part.
     downsampled: bool = False
+    #: "tet" when the grid was sampled from a tet mesh (``voxel_count`` and
+    #: ``part_type_counts`` are then node counts), else "voxel".
+    mesh_type: str = "voxel"
 
 
 # --------------------------------------------------------------------------
@@ -210,6 +242,18 @@ def build_field_grids(
     is the only signal a lazily-rebuilt grid has.
     """
     summary = summary or {}
+    if visualization.get("mesh_type") == TET_MESH_TYPE:
+        if visualization.get("tets") is None:
+            too_large = summary.get(TET_LATTICE_TOO_LARGE_KEY)
+            if isinstance(too_large, dict):
+                # Re-running at the same size fails the same way; the sidecar
+                # was never written because the lattice was too large.
+                dims = tuple(int(v) for v in too_large["dims"])
+                raise TetLatticeTooLargeError((dims[0], dims[1], dims[2]), float(too_large["spacing"]))
+            raise TetGridUnavailableError(
+                "This tet-mesh run has no saved field grid. Re-run it to regenerate the result fields."
+            )
+        return _build_tet_field_grids(visualization, summary)
     # `value or []` would raise on a numpy array -- "the truth value of an
     # array with more than one element is ambiguous" -- and the full-resolution
     # grid source hands these in as arrays rather than lists.
@@ -311,6 +355,135 @@ def build_field_grids(
         grids.stacks["fill_animation"] = fill
 
     return grids
+
+
+def _build_tet_field_grids(visualization: Dict[str, Any], summary: Dict[str, Any]) -> FieldGrids:
+    """
+    Every dense grid for a tet run, from the full-resolution grid source.
+
+    ``centers`` are the node coordinates and every field is per node. The
+    lattice is a :class:`core.tet_lattice.TetLatticeSampler` at
+    ``lattice_spacing``; scalar fields and frames are barycentric samples at
+    the inside cells, and the hole fill outside the mesh is the voxel path's
+    nearest-inside-cell fill. The layout handed to the client (dims, origin,
+    spacing, uint8, x-fastest, mask = code + 1) is the voxel one.
+    """
+    from core.tet_lattice import TetLatticeSampler
+
+    nodes = _as_array(visualization.get("centers")).reshape((-1, 3))
+    n_nodes = int(nodes.shape[0])
+    tets = np.asarray(visualization["tets"], dtype=np.int64).reshape((-1, 4))
+    tet_part_types = np.asarray(visualization.get("tet_part_types"), dtype=np.int8).reshape(-1)
+    spacing = float(visualization.get("lattice_spacing") or 0.0)
+    if not np.isfinite(spacing) or spacing <= 0.0:
+        raise TetGridUnavailableError("tet grid source has no lattice_spacing")
+
+    try:
+        sampler = TetLatticeSampler(nodes, tets, tet_part_types, spacing)
+    except LatticeTooLargeError as exc:
+        raise TetLatticeTooLargeError(exc.dims, exc.spacing) from exc
+    lattice = _lattice_from_sampler(sampler)
+    mask = sampler.mask_codes()
+    nearest = _nearest_known_map(mask != 0, lattice)
+
+    raw_part_types = visualization.get("part_types")
+    if raw_part_types is not None and len(raw_part_types) == n_nodes:
+        part_types = np.asarray(raw_part_types, dtype=np.int32)
+    else:
+        part_types = np.full(n_nodes, PART_TYPE_CAST, dtype=np.int32)
+
+    grids = FieldGrids(
+        lattice=lattice,
+        mask=mask,
+        downsampled=False,
+        voxel_count=n_nodes,
+        cast_voxel_count=int(np.sum(part_types == PART_TYPE_CAST)),
+        total_volume_in3=float(summary.get("total_volume", 0.0) or 0.0),
+        stats=_flatten_stats(summary),
+        mesh_type=TET_MESH_TYPE,
+    )
+    # Counts are per node, like voxel_count. A code that only tets carry (a
+    # chill one tet thick, whose nodes all take the metal code) still gets a
+    # row, so every mask code has a name and a colour.
+    codes, counts = np.unique(part_types, return_counts=True)
+    grids.part_type_counts = {int(code): int(count) for code, count in zip(codes, counts)}
+    for code in np.unique(sampler.cell_part_types):
+        grids.part_type_counts.setdefault(int(code), 0)
+
+    cell_flat = sampler.cell_flat
+    for mode, source_keys in SCALAR_MODE_SOURCES.items():
+        values = _first_present(visualization, source_keys, n_nodes)
+        if values is None:
+            continue
+        sample_mask = np.isfinite(values)
+        if mode in _NON_NEGATIVE_ONLY_MODES:
+            sample_mask &= values >= 0.0
+        if not np.any(sample_mask):
+            continue
+        usable = values[sample_mask]
+        minimum = float(np.min(usable))
+        maximum = float(np.max(usable))
+        mean = float(np.mean(usable))
+        cell_values, cell_known = _sample_node_values(sampler, values, sample_mask)
+        dense = _scatter_and_fill(cell_values, cell_flat, cell_known, nearest, lattice)
+        constant = bool(maximum <= minimum)
+        grids.scalars[mode] = ScalarGrid(
+            values=_quantize(dense, minimum, maximum),
+            minimum=minimum,
+            maximum=maximum,
+            mean=mean,
+            constant=constant,
+            empty=bool(constant and abs(maximum) < 1e-12),
+        )
+
+    for stack_key, history_key, times_key in (
+        ("fraction_liquid", "fraction_liquid_history", "fraction_liquid_times"),
+        ("fill_animation", "fill_animation_history", "fill_animation_times"),
+    ):
+        stack = _build_tet_frame_stack(
+            visualization.get(history_key), visualization.get(times_key), sampler, nearest, lattice, n_nodes
+        )
+        if stack is not None:
+            grids.stacks[stack_key] = stack
+
+    return grids
+
+
+def _build_tet_frame_stack(
+    history: Any,
+    times: Any,
+    sampler: Any,
+    nearest: np.ndarray,
+    lattice: Lattice,
+    n_nodes: int,
+) -> Optional[FrameStack]:
+    """Per-node frames sampled onto the lattice, quantized like the voxel stack."""
+    if not isinstance(history, list) or not history:
+        return None
+    if any(np.size(snapshot) != n_nodes for snapshot in history):
+        return None
+    count = len(history)
+    frames = np.empty((count, lattice.cell_count), dtype=np.uint8)
+    # Batches bound the float transients to a few frames of inside cells.
+    for start in range(0, count, _NODE_SAMPLE_FRAME_BATCH):
+        batch = np.stack(
+            [np.asarray(s, dtype=np.float64).reshape(-1) for s in history[start : start + _NODE_SAMPLE_FRAME_BATCH]],
+            axis=0,
+        )
+        finite = np.isfinite(batch)
+        cell_values, cell_known = _sample_node_values(
+            sampler, np.where(finite, np.clip(batch, 0.0, 1.0), 0.0), finite
+        )
+        for offset in range(batch.shape[0]):
+            dense = _scatter_and_fill(
+                cell_values[offset], sampler.cell_flat, cell_known[offset], nearest, lattice
+            )
+            frames[start + offset] = _quantize(dense, 0.0, 1.0)
+
+    time_arr = np.asarray(times if times is not None else [], dtype=np.float32).reshape(-1)
+    if time_arr.size != count:
+        time_arr = np.linspace(0.0, 1.0, count, dtype=np.float32).reshape(-1)
+    return FrameStack(frames=frames, times_s=time_arr)
 
 
 def _as_array(value: Any) -> np.ndarray:
@@ -489,6 +662,14 @@ def sidecar_path(artifact_path: Path | str) -> Path:
 
 def save_sidecar(path: Path, grids: FieldGrids) -> None:
     """Write the dense grids as a single compressed ``.npz``."""
+    meta: Dict[str, Any] = {
+        "stats": grids.stats,
+        "part_type_counts": {str(k): v for k, v in grids.part_type_counts.items()},
+    }
+    if grids.mesh_type == TET_MESH_TYPE:
+        # Voxel sidecars stay byte-identical: the key is only written for tet
+        # runs. ``spacing`` above is the lattice pitch the tet run used.
+        meta["mesh_type"] = TET_MESH_TYPE
     payload: Dict[str, np.ndarray] = {
         "version": np.asarray([SIDECAR_VERSION], dtype=np.int32),
         "dims": np.asarray(grids.lattice.dims, dtype=np.int32),
@@ -500,15 +681,7 @@ def save_sidecar(path: Path, grids: FieldGrids) -> None:
             dtype=np.int64,
         ),
         "total_volume": np.asarray([grids.total_volume_in3], dtype=np.float64),
-        "meta_json": np.frombuffer(
-            json.dumps(
-                {
-                    "stats": grids.stats,
-                    "part_type_counts": {str(k): v for k, v in grids.part_type_counts.items()},
-                }
-            ).encode("utf-8"),
-            dtype=np.uint8,
-        ),
+        "meta_json": np.frombuffer(json.dumps(meta).encode("utf-8"), dtype=np.uint8),
     }
     for mode, grid in grids.scalars.items():
         payload[f"scalar__{mode}"] = grid.values
@@ -580,6 +753,7 @@ def load_sidecar(path: Path) -> Optional[FieldGrids]:
                 total_volume_in3=float(data["total_volume"][0]),
                 stats=dict(meta.get("stats", {})),
                 part_type_counts={int(k): int(v) for k, v in meta.get("part_type_counts", {}).items()},
+                mesh_type=str(meta.get("mesh_type", "voxel")),
             )
             for key in data.files:
                 if key.startswith("scalar__"):
@@ -633,13 +807,46 @@ def write_sidecar_for_artifact(
     must not be lost because the render sidecar could not be produced. The
     lazy path in :func:`load_grids` rebuilds it on first request.
     """
+    grids = build_artifact_grids(artifact, grid_source=grid_source)
+    if grids is None:
+        return None
+    return save_artifact_sidecar(artifact_path, grids)
+
+
+def build_artifact_grids(
+    artifact: Dict[str, Any],
+    *,
+    grid_source: Optional[Dict[str, Any]] = None,
+) -> Optional[FieldGrids]:
+    """
+    The sidecar grids for an artifact being written, or ``None``. Never raises.
+
+    A tet run whose sampler lattice is over ``MAX_LATTICE_CELLS`` is recorded
+    in ``artifact["summary"][TET_LATTICE_TOO_LARGE_KEY]``. The JSON artifact
+    has no tets to rebuild from, so without the record every later request
+    would read as a missing grid ("re-run it") instead of a lattice that
+    needs a coarser element size. Call this before the JSON is written.
+    """
     try:
         if grid_source:
             grids = build_field_grids(grid_source, artifact.get("summary", {}), downsampled=False)
         else:
             grids = build_field_grids(artifact.get("visualization", {}), artifact.get("summary", {}))
-        if grids.voxel_count == 0:
-            return None
+    except TetLatticeTooLargeError as exc:
+        artifact.setdefault("summary", {})[TET_LATTICE_TOO_LARGE_KEY] = {
+            "dims": [int(v) for v in exc.dims],
+            "cell_count": int(exc.cell_count),
+            "spacing": float(exc.spacing),
+        }
+        return None
+    except Exception:  # pragma: no cover - defensive; never fail a completed run
+        return None
+    return grids if grids.voxel_count else None
+
+
+def save_artifact_sidecar(artifact_path: Path | str, grids: FieldGrids) -> Optional[Path]:
+    """Persist ``grids`` as the artifact's sidecar. ``None`` when the write fails."""
+    try:
         path = sidecar_path(artifact_path)
         save_sidecar(path, grids)
         return path

@@ -32,12 +32,14 @@ class AnalysisOptionsDialog(DraggableDialog):
         analysis_group = QGroupBox("Select Analyses to Run")
         analysis_layout = QVBoxLayout()
 
-        self.shrinkage_check = QCheckBox("Shrinkage / Porosity")
+        self.shrinkage_check = QCheckBox("Shrink and Microporosity")
         self.shrinkage_check.setChecked(True)
         self.shrinkage_check.setToolTip(
-            "Predicts volumetric shrinkage defects based on feeding distance,\n"
-            "geometric modulus, and solidification sequence.\n\n"
-            "Red regions indicate high shrinkage probability."
+            "Shrink: macro-shrinkage risk from feeding distance,\n"
+            "geometric modulus, and solidification sequence.\n"
+            "Microporosity: dispersed porosity risk from Niyama,\n"
+            "feed-path blockage, and Darcy margin.\n\n"
+            "Red regions indicate high risk."
         )
         analysis_layout.addWidget(self.shrinkage_check)
 

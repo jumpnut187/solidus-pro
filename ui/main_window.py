@@ -51,6 +51,8 @@ from ui.qt import (
     QTableWidgetItem,
     QTextEdit,
     QTimer,
+    QToolButton,
+    QToolTip,
     QVBoxLayout,
     QWidget,
     QWidgetAction,
@@ -79,6 +81,7 @@ from core.part_manager import (
     PART_TYPE_TO_CODE,
     part_type_from_display_name,
 )
+from config.exceptions import MeshGenerationError
 from core.materials import get_all_alloy_names, get_alloy
 from core.gpu_compute import GPUComputeManager
 from core.memory_limits import (
@@ -101,6 +104,12 @@ from .dialogs import (
 )
 from .orientation_tool import OrientationController, PartingLine
 from .project_state import build_project_state, load_project_state
+from .result_types import (
+    DEFAULT_RESULT_TYPE,
+    canonical_result_type,
+    result_type_help_html,
+    result_type_mode,
+)
 from .workers import (
     DeepAutoTrainWorker,
     DeepExportWorker,
@@ -121,6 +130,14 @@ try:
 except ImportError:
     from core.error_logger_dummy import logger
 
+
+#: Default Shrink envelope threshold (percent). Keep in step with
+#: DEFAULT_THRESHOLD.shrinkage in web_frontend/src/lib/viewState.ts.
+SHRINKAGE_DEFAULT_THRESHOLD_PERCENT = 70
+
+#: Default Microporosity envelope threshold (percent). Keep in step with
+#: DEFAULT_THRESHOLD.porosity in web_frontend/src/lib/viewState.ts.
+MICROPOROSITY_DEFAULT_THRESHOLD_PERCENT = 70
 
 FRACTION_LIQUID_TIME_SLIDER_MAX = 1000
 
@@ -161,6 +178,30 @@ def clamp_window_position(
         max(min_x, min(preferred_x, max_x)),
         max(min_y, min(preferred_y, max_y)),
     )
+
+
+def format_mesh_fallback_notice(reason: Optional[str]) -> Dict[str, str]:
+    """
+    User-facing text for a tet run that fell back to the voxel mesh
+    (``SimulationWorker.mesh_fallback_reason``). Qt-free, like
+    ``format_filling_notice``, and with the same keys: "level" is "none"
+    without a fallback, else "warning".
+    """
+    if not reason:
+        return {"level": "none", "status_line": "", "title": "", "body": "", "tag": ""}
+    return {
+        "level": "warning",
+        "status_line": "⚠ Ran on the voxel mesh: the tetrahedral mesh was not used",
+        "title": "Ran on the Voxel Mesh",
+        "body": (
+            "Mesh type was Tetrahedral, but this run used the voxel mesh at the same size.\n\n"
+            f"Reason: {reason}\n\n"
+            "The results below are voxel results. To keep a run on the tet mesh, use a\n"
+            "larger mesh size, or raise the limits in the mesh settings\n"
+            "(tet_auto_max_nodes, tet_mesh_timeout_s)."
+        ),
+        "tag": "VOXEL FALLBACK",
+    }
 
 
 def format_filling_notice(summary: Optional[Dict[str, Any]]) -> Dict[str, str]:
@@ -383,6 +424,9 @@ class MeshDialog(DraggableDialog):
     
     settings_changed = Signal(float, int, str)  # voxel_size, refinement, memory_mode
     apply_ml_requested = Signal()
+
+    VOXEL_SIZE_LABEL = "Base Voxel Size (inches):"
+    ELEMENT_SIZE_LABEL = "Mesh size (in):"
     
     def __init__(self, parent=None):
         super().__init__(parent, "Mesh Parameters")
@@ -392,14 +436,46 @@ class MeshDialog(DraggableDialog):
     
     def _setup_ui(self):
         """Set up the mesh dialog UI"""
-        # Voxel size
-        self.content_layout.addWidget(QLabel("Base Voxel Size (inches):"))
+        from config.settings import get_settings
+
+        # Mesh type. The item data is the PipelineInputs.mesh_type value.
+        self.content_layout.addWidget(QLabel("Mesh type:"))
+        self.mesh_type_combo = QComboBox()
+        self.mesh_type_combo.addItem("Voxel", "voxel")
+        self.mesh_type_combo.addItem("Tetrahedral", "tet")
+        self.mesh_type_combo.setToolTip(
+            "Voxel: adaptive voxel grid (default).\n"
+            "Tetrahedral: conforming tet mesh of the CAD surfaces (implicit FEM solve).\n"
+            "A tet run switches to the voxel mesh, and says why, when tet meshing\n"
+            "fails, runs too long or the model is too large."
+        )
+        self.content_layout.addWidget(self.mesh_type_combo)
+
+        # Cut cells (PipelineInputs.voxel_cut_cells). Applies to voxel meshes,
+        # including the voxel mesh a tet run falls back to.
+        self.cut_cells_check = QCheckBox("Cut cells (CAD-accurate boundary)")
+        self.cut_cells_check.setToolTip(
+            "Voxel mesh only. Each boundary voxel carries the metal fraction and the\n"
+            "mold-contact area of the CAD inside it, so metal volume and cooling\n"
+            "surface match the CAD instead of the voxel staircase.\n"
+            "Measured at 0.1 in: total solidification time within about 1 % of a\n"
+            "fine tet reference (plain voxels: up to +17 %)."
+        )
+        self.content_layout.addWidget(self.cut_cells_check)
+
+        # Voxel size (tet edge length = this * settings.mesh.tet_edge_length_factor)
+        self.voxel_size_label = QLabel(self.VOXEL_SIZE_LABEL)
+        self.content_layout.addWidget(self.voxel_size_label)
         self.voxel_size_spin = QDoubleSpinBox()
         self.voxel_size_spin.setRange(0.02, 0.5)
         self.voxel_size_spin.setValue(0.1)
         self.voxel_size_spin.setSingleStep(0.02)
         self.voxel_size_spin.setDecimals(3)
         self.content_layout.addWidget(self.voxel_size_spin)
+        # Tet only: the edge length the size above produces.
+        self.tet_edge_label = QLabel("")
+        self.tet_edge_label.setStyleSheet("font-size: 10px; color: #888;")
+        self.content_layout.addWidget(self.tet_edge_label)
         
         # Refinement level
         self.content_layout.addWidget(QLabel("Refinement Level:"))
@@ -436,13 +512,29 @@ class MeshDialog(DraggableDialog):
         self.content_layout.addWidget(self.ml_status_label)
         
         self.content_layout.addStretch()
+
+        self.mesh_type_combo.currentIndexChanged.connect(self._update_size_label)
+        self.voxel_size_spin.valueChanged.connect(self._update_size_label)
+        self.set_mesh_type(get_settings().mesh.mesh_type)
+        self.set_voxel_cut_cells(bool(getattr(get_settings().mesh, "voxel_cut_cells", False)))
+
+    def _update_size_label(self, *_args):
+        """Name the size control for the selected mesh type; on tet show the effective edge length."""
+        tet = self.get_mesh_type() == "tet"
+        self.voxel_size_label.setText(self.ELEMENT_SIZE_LABEL if tet else self.VOXEL_SIZE_LABEL)
+        self.tet_edge_label.setText(
+            f"Tet edge \u2248 {tet_edge_length_in(self.voxel_size_spin.value()):.3f} in" if tet else ""
+        )
+        self.tet_edge_label.setVisible(tet)
     
     def store_original_values(self):
         """Store current settings"""
         self._original_values = {
             'voxel_size': self.voxel_size_spin.value(),
             'refinement': int(self.refinement_spin.value()),
-            'memory_mode': self.memory_mode_combo.currentIndex()
+            'memory_mode': self.memory_mode_combo.currentIndex(),
+            'mesh_type': self.mesh_type_combo.currentIndex(),
+            'voxel_cut_cells': self.cut_cells_check.isChecked(),
         }
     
     def restore_original_values(self):
@@ -451,6 +543,8 @@ class MeshDialog(DraggableDialog):
             self.voxel_size_spin.setValue(self._original_values['voxel_size'])
             self.refinement_spin.setValue(self._original_values['refinement'])
             self.memory_mode_combo.setCurrentIndex(self._original_values['memory_mode'])
+            self.mesh_type_combo.setCurrentIndex(self._original_values['mesh_type'])
+            self.cut_cells_check.setChecked(self._original_values['voxel_cut_cells'])
     
     def apply_values(self):
         """Emit signal with current settings"""
@@ -471,13 +565,36 @@ class MeshDialog(DraggableDialog):
     def get_memory_mode(self):
         memory_modes = {"Auto (Recommended)": "auto", "Force RAM": "ram", "Force Disk": "disk"}
         return memory_modes.get(self.memory_mode_combo.currentText(), "auto")
+
+    def get_mesh_type(self) -> str:
+        """"tet" or "voxel"."""
+        return str(self.mesh_type_combo.currentData())
+
+    def set_mesh_type(self, mesh_type: str) -> None:
+        """Select ``mesh_type`` ("tet" or "voxel"); an unknown value selects Voxel."""
+        index = self.mesh_type_combo.findData(str(mesh_type).strip().lower())
+        if index < 0:
+            index = self.mesh_type_combo.findData("voxel")
+        self.mesh_type_combo.setCurrentIndex(index)
+        self._update_size_label()
+
+    def get_voxel_cut_cells(self) -> bool:
+        """The PipelineInputs.voxel_cut_cells value."""
+        return self.cut_cells_check.isChecked()
+
+    def set_voxel_cut_cells(self, enabled: bool) -> None:
+        self.cut_cells_check.setChecked(bool(enabled))
     
-    def set_values(self, voxel_size, refinement, memory_mode="auto"):
-        """Set current values"""
+    def set_values(self, voxel_size, refinement, memory_mode="auto", mesh_type=None, voxel_cut_cells=None):
+        """Set current values. ``mesh_type`` / ``voxel_cut_cells`` None leave them unchanged."""
         self.voxel_size_spin.setValue(voxel_size)
         self.refinement_spin.setValue(refinement)
         mode_map = {"auto": 0, "ram": 1, "disk": 2}
         self.memory_mode_combo.setCurrentIndex(mode_map.get(memory_mode, 0))
+        if mesh_type is not None:
+            self.set_mesh_type(mesh_type)
+        if voxel_cut_cells is not None:
+            self.set_voxel_cut_cells(voxel_cut_cells)
 
 
 
@@ -877,7 +994,7 @@ class VisualizationDialog(DraggableDialog):
         lg_layout.addWidget(QLabel("Legend Title:"))
         self.legend_title_combo = QComboBox()
         self.legend_title_combo.addItems([
-            "Intensity", "Shrinkage/Porosity Risk", "Defect Risk",
+            "Intensity", "Shrink Risk", "Microporosity Risk", "Defect Risk",
             "Niyama Criterion", "Hot Spot Intensity", "Fraction Liquid"
         ])
         lg_layout.addWidget(self.legend_title_combo)
@@ -1341,7 +1458,8 @@ class HelpGuideDialog(QDialog):
             <h3>Result View Interpretation</h3>
             <ul>
                 <li><b>Model Only:</b> Geometry with no overlay. Use to verify orientation and labels.</li>
-                <li><b>Shrinkage/Porosity:</b> Higher values indicate higher risk likelihood.</li>
+                <li><b>Shrink:</b> Macro-shrinkage (cavity) risk. Higher values indicate higher risk likelihood.</li>
+                <li><b>Microporosity:</b> Dispersed interdendritic porosity risk from Niyama, feed-path blockage and Darcy margin.</li>
                 <li><b>Hot Spots:</b> Higher values indicate trapped late-solidification zones.</li>
                 <li><b>Niyama Criterion:</b> Directional solidification risk map. Lower threshold = stricter risk view.</li>
                 <li><b>Hot Tear Risk:</b> Uses brittle-temperature range behavior for tearing risk.</li>
@@ -1740,7 +1858,42 @@ class ConsoleWindow(QDialog):
         super().showEvent(event)
 
 
+def tet_edge_length_in(voxel_size: float) -> float:
+    """Tet edge length, inches, a run at ``voxel_size`` meshes with (``x settings.mesh.tet_edge_length_factor``)."""
+    from config.settings import get_settings
+
+    return float(voxel_size) * float(get_settings().mesh.tet_edge_length_factor)
+
+
 # ==================== Riser Design Dialog ====================
+
+def build_riser_design_tet_mesh(cast_mesh, voxel_size: float):
+    """Tet-mesh the cast part for the riser analysis at the simulation edge length.
+
+    Edge length = ``voxel_size * settings.mesh.tet_edge_length_factor``, as in
+    ``core.simulation_pipeline``. Raises ``MeshGenerationError`` before meshing
+    when the estimated node count exceeds ``settings.mesh.tet_max_nodes``.
+    """
+    from config.settings import get_settings
+    from core.part_manager import PART_TYPE_CAST
+    from core.simulation_pipeline import estimate_tet_node_count
+    from core.tet_mesh import build_tet_mesh
+
+    mesh_settings = get_settings().mesh
+    parts = [(cast_mesh, PART_TYPE_CAST)]
+    edge_length_in = float(voxel_size) * float(mesh_settings.tet_edge_length_factor)
+    estimated_nodes = estimate_tet_node_count(parts, edge_length_in)
+    max_nodes = int(mesh_settings.tet_max_nodes)
+    if estimated_nodes > max_nodes:
+        raise MeshGenerationError(
+            f"tet mesh at edge length {edge_length_in:g} in would have about "
+            f"{estimated_nodes:,} nodes, above the limit of {max_nodes:,} "
+            f"(settings.mesh.tet_max_nodes). Increase the element size",
+            voxel_size=edge_length_in,
+            estimated_voxels=estimated_nodes,
+        )
+    return build_tet_mesh(parts, edge_length_in, epsilon_rel=float(mesh_settings.tet_epsilon_rel))
+
 
 class RiserDesignDialog(DraggableDialog):
     """Modal dialog for automatic riser design using Heuvers' circle method"""
@@ -1851,6 +2004,9 @@ class RiserDesignDialog(DraggableDialog):
         if self._voxel_mesh is None:
             try:
                 self._prepare_mesh_from_parent()
+            except MeshGenerationError as e:
+                QMessageBox.warning(self, "Mesh Generation Error", str(e))
+                return
             except Exception as e:
                 QMessageBox.warning(self, "Mesh Error", f"Failed to prepare mesh: {str(e)}")
                 return
@@ -1861,6 +2017,7 @@ class RiserDesignDialog(DraggableDialog):
         
         try:
             from core.riser_design import RiserDesigner, RiserDesignParameters
+            from core.simulation_pipeline import mesh_type_of
             
             self.analyze_btn.setEnabled(False)
             self.analyze_btn.setText("Analyzing...")
@@ -1877,14 +2034,18 @@ class RiserDesignDialog(DraggableDialog):
                 max_diameter=12.0   # 12 inch maximum
             )
             
-            # Create designer
+            # Create designer. On a tet mesh every array is per node and
+            # voxel_volumes are the lumped node volumes.
+            mesh = self._voxel_mesh
             designer = RiserDesigner(
-                voxel_positions=self._voxel_mesh.voxel_centers,
-                voxel_size=self._voxel_mesh.base_voxel_size,
-                neighbors=self._voxel_mesh.neighbors if hasattr(self._voxel_mesh, 'neighbors') else self._create_neighbor_array(),
-                surface_mask=self._voxel_mesh.surface_voxels if hasattr(self._voxel_mesh, 'surface_voxels') else self._create_surface_mask(),
+                voxel_positions=mesh.voxel_centers,
+                voxel_size=mesh.base_voxel_size,
+                neighbors=mesh.voxel_neighbors if getattr(mesh, 'voxel_neighbors', None) is not None else self._create_neighbor_array(),
+                surface_mask=mesh.surface_voxels if getattr(mesh, 'surface_voxels', None) is not None else self._create_surface_mask(),
                 alloy=self._alloy,
-                params=params
+                params=params,
+                voxel_volumes=getattr(mesh, 'voxel_volumes', None),
+                mesh_type=mesh_type_of(mesh),
             )
             
             # Debug: print modulus info
@@ -1963,16 +2124,20 @@ class RiserDesignDialog(DraggableDialog):
         mesh = casting_part.get_transformed_mesh()
         bounds = np.array([mesh.bounds[0], mesh.bounds[1]]).T
         
-        # Create voxel mesh
         voxel_size = main_window._current_voxel_size
-        self._voxel_mesh = AdaptiveVoxelMesh(
-            base_voxel_size=voxel_size,
-            max_refinement_level=3
-        )
-        success = self._voxel_mesh.generate(mesh, bounds)
-        
-        if not success or self._voxel_mesh.voxel_centers is None:
-            raise ValueError("Failed to create voxel mesh")
+        if main_window._performance_options.get('mesh_type') == 'tet':
+            self._voxel_mesh = build_riser_design_tet_mesh(mesh, voxel_size)
+        else:
+            # Create voxel mesh
+            self._voxel_mesh = AdaptiveVoxelMesh(
+                base_voxel_size=voxel_size,
+                max_refinement_level=3,
+                voxel_cut_cells=main_window._performance_options.get('voxel_cut_cells'),
+            )
+            success = self._voxel_mesh.generate(mesh, bounds)
+            
+            if not success or self._voxel_mesh.voxel_centers is None:
+                raise ValueError("Failed to create voxel mesh")
         
         # Get alloy properties
         try:
@@ -2098,7 +2263,7 @@ class SolidificationParamsDialog(DraggableDialog):
         ("feeding", "disconnected_neck_floor", "Disconnected Neck Floor", 0.70, 0.3, 1.0, 0.01, 2, "fraction",
          "Minimum shrinkage reduction for feeder necks not connected to a riser system."),
         ("feeding", "shrink_scalar", "Shrink Scalar", 0.5, 0.25, 4.0, 0.05, 2, "",
-         "Global Shrinkage/Porosity calibration. Values above 1 reduce displayed risk; values below 1 increase it."),
+         "Global calibration of the Shrink and Microporosity results. Values above 1 reduce displayed risk; values below 1 increase it."),
         ("feeding", "feeding_zone_vertical_bias", "Feeding-Zone +Z Bias", 0.0, 0.0, 2.0, 0.05, 2, "",
          "Strength of +Z directional solidification inside the riser feeding zone. "
          "Higher = bottom solidifies faster in the feeding zone, hardening directional "
@@ -2602,7 +2767,11 @@ class MainWindow(QMainWindow):
         self._performance_options['use_gpu'] = bool(
             getattr(_settings, 'use_gpu', self._performance_options.get('use_gpu', True))
         )
+        # The mesh dialog starts on settings.mesh.mesh_type / voxel_cut_cells.
+        self._performance_options['mesh_type'] = self.mesh_dialog.get_mesh_type()
+        self._performance_options['voxel_cut_cells'] = self.mesh_dialog.get_voxel_cut_cells()
         self._update_performance_summary()
+        self._update_mesh_summary()
     
     def _create_menu_bar(self):
         """Create the application menu bar"""
@@ -3250,23 +3419,34 @@ class MainWindow(QMainWindow):
         
         # Result type selector
         vis_layout.addWidget(QLabel("Result Type:"))
+        result_type_row = QHBoxLayout()
         self.result_type_combo = QComboBox()
-        self.result_type_combo.addItems(["Shrinkage/Porosity", "Feed Modulus", "Hot Spots", "Niyama Criterion", "Fraction Liquid", "Fill Time"])
+        self.result_type_combo.addItems([DEFAULT_RESULT_TYPE, "Feed Modulus", "Hot Spots", "Niyama Criterion", "Fraction Liquid", "Fill Time"])
+        self._apply_result_type_item_tooltips()
         self.result_type_combo.currentTextChanged.connect(self._on_result_type_changed)
         self.result_type_combo.setEnabled(False)  # Enable after simulation
-        vis_layout.addWidget(self.result_type_combo)
+        result_type_row.addWidget(self.result_type_combo, 1)
+        # Info button: shows the selected result's help (core/result_help.json).
+        self.result_type_help_btn = QToolButton()
+        self.result_type_help_btn.setText("ⓘ")
+        self.result_type_help_btn.setAccessibleName("About this result type")
+        self.result_type_help_btn.clicked.connect(self._show_result_type_help)
+        result_type_row.addWidget(self.result_type_help_btn)
+        vis_layout.addLayout(result_type_row)
+        self._sync_result_type_help_button()
         
         # Threshold/intensity slider
         self.threshold_label_title = QLabel("X-Ray Level %:")
         vis_layout.addWidget(self.threshold_label_title)
         self.threshold_slider = MarkedSlider(Qt.Horizontal)
         self.threshold_slider.setRange(1, 100)
-        self.threshold_slider.setValue(30)
-        self.threshold_slider.setMarkerPosition(30)
+        # Shrink is the result type shown first.
+        self.threshold_slider.setValue(SHRINKAGE_DEFAULT_THRESHOLD_PERCENT)
+        self.threshold_slider.setMarkerPosition(SHRINKAGE_DEFAULT_THRESHOLD_PERCENT)
         self.threshold_slider.valueChanged.connect(self._update_threshold)
         vis_layout.addWidget(self.threshold_slider)
 
-        self.threshold_label = QLabel("30%")
+        self.threshold_label = QLabel(f"{SHRINKAGE_DEFAULT_THRESHOLD_PERCENT}%")
         vis_layout.addWidget(self.threshold_label)
         
         # Time slider for Fraction Liquid (hidden by default)
@@ -3504,7 +3684,9 @@ class MainWindow(QMainWindow):
         self.mesh_dialog.set_values(
             self._current_voxel_size,
             self._current_refinement,
-            self._current_memory_mode
+            self._current_memory_mode,
+            mesh_type=self._performance_options.get('mesh_type'),
+            voxel_cut_cells=self._performance_options.get('voxel_cut_cells'),
         )
         # Enable ML button if STL is loaded
         self.mesh_dialog.apply_ml_button.setEnabled(self.stl_loader.is_valid())
@@ -3823,7 +4005,9 @@ class MainWindow(QMainWindow):
     def _get_recommended_threshold(self, vis_mode, alloy_name):
         """Get recommended threshold value (0-100) based on visualization mode and alloy"""
         if vis_mode == "shrinkage":
-            return 30
+            return SHRINKAGE_DEFAULT_THRESHOLD_PERCENT
+        elif vis_mode == "porosity":
+            return MICROPOROSITY_DEFAULT_THRESHOLD_PERCENT
         elif vis_mode == "hotspot":
             return 30  # Top 30% hottest areas
         elif vis_mode == "niyama":
@@ -3986,30 +4170,38 @@ class MainWindow(QMainWindow):
         self.fraction_liquid_play_pause_btn.setEnabled(enabled)
         self.fraction_liquid_speed_combo.setEnabled(enabled)
 
+    def _apply_result_type_item_tooltips(self) -> None:
+        """Put each result type's help text on its combo item (Qt.ToolTipRole)."""
+        for index in range(self.result_type_combo.count()):
+            help_html = result_type_help_html(self.result_type_combo.itemText(index))
+            if help_html:
+                self.result_type_combo.setItemData(index, help_html, Qt.ToolTipRole)
+
+    def _selected_result_type_help_html(self) -> str:
+        help_html = result_type_help_html(self.result_type_combo.currentText(), with_title=True)
+        return help_html or "Select a result type to see what it shows."
+
+    def _sync_result_type_help_button(self) -> None:
+        """Show the selected result's help as the info button's tooltip."""
+        button = getattr(self, "result_type_help_btn", None)
+        if button is None:
+            return
+        button.setToolTip(self._selected_result_type_help_html())
+
+    def _show_result_type_help(self) -> None:
+        """Info button: pop up the selected result's help next to the button."""
+        button = self.result_type_help_btn
+        QToolTip.showText(
+            button.mapToGlobal(QPoint(0, button.height())),
+            self._selected_result_type_help_html(),
+            button,
+        )
+
     def _on_result_type_changed(self, result_type):
         """Handle result type selection change"""
         print(f"DEBUG: Result type changed to: {result_type}")
-        self._current_vis_mode = {
-            "Shrinkage/Porosity": "shrinkage",
-            "Feed Modulus": "feed_modulus",
-            "Hot Spots": "hotspot",
-            "Niyama Criterion": "niyama",
-            "Hot Tear Risk": "hot_tear",
-            "Sand Burn-In": "sand_burn_in",
-            "Gas Generation": "gas_generation",
-            "Gas Entrapment": "gas_entrapment",
-            "Gas Porosity Risk": "gas_porosity",
-            "Fraction Liquid": "fraction_liquid",
-            "Fill Time": "fill_time",
-            "Fill Animation": "fill_animation",
-            # Advanced analysis modes
-            "Feeding Quality": "feeding_quality",
-            "Thermal Stress": "thermal_stress",
-            "Distortion": "distortion",
-            "Crack Susceptibility": "crack_susceptibility",
-            "SDAS (Microstructure)": "sdas",
-            "Predicted UTS": "predicted_uts"
-        }.get(result_type, "shrinkage")
+        self._current_vis_mode = result_type_mode(result_type)
+        self._sync_result_type_help_button()
         
         print(f"DEBUG: Visualization mode set to: {self._current_vis_mode}")
 
@@ -4145,6 +4337,7 @@ class MainWindow(QMainWindow):
             # Update threshold label based on result type
             labels = {
                 "shrinkage": "X-Ray Level %:",
+                "porosity": "X-Ray Level %:",
                 "hotspot": "Min Intensity %:",
             }
             self.threshold_label_title.setText(labels.get(self._current_vis_mode, "Threshold:"))
@@ -4451,6 +4644,10 @@ class MainWindow(QMainWindow):
         self._current_voxel_size = voxel_size
         self._current_refinement = refinement
         self._current_memory_mode = memory_mode
+        # mesh_type rides in performance_options so it reaches the worker and
+        # the project file without a new signal argument or schema field.
+        self._performance_options['mesh_type'] = self.mesh_dialog.get_mesh_type()
+        self._performance_options['voxel_cut_cells'] = self.mesh_dialog.get_voxel_cut_cells()
         # CAD is tessellated when the file is opened, but the voxel size is
         # chosen here -- afterwards. Picking a finer grid now would otherwise
         # leave the geometry coarser than the grid can resolve, so the STEP
@@ -4506,6 +4703,11 @@ class MainWindow(QMainWindow):
     
     def _update_mesh_summary(self):
         """Update mesh summary label in sidebar"""
+        if self._performance_options.get('mesh_type') == 'tet':
+            self.mesh_summary_label.setText(
+                f"Tet: {self._current_voxel_size:.3f}\", edge \u2248 {tet_edge_length_in(self._current_voxel_size):.3f}\""
+            )
+            return
         self.mesh_summary_label.setText(
             f"Voxel: {self._current_voxel_size:.3f}\", Ref: {int(self._current_refinement)}"
         )
@@ -5124,7 +5326,7 @@ class MainWindow(QMainWindow):
 
     def _collect_project_state(self) -> dict:
         """Capture the current desktop session state."""
-        result_type = self.result_type_combo.currentText() or "Shrinkage/Porosity"
+        result_type = self.result_type_combo.currentText() or DEFAULT_RESULT_TYPE
         ui_state = {
             "show_model": self.show_mesh_check.isChecked(),
             "show_results": self.show_results_check.isChecked(),
@@ -5238,10 +5440,20 @@ class MainWindow(QMainWindow):
 
         self._on_alloy_confirmed(simulation_state["alloy_name"])
         self.material_dialog.set_alloy(simulation_state["alloy_name"])
+        from config.settings import get_settings as _get_settings
+
         self.mesh_dialog.set_values(
             simulation_state["voxel_size"],
             simulation_state["refinement_level"],
             simulation_state["memory_mode"],
+            # Absent on projects saved before the mesh-type toggle.
+            mesh_type=simulation_state["performance_options"].get(
+                "mesh_type", _get_settings().mesh.mesh_type
+            ),
+            # Absent on projects saved before the cut-cell option.
+            voxel_cut_cells=simulation_state["performance_options"].get(
+                "voxel_cut_cells", bool(getattr(_get_settings().mesh, "voxel_cut_cells", False))
+            ),
         )
         self._on_mesh_settings_confirmed(
             simulation_state["voxel_size"],
@@ -5287,7 +5499,8 @@ class MainWindow(QMainWindow):
             if default_idx >= 0:
                 self.fraction_liquid_speed_combo.setCurrentIndex(default_idx)
 
-        result_type = str(ui_state.get("result_type", "Shrinkage/Porosity"))
+        # Projects saved before the rename carry "Shrinkage/Porosity"; it opens as Shrink.
+        result_type = canonical_result_type(str(ui_state.get("result_type", DEFAULT_RESULT_TYPE)))
         combo_index = self.result_type_combo.findText(result_type)
         if combo_index >= 0:
             self.result_type_combo.setCurrentIndex(combo_index)
@@ -5374,10 +5587,16 @@ class MainWindow(QMainWindow):
         
         voxel_size = self._current_voxel_size
         
-        # Validate memory requirements
-        validation = validate_mesh_parameters(bounds_tuple, voxel_size, fill_ratio)
+        # Validate memory requirements. A tet run skips the voxel memory model:
+        # the pipeline checks its estimated node count against
+        # settings.mesh.tet_max_nodes and raises MeshGenerationError, which the
+        # failure dialog shows verbatim.
+        if self._performance_options.get('mesh_type') == 'tet':
+            validation = None
+        else:
+            validation = validate_mesh_parameters(bounds_tuple, voxel_size, fill_ratio)
         
-        if not validation.can_proceed:
+        if validation is not None and not validation.can_proceed:
             # CRITICAL or ERROR - Cannot proceed
             if validation.recommended_voxel_size:
                 reply = QMessageBox.critical(
@@ -5417,7 +5636,7 @@ class MainWindow(QMainWindow):
                 )
                 return
         
-        elif validation.severity == MemorySeverity.WARNING:
+        elif validation is not None and validation.severity == MemorySeverity.WARNING:
             # Warning - Ask user to confirm
             mem_info = get_system_memory_info()
             reply = QMessageBox.warning(
@@ -5442,7 +5661,10 @@ class MainWindow(QMainWindow):
         self._stop_fraction_liquid_playback()
 
         # Update status with memory info
-        self.status_label.setText(f"Starting simulation ({validation.estimated_voxels:,} estimated voxels)...")
+        if validation is None:
+            self.status_label.setText("Starting simulation (tetrahedral mesh)...")
+        else:
+            self.status_label.setText(f"Starting simulation ({validation.estimated_voxels:,} estimated voxels)...")
         
         # Clear previous simulation outputs without removing loaded parts.
         self._purge_previous_simulation_memory()
@@ -5460,8 +5682,10 @@ class MainWindow(QMainWindow):
             'voxel_size': voxel_size,
             'refinement': int(self._current_refinement),
             'memory_mode': memory_mode,
-            'estimated_voxels': validation.estimated_voxels,
-            'estimated_memory_mb': validation.estimated_memory_mb
+            'mesh_type': self._performance_options.get('mesh_type'),
+            'voxel_cut_cells': self._performance_options.get('voxel_cut_cells'),
+            'estimated_voxels': validation.estimated_voxels if validation is not None else None,
+            'estimated_memory_mb': validation.estimated_memory_mb if validation is not None else None
         })
         
         # Start simulation in background thread
@@ -5493,8 +5717,23 @@ class MainWindow(QMainWindow):
         self.simulation_worker.start()
     
     def _on_simulation_progress(self, message: str):
-        """Handle simulation progress updates"""
+        """Handle simulation progress updates.
+
+        After a tet -> voxel fallback the reason stays under every later
+        message until the run ends.
+        """
+        reason = self._progress_sender_mesh_fallback_reason()
+        if reason and reason not in message:
+            message = f"{message}\n⚠ Running on the voxel mesh: {reason}"
         self.status_label.setText(message)
+
+    def _progress_sender_mesh_fallback_reason(self) -> Optional[str]:
+        """``mesh_fallback_reason`` of the worker emitting progress, or None."""
+        try:
+            reason = getattr(self.sender(), "mesh_fallback_reason", None)
+        except Exception:
+            return None
+        return reason if isinstance(reason, str) and reason else None
     
     def _on_detailed_progress(self, current: int, total: int, stage: str):
         """Handle detailed Z-slice progress with time estimation"""
@@ -5547,8 +5786,20 @@ class MainWindow(QMainWindow):
             percentage = int((current / total) * 100)
             self.progress_bar.setFormat(f"{percentage}%")
         
-        # Update status label
-        self.status_label.setText(f"Processing {stage}: Z-slice {current}/{total}")
+        # Update status label. The tet pipeline reports stage percentages,
+        # not voxelizer Z-slices.
+        if self._progress_sender_is_tet_run():
+            self.status_label.setText(f"{stage} {int((current / total) * 100)}%")
+        else:
+            self.status_label.setText(f"Processing {stage}: Z-slice {current}/{total}")
+
+    def _progress_sender_is_tet_run(self) -> bool:
+        """True when the worker emitting progress runs a tet mesh (``run_mesh_type``)."""
+        try:
+            run_mesh_type = getattr(self.sender(), "run_mesh_type", None)
+            return callable(run_mesh_type) and run_mesh_type() == "tet"
+        except Exception:
+            return False
     
     def _on_simulation_finished(self, success: bool, status: str):
         """Handle simulation completion"""
@@ -5563,8 +5814,13 @@ class MainWindow(QMainWindow):
                 'elapsed_time_seconds': elapsed_time,
                 'alloy': self._current_alloy
             })
-            logger.log_performance("Complete simulation", elapsed_time, 
-                                   self.simulation_worker.voxel_mesh.get_voxel_count() if self.simulation_worker.voxel_mesh else 0)
+            finished_mesh = self.simulation_worker.voxel_mesh
+            logger.log_performance(
+                "Complete simulation",
+                elapsed_time,
+                finished_mesh.get_voxel_count() if finished_mesh else 0,
+                count_unit="nodes" if getattr(finished_mesh, "mesh_type", "voxel") == "tet" else "voxels",
+            )
             
             # Get results
             simulation = self.simulation_worker.simulation
@@ -5604,7 +5860,11 @@ class MainWindow(QMainWindow):
                 # information dialog rather than a warning icon.
                 QMessageBox.information(self, notice["title"], notice["body"])
 
-            self.status_label.setText(notice["status_line"] or "✓ Visualization complete")
+            status_line = notice["status_line"] or "✓ Visualization complete"
+            fallback_notice = self._show_mesh_fallback_notice(sim_worker)
+            if fallback_notice["status_line"]:
+                status_line = f"{fallback_notice['status_line']}\n{status_line}"
+            self.status_label.setText(status_line)
             # Keep the sidebar's "Analyses: ..." summary in sync with what the
             # filling stage actually concluded, not just what was requested --
             # see _update_analysis_summary for the request-time text this
@@ -5621,7 +5881,11 @@ class MainWindow(QMainWindow):
             logger.error("Simulation failed", context={'alloy': self._current_alloy})
             self.status_label.setText("Simulation failed")
             self.progress_bar.setFormat("Failed")
-            QMessageBox.critical(self, "Error", "Simulation failed. Check console for details.")
+            mesh_error = getattr(self.simulation_worker, "mesh_error_message", None)
+            if mesh_error:
+                QMessageBox.critical(self, "Mesh Generation Error", mesh_error)
+            else:
+                QMessageBox.critical(self, "Error", "Simulation failed. Check console for details.")
 
     # ------------------------------------------------------------------
     # Surrogate simulation handlers
@@ -6200,6 +6464,8 @@ class MainWindow(QMainWindow):
             analysis_options=self._get_effective_analysis_options(),
             solidification_params=self._solidification_params,
             pour_location=self._pour_location,
+            mesh_type=self._performance_options.get('mesh_type'),
+            voxel_cut_cells=self._performance_options.get('voxel_cut_cells'),
         )
         self.surrogate_worker.progress.connect(self._on_simulation_progress)
         self.surrogate_worker.detailed_progress.connect(self._on_detailed_progress)
@@ -6240,8 +6506,23 @@ class MainWindow(QMainWindow):
             badge += f" · conf {confidence:.2f}"
         if getattr(simulation, "surrogate_disabled_analyses", None):
             badge += " · disabled: " + ", ".join(simulation.surrogate_disabled_analyses)
-        self.status_label.setText(f"✓ {badge}")
+        fallback_notice = self._show_mesh_fallback_notice(self.simulation_worker)
+        status_line = f"✓ {badge}"
+        if fallback_notice["status_line"]:
+            status_line = f"{fallback_notice['status_line']}\n{status_line}"
+        self.status_label.setText(status_line)
         self.progress_bar.setFormat("Complete")
+
+    def _show_mesh_fallback_notice(self, worker: Any) -> Dict[str, str]:
+        """Tell the user, after the run, that a tet run used the voxel mesh; returns the notice.
+
+        Same mechanism as the stalled-fill notice: an information box.
+        """
+        reason = getattr(worker, "mesh_fallback_reason", None)
+        notice = format_mesh_fallback_notice(reason if isinstance(reason, str) else None)
+        if notice["level"] == "warning":
+            QMessageBox.information(self, notice["title"], notice["body"])
+        return notice
 
     def _setup_result_type_options(self):
         """Configure result type combo based on available analyses"""
@@ -6250,7 +6531,13 @@ class MainWindow(QMainWindow):
         # Build list of available result types
         available_types = []
         if self._analysis_options.get('shrinkage', False):
-            available_types.append("Shrinkage/Porosity")
+            available_types.append("Shrink")
+            if (
+                self.simulation_worker is not None
+                and self.simulation_worker.simulation is not None
+                and getattr(self.simulation_worker.simulation, "porosity_probability", None) is not None
+            ):
+                available_types.append("Microporosity")
         if self.simulation_worker is not None and self.simulation_worker.simulation is not None:
             if getattr(self.simulation_worker.simulation, "local_modulus", None) is not None:
                 available_types.append("Feed Modulus")
@@ -6328,6 +6615,7 @@ class MainWindow(QMainWindow):
         self.result_type_combo.blockSignals(True)
         self.result_type_combo.clear()
         self.result_type_combo.addItems(available_types)
+        self._apply_result_type_item_tooltips()
         self.result_type_combo.blockSignals(False)
         
         # Set time slider range for fraction liquid
@@ -6338,26 +6626,7 @@ class MainWindow(QMainWindow):
         
         # Select first available type AND trigger the handler
         if available_types:
-            self._current_vis_mode = {
-                "Shrinkage/Porosity": "shrinkage",
-                "Feed Modulus": "feed_modulus",
-                "Hot Spots": "hotspot",
-                "Niyama Criterion": "niyama",
-                "Hot Tear Risk": "hot_tear",
-                "Sand Burn-In": "sand_burn_in",
-                "Gas Generation": "gas_generation",
-                "Gas Entrapment": "gas_entrapment",
-                "Gas Porosity Risk": "gas_porosity",
-                "Fraction Liquid": "fraction_liquid",
-                "Fill Time": "fill_time",
-                "Fill Animation": "fill_animation",
-                "Feeding Quality": "feeding_quality",
-                "Thermal Stress": "thermal_stress",
-                "Distortion": "distortion",
-                "Crack Susceptibility": "crack_susceptibility",
-                "SDAS (Microstructure)": "sdas",
-                "Predicted UTS": "predicted_uts"
-            }.get(available_types[0], "shrinkage")
+            self._current_vis_mode = result_type_mode(available_types[0])
             # Manually trigger to ensure UI is updated
             self._on_result_type_changed(available_types[0])
     
@@ -6388,6 +6657,8 @@ class MainWindow(QMainWindow):
         
         if self._current_vis_mode == 'shrinkage':
             self._visualize_shrinkage(simulation, voxel_mesh, threshold)
+        elif self._current_vis_mode == 'porosity':
+            self._visualize_shrinkage(simulation, voxel_mesh, threshold, microporosity=True)
         elif self._current_vis_mode == 'feed_modulus':
             self._visualize_feed_modulus(simulation, voxel_mesh, threshold)
         elif self._current_vis_mode == 'hotspot':
@@ -6442,22 +6713,33 @@ class MainWindow(QMainWindow):
         elif self._current_vis_mode == 'predicted_uts':
             self._visualize_predicted_uts(simulation, voxel_mesh, threshold)
     
-    def _visualize_shrinkage(self, simulation, voxel_mesh, threshold):
-        """Visualize shrinkage/porosity results"""
-        if simulation.shrinkage_probability is None:
-            print("No shrinkage data available")
+    def _visualize_shrinkage(self, simulation, voxel_mesh, threshold, microporosity: bool = False):
+        """Visualize the Shrink result, or Microporosity when ``microporosity``.
+
+        Both use the engine's display arrays (chill points at 0), the same
+        arrays the web paints, and both register the pocket inspector.
+        """
+        if microporosity:
+            attribute, method_name, legend_title = (
+                "porosity_probability", "get_microporosity_display_intensity", "Microporosity Risk"
+            )
+        else:
+            attribute, method_name, legend_title = (
+                "shrinkage_probability", "get_shrink_display_intensity", "Shrink Risk"
+            )
+        raw = getattr(simulation, attribute, None)
+        if raw is None:
+            print(f"No {legend_title} data available")
             return
 
-        if hasattr(simulation, "get_shrinkage_display_intensity"):
-            intensities = np.asarray(simulation.get_shrinkage_display_intensity(), dtype=np.float32)
+        display_fn = getattr(simulation, method_name, None)
+        if callable(display_fn):
+            intensities = np.asarray(display_fn(), dtype=np.float32)
         else:
-            intensities = np.array([
-                simulation.get_shrinkage_intensity(i)
-                for i in range(len(voxel_mesh.voxel_centers))
-            ], dtype=np.float32)
+            intensities = np.asarray(raw, dtype=np.float32)
 
         if len(intensities) != len(voxel_mesh.voxel_centers):
-            print("No shrinkage data available")
+            print(f"No {legend_title} data available")
             return
         effective_threshold, lowered_threshold = self._get_effective_shrinkage_threshold(
             intensities,
@@ -6488,7 +6770,7 @@ class MainWindow(QMainWindow):
         )
 
         # Update legend
-        self.visualizer.update_legend("Shrinkage/Porosity Risk", 0.0, 1.0)
+        self.visualizer.update_legend(legend_title, 0.0, 1.0)
 
         # Store for threshold updates
         self.visualizer.current_shrinkage_data = (
@@ -6952,7 +7234,7 @@ class MainWindow(QMainWindow):
         # Update based on current visualization mode
         mode = getattr(self, '_current_vis_mode', 'shrinkage')
 
-        if mode == 'shrinkage':
+        if mode in ('shrinkage', 'porosity'):
             if hasattr(self.visualizer, 'current_shrinkage_data') and \
                self.visualizer.current_shrinkage_data is not None:
                 self.visualizer.update_shrinkage_threshold(threshold)
@@ -7068,7 +7350,10 @@ class MainWindow(QMainWindow):
         
         # Update legend title based on current result type
         if self._current_vis_mode == 'shrinkage':
-            self.visualizer.show_color_bar("Shrinkage/Porosity Risk",
+            self.visualizer.show_color_bar("Shrink Risk",
+                                           self.visualization_dialog.show_legend_check.isChecked())
+        elif self._current_vis_mode == 'porosity':
+            self.visualizer.show_color_bar("Microporosity Risk",
                                            self.visualization_dialog.show_legend_check.isChecked())
         elif self._current_vis_mode == 'hotspot':
             self.visualizer.show_color_bar("Hot Spot Intensity",
@@ -7106,7 +7391,9 @@ class MainWindow(QMainWindow):
         """Handle legend show/hide toggle"""
         title = "Intensity"
         if self._current_vis_mode == 'shrinkage':
-            title = "Shrinkage/Porosity Risk"
+            title = "Shrink Risk"
+        elif self._current_vis_mode == 'porosity':
+            title = "Microporosity Risk"
         elif self._current_vis_mode == 'hotspot':
             title = "Hot Spot Intensity"
         elif self._current_vis_mode == 'niyama':

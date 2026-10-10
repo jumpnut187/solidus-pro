@@ -197,13 +197,31 @@ export type JobStatus = {
   queue_position?: number;
 };
 
-export type MeshPreview = {
+export type VoxelMeshPreview = {
+  mesh_type?: undefined;
   estimated_voxels: number;
   estimated_memory_mb: number;
   can_proceed: boolean;
   message: string;
   recommended_voxel_size: number;
 };
+
+/**
+ * `web/routes.py::tet_mesh_estimate`; `recommended_voxel_size` is null under the node limit.
+ * `can_proceed` false with `falls_back_to_voxel` true: the run uses the voxel mesh instead.
+ */
+export type TetMeshPreview = {
+  mesh_type: 'tet';
+  estimated_nodes: number;
+  max_nodes: number;
+  edge_length_in: number;
+  can_proceed: boolean;
+  falls_back_to_voxel: boolean;
+  message: string;
+  recommended_voxel_size: number | null;
+};
+
+export type MeshPreview = VoxelMeshPreview | TetMeshPreview;
 
 export type MlMeshRecommendation = {
   base_voxel_size: number;
@@ -212,6 +230,12 @@ export type MlMeshRecommendation = {
   reason: string;
   used_model: boolean;
   warning?: string;
+  // Present only when the request asked for mesh_type 'tet'.
+  mesh_type?: 'tet';
+  estimated_nodes?: number;
+  max_nodes?: number;
+  edge_length_in?: number;
+  can_proceed?: boolean;
 };
 
 export type HardwareInfo = {
@@ -458,12 +482,19 @@ export const api = {
     }),
 
   // --- Mesh ----------------------------------------------------------------
-  meshPreview: (projectId: string, voxelSize: number) =>
-    requestJson<MeshPreview>(`/api/projects/${projectId}/mesh-preview`, jsonBody({ voxel_size: voxelSize })),
-  mlMesh: (projectId: string, targetAccuracy?: number) =>
+  meshPreview: (projectId: string, voxelSize: number, meshType: string) =>
+    requestJson<MeshPreview>(
+      `/api/projects/${projectId}/mesh-preview`,
+      jsonBody({ voxel_size: voxelSize, mesh_type: meshType })
+    ),
+  mlMesh: (projectId: string, meshType: string, targetAccuracy?: number) =>
     requestJson<MlMeshRecommendation>(
       `/api/projects/${projectId}/ml-mesh`,
-      jsonBody(targetAccuracy === undefined ? {} : { target_accuracy: targetAccuracy })
+      jsonBody(
+        targetAccuracy === undefined
+          ? { mesh_type: meshType }
+          : { mesh_type: meshType, target_accuracy: targetAccuracy }
+      )
     ),
 
   // --- Runs ----------------------------------------------------------------

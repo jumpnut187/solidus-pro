@@ -167,7 +167,7 @@ export const PARAM_DEFS: ParamDef[] = [
     step: 0.05,
     decimals: 2,
     unit: '',
-    help: 'Global shrinkage/porosity calibration. Above 1 reduces displayed risk; below 1 increases it.'
+    help: 'Global calibration of the Shrink and Microporosity results. Above 1 reduces displayed risk; below 1 increases it.'
   },
   {
     group: 'feeding',

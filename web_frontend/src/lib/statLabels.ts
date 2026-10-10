@@ -74,11 +74,11 @@ const OVERRIDES: Record<string, { label?: string; hint?: string; decimals?: numb
     hint: "The solver's own shrinkage threshold, which is stricter than the display one."
   },
   shrinkage_percentage: { label: 'Share of voxels flagged' },
-  shrinkage_max: { label: 'Max risk' },
-  shrinkage_mean: { label: 'Mean risk' },
+  shrinkage_max: { label: 'Max Shrink risk' },
+  shrinkage_mean: { label: 'Mean Shrink risk' },
   shrinkage_affected_count: {
     label: 'Voxels showing any risk',
-    hint: 'Every voxel with a non-trivial shrinkage value in the displayed field.'
+    hint: 'Every voxel with a non-trivial value in the displayed Shrink field.'
   },
   hotspot_voxel_count: {
     label: 'Voxels flagged by the solver',
@@ -118,22 +118,41 @@ const OVERRIDES: Record<string, { label?: string; hint?: string; decimals?: numb
   fill_max_time_s: { label: 'Fill time' },
   fill_filled_voxel_count: { label: 'Filled voxels' },
   fill_unfilled_voxel_count: { label: 'Unfilled voxels' },
+  // Tet runs: web/payloads.py renames the fill counts; they count mesh nodes.
+  fill_nodes_filled_count: { label: 'Filled nodes' },
+  fill_nodes_unfilled_count: { label: 'Unfilled nodes' },
   fraction_liquid_snapshots: { label: 'Liquid-fraction frames' },
   shrink_scalar: {
     label: 'Shrink scalar',
     decimals: 2,
-    hint: 'Global calibration applied to the displayed shrinkage risk.'
+    hint: 'Global calibration applied to the Shrink and Microporosity risk.'
   },
   shrink_scalar_formula: { label: 'Shrink scalar formula' }
 };
+
+/**
+ * Tet runs (`stats.mesh_type === 'tet'`): counts are mesh nodes, and
+ * `shrinkage_percentage` is a node-volume share (core/simulation_pipeline.py),
+ * not a count share. Every other label swaps "voxel" for "node".
+ */
+const TET_OVERRIDES: Record<string, { label?: string; hint?: string }> = {
+  shrinkage_percentage: {
+    label: 'Share of volume flagged',
+    hint: 'Volume of the flagged nodes as a share of the casting volume.'
+  }
+};
+
+function tetWording(text: string): string {
+  return text.replace(/\bVoxels\b/g, 'Nodes').replace(/\bvoxels\b/g, 'nodes').replace(/\bVoxel\b/g, 'Node').replace(/\bvoxel\b/g, 'node');
+}
 
 /** Section headings, matched against the start of a key, longest prefix first. */
 const GROUPS: { prefix: string; label: string }[] = [
   { prefix: 'niyama_metadata_', label: 'Niyama method' },
   { prefix: 'niyama_', label: 'Niyama' },
-  { prefix: 'shrinkage_', label: 'Shrinkage' },
-  { prefix: 'shrink_scalar', label: 'Shrinkage' },
-  { prefix: 'defect_', label: 'Shrinkage' },
+  { prefix: 'shrinkage_', label: 'Shrink and microporosity' },
+  { prefix: 'shrink_scalar', label: 'Shrink and microporosity' },
+  { prefix: 'defect_', label: 'Shrink and microporosity' },
   { prefix: 'casting_volume', label: 'Overview' },
   { prefix: 'hotspot_', label: 'Hot spots' },
   { prefix: 'hot_tear', label: 'Hot tear' },
@@ -160,7 +179,7 @@ const GROUPS: { prefix: string; label: string }[] = [
 const GROUP_ORDER = [
   'Overview',
   'Solidification',
-  'Shrinkage',
+  'Shrink and microporosity',
   'Feeding',
   'Hot spots',
   'Niyama',
@@ -236,15 +255,19 @@ export function buildStatGroups(
     else byGroup.set(group, [row]);
   };
 
+  // On a tet run GridMeta's counts are mesh nodes (web/fields.py).
+  const tet = stats.mesh_type === 'tet';
   if (extras.voxelCount > 0) {
-    push('Overview', { key: '_voxels', label: 'Voxels', value: formatCount(extras.voxelCount) });
+    push('Overview', { key: '_voxels', label: tet ? 'Nodes' : 'Voxels', value: formatCount(extras.voxelCount) });
   }
   if (extras.castVoxelCount > 0) {
     push('Overview', {
       key: '_cast_voxels',
-      label: 'Cast voxels',
+      label: tet ? 'Cast nodes' : 'Cast voxels',
       value: formatCount(extras.castVoxelCount),
-      hint: 'Voxels belonging to cast, riser and riser-post bodies.'
+      hint: tet
+        ? 'Mesh nodes belonging to cast, riser and riser-post bodies.'
+        : 'Voxels belonging to cast, riser and riser-post bodies.'
     });
   }
   if (extras.totalVolumeIn3 > 0) {
@@ -254,23 +277,31 @@ export function buildStatGroups(
       value: `${formatNumber(extras.totalVolumeIn3, 1)} in³`
     });
   }
-  if (extras.spacing > 0) {
+  // Tet: the element size is the requested edge length from the run summary;
+  // GridMeta's spacing is only the display-lattice pitch.
+  const edgeLength = tet ? Number(stats.tet_edge_length_in) : NaN;
+  const size = tet && Number.isFinite(edgeLength) && edgeLength > 0 ? edgeLength : extras.spacing;
+  if (size > 0) {
     push('Overview', {
       key: '_spacing',
-      label: 'Voxel size',
-      value: `${formatNumber(extras.spacing, 3)} in`
+      label: tet ? 'Element size' : 'Voxel size',
+      value: `${formatNumber(size, 3)} in`
     });
   }
 
   for (const [key, value] of Object.entries(stats)) {
     // Already shown from GridMeta's own fields, in better units.
-    if (key === 'voxel_count' || key === 'total_volume') continue;
+    if (key === 'voxel_count' || key === 'total_volume' || key === 'tet_edge_length_in') continue;
+    // A sentence, shown as the Results panel's fallback banner.
+    if (key === 'mesh_fallback_reason') continue;
     const spec = describe(key);
+    const hint = OVERRIDES[key]?.hint;
+    const tetOverride = tet ? TET_OVERRIDES[key] : undefined;
     push(groupFor(key), {
       key,
-      label: spec.label,
+      label: tetOverride?.label ?? (tet ? tetWording(spec.label) : spec.label),
       value: renderValue(value, spec),
-      hint: OVERRIDES[key]?.hint
+      hint: tetOverride?.hint ?? (tet && hint ? tetWording(hint) : hint)
     });
   }
 
