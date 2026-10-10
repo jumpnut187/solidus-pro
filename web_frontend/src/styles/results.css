@@ -44,6 +44,50 @@
   gap: var(--sp-3);
 }
 
+/* Result type selector with its info button; the popover drops below it. */
+.result-type-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.result-type-row > .field {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.result-help-anchor {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.result-help-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: var(--z-modal);
+  width: 272px;
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-2);
+  box-shadow: var(--shadow-panel);
+}
+
+.result-help-title {
+  margin: 0 0 var(--sp-1);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+.result-help-body {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+
 .colormap-preview {
   flex: 0 0 44px;
   height: 20px;

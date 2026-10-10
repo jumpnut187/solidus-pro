@@ -1346,7 +1346,7 @@ class CastingVisualizer(QWidget):
         Update the legend title and scale
         
         Args:
-            title: Legend title (e.g., "Shrinkage/Porosity Risk")
+            title: Legend title (e.g., "Shrink Risk")
             min_val: Minimum value for scale
             max_val: Maximum value for scale
             units: Units string (e.g., "MPa", "μm")
@@ -2648,7 +2648,7 @@ class CastingVisualizer(QWidget):
     def load_shrinkage(self, voxel_centers: np.ndarray, voxel_sizes: np.ndarray,
                        shrinkage_intensity: np.ndarray, threshold: float = 0.3,
                        vmin: float = 0.0, vmax: float = 1.0):
-        """Shrinkage / porosity risk (also feed modulus, in inches, via vmin/vmax)."""
+        """Shrink or Microporosity risk (also feed modulus, in inches, via vmin/vmax)."""
         self.current_shrinkage_data = (voxel_centers, voxel_sizes, shrinkage_intensity)
         if self.feed_modulus_leader:
             self.feed_modulus_leader.clear()

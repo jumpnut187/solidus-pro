@@ -1,4 +1,5 @@
-import { ChevronLeft, ChevronRight, FlipHorizontal, Maximize2, Ruler } from 'lucide-react';
+import { useEffect, useId, useRef, useState } from 'react';
+import { ChevronLeft, ChevronRight, FlipHorizontal, Info, Maximize2, Ruler } from 'lucide-react';
 
 import { CollapsibleGroup, Group } from './SetupPanel';
 import { COLORMAPS, defaultColormapForMode, gradientCss, isDefaultColormapFor } from '../lib/colormaps';
@@ -7,6 +8,7 @@ import { buildStatGroups } from '../lib/statLabels';
 import {
   COLORMAP_IDS,
   DEFAULT_THRESHOLD,
+  RESULT_MODE_HELP,
   RESULT_MODE_LABELS,
   RESULT_MODE_UNITS,
   isSweepMode,
@@ -56,6 +58,65 @@ const MODE_GROUPS: { label: string; modes: ResultModeId[] }[] = [
   { label: 'Microstructure', modes: ['sdas', 'predicted_uts'] }
 ];
 
+/**
+ * Info button beside the result selector: a popover with the selected
+ * result's help text (core/result_help.json, shared with the desktop).
+ * Closes on Escape, on a click outside, and when the mode changes.
+ */
+function ResultHelpButton({ mode }: { mode: ResultModeId }) {
+  const [open, setOpen] = useState(false);
+  const anchorRef = useRef<HTMLDivElement | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const popoverId = useId();
+  const label = RESULT_MODE_LABELS[mode];
+
+  useEffect(() => setOpen(false), [mode]);
+
+  useEffect(() => {
+    if (!open) return;
+    function onPointerDown(event: MouseEvent) {
+      if (!anchorRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        event.stopPropagation();
+        setOpen(false);
+        buttonRef.current?.focus();
+      }
+    }
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown, true);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown, true);
+    };
+  }, [open]);
+
+  return (
+    <div className="result-help-anchor" ref={anchorRef}>
+      <button
+        ref={buttonRef}
+        type="button"
+        className="btn btn-ghost btn-icon"
+        aria-label={`About ${label}`}
+        aria-expanded={open}
+        aria-controls={open ? popoverId : undefined}
+        aria-describedby={open ? popoverId : undefined}
+        title={`About ${label}`}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <Info size={14} />
+      </button>
+      {open ? (
+        <div id={popoverId} className="result-help-pop" role="tooltip">
+          <p className="result-help-title">{label}</p>
+          <p className="result-help-body">{RESULT_MODE_HELP[mode]}</p>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function ResultsPanel(props: ResultsPanelProps) {
   const {
     collapsed,
@@ -72,6 +133,8 @@ export function ResultsPanel(props: ResultsPanelProps) {
     onRecomputeDefectVolume,
     onOpenStatistics
   } = props;
+  // Before the collapsed early return: hooks run on every render.
+  const resultHelpId = useId();
 
   if (collapsed) {
     return (
@@ -144,47 +207,59 @@ export function ResultsPanel(props: ResultsPanelProps) {
               </p>
             ) : null}
             <CollapsibleGroup title="Field" summary={RESULT_MODE_LABELS[view.mode]} {...section('field')}>
-              <label className="field">
-                <span className="visually-hidden">Result type</span>
-                <select
-                  className="select"
-                  value={view.mode}
-                  onChange={(event) => {
-                    const mode = event.target.value as ResultModeId;
-                    onViewChange({
-                      mode,
-                      threshold: DEFAULT_THRESHOLD[mode],
-                      scaleMin: null,
-                      scaleMax: null,
-                      playing: false,
-                      timePercent: 0,
-                      // Follow the new mode's default map, but only while the
-                      // one on screen is still the old mode's default. A map
-                      // the user picked on purpose survives the switch.
-                      colormap: isDefaultColormapFor(view.mode, view.colormap)
-                        ? defaultColormapForMode(mode)
-                        : view.colormap
-                    });
-                  }}
-                >
-                  {MODE_GROUPS.map((group) => (
-                    <optgroup key={group.label} label={group.label}>
-                      {group.modes.map((mode) => (
-                        <option key={mode} value={mode} disabled={!available.has(mode)}>
-                          {RESULT_MODE_LABELS[mode]}
-                          {available.has(mode)
-                            ? constantModes.has(mode)
-                              ? ' — one value everywhere'
-                              : ''
-                            : emptyModes.has(mode)
-                              ? ' — no signal'
-                              : ' — not in this run'}
-                        </option>
-                      ))}
-                    </optgroup>
-                  ))}
-                </select>
-              </label>
+              <div className="result-type-row">
+                <label className="field">
+                  <span className="visually-hidden">Result type</span>
+                  <select
+                    className="select"
+                    value={view.mode}
+                    aria-describedby={resultHelpId}
+                    onChange={(event) => {
+                      const mode = event.target.value as ResultModeId;
+                      onViewChange({
+                        mode,
+                        threshold: DEFAULT_THRESHOLD[mode],
+                        scaleMin: null,
+                        scaleMax: null,
+                        playing: false,
+                        timePercent: 0,
+                        // Follow the new mode's default map, but only while the
+                        // one on screen is still the old mode's default. A map
+                        // the user picked on purpose survives the switch.
+                        colormap: isDefaultColormapFor(view.mode, view.colormap)
+                          ? defaultColormapForMode(mode)
+                          : view.colormap
+                      });
+                    }}
+                  >
+                    {MODE_GROUPS.map((group) => (
+                      <optgroup key={group.label} label={group.label}>
+                        {group.modes.map((mode) => (
+                          <option
+                            key={mode}
+                            value={mode}
+                            disabled={!available.has(mode)}
+                            title={RESULT_MODE_HELP[mode]}
+                          >
+                            {RESULT_MODE_LABELS[mode]}
+                            {available.has(mode)
+                              ? constantModes.has(mode)
+                                ? ' — one value everywhere'
+                                : ''
+                              : emptyModes.has(mode)
+                                ? ' — no signal'
+                                : ' — not in this run'}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </select>
+                </label>
+                <ResultHelpButton mode={view.mode} />
+              </div>
+              <span id={resultHelpId} className="visually-hidden">
+                {RESULT_MODE_HELP[view.mode]}
+              </span>
 
               {available.has(view.mode) && constantModes.has(view.mode) ? (
                 <p className="status-note status-note-info">

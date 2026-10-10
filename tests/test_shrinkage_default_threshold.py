@@ -1,4 +1,4 @@
-"""Shrinkage/Porosity envelope threshold defaults to 70 % on desktop and web."""
+"""Shrink and Microporosity envelope thresholds default to 70 % on desktop and web."""
 
 import re
 import unittest
@@ -13,6 +13,19 @@ class ShrinkageDefaultThresholdTests(unittest.TestCase):
         match = re.search(r"^SHRINKAGE_DEFAULT_THRESHOLD_PERCENT = (\d+)$", source, re.M)
         self.assertIsNotNone(match)
         self.assertEqual(int(match.group(1)), 70)
+
+    def test_desktop_microporosity_default_is_70(self) -> None:
+        source = (ROOT / "ui" / "main_window.py").read_text(encoding="utf-8")
+        match = re.search(r"^MICROPOROSITY_DEFAULT_THRESHOLD_PERCENT = (\d+)$", source, re.M)
+        self.assertIsNotNone(match)
+        self.assertEqual(int(match.group(1)), 70)
+
+    def test_desktop_recommended_thresholds_are_70(self) -> None:
+        from ui.main_window import MainWindow
+
+        window = MainWindow.__new__(MainWindow)
+        self.assertEqual(MainWindow._get_recommended_threshold(window, "shrinkage", "WCB"), 70)
+        self.assertEqual(MainWindow._get_recommended_threshold(window, "porosity", "WCB"), 70)
 
     def test_web_default_matches_desktop(self) -> None:
         source = (ROOT / "web_frontend" / "src" / "lib" / "viewState.ts").read_text(encoding="utf-8")

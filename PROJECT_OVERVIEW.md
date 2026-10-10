@@ -534,7 +534,7 @@ data/
 
 | Feature | Commercial Simulator | This Simulator |
 |---------|-----------|----------------|
-| Shrinkage/Porosity | ✅ | ✅ |
+| Shrink and Microporosity | ✅ | ✅ |
 | Hot Spot Detection | ✅ | ✅ |
 | Niyama Criterion | ✅ | ✅ |
 | Feeding Path Analysis | ✅ | ✅ (NEW) |

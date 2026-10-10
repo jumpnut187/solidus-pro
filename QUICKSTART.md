@@ -218,7 +218,7 @@ Covers all seven alloys: WCB, CF8, C958, C964, CA6NM, MONEL400 and IN625.
 - `feeding_path_lengths` is populated when riser-fed path tracing is available.
 - `shrinkage_risk` and `porosity_risk` are the primary bounded defect-risk outputs. The `*_probability` names remain as legacy aliases.
 - `porosity_risk` is a hybrid defect-risk field built from shrinkage plus relative solidification time and Niyama severity; it is not a calibrated porosity percentage.
-- The merged "Shrinkage/Porosity" view uses the maximum of the shrinkage and porosity risk fields.
+- The "Shrink" view shows `shrinkage_probability` and the "Microporosity" view shows `porosity_probability`, each with chill points at 0 (`get_shrink_display_intensity` / `get_microporosity_display_intensity`). Projects saved with the old merged "Shrinkage/Porosity" view open on Shrink. Each result type has help text in `core/result_help.json`, shown by the info button next to the result selector in both apps.
 - `niyama_values` are reported in the engine's approximate `C * sqrt(s) / mm` unit convention, and the derived Niyama risk field includes directional-solidification modifiers near chills.
 - `local_thickness = 2 * modulus` is a section-size proxy, not a literal thickness measurement.
 - The default solver is geometry-driven. It includes physics-inspired terms, but it is not a full thermal/phase-field simulation.

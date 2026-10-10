@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 from config.settings import MESH_TYPES
 from core.part_manager import PartManager
 from core.solidification_params import migrate_legacy_pour_rate
+from ui.result_types import canonical_result_type
 
 
 #: Version stamped on every project this build saves.
@@ -206,9 +207,12 @@ def _normalize_ui_state(value: Any) -> Dict[str, Any]:
 
     A missing ``parting_line`` (projects saved before the Orient & Parting
     Line tool) means "not set yet", so a malformed one is dropped rather than
-    guessed at.
+    guessed at. A legacy ``result_type`` (``"Shrinkage/Porosity"``) is renamed
+    to its current label (``"Shrink"``).
     """
     ui_state = dict(value) if isinstance(value, dict) else {}
+    if isinstance(ui_state.get("result_type"), str):
+        ui_state["result_type"] = canonical_result_type(ui_state["result_type"])
     if "parting_line" in ui_state:
         parting_line = normalize_parting_line(ui_state["parting_line"])
         if parting_line is None:

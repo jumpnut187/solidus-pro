@@ -83,7 +83,7 @@ Three modes for any hardware budget:
 
 | Analysis | What It Tells You |
 |---|---|
-| **Shrinkage / Porosity** | Where the metal will pull away — your primary defect map |
+| **Shrink and Microporosity** | Shrink: where the metal will pull away into a cavity — your primary defect map. Microporosity: dispersed porosity from poor Niyama, blocked feed paths and Darcy margin |
 | **Hot Spots** | Last-to-freeze zones begging for a riser |
 | **Niyama Criterion** | `G / √R` — the gold-standard directional solidification check |
 | **Fraction Liquid** | Time-resolved melt progression, full timeline playback |

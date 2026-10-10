@@ -427,16 +427,12 @@ def build_visualization_payload(
             visualization_data["surface_voxels"] = surface_voxels[indices].tolist()
 
     if engine.shrinkage_probability is not None:
-        display_fn = getattr(engine, "get_shrinkage_display_intensity", None)
+        # The Shrink result: same array the desktop shows (chills at 0, no porosity).
+        display_fn = getattr(engine, "get_shrink_display_intensity", None)
         if callable(display_fn):
             shrinkage = np.asarray(display_fn(), dtype=np.float32)
         else:
             shrinkage = np.asarray(engine.shrinkage_probability, dtype=np.float32)
-            porosity = getattr(engine, "porosity_probability", None)
-            if porosity is not None:
-                porosity_arr = np.asarray(porosity, dtype=np.float32)
-                if len(porosity_arr) == len(shrinkage):
-                    shrinkage = np.maximum(shrinkage, porosity_arr).astype(np.float32)
         if len(shrinkage) != n_voxels:
             shrinkage = np.asarray(engine.shrinkage_probability, dtype=np.float32)
         visualization_data["shrinkage"] = shrinkage[indices].tolist()
@@ -460,7 +456,11 @@ def build_visualization_payload(
     feeding_open_fraction = getattr(engine, "feeding_open_fraction", None)
     if feeding_open_fraction is not None and len(feeding_open_fraction) == n_voxels:
         visualization_data["feeding_open_fraction"] = np.asarray(feeding_open_fraction, dtype=np.float32)[indices].tolist()
+    # The Microporosity result: same array the desktop shows (chills at 0).
     porosity_standalone = getattr(engine, "porosity_probability", None)
+    microporosity_fn = getattr(engine, "get_microporosity_display_intensity", None)
+    if porosity_standalone is not None and callable(microporosity_fn):
+        porosity_standalone = microporosity_fn()
     if porosity_standalone is not None and len(porosity_standalone) == n_voxels:
         visualization_data["porosity"] = np.asarray(porosity_standalone, dtype=np.float32)[indices].tolist()
 

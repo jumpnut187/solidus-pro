@@ -391,7 +391,7 @@ def build_fork_artifact(result: PipelineResult) -> Dict[str, Any]:
         "crack_susceptibility": getattr(engine, "crack_susceptibility", None),
         "sdas": _normalize(getattr(engine, "sdas", None)),
         "predicted_uts": _invert(_normalize(getattr(engine, "predicted_uts", None))),
-        "porosity": getattr(engine, "porosity_probability", None),
+        "porosity": _display_field(engine, "get_microporosity_display_intensity", "porosity_probability"),
         "feeding_blocked": getattr(engine, "feeding_blocked", None),
         "feeding_path_lengths": getattr(engine, "feeding_path_lengths", None),
         "feeding_open_fraction": getattr(engine, "feeding_open_fraction", None),
@@ -502,9 +502,16 @@ def _full_grid_source(engine: Any, mesh: Any, source_centers: np.ndarray) -> Dic
         source["tet_part_types"] = np.asarray(mesh.tet_part_types, dtype=np.int8)
         source["lattice_spacing"] = tet_presentation_spacing(mesh)
 
+    # Shrink and Microporosity: the same display arrays the desktop paints.
+    for key, method_name, attribute in (
+        ("shrinkage", "get_shrink_display_intensity", "shrinkage_probability"),
+        ("porosity", "get_microporosity_display_intensity", "porosity_probability"),
+    ):
+        values = _full_array(_display_field(engine, method_name, attribute), count)
+        if values is not None:
+            source[key] = values
+
     for key, attribute in (
-        ("shrinkage", "shrinkage_probability"),
-        ("porosity", "porosity_probability"),
         ("feed_modulus", "local_modulus"),
         ("hotspot", "hotspot_intensity"),
         ("solidification_times", "solidification_times"),
@@ -662,6 +669,22 @@ def _normalize(values: Any) -> Optional[np.ndarray]:
     if max_v <= min_v:
         return np.zeros_like(arr, dtype=np.float32)
     return np.clip((arr - min_v) / (max_v - min_v), 0.0, 1.0).astype(np.float32)
+
+
+def _display_field(engine: Any, method_name: str, attribute: str) -> Any:
+    """The engine's display array for a result (``method_name()``), else the raw attribute.
+
+    Shrink and Microporosity go through ``get_shrink_display_intensity`` and
+    ``get_microporosity_display_intensity`` so the web shows the same arrays
+    as the desktop (chill points at 0). An engine without the method, or
+    without the attribute, falls back to the attribute (or None).
+    """
+    if getattr(engine, attribute, None) is None:
+        return None
+    method = getattr(engine, method_name, None)
+    if callable(method):
+        return method()
+    return getattr(engine, attribute)
 
 
 def _invert(values: Any) -> Optional[np.ndarray]:

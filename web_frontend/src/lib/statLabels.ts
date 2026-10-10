@@ -74,11 +74,11 @@ const OVERRIDES: Record<string, { label?: string; hint?: string; decimals?: numb
     hint: "The solver's own shrinkage threshold, which is stricter than the display one."
   },
   shrinkage_percentage: { label: 'Share of voxels flagged' },
-  shrinkage_max: { label: 'Max risk' },
-  shrinkage_mean: { label: 'Mean risk' },
+  shrinkage_max: { label: 'Max Shrink risk' },
+  shrinkage_mean: { label: 'Mean Shrink risk' },
   shrinkage_affected_count: {
     label: 'Voxels showing any risk',
-    hint: 'Every voxel with a non-trivial shrinkage value in the displayed field.'
+    hint: 'Every voxel with a non-trivial value in the displayed Shrink field.'
   },
   hotspot_voxel_count: {
     label: 'Voxels flagged by the solver',
@@ -125,7 +125,7 @@ const OVERRIDES: Record<string, { label?: string; hint?: string; decimals?: numb
   shrink_scalar: {
     label: 'Shrink scalar',
     decimals: 2,
-    hint: 'Global calibration applied to the displayed shrinkage risk.'
+    hint: 'Global calibration applied to the Shrink and Microporosity risk.'
   },
   shrink_scalar_formula: { label: 'Shrink scalar formula' }
 };
@@ -150,9 +150,9 @@ function tetWording(text: string): string {
 const GROUPS: { prefix: string; label: string }[] = [
   { prefix: 'niyama_metadata_', label: 'Niyama method' },
   { prefix: 'niyama_', label: 'Niyama' },
-  { prefix: 'shrinkage_', label: 'Shrinkage' },
-  { prefix: 'shrink_scalar', label: 'Shrinkage' },
-  { prefix: 'defect_', label: 'Shrinkage' },
+  { prefix: 'shrinkage_', label: 'Shrink and microporosity' },
+  { prefix: 'shrink_scalar', label: 'Shrink and microporosity' },
+  { prefix: 'defect_', label: 'Shrink and microporosity' },
   { prefix: 'casting_volume', label: 'Overview' },
   { prefix: 'hotspot_', label: 'Hot spots' },
   { prefix: 'hot_tear', label: 'Hot tear' },
@@ -179,7 +179,7 @@ const GROUPS: { prefix: string; label: string }[] = [
 const GROUP_ORDER = [
   'Overview',
   'Solidification',
-  'Shrinkage',
+  'Shrink and microporosity',
   'Feeding',
   'Hot spots',
   'Niyama',

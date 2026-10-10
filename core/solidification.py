@@ -5640,14 +5640,48 @@ class SolidificationEngine:
             return 0.0
         return float(intensities[voxel_index])
 
+    def _mask_display_risk(self, values: Optional[np.ndarray]) -> np.ndarray:
+        """Clip a 0-1 risk field and force CHILL and orphan-metal points to 0."""
+        if values is None:
+            return np.zeros(0, dtype=np.float32)
+        display = np.asarray(values, dtype=np.float32).copy()
+        part_types = getattr(self.mesh, "voxel_part_types", None)
+        if part_types is not None and len(part_types) == len(display):
+            chill_mask = np.asarray(part_types, dtype=np.int32) == 2
+            if np.any(chill_mask):
+                display[chill_mask] = 0.0
+            orphan_mask = self._get_orphan_metal_mask()
+            if len(orphan_mask) == len(display) and np.any(orphan_mask):
+                display[orphan_mask] = 0.0
+        return np.clip(display, 0.0, 1.0).astype(np.float32, copy=False)
+
+    def get_shrink_display_intensity(self) -> np.ndarray:
+        """The Shrink result: macro-shrinkage risk as both apps display it.
+
+        ``shrinkage_probability`` (after the shrink scalar) with CHILL and
+        orphan-metal points forced to 0. Microporosity is not mixed in.
+        """
+        return self._mask_display_risk(getattr(self, "shrinkage_probability", None))
+
+    def get_microporosity_display_intensity(self) -> np.ndarray:
+        """The Microporosity result as both apps display it.
+
+        ``porosity_probability`` (Niyama + feed-path blockage + Darcy margin,
+        after the shrink scalar) with CHILL and orphan-metal points forced to 0.
+        """
+        return self._mask_display_risk(getattr(self, "porosity_probability", None))
+
     def get_shrinkage_display_intensity(self) -> np.ndarray:
         """
-        Build display-ready shrinkage/porosity intensity by part type.
+        Combined shrink/microporosity intensity, max(shrink, microporosity).
 
-        All CAST, RISER, and RISER_POST voxels use combined risk via
-        max(shrinkage_probability, porosity_probability) so the Shrinkage/Porosity
-        view reflects the dominant defect mode.  CHILL voxels are forced to 0.0
-        so external cooling devices remain hidden from shrinkage visualization.
+        This is the field the old "Shrinkage/Porosity" result showed. The
+        result views now show Shrink (:meth:`get_shrink_display_intensity`)
+        and Microporosity (:meth:`get_microporosity_display_intensity`)
+        separately; this combined field remains for
+        :meth:`get_shrinkage_intensity`, ``core.defect_regions`` and the
+        regression tests that check overall defect coverage. CHILL and
+        orphan-metal voxels are forced to 0.0.
         """
         shrink = getattr(self, "shrinkage_probability", None)
         poro = getattr(self, "porosity_probability", None)

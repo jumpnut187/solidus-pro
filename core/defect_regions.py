@@ -1,7 +1,8 @@
 """Defect-region extraction for shrink/porosity pockets.
 
-The desktop shrinkage/porosity result is a per-voxel scalar field
-(``max(shrinkage_probability, porosity_probability)``). For the
+The desktop Shrink and Microporosity results are per-voxel scalar fields
+(``SolidificationEngine.get_shrink_display_intensity`` and
+``get_microporosity_display_intensity``). For the
 inspector feature we need to recover the connected defect pocket
 under the active threshold so we can show the user the volume of
 the pocket they clicked on.
@@ -74,10 +75,11 @@ def compute_merged_shrink_display_intensity(
     voxel_part_types: Optional[np.ndarray],
     chill_part_type: int = 2,
 ) -> np.ndarray:
-    """Build the merged shrink/porosity display intensity used by the desktop.
+    """Build the merged max(shrink, microporosity) intensity.
 
-    Mirrors ``SolidificationEngine.get_shrinkage_display_intensity`` so the
-    pocket boundaries match exactly what the user sees on the cube glyphs.
+    Mirrors ``SolidificationEngine.get_shrinkage_display_intensity`` (the field
+    the old "Shrinkage/Porosity" view showed). The desktop inspector now takes
+    the Shrink or Microporosity display array directly.
     CHILL voxels are forced to zero so chills don't pollute the merged field.
     """
     if shrinkage_probability is None and porosity_probability is None:

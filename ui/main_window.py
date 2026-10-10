@@ -51,6 +51,8 @@ from ui.qt import (
     QTableWidgetItem,
     QTextEdit,
     QTimer,
+    QToolButton,
+    QToolTip,
     QVBoxLayout,
     QWidget,
     QWidgetAction,
@@ -102,6 +104,12 @@ from .dialogs import (
 )
 from .orientation_tool import OrientationController, PartingLine
 from .project_state import build_project_state, load_project_state
+from .result_types import (
+    DEFAULT_RESULT_TYPE,
+    canonical_result_type,
+    result_type_help_html,
+    result_type_mode,
+)
 from .workers import (
     DeepAutoTrainWorker,
     DeepExportWorker,
@@ -123,9 +131,13 @@ except ImportError:
     from core.error_logger_dummy import logger
 
 
-#: Default Shrinkage/Porosity envelope threshold (percent). Keep in step with
+#: Default Shrink envelope threshold (percent). Keep in step with
 #: DEFAULT_THRESHOLD.shrinkage in web_frontend/src/lib/viewState.ts.
 SHRINKAGE_DEFAULT_THRESHOLD_PERCENT = 70
+
+#: Default Microporosity envelope threshold (percent). Keep in step with
+#: DEFAULT_THRESHOLD.porosity in web_frontend/src/lib/viewState.ts.
+MICROPOROSITY_DEFAULT_THRESHOLD_PERCENT = 70
 
 FRACTION_LIQUID_TIME_SLIDER_MAX = 1000
 
@@ -982,7 +994,7 @@ class VisualizationDialog(DraggableDialog):
         lg_layout.addWidget(QLabel("Legend Title:"))
         self.legend_title_combo = QComboBox()
         self.legend_title_combo.addItems([
-            "Intensity", "Shrinkage/Porosity Risk", "Defect Risk",
+            "Intensity", "Shrink Risk", "Microporosity Risk", "Defect Risk",
             "Niyama Criterion", "Hot Spot Intensity", "Fraction Liquid"
         ])
         lg_layout.addWidget(self.legend_title_combo)
@@ -1446,7 +1458,8 @@ class HelpGuideDialog(QDialog):
             <h3>Result View Interpretation</h3>
             <ul>
                 <li><b>Model Only:</b> Geometry with no overlay. Use to verify orientation and labels.</li>
-                <li><b>Shrinkage/Porosity:</b> Higher values indicate higher risk likelihood.</li>
+                <li><b>Shrink:</b> Macro-shrinkage (cavity) risk. Higher values indicate higher risk likelihood.</li>
+                <li><b>Microporosity:</b> Dispersed interdendritic porosity risk from Niyama, feed-path blockage and Darcy margin.</li>
                 <li><b>Hot Spots:</b> Higher values indicate trapped late-solidification zones.</li>
                 <li><b>Niyama Criterion:</b> Directional solidification risk map. Lower threshold = stricter risk view.</li>
                 <li><b>Hot Tear Risk:</b> Uses brittle-temperature range behavior for tearing risk.</li>
@@ -2250,7 +2263,7 @@ class SolidificationParamsDialog(DraggableDialog):
         ("feeding", "disconnected_neck_floor", "Disconnected Neck Floor", 0.70, 0.3, 1.0, 0.01, 2, "fraction",
          "Minimum shrinkage reduction for feeder necks not connected to a riser system."),
         ("feeding", "shrink_scalar", "Shrink Scalar", 0.5, 0.25, 4.0, 0.05, 2, "",
-         "Global Shrinkage/Porosity calibration. Values above 1 reduce displayed risk; values below 1 increase it."),
+         "Global calibration of the Shrink and Microporosity results. Values above 1 reduce displayed risk; values below 1 increase it."),
         ("feeding", "feeding_zone_vertical_bias", "Feeding-Zone +Z Bias", 0.0, 0.0, 2.0, 0.05, 2, "",
          "Strength of +Z directional solidification inside the riser feeding zone. "
          "Higher = bottom solidifies faster in the feeding zone, hardening directional "
@@ -3406,18 +3419,28 @@ class MainWindow(QMainWindow):
         
         # Result type selector
         vis_layout.addWidget(QLabel("Result Type:"))
+        result_type_row = QHBoxLayout()
         self.result_type_combo = QComboBox()
-        self.result_type_combo.addItems(["Shrinkage/Porosity", "Feed Modulus", "Hot Spots", "Niyama Criterion", "Fraction Liquid", "Fill Time"])
+        self.result_type_combo.addItems([DEFAULT_RESULT_TYPE, "Feed Modulus", "Hot Spots", "Niyama Criterion", "Fraction Liquid", "Fill Time"])
+        self._apply_result_type_item_tooltips()
         self.result_type_combo.currentTextChanged.connect(self._on_result_type_changed)
         self.result_type_combo.setEnabled(False)  # Enable after simulation
-        vis_layout.addWidget(self.result_type_combo)
+        result_type_row.addWidget(self.result_type_combo, 1)
+        # Info button: shows the selected result's help (core/result_help.json).
+        self.result_type_help_btn = QToolButton()
+        self.result_type_help_btn.setText("ⓘ")
+        self.result_type_help_btn.setAccessibleName("About this result type")
+        self.result_type_help_btn.clicked.connect(self._show_result_type_help)
+        result_type_row.addWidget(self.result_type_help_btn)
+        vis_layout.addLayout(result_type_row)
+        self._sync_result_type_help_button()
         
         # Threshold/intensity slider
         self.threshold_label_title = QLabel("X-Ray Level %:")
         vis_layout.addWidget(self.threshold_label_title)
         self.threshold_slider = MarkedSlider(Qt.Horizontal)
         self.threshold_slider.setRange(1, 100)
-        # Shrinkage/Porosity is the result type shown first.
+        # Shrink is the result type shown first.
         self.threshold_slider.setValue(SHRINKAGE_DEFAULT_THRESHOLD_PERCENT)
         self.threshold_slider.setMarkerPosition(SHRINKAGE_DEFAULT_THRESHOLD_PERCENT)
         self.threshold_slider.valueChanged.connect(self._update_threshold)
@@ -3983,6 +4006,8 @@ class MainWindow(QMainWindow):
         """Get recommended threshold value (0-100) based on visualization mode and alloy"""
         if vis_mode == "shrinkage":
             return SHRINKAGE_DEFAULT_THRESHOLD_PERCENT
+        elif vis_mode == "porosity":
+            return MICROPOROSITY_DEFAULT_THRESHOLD_PERCENT
         elif vis_mode == "hotspot":
             return 30  # Top 30% hottest areas
         elif vis_mode == "niyama":
@@ -4145,30 +4170,38 @@ class MainWindow(QMainWindow):
         self.fraction_liquid_play_pause_btn.setEnabled(enabled)
         self.fraction_liquid_speed_combo.setEnabled(enabled)
 
+    def _apply_result_type_item_tooltips(self) -> None:
+        """Put each result type's help text on its combo item (Qt.ToolTipRole)."""
+        for index in range(self.result_type_combo.count()):
+            help_html = result_type_help_html(self.result_type_combo.itemText(index))
+            if help_html:
+                self.result_type_combo.setItemData(index, help_html, Qt.ToolTipRole)
+
+    def _selected_result_type_help_html(self) -> str:
+        help_html = result_type_help_html(self.result_type_combo.currentText(), with_title=True)
+        return help_html or "Select a result type to see what it shows."
+
+    def _sync_result_type_help_button(self) -> None:
+        """Show the selected result's help as the info button's tooltip."""
+        button = getattr(self, "result_type_help_btn", None)
+        if button is None:
+            return
+        button.setToolTip(self._selected_result_type_help_html())
+
+    def _show_result_type_help(self) -> None:
+        """Info button: pop up the selected result's help next to the button."""
+        button = self.result_type_help_btn
+        QToolTip.showText(
+            button.mapToGlobal(QPoint(0, button.height())),
+            self._selected_result_type_help_html(),
+            button,
+        )
+
     def _on_result_type_changed(self, result_type):
         """Handle result type selection change"""
         print(f"DEBUG: Result type changed to: {result_type}")
-        self._current_vis_mode = {
-            "Shrinkage/Porosity": "shrinkage",
-            "Feed Modulus": "feed_modulus",
-            "Hot Spots": "hotspot",
-            "Niyama Criterion": "niyama",
-            "Hot Tear Risk": "hot_tear",
-            "Sand Burn-In": "sand_burn_in",
-            "Gas Generation": "gas_generation",
-            "Gas Entrapment": "gas_entrapment",
-            "Gas Porosity Risk": "gas_porosity",
-            "Fraction Liquid": "fraction_liquid",
-            "Fill Time": "fill_time",
-            "Fill Animation": "fill_animation",
-            # Advanced analysis modes
-            "Feeding Quality": "feeding_quality",
-            "Thermal Stress": "thermal_stress",
-            "Distortion": "distortion",
-            "Crack Susceptibility": "crack_susceptibility",
-            "SDAS (Microstructure)": "sdas",
-            "Predicted UTS": "predicted_uts"
-        }.get(result_type, "shrinkage")
+        self._current_vis_mode = result_type_mode(result_type)
+        self._sync_result_type_help_button()
         
         print(f"DEBUG: Visualization mode set to: {self._current_vis_mode}")
 
@@ -4304,6 +4337,7 @@ class MainWindow(QMainWindow):
             # Update threshold label based on result type
             labels = {
                 "shrinkage": "X-Ray Level %:",
+                "porosity": "X-Ray Level %:",
                 "hotspot": "Min Intensity %:",
             }
             self.threshold_label_title.setText(labels.get(self._current_vis_mode, "Threshold:"))
@@ -5292,7 +5326,7 @@ class MainWindow(QMainWindow):
 
     def _collect_project_state(self) -> dict:
         """Capture the current desktop session state."""
-        result_type = self.result_type_combo.currentText() or "Shrinkage/Porosity"
+        result_type = self.result_type_combo.currentText() or DEFAULT_RESULT_TYPE
         ui_state = {
             "show_model": self.show_mesh_check.isChecked(),
             "show_results": self.show_results_check.isChecked(),
@@ -5465,7 +5499,8 @@ class MainWindow(QMainWindow):
             if default_idx >= 0:
                 self.fraction_liquid_speed_combo.setCurrentIndex(default_idx)
 
-        result_type = str(ui_state.get("result_type", "Shrinkage/Porosity"))
+        # Projects saved before the rename carry "Shrinkage/Porosity"; it opens as Shrink.
+        result_type = canonical_result_type(str(ui_state.get("result_type", DEFAULT_RESULT_TYPE)))
         combo_index = self.result_type_combo.findText(result_type)
         if combo_index >= 0:
             self.result_type_combo.setCurrentIndex(combo_index)
@@ -6496,7 +6531,13 @@ class MainWindow(QMainWindow):
         # Build list of available result types
         available_types = []
         if self._analysis_options.get('shrinkage', False):
-            available_types.append("Shrinkage/Porosity")
+            available_types.append("Shrink")
+            if (
+                self.simulation_worker is not None
+                and self.simulation_worker.simulation is not None
+                and getattr(self.simulation_worker.simulation, "porosity_probability", None) is not None
+            ):
+                available_types.append("Microporosity")
         if self.simulation_worker is not None and self.simulation_worker.simulation is not None:
             if getattr(self.simulation_worker.simulation, "local_modulus", None) is not None:
                 available_types.append("Feed Modulus")
@@ -6574,6 +6615,7 @@ class MainWindow(QMainWindow):
         self.result_type_combo.blockSignals(True)
         self.result_type_combo.clear()
         self.result_type_combo.addItems(available_types)
+        self._apply_result_type_item_tooltips()
         self.result_type_combo.blockSignals(False)
         
         # Set time slider range for fraction liquid
@@ -6584,26 +6626,7 @@ class MainWindow(QMainWindow):
         
         # Select first available type AND trigger the handler
         if available_types:
-            self._current_vis_mode = {
-                "Shrinkage/Porosity": "shrinkage",
-                "Feed Modulus": "feed_modulus",
-                "Hot Spots": "hotspot",
-                "Niyama Criterion": "niyama",
-                "Hot Tear Risk": "hot_tear",
-                "Sand Burn-In": "sand_burn_in",
-                "Gas Generation": "gas_generation",
-                "Gas Entrapment": "gas_entrapment",
-                "Gas Porosity Risk": "gas_porosity",
-                "Fraction Liquid": "fraction_liquid",
-                "Fill Time": "fill_time",
-                "Fill Animation": "fill_animation",
-                "Feeding Quality": "feeding_quality",
-                "Thermal Stress": "thermal_stress",
-                "Distortion": "distortion",
-                "Crack Susceptibility": "crack_susceptibility",
-                "SDAS (Microstructure)": "sdas",
-                "Predicted UTS": "predicted_uts"
-            }.get(available_types[0], "shrinkage")
+            self._current_vis_mode = result_type_mode(available_types[0])
             # Manually trigger to ensure UI is updated
             self._on_result_type_changed(available_types[0])
     
@@ -6634,6 +6657,8 @@ class MainWindow(QMainWindow):
         
         if self._current_vis_mode == 'shrinkage':
             self._visualize_shrinkage(simulation, voxel_mesh, threshold)
+        elif self._current_vis_mode == 'porosity':
+            self._visualize_shrinkage(simulation, voxel_mesh, threshold, microporosity=True)
         elif self._current_vis_mode == 'feed_modulus':
             self._visualize_feed_modulus(simulation, voxel_mesh, threshold)
         elif self._current_vis_mode == 'hotspot':
@@ -6688,22 +6713,33 @@ class MainWindow(QMainWindow):
         elif self._current_vis_mode == 'predicted_uts':
             self._visualize_predicted_uts(simulation, voxel_mesh, threshold)
     
-    def _visualize_shrinkage(self, simulation, voxel_mesh, threshold):
-        """Visualize shrinkage/porosity results"""
-        if simulation.shrinkage_probability is None:
-            print("No shrinkage data available")
+    def _visualize_shrinkage(self, simulation, voxel_mesh, threshold, microporosity: bool = False):
+        """Visualize the Shrink result, or Microporosity when ``microporosity``.
+
+        Both use the engine's display arrays (chill points at 0), the same
+        arrays the web paints, and both register the pocket inspector.
+        """
+        if microporosity:
+            attribute, method_name, legend_title = (
+                "porosity_probability", "get_microporosity_display_intensity", "Microporosity Risk"
+            )
+        else:
+            attribute, method_name, legend_title = (
+                "shrinkage_probability", "get_shrink_display_intensity", "Shrink Risk"
+            )
+        raw = getattr(simulation, attribute, None)
+        if raw is None:
+            print(f"No {legend_title} data available")
             return
 
-        if hasattr(simulation, "get_shrinkage_display_intensity"):
-            intensities = np.asarray(simulation.get_shrinkage_display_intensity(), dtype=np.float32)
+        display_fn = getattr(simulation, method_name, None)
+        if callable(display_fn):
+            intensities = np.asarray(display_fn(), dtype=np.float32)
         else:
-            intensities = np.array([
-                simulation.get_shrinkage_intensity(i)
-                for i in range(len(voxel_mesh.voxel_centers))
-            ], dtype=np.float32)
+            intensities = np.asarray(raw, dtype=np.float32)
 
         if len(intensities) != len(voxel_mesh.voxel_centers):
-            print("No shrinkage data available")
+            print(f"No {legend_title} data available")
             return
         effective_threshold, lowered_threshold = self._get_effective_shrinkage_threshold(
             intensities,
@@ -6734,7 +6770,7 @@ class MainWindow(QMainWindow):
         )
 
         # Update legend
-        self.visualizer.update_legend("Shrinkage/Porosity Risk", 0.0, 1.0)
+        self.visualizer.update_legend(legend_title, 0.0, 1.0)
 
         # Store for threshold updates
         self.visualizer.current_shrinkage_data = (
@@ -7198,7 +7234,7 @@ class MainWindow(QMainWindow):
         # Update based on current visualization mode
         mode = getattr(self, '_current_vis_mode', 'shrinkage')
 
-        if mode == 'shrinkage':
+        if mode in ('shrinkage', 'porosity'):
             if hasattr(self.visualizer, 'current_shrinkage_data') and \
                self.visualizer.current_shrinkage_data is not None:
                 self.visualizer.update_shrinkage_threshold(threshold)
@@ -7314,7 +7350,10 @@ class MainWindow(QMainWindow):
         
         # Update legend title based on current result type
         if self._current_vis_mode == 'shrinkage':
-            self.visualizer.show_color_bar("Shrinkage/Porosity Risk",
+            self.visualizer.show_color_bar("Shrink Risk",
+                                           self.visualization_dialog.show_legend_check.isChecked())
+        elif self._current_vis_mode == 'porosity':
+            self.visualizer.show_color_bar("Microporosity Risk",
                                            self.visualization_dialog.show_legend_check.isChecked())
         elif self._current_vis_mode == 'hotspot':
             self.visualizer.show_color_bar("Hot Spot Intensity",
@@ -7352,7 +7391,9 @@ class MainWindow(QMainWindow):
         """Handle legend show/hide toggle"""
         title = "Intensity"
         if self._current_vis_mode == 'shrinkage':
-            title = "Shrinkage/Porosity Risk"
+            title = "Shrink Risk"
+        elif self._current_vis_mode == 'porosity':
+            title = "Microporosity Risk"
         elif self._current_vis_mode == 'hotspot':
             title = "Hot Spot Intensity"
         elif self._current_vis_mode == 'niyama':

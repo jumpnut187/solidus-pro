@@ -44,7 +44,8 @@ def _synthetic_visualization() -> dict:
 
 
 class WebApiPayloadTests(unittest.TestCase):
-    def test_shrinkage_mode_uses_combined_adjusted_risk(self) -> None:
+    def test_shrinkage_mode_is_shrink_only(self) -> None:
+        """The web 'shrinkage' (Shrink) payload is shrink risk, not max(shrink, porosity)."""
         shrinkage = np.array([0.1, 0.8, 0.0], dtype=np.float32)
         porosity = np.array([0.7, 0.2, 0.4], dtype=np.float32)
         engine = SimpleNamespace(
@@ -59,7 +60,8 @@ class WebApiPayloadTests(unittest.TestCase):
             solidification_times=None,
             fraction_liquid_history=[],
         )
-        engine.get_shrinkage_display_intensity = lambda: np.maximum(shrinkage, porosity)
+        engine.get_shrink_display_intensity = lambda: shrinkage
+        engine.get_microporosity_display_intensity = lambda: porosity
         voxel_mesh = SimpleNamespace(
             voxel_centers=np.array(
                 [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
@@ -78,9 +80,10 @@ class WebApiPayloadTests(unittest.TestCase):
             max_voxels=10,
         )
 
-        np.testing.assert_allclose(visualization["shrinkage"], [0.7, 0.8, 0.4])
+        np.testing.assert_allclose(visualization["shrinkage"], [0.1, 0.8, 0.0])
+        np.testing.assert_allclose(visualization["porosity"], [0.7, 0.2, 0.4])
         self.assertEqual(summary["shrink_scalar"], 2.0)
-        self.assertEqual(summary["shrinkage_stats"]["affected_count"], 3)
+        self.assertEqual(summary["shrinkage_stats"]["affected_count"], 2)
 
     def test_porosity_mode_exposed_separately(self) -> None:
         """Feeding-blocked, path lengths, open fraction, and porosity are exposed."""
@@ -104,7 +107,6 @@ class WebApiPayloadTests(unittest.TestCase):
             feeding_path_lengths=feeding_path_lengths,
             feeding_open_fraction=feeding_open_fraction,
         )
-        engine.get_shrinkage_display_intensity = lambda: np.maximum(shrinkage, porosity)
         voxel_mesh = SimpleNamespace(
             voxel_centers=np.array(
                 [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
