@@ -109,7 +109,7 @@ export function isTimeMode(mode: ResultModeId): boolean {
 /** Recommended envelope threshold (percent) per mode, mirroring the desktop defaults. */
 export const DEFAULT_THRESHOLD: Record<ResultModeId, number> = {
   shrinkage: 70,
-  porosity: 30,
+  porosity: 70,
   feed_modulus: 1,
   hotspot: 30,
   solidification_time: 50,

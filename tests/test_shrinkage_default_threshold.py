@@ -20,6 +20,12 @@ class ShrinkageDefaultThresholdTests(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertEqual(int(match.group(1)), 70)
 
+    def test_web_porosity_default_is_70(self) -> None:
+        source = (ROOT / "web_frontend" / "src" / "lib" / "viewState.ts").read_text(encoding="utf-8")
+        match = re.search(r"^\s*porosity: (\d+),", source, re.M)
+        self.assertIsNotNone(match)
+        self.assertEqual(int(match.group(1)), 70)
+
 
 if __name__ == "__main__":
     unittest.main()
