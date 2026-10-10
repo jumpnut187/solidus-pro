@@ -123,6 +123,10 @@ except ImportError:
     from core.error_logger_dummy import logger
 
 
+#: Default Shrinkage/Porosity envelope threshold (percent). Keep in step with
+#: DEFAULT_THRESHOLD.shrinkage in web_frontend/src/lib/viewState.ts.
+SHRINKAGE_DEFAULT_THRESHOLD_PERCENT = 70
+
 FRACTION_LIQUID_TIME_SLIDER_MAX = 1000
 
 FRACTION_LIQUID_PLAYBACK_INTERVAL_MS = 90
@@ -3413,12 +3417,13 @@ class MainWindow(QMainWindow):
         vis_layout.addWidget(self.threshold_label_title)
         self.threshold_slider = MarkedSlider(Qt.Horizontal)
         self.threshold_slider.setRange(1, 100)
-        self.threshold_slider.setValue(30)
-        self.threshold_slider.setMarkerPosition(30)
+        # Shrinkage/Porosity is the result type shown first.
+        self.threshold_slider.setValue(SHRINKAGE_DEFAULT_THRESHOLD_PERCENT)
+        self.threshold_slider.setMarkerPosition(SHRINKAGE_DEFAULT_THRESHOLD_PERCENT)
         self.threshold_slider.valueChanged.connect(self._update_threshold)
         vis_layout.addWidget(self.threshold_slider)
 
-        self.threshold_label = QLabel("30%")
+        self.threshold_label = QLabel(f"{SHRINKAGE_DEFAULT_THRESHOLD_PERCENT}%")
         vis_layout.addWidget(self.threshold_label)
         
         # Time slider for Fraction Liquid (hidden by default)
@@ -3977,7 +3982,7 @@ class MainWindow(QMainWindow):
     def _get_recommended_threshold(self, vis_mode, alloy_name):
         """Get recommended threshold value (0-100) based on visualization mode and alloy"""
         if vis_mode == "shrinkage":
-            return 30
+            return SHRINKAGE_DEFAULT_THRESHOLD_PERCENT
         elif vis_mode == "hotspot":
             return 30  # Top 30% hottest areas
         elif vis_mode == "niyama":
