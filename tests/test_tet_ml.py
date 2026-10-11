@@ -276,10 +276,13 @@ class TetCaptureTests(unittest.TestCase):
             summary = dataset_summary(tmp)
             self.assertEqual([r["mesh_type"] for r in summary["runs"]], ["tet", "voxel"])
 
+            # core.deep_model.dataset imports without torch (it only needs torch
+            # to build tensors), so check for torch itself.
             try:
-                from core.deep_model.dataset import DeepDataset
+                import torch  # noqa: F401
             except ImportError:  # torch absent
                 return
+            from core.deep_model.dataset import DeepDataset
             dataset = DeepDataset(records, resolution=RESOLUTION)
             self.assertEqual(len(dataset), 3)
             item = dataset[0]

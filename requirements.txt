@@ -11,6 +11,7 @@ psutil>=5.9.5              # System and process utilities (CPU/memory detection)
 trimesh>=3.21.0            # 3D mesh processing
 cascadio>=0.0.13,<1.0       # Optional STEP file backend (used by trimesh via cascadio)
 rtree>=0.9.7                # Spatial indexing for trimesh.contains()
+networkx>=3.0               # trimesh.split()/fill_holes() (core/cut_cells.py); was only pulled in via torch
 embreex>=4.0.0              # Embree BVH ray casting for trimesh.contains(). Without it trimesh
                             # falls back to a pure-numpy path that peaks at ~5 GB per 2,500-point
                             # batch on a 500k-face mesh (caused a swap-death kernel panic).

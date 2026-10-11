@@ -75,23 +75,16 @@ else:  # pragma: no cover - only when torch is absent (e.g. CI without torch)
     class _ModuleBase:
         """Minimal stand-in for ``nn.Module`` when torch is not installed.
 
-        Enough to let ``model.py`` import cleanly so the pure-logic tests
-        (``AutoTrainPolicyTests``) and the ``@skipUnless``-guarded tests can
-        load.  Instantiation and ``forward`` are never called without torch,
-        so this only needs to be a class the others can subclass.
+        Lets ``model.py`` import cleanly so its constants, manifest helpers
+        and class names are available without torch.  Building a network
+        still needs torch, so instantiation fails with a clear message.
         """
 
         def __init__(self, *args, **kwargs):
-            pass
-
-        def __init_subclass__(cls, *args, **kwargs):
-            super().__init_subclass__(*args, **kwargs)
-
-        def register_buffer(self, *args, **kwargs):
-            pass
-
-        def parameters(self):
-            return iter(())
+            raise ImportError(
+                "PyTorch is not installed. Install the deep-learning extras with "
+                "`pip install -r requirements.txt` (DEEP LEARNING MODULE section)."
+            )
 
 
 class ConvBlock(_ModuleBase):
