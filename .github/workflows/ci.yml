@@ -1,6 +1,6 @@
 # Regression check. Logic lives in scripts/ci/ so a later GitLab pipeline
 # (.gitlab-ci.yml) can run the same commands; keep this file a thin wrapper.
-name: tests
+name: ci
 
 on:
   pull_request:
