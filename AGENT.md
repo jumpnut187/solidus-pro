@@ -133,6 +133,8 @@ python -m compileall config core physics ui web   # syntax pass
 
 - `mypy.ini` `files=` is an explicit allowlist; most of `core/`, `ui/`, `physics/`, `config/` are `ignore_errors = true`. Don't assume type-checking a new file does anything until it's added to `files=`.
 - Add regression tests near changed behavior using the `unittest` pattern; `tests/verify_*.py` are standalone scripts, not test suites.
+- CI (`.github/workflows/tests.yml`, PRs + pushes to `main`) is a thin wrapper over `scripts/ci/install.sh` and `scripts/ci/check.sh {pins|syntax|types|tests}`; put CI logic in those scripts so a GitLab pipeline can reuse them. Runner: Ubuntu 24.04, Python 3.13, no torch (deep-model tests skip). mypy is advisory; the suite must exit 0.
+- Dependencies: `requirements.txt` = `-r requirements-core.txt` + `-r requirements-ml.txt`. CI installs `requirements-ci.txt` pinned by `constraints-ci.txt`. After adding or upgrading a core package in the venv, run `venv/bin/python scripts/ci/update_constraints.py` and commit the result, or the `pins` check fails.
 - Frontend: `cd web_frontend && npm install && npm run build` (`build` = `tsc -b && vite build`). Flask serves the built `dist/` — rebuild after frontend changes. Vite dev server runs on port **5175**, not 5173.
 
 ## Architecture
