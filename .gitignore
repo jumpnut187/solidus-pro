@@ -67,3 +67,6 @@ models/deep_model/
 
 # fTetWild writes this into the working directory
 __tracked_surface.stl
+
+# Third-party tool clone (colbymchenry/codegraph) with its own .git -- not project source
+codegraph/
