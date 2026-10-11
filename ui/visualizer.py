@@ -1330,7 +1330,7 @@ class CastingVisualizer(QWidget):
         
         # Initially hidden
         self.scalar_bar_actor.SetVisibility(False)
-        self.renderer.AddActor2D(self.scalar_bar_actor)
+        self.renderer.AddViewProp(self.scalar_bar_actor)
         
         # Create text actor for material/time info
         self.info_text_actor = vtk.vtkTextActor()
@@ -1339,7 +1339,7 @@ class CastingVisualizer(QWidget):
         self.info_text_actor.GetTextProperty().SetColor(1, 1, 1)
         self.info_text_actor.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
         self.info_text_actor.SetPosition(0.02, 0.95)
-        self.renderer.AddActor2D(self.info_text_actor)
+        self.renderer.AddViewProp(self.info_text_actor)
         
     def update_legend(self, title: str, min_val: float, max_val: float, units: str = "", render: bool = True):
         """

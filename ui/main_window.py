@@ -2262,7 +2262,7 @@ class SolidificationParamsDialog(DraggableDialog):
          "Shrinkage reduction at feeder neck contact with casting."),
         ("feeding", "disconnected_neck_floor", "Disconnected Neck Floor", 0.70, 0.3, 1.0, 0.01, 2, "fraction",
          "Minimum shrinkage reduction for feeder necks not connected to a riser system."),
-        ("feeding", "shrink_scalar", "Shrink Scalar", 0.5, 0.25, 4.0, 0.05, 2, "",
+        ("feeding", "shrink_scalar", "Shrink Scalar", 1.0, 0.25, 4.0, 0.05, 2, "",
          "Global calibration of the Shrink and Microporosity results. Values above 1 reduce displayed risk; values below 1 increase it."),
         ("feeding", "feeding_zone_vertical_bias", "Feeding-Zone +Z Bias", 0.0, 0.0, 2.0, 0.05, 2, "",
          "Strength of +Z directional solidification inside the riser feeding zone. "

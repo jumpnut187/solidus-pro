@@ -4111,7 +4111,7 @@ class SolidificationEngine:
             shrinkage_arr = np.asarray(shrinkage_raw, dtype=np.float32)
             self.shrinkage_risk = shrinkage_raw
             self.raw_shrinkage_probability = shrinkage_raw
-            if scalar == SHRINK_SCALAR_DEFAULT:
+            if scalar == 1.0:  # identity, independent of the default
                 self.shrinkage_probability = shrinkage_raw
             else:
                 self.shrinkage_probability = np.clip(
@@ -4127,7 +4127,7 @@ class SolidificationEngine:
             porosity_arr = np.asarray(porosity_raw, dtype=np.float32)
             self.porosity_risk = porosity_raw
             self.raw_porosity_probability = porosity_raw
-            if scalar == SHRINK_SCALAR_DEFAULT:
+            if scalar == 1.0:  # identity, independent of the default
                 self.porosity_probability = porosity_raw
             else:
                 self.porosity_probability = np.clip(

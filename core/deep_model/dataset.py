@@ -24,8 +24,14 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-import torch
-from torch.utils.data import Dataset
+try:
+    import torch
+    from torch.utils.data import Dataset
+except ImportError:  # pragma: no cover - torch is an optional dependency
+    # Keep the module importable so callers can read the encoding constants
+    # (CHILL_PART_TYPE, CHILL_CHANNEL_TOL) without torch installed.
+    torch = None  # type: ignore[assignment]
+    Dataset = object  # type: ignore[assignment,misc]
 
 from core.deep_model.model import DEFAULT_TRAINING_RESOLUTION, TARGET_NAMES
 from core.surrogate.dataset import DEFAULT_DATASET_DIR, load_dataset
@@ -211,6 +217,11 @@ class DeepDataset(Dataset):
         val_fraction: float = DEFAULT_VAL_FRACTION,
         seed: int = DEFAULT_SEED,
     ):
+        if torch is None:
+            raise ImportError(
+                "PyTorch is not installed. Install the deep-learning extras with "
+                "`pip install -r requirements.txt` (DEEP LEARNING MODULE section)."
+            )
         if resolution not in (8, 16, 32, 64, 128):
             raise ValueError(
                 f"Training resolution must be in {{8, 16, 32, 64, 128}}, got {resolution}"

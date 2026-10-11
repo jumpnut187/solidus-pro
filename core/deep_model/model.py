@@ -30,9 +30,16 @@ import os
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+try:
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+    TORCH_AVAILABLE = True
+except ImportError:  # pragma: no cover - torch is an optional dependency
+    torch = None  # type: ignore[assignment]
+    nn = None  # type: ignore[assignment]
+    F = None  # type: ignore[assignment]
+    TORCH_AVAILABLE = False
 
 END_TIME_FLOOR = 0.1
 SUPPORTED_RESOLUTIONS = (8, 16, 32, 64, 128)
@@ -62,7 +69,25 @@ def levels_for_resolution(resolution: int) -> int:
     return max(1, min(4, int(math.log2(max(resolution, 2)))))
 
 
-class ConvBlock(nn.Module):
+if TORCH_AVAILABLE:
+    _ModuleBase = nn.Module
+else:  # pragma: no cover - only when torch is absent (e.g. CI without torch)
+    class _ModuleBase:
+        """Minimal stand-in for ``nn.Module`` when torch is not installed.
+
+        Lets ``model.py`` import cleanly so its constants, manifest helpers
+        and class names are available without torch.  Building a network
+        still needs torch, so instantiation fails with a clear message.
+        """
+
+        def __init__(self, *args, **kwargs):
+            raise ImportError(
+                "PyTorch is not installed. Install the deep-learning extras with "
+                "`pip install -r requirements.txt` (DEEP LEARNING MODULE section)."
+            )
+
+
+class ConvBlock(_ModuleBase):
     """Two Conv3D + GroupNorm + SiLU blocks."""
 
     def __init__(self, in_channels: int, out_channels: int, groups: int = 8):
@@ -79,7 +104,7 @@ class ConvBlock(nn.Module):
         return x
 
 
-class Downsample(nn.Module):
+class Downsample(_ModuleBase):
     """Stride-2 conv for encoder downsampling (optional channel doubling)."""
 
     def __init__(self, in_channels: int, out_channels: int):
@@ -90,7 +115,7 @@ class Downsample(nn.Module):
         return self.conv(x)
 
 
-class Upsample(nn.Module):
+class Upsample(_ModuleBase):
     """Transposed-conv upsample by factor 2."""
 
     def __init__(self, in_channels: int, out_channels: int):
@@ -101,7 +126,7 @@ class Upsample(nn.Module):
         return self.conv(x)
 
 
-class FiLM(nn.Module):
+class FiLM(_ModuleBase):
     """Feature-wise linear modulation driven by the conditioning vector.
 
     The conditioning vector goes through an MLP producing per-channel scale
@@ -132,7 +157,7 @@ class FiLM(nn.Module):
         return gamma * x + beta
 
 
-class UNet3D(nn.Module):
+class UNet3D(_ModuleBase):
     """3D U-Net with FiLM conditioning for solidification schedules."""
 
     def __init__(

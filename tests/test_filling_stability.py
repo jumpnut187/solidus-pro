@@ -2432,18 +2432,9 @@ class ChokeWarningTests(unittest.TestCase):
 
         A 5 x 5 column, so the two grids genuinely disagree: 25 fine cells
         against 9 coarse ones of four times the area, 36/25 rather than 1.
-        ``_Params.filling`` is one shared instance across the whole module, so
-        the coarsening is put back by hand -- leaving it set silently halves
-        every later fixture's resolution.
         """
-        from tests.test_filling_stage import _Params
-
         mesh = _tower(nx=5, ny=5, nz=8, part_type=PART_TYPE_GATE)
-        previous = _Params.filling.fill_grid_coarsening
-        try:
-            result = _run(mesh=mesh, max_fill_time_s=0.02, fill_grid_coarsening=2)
-        finally:
-            _Params.filling.fill_grid_coarsening = previous
+        result = _run(mesh=mesh, max_fill_time_s=0.02, fill_grid_coarsening=2)
         self.assertIsNotNone(result)
         self.assertEqual(result.coarsening, 2)
         self.assertGreater(result.choke_area_cm2, result.choke_area_fine_cm2)
