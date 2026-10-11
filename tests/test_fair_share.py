@@ -6,6 +6,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -187,11 +188,15 @@ class ThreadBudgetResolutionTests(unittest.TestCase):
         self.assertEqual(_resolve_solidification_thread_target(), logical)
 
     def test_hardware_cap_lowers_compute_count(self) -> None:
-        base = hardware.get_optimal_thread_count('compute')
-        hardware.set_thread_cap(2)
-        self.assertEqual(hardware.get_optimal_thread_count('compute'), 2)
-        hardware.set_thread_cap(None)
-        self.assertEqual(hardware.get_optimal_thread_count('compute'), base)
+        # Pin the core count: on a 1-physical-core host (a 2-vCPU CI runner)
+        # the uncapped count is already 1, and a cap of 2 cannot lower it.
+        # 8 physical cores -> uncapped compute count 7.
+        with mock.patch.object(hardware, "physical_cores", 8):
+            self.assertEqual(hardware.get_optimal_thread_count('compute'), 7)
+            hardware.set_thread_cap(2)
+            self.assertEqual(hardware.get_optimal_thread_count('compute'), 2)
+            hardware.set_thread_cap(None)
+            self.assertEqual(hardware.get_optimal_thread_count('compute'), 7)
 
     def test_hardware_env_cap_lowers_compute_count(self) -> None:
         base = hardware.get_optimal_thread_count('compute')

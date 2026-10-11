@@ -266,12 +266,16 @@ class TetHeatTransferPhysicsTest(unittest.TestCase):
         model, _, faces = make_model((3, 3, 3), (0.03, 0.03, 0.03), [constant_material(30.0, 3e6)])
         model.add_boundary_group(np.arange(len(faces)), htc=500.0, t_inf=25.0)
         model.set_initial_temperature(700.0)
+        # Linear-solve round-off on a 700 degC field. Linux x86_64 undershot
+        # by 1.2e-9 degC; a real maximum-principle violation (oscillation) is
+        # orders of magnitude larger.
+        round_off = 1e-10 * 700.0
         for _ in range(10):
             model.step(1e4)
             temps = model.temperatures
             self.assertTrue(np.all(np.isfinite(temps)))
-            self.assertGreaterEqual(temps.min(), 25.0 - 1e-9)
-            self.assertLessEqual(temps.max(), 700.0 + 1e-9)
+            self.assertGreaterEqual(temps.min(), 25.0 - round_off)
+            self.assertLessEqual(temps.max(), 700.0 + round_off)
         self.assertLess(np.abs(model.temperatures - 25.0).max(), 1e-6)
 
     def test_time_function_is_evaluated_at_end_of_step(self) -> None:
