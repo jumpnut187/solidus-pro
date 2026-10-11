@@ -468,8 +468,13 @@ class _ThermalBoundary:
 
 
 class _Params:
-    filling = _Filling()
-    thermal_boundary = _ThermalBoundary()
+    # Per instance, not class attributes: tests override fields on
+    # ``options.solidification_params.filling`` with setattr, and a shared
+    # instance leaked those overrides into every later test (a
+    # smagorinsky_cs=0.0 run made an unrelated fill diverge).
+    def __init__(self):
+        self.filling = _Filling()
+        self.thermal_boundary = _ThermalBoundary()
 
 
 class _Options:
