@@ -99,15 +99,61 @@ Each alloy's feeding distance multiplier is calibrated **from the riser's center
 
 | Alloy | Type | Feeding Multiplier |
 |---|---|---|
-| WCB | Carbon Steel Casting | 6.0× |
-| CF8 | Stainless Steel 304 | 5.5× |
-| C958 | Aluminum Bronze | 8.0× |
-| CA6NM | Cast Steel | 5.9× |
+| WCB | Carbon Steel Casting | 3.0× |
+| CF8 | Stainless Steel 304 | 2.5× |
+| C958 | Aluminum Bronze | 4.0× |
+| CA6NM | Cast Steel | 4.0× |
 | C964 | Copper-Nickel (CuNi) | — |
 | MONEL400 | Monel 400 | — |
 | IN625 | Inconel 625 | — |
 
 Every alloy packs 40+ properties: liquidus/solidus/pouring temps, density curves, conductivity, latent heat, volumetric shrinkage, viscosity, SDAS parameters, Niyama thresholds, hot-tear susceptibility coefficients, sand burn-in sensitivity, and gas porosity tendencies. Property values come from published casting references.
+
+---
+
+## System Requirements
+
+The voxel caps below come from `core/memory_limits.py`, which sets them from total RAM. The web simulation limits come from `web/services/simulation_queue.py`, which allows one simulation per 4 physical cores, up to 4 at once.
+
+### Local (Desktop and Web)
+
+| | Minimum | Recommended | Max (useful) |
+|---|---|---|---|
+| OS | macOS 15 (Apple Silicon), Windows 10 64-bit, Linux x86_64 with glibc 2.28+ (Ubuntu 20.04+) | macOS 15+ on M2 or later, Windows 11, Ubuntu 22.04 / 24.04 | Same as recommended |
+| Python | 3.10 | 3.13 (CI version) | 3.14 |
+| CPU | 4 physical cores | 8 physical cores | 16+ physical cores |
+| RAM | 8 GB | 32 GB | 64 GB |
+| Voxel cap, soft / hard | 500K / 1M | 2M / 4M | 3M / 5M |
+| GPU | None (CPU path) | Apple M2+ (Metal) or NVIDIA with CUDA 12 | Apple M3+ (soft cap +30 %) or NVIDIA with CUDA 12 |
+| Disk | 10 GB free (the venv is about 4 GB) | 50 GB SSD | 100+ GB NVMe |
+| Display (desktop) | OpenGL 3.2, 1920×1080 | 2560×1440 | Any |
+
+- RAM above 64 GB does not raise the voxel cap. Cores above 16 still speed up the Numba loops, because the code sets no core cap.
+- The tiers use total RAM as the OS reports it. A 64 GB machine that reports 63.x GB lands in the 32 GB tier.
+- Apple Silicon raises the soft cap by 20 % (M1), 25 % (M2) or 30 % (M3, M4).
+- Intel Macs are not supported. `torch>=2.6` and `pytetwild` publish no macOS x86_64 wheels.
+- Tet meshes fall back to voxel above 300,000 nodes and are refused above 3,000,000 nodes.
+
+### GCP (Web App on Compute Engine)
+
+A GCP vCPU is one hyperthread, so physical cores = vCPU ÷ 2. Numba sizes its threads from physical cores.
+
+| | Minimum | Recommended | Max (useful) |
+|---|---|---|---|
+| Machine type | e2-standard-8 (8 vCPU, 32 GB) | n2-standard-16 (16 vCPU, 64 GB) | n2-standard-32 (32 vCPU, 128 GB) |
+| Physical cores | 4 | 8 | 16 |
+| Concurrent simulations (auto) | 1 | 2 | 4 (code cap) |
+| Voxel cap, soft / hard | 1M / 2M | 2M / 4M | 3M / 5M |
+| GPU (optional, CUDA via CuPy) | None | g2-standard-16 (1× NVIDIA L4, 16 vCPU, 64 GB) | g2-standard-32 (1× NVIDIA L4, 32 vCPU, 128 GB) |
+| Boot disk | 50 GB pd-balanced | 100 GB pd-ssd | 200 GB pd-ssd |
+| OS image | Ubuntu 22.04 LTS | Ubuntu 24.04 LTS | Ubuntu 24.04 LTS |
+| Python | 3.10 | 3.13 | 3.14 |
+
+- GCP machines report slightly less RAM than their nominal size, so 32 GB lands in the 16 GB tier and 64 GB lands in the 32 GB tier. The voxel caps above reflect that.
+- Each extra simulation needs 2 GB free (`CASTSIM_WEB_MIN_SIM_MEMORY_MB`) beyond a reserve of the larger of 2 GB or 10 % of RAM (`CASTSIM_WEB_RESERVE_MEMORY_MB`).
+- Above 32 vCPU the queue still stops at 4 simulations. Set `CASTSIM_MAX_CONCURRENT_SIMULATIONS` to use more.
+- gunicorn runs 1 worker with 8 threads (`run_web.py`). Simulations run in separate processes.
+- Set `CASTSIM_SECRET_KEY`, and put the app behind Identity-Aware Proxy.
 
 ---
 
@@ -121,7 +167,7 @@ source venv/bin/activate      # Linux / macOS
 pip install -r requirements.txt
 ```
 
-**Prerequisites**: Python 3.9+, any OS.
+**Prerequisites**: Python 3.10–3.14 (3.13 recommended). See [System Requirements](#system-requirements).
 
 ### Optional: GPU Dependencies
 
@@ -238,10 +284,7 @@ python -m compileall config core physics ui web   # syntax pass
 
 ## License
 
-Copyright (c) 2025-2026 Brendon Jarrett. All rights reserved.
+Property of DW Clark & Brendon Jarrett
 
-Proprietary and confidential. No license is granted to use, copy, modify, or distribute this software without written permission from the copyright holder. See [LICENSE](LICENSE).
 
 ---
-
-*Solidus Pro provides engineering predictions based on geometric analysis and simplified solidification models. For production-critical castings, always validate with physical trials.*
