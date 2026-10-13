@@ -262,7 +262,7 @@ def build_field_grids(
         empty_lattice = Lattice(dims=(1, 1, 1), origin=(0.0, 0.0, 0.0), spacing=1.0)
         return FieldGrids(lattice=empty_lattice, mask=np.zeros(1, dtype=np.uint8))
     centers = centers.reshape((-1, 3))
-    n_voxels = int(centers.shape[0])
+    n_voxels = int(centers.size // 3)
 
     sizes = _as_array(visualization.get("sizes"))
     lattice = derive_lattice(centers, sizes if sizes.size == n_voxels else None)
@@ -371,7 +371,7 @@ def _build_tet_field_grids(visualization: Dict[str, Any], summary: Dict[str, Any
     from core.tet_lattice import TetLatticeSampler
 
     nodes = _as_array(visualization.get("centers")).reshape((-1, 3))
-    n_nodes = int(nodes.shape[0])
+    n_nodes = int(nodes.size // 3)
     tets = np.asarray(visualization["tets"], dtype=np.int64).reshape((-1, 4))
     tet_part_types = np.asarray(visualization.get("tet_part_types"), dtype=np.int8).reshape(-1)
     spacing = float(visualization.get("lattice_spacing") or 0.0)

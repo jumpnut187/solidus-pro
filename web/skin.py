@@ -55,7 +55,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, TypedDict
 import hashlib
 import json
 import logging
@@ -441,8 +441,15 @@ def skin_path(artifact_path: Path | str) -> Path:
     return path.with_name(path.stem + ".skin.npz")
 
 
+class _SkinPayload(TypedDict):
+    version: np.ndarray
+    range: np.ndarray
+    signature: np.ndarray
+    values: np.ndarray
+
+
 def _save(path: Path, grid: SkinGrid) -> None:
-    payload = {
+    payload: _SkinPayload = {
         "version": np.asarray([SKIN_VERSION], dtype=np.int32),
         "range": np.asarray([grid.range_voxels], dtype=np.float64),
         "signature": np.frombuffer(grid.signature.encode("utf-8"), dtype=np.uint8),

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import multiprocessing
+from multiprocessing.managers import BaseManager
 import os
 import psutil
 import sys
 import time
 from collections import OrderedDict
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, cast
 
 from config.hardware_config import hardware
 
@@ -419,15 +420,15 @@ class SimulationQueueManager:
 
     def __init__(self, config: Optional[QueueConfig] = None) -> None:
         self.config = config or QueueConfig()
-        self._manager: Optional[multiprocessing.Manager] = None
-        self.queue_lock: Optional[Any] = None
+        self._manager: Optional[BaseManager] = None
+        self.queue_lock: Any = None
 
-        self.active_simulations: Optional[Dict[str, Any]] = None
-        self.simulation_results: Optional[Dict[str, Any]] = None
-        self.simulation_processes: Optional[Dict[str, Any]] = None
-        self.simulation_stop_flags: Optional[Dict[str, bool]] = None
-        self.queued_simulations: Optional[Dict[str, Any]] = None
-        self.user_simulation_counts: Optional[Dict[str, int]] = None
+        self.active_simulations: Any = None
+        self.simulation_results: Any = None
+        self.simulation_processes: Any = None
+        self.simulation_stop_flags: Any = None
+        self.queued_simulations: Any = None
+        self.user_simulation_counts: Any = None
         self.running_count: Any = None
         self.thread_budget: Any = None
         self.sim_memory_mb: Any = None
@@ -480,7 +481,10 @@ class SimulationQueueManager:
     def can_user_submit(self, user_ip: str) -> bool:
         self._init_manager()
         with self.queue_lock:
-            return self.user_simulation_counts.get(user_ip, 0) < self.config.max_simulations_per_user
+            return bool(
+                self.user_simulation_counts.get(user_ip, 0)
+                < self.config.max_simulations_per_user
+            )
 
     def increment_user_count(self, user_ip: str) -> None:
         self._init_manager()
@@ -681,7 +685,7 @@ class SimulationQueueManager:
             stop_flags = self.simulation_stop_flags
             if stop_flags is None:
                 return False
-            return stop_flags.get(sim_id, False)
+            return bool(stop_flags.get(sim_id, False))
 
     def set_progress(self, sim_id: str, progress: int, message: str) -> None:
         self._init_manager()
@@ -719,7 +723,7 @@ class SimulationQueueManager:
             results = self.simulation_results
             if results is None:
                 return None
-            return results.get(sim_id)
+            return cast("Optional[Dict[str, Any]]", results.get(sim_id))
 
     def get_status(self, sim_id: str) -> Optional[Dict[str, Any]]:
         self._init_manager()

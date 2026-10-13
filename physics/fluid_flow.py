@@ -275,7 +275,7 @@ class LatticeUnits:
         """Convert a lattice velocity field to m/s."""
         return np.asarray(u_lattice) * self.velocity_scale
 
-    def to_lattice_velocity(self, u_physical: np.ndarray) -> np.ndarray:
+    def to_lattice_velocity(self, u_physical: "float | np.ndarray") -> np.ndarray:
         """Convert a velocity field in m/s to lattice units."""
         return np.asarray(u_physical) / self.velocity_scale
 

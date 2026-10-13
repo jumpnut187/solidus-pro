@@ -45,7 +45,7 @@ existence and silently remove the restriction the user placed.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple, cast
 
 import numpy as np
 
@@ -730,7 +730,7 @@ def coarsen_part_types(
         raise ValueError(f"factor must be a positive integer, got {factor}")
     factor = int(factor)
     if factor == 1:
-        return dense.copy()
+        return cast("np.ndarray", dense.copy())
 
     nx, ny, nz = dense.shape
     pad = (
@@ -967,7 +967,7 @@ def _lattice_filter_geometry(
     """
     occupied = np.argwhere(component)
     extents = occupied.max(axis=0) - occupied.min(axis=0) + 1
-    thickness_cells = int(extents.min())
+    thickness_cells = int(np.min(extents))
     thickness_m = thickness_cells * dx_m
     volume_m3 = int(component.sum()) * dx_m ** 3
     return volume_m3 / thickness_m, thickness_m
@@ -1303,7 +1303,7 @@ def _min_flow_slice_cells(dense_types: np.ndarray) -> int:
         counts = flow.sum(axis=tuple(a for a in (0, 1, 2) if a != axis))
         occupied = counts[counts > 0]
         if occupied.size:
-            best = min(best, float(occupied.min()))
+            best = min(best, float(np.min(occupied)))
     if not np.isfinite(best):
         return 0
     return int(best)
@@ -2475,7 +2475,7 @@ def run_filling_stage(
             coarsening_decision.cells_chosen
             / max(1, coarsening_decision.cells_configured)
         )
-        label = _METAL_PATH_LABELS.get(forced, "gating")
+        label = _METAL_PATH_LABELS.get(forced, "gating") if forced is not None else "gating"
         severing = coarsening_decision.forced_by_severing
         if severing is not None:
             # A severed part may have no cells at all, so there is no thickness

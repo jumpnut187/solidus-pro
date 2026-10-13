@@ -189,7 +189,10 @@ class ThreadBudgetResolutionTests(unittest.TestCase):
     def test_hardware_cap_lowers_compute_count(self) -> None:
         base = hardware.get_optimal_thread_count('compute')
         hardware.set_thread_cap(2)
-        self.assertEqual(hardware.get_optimal_thread_count('compute'), 2)
+        # A cap can only lower the count: on a runner with fewer than two
+        # usable cores the machine's own optimum wins. Mirrors the env-cap
+        # test below, which already expects min(base, cap).
+        self.assertEqual(hardware.get_optimal_thread_count('compute'), min(base, 2))
         hardware.set_thread_cap(None)
         self.assertEqual(hardware.get_optimal_thread_count('compute'), base)
 

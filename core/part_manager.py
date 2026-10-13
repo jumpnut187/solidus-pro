@@ -1583,7 +1583,7 @@ class PartManager:
         """Get number of parts"""
         return len(self.parts)
     
-    def get_parts_with_types(self) -> List[Tuple['Part', int]]:
+    def get_parts_with_types(self) -> List[Tuple[trimesh.Trimesh, int]]:
         """
         Get all visible parts with their type codes for voxel assignment.
         

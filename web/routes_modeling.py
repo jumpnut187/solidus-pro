@@ -94,7 +94,7 @@ def _checked_mesh(raw: Any) -> trimesh.Trimesh:
         raise ModelingRequestError("Mesh arrays must be numbers.") from exc
     if not np.all(np.isfinite(vertices)):
         raise ModelingRequestError("The mesh has a non-finite coordinate.")
-    if faces.min() < 0 or faces.max() >= len(vertices):
+    if np.min(faces) < 0 or np.max(faces) >= len(vertices):
         raise ModelingRequestError("A mesh face names a vertex that does not exist.")
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=True)
     if len(mesh.faces) == 0:
