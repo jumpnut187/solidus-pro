@@ -41,7 +41,7 @@ little mass each time.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import Optional, Tuple, cast
 
 import numpy as np
 
@@ -476,7 +476,7 @@ def _dilate(mask: np.ndarray) -> np.ndarray:
     for i in range(1, Q):
         c = LATTICE_VELOCITIES[i]
         out |= np.roll(mask, shift=(int(c[0]), int(c[1]), int(c[2])), axis=(0, 1, 2))
-    return out
+    return cast("np.ndarray", out)
 
 
 # ---------------------------------------------------------------------------
@@ -645,7 +645,7 @@ def reconstruct_gas_populations(
             feq_gas[i][target] + feq_gas[ibar][target] - post[i][target],
             0.0,
         )
-    return out
+    return cast("np.ndarray", out)
 
 
 def advance_mass(

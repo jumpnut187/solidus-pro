@@ -270,8 +270,13 @@ class TetHeatTransferPhysicsTest(unittest.TestCase):
             model.step(1e4)
             temps = model.temperatures
             self.assertTrue(np.all(np.isfinite(temps)))
-            self.assertGreaterEqual(temps.min(), 25.0 - 1e-9)
-            self.assertLessEqual(temps.max(), 700.0 + 1e-9)
+            # Absolute slack, not relative: these are 25-700 K magnitudes,
+            # and accumulated FP error differs by BLAS/platform (CI undershot
+            # by ~1.2e-9). The converged bound asserted below is 1e-6, so use
+            # the same slack here -- it is still far too tight to hide a real
+            # overshoot.
+            self.assertGreaterEqual(temps.min(), 25.0 - 1e-6)
+            self.assertLessEqual(temps.max(), 700.0 + 1e-6)
         self.assertLess(np.abs(model.temperatures - 25.0).max(), 1e-6)
 
     def test_time_function_is_evaluated_at_end_of_step(self) -> None:

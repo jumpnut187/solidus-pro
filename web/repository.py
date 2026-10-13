@@ -77,14 +77,14 @@ def strip_upload_prefix(stem: str) -> str:
     return cleaned or stem
 
 
-def get_db(database_path: Path) -> sqlite3.Connection:
+def get_db(database_path: "str | os.PathLike") -> sqlite3.Connection:
     conn = sqlite3.connect(str(database_path))
     conn.row_factory = sqlite3.Row
     return conn
 
 
 @contextmanager
-def get_db_connection(database_path: Path) -> Iterator[sqlite3.Connection]:
+def get_db_connection(database_path: "str | os.PathLike") -> Iterator[sqlite3.Connection]:
     conn = get_db(database_path)
     try:
         yield conn
@@ -711,7 +711,7 @@ def get_project_and_parts(
     return get_project(database_path, project_id), get_parts(database_path, project_id)
 
 
-def mark_project_status(database_path: Path, project_id: str, status: str) -> None:
+def mark_project_status(database_path: "str | os.PathLike", project_id: str, status: str) -> None:
     with get_db_connection(database_path) as db:
         db.execute(
             "UPDATE projects SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -720,7 +720,7 @@ def mark_project_status(database_path: Path, project_id: str, status: str) -> No
 
 
 def mark_project_completed(
-    database_path: Path,
+    database_path: "str | os.PathLike",
     project_id: str,
     summary: Dict[str, Any],
     artifact_path: str,

@@ -668,7 +668,10 @@ def _normalize(values: Any) -> Optional[np.ndarray]:
     max_v = float(np.max(finite))
     if max_v <= min_v:
         return np.zeros_like(arr, dtype=np.float32)
-    return np.clip((arr - min_v) / (max_v - min_v), 0.0, 1.0).astype(np.float32)
+    return cast(
+        "np.ndarray",
+        np.clip((arr - min_v) / (max_v - min_v), 0.0, 1.0).astype(np.float32),
+    )
 
 
 def _display_field(engine: Any, method_name: str, attribute: str) -> Any:

@@ -724,7 +724,7 @@ def _add_summary_statistics(result_data: Dict[str, Any], engine: SolidificationE
 
 def _optional_float(value: Any) -> Optional[float]:
     try:
-        number = float(value)  # type: ignore[arg-type]
+        number = float(value)
     except (TypeError, ValueError):
         return None
     return number if np.isfinite(number) else None
@@ -732,7 +732,7 @@ def _optional_float(value: Any) -> Optional[float]:
 
 def _optional_int(value: Any) -> Optional[int]:
     try:
-        return int(value)  # type: ignore[arg-type]
+        return int(value)
     except (TypeError, ValueError):
         return None
 
@@ -876,6 +876,7 @@ def prepare_mesh_and_geometry(
             detailed_progress_callback(current, total, stage)
 
     _apply_thread_budget(inputs.thread_budget_provider)
+    assert bounds_to_use is not None
     success = voxel_mesh.generate(
         mesh_to_use,
         bounds_to_use,
@@ -973,8 +974,10 @@ def _build_tet_simulation_mesh(
     _check_cancel(cancel_callback)
     # Record the run's lattice pitch on the mesh so rendering does not depend
     # on settings that may change between the run and a later re-render.
-    tet_mesh.lattice_spacing_in = float(inputs.voxel_size) * float(
-        mesh_settings.tet_lattice_spacing_factor
+    setattr(
+        tet_mesh,
+        "lattice_spacing_in",
+        float(inputs.voxel_size) * float(mesh_settings.tet_lattice_spacing_factor),
     )
     _emit_message(
         progress_message_callback,
