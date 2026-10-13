@@ -967,7 +967,7 @@ def _lattice_filter_geometry(
     """
     occupied = np.argwhere(component)
     extents = occupied.max(axis=0) - occupied.min(axis=0) + 1
-    thickness_cells = int(extents.min())
+    thickness_cells = int(np.min(extents))
     thickness_m = thickness_cells * dx_m
     volume_m3 = int(component.sum()) * dx_m ** 3
     return volume_m3 / thickness_m, thickness_m
@@ -1303,7 +1303,7 @@ def _min_flow_slice_cells(dense_types: np.ndarray) -> int:
         counts = flow.sum(axis=tuple(a for a in (0, 1, 2) if a != axis))
         occupied = counts[counts > 0]
         if occupied.size:
-            best = min(best, float(occupied.min()))
+            best = min(best, float(np.min(occupied)))
     if not np.isfinite(best):
         return 0
     return int(best)

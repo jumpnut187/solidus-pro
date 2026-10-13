@@ -276,7 +276,7 @@ def tet_edge_length_for_node_limit(parts: Sequence[Tuple[Any, int]], max_nodes: 
         [float(max_nodes), 0.0, -TET_NODES_PER_UNIT_AREA * area_in2, -TET_NODES_PER_UNIT_VOLUME * volume_in3]
     )
     real = roots[np.abs(roots.imag) <= 1e-9 * np.maximum(np.abs(roots), 1.0)].real
-    edge_length_in = float(real.max())
+    edge_length_in = float(np.max(real))
     while _tet_node_model(volume_in3, area_in2, edge_length_in) > int(max_nodes):
         edge_length_in *= 1.0 + 1e-9
     return edge_length_in
