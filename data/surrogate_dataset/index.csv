@@ -1,0 +1,374 @@
+sample_id,timestamp,alloy,voxel_count,resolution,path
+068a4f055d15,2026-08-17 08:49:10,WCB (Carbon Steel Casting),125,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_068a4f055d15.npz
+069c3de43ab3,2026-08-17 08:49:10,CF8 (Stainless Steel 304),125,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_069c3de43ab3.npz
+7587eed2cbb8,2026-08-17 08:49:10,C958 (Aluminum Bronze),125,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_7587eed2cbb8.npz
+c9cf6b59e580,2026-08-17 08:49:10,C964 (CuNi),125,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_c9cf6b59e580.npz
+e66445ce4e6c,2026-08-17 08:49:10,CA6NM (Cast Steel),125,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_e66445ce4e6c.npz
+232b120ac349,2026-08-17 08:49:11,MONEL400 (Monel 400 Nickel-Copper),125,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_232b120ac349.npz
+89eea1b8c4eb,2026-08-17 08:49:11,IN625 (Inconel 625),125,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_89eea1b8c4eb.npz
+e122a37c751b,2026-08-17 08:49:11,WCB (Carbon Steel Casting),1331,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_e122a37c751b.npz
+ea42eeac3e32,2026-08-17 08:49:11,CF8 (Stainless Steel 304),1331,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_ea42eeac3e32.npz
+e55fbe9b8805,2026-08-17 08:49:11,C958 (Aluminum Bronze),1331,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_e55fbe9b8805.npz
+dfeef76d1a90,2026-08-17 08:49:12,C964 (CuNi),1331,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_dfeef76d1a90.npz
+0cce1ded731c,2026-08-17 08:49:12,CA6NM (Cast Steel),1331,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_0cce1ded731c.npz
+f38d319944c4,2026-08-17 08:49:12,MONEL400 (Monel 400 Nickel-Copper),1331,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_f38d319944c4.npz
+c593e84b77be,2026-08-17 08:49:12,IN625 (Inconel 625),1331,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_c593e84b77be.npz
+50b21b3d732f,2026-08-17 08:49:12,WCB (Carbon Steel Casting),351,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_50b21b3d732f.npz
+a8f9c1ed52eb,2026-08-17 08:49:13,CF8 (Stainless Steel 304),351,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_a8f9c1ed52eb.npz
+9178f233891e,2026-08-17 08:49:13,C958 (Aluminum Bronze),351,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_9178f233891e.npz
+0070e6ca2fa5,2026-08-17 08:49:13,C964 (CuNi),351,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_0070e6ca2fa5.npz
+a5c337c9568f,2026-08-17 08:49:13,CA6NM (Cast Steel),351,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_a5c337c9568f.npz
+29268d9bf910,2026-08-17 08:49:13,MONEL400 (Monel 400 Nickel-Copper),351,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_29268d9bf910.npz
+ac753dce3d41,2026-08-17 08:49:13,IN625 (Inconel 625),351,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_ac753dce3d41.npz
+57cdfc1540f2,2026-08-17 08:49:13,WCB (Carbon Steel Casting),525,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_57cdfc1540f2.npz
+84e3a45ea550,2026-08-17 08:49:14,CF8 (Stainless Steel 304),525,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_84e3a45ea550.npz
+bd3fdb977fff,2026-08-17 08:49:14,C958 (Aluminum Bronze),525,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_bd3fdb977fff.npz
+d41595461282,2026-08-17 08:49:14,C964 (CuNi),525,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_d41595461282.npz
+1f048033ce87,2026-08-17 08:49:14,CA6NM (Cast Steel),525,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_1f048033ce87.npz
+0a528a22f20c,2026-08-17 08:49:14,MONEL400 (Monel 400 Nickel-Copper),525,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_0a528a22f20c.npz
+c7e451aca9d2,2026-08-17 08:49:14,IN625 (Inconel 625),525,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_c7e451aca9d2.npz
+c6eede52bc2c,2026-08-17 08:49:15,WCB (Carbon Steel Casting),405,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_c6eede52bc2c.npz
+1ef7a5183fd8,2026-08-17 08:49:15,CF8 (Stainless Steel 304),405,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_1ef7a5183fd8.npz
+3f38ccde8423,2026-08-17 08:49:15,C958 (Aluminum Bronze),405,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_3f38ccde8423.npz
+f2995ac92ca9,2026-08-17 08:49:15,C964 (CuNi),405,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_f2995ac92ca9.npz
+91686cc2bd4c,2026-08-17 08:49:15,CA6NM (Cast Steel),405,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_91686cc2bd4c.npz
+79720fd04557,2026-08-17 08:49:15,MONEL400 (Monel 400 Nickel-Copper),405,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_79720fd04557.npz
+a4097305e389,2026-08-17 08:49:16,IN625 (Inconel 625),405,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_a4097305e389.npz
+7ecd7a1844c5,2026-08-17 09:04:15,WCB (Carbon Steel Casting),41593,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_7ecd7a1844c5.npz
+dac77b2209c0,2026-08-17 09:06:20,WCB (Carbon Steel Casting),41593,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_dac77b2209c0.npz
+d79c4eeb5390,2026-08-17 09:15:52,WCB (Carbon Steel Casting),34029,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_d79c4eeb5390.npz
+6c749d6b8909,2026-08-17 09:18:20,WCB (Carbon Steel Casting),34029,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_6c749d6b8909.npz
+eceaacbfe540,2026-08-17 11:00:05,WCB (Carbon Steel Casting),142883,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_eceaacbfe540.npz
+67cc7eea5759,2026-08-18 07:00:48,WCB (Carbon Steel Casting),22435,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_67cc7eea5759.npz
+97e3bc72aa3f,2026-08-18 07:30:10,WCB (Carbon Steel Casting),17985,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_97e3bc72aa3f.npz
+3d3a681e5c03,2026-08-18 10:57:38,WCB (Carbon Steel Casting),22391,64,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_3d3a681e5c03.npz
+c4c2f6d34f67,2026-08-27 06:19:40,WCB (Carbon Steel Casting),132073,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_c4c2f6d34f67.npz
+bfcefe5a76e2,2026-08-27 07:13:30,WCB (Carbon Steel Casting),51408,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_bfcefe5a76e2.npz
+258827d1fec4,2026-08-27 08:18:44,WCB (Carbon Steel Casting),132073,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_258827d1fec4.npz
+97cea7571c38,2026-08-27 08:52:11,WCB (Carbon Steel Casting),132073,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_97cea7571c38.npz
+76905fc69eae,2026-08-27 09:15:50,WCB (Carbon Steel Casting),132073,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_76905fc69eae.npz
+479864fcbc90,2026-08-27 10:23:48,WCB (Carbon Steel Casting),132073,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_479864fcbc90.npz
+f2a131d9ce10,2026-08-27 12:51:57,WCB (Carbon Steel Casting),132073,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_f2a131d9ce10.npz
+805e547d9235,2026-08-28 06:13:19,CA6NM (Cast Steel),512814,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_805e547d9235.npz
+09eacd2c21b8,2026-08-28 07:07:49,CA6NM (Cast Steel),512814,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_09eacd2c21b8.npz
+39dfc7368c33,2026-08-28 07:23:27,WCB (Carbon Steel Casting),512814,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_39dfc7368c33.npz
+4ce727859fe1,2026-08-30 20:38:40,WCB (Carbon Steel Casting),3230,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_4ce727859fe1.npz
+e2aca50dc50d,2026-08-30 20:39:59,WCB (Carbon Steel Casting),2879,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_e2aca50dc50d.npz
+2bbc15975814,2026-08-30 20:46:23,WCB (Carbon Steel Casting),2879,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_2bbc15975814.npz
+2f9cc2e4cff6,2026-08-30 21:16:58,WCB (Carbon Steel Casting),17979,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_2f9cc2e4cff6.npz
+230bc0bb80d5,2026-08-30 21:18:23,WCB (Carbon Steel Casting),17979,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_230bc0bb80d5.npz
+9cb099a38bde,2026-08-30 21:27:08,WCB (Carbon Steel Casting),17979,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_9cb099a38bde.npz
+b687c91d4d8f,2026-08-30 22:19:24,WCB (Carbon Steel Casting),17979,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_b687c91d4d8f.npz
+f6d7b4346f50,2026-08-30 22:20:29,WCB (Carbon Steel Casting),17979,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_f6d7b4346f50.npz
+219608c5e523,2026-08-30 22:35:26,WCB (Carbon Steel Casting),17979,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_219608c5e523.npz
+844179c7196e,2026-08-30 23:05:15,WCB (Carbon Steel Casting),17979,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_844179c7196e.npz
+9bed6429e04c,2026-08-31 04:19:56,WCB (Carbon Steel Casting),5448,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_9bed6429e04c.npz
+1a83932d8b73,2026-08-31 09:37:16,WCB (Carbon Steel Casting),10761,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_1a83932d8b73.npz
+d4c111362bd7,2026-08-31 10:26:57,WCB (Carbon Steel Casting),10761,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_d4c111362bd7.npz
+35ea9f3169c0,2026-08-31 11:07:04,WCB (Carbon Steel Casting),33305,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_35ea9f3169c0.npz
+73b8863c6f7f,2026-08-31 11:37:17,WCB (Carbon Steel Casting),33305,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_73b8863c6f7f.npz
+3606aec04819,2026-08-31 11:41:44,WCB (Carbon Steel Casting),33305,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_3606aec04819.npz
+fdd7c9c929e0,2026-08-31 14:57:53,WCB (Carbon Steel Casting),17967,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_fdd7c9c929e0.npz
+ebc7b92b0db3,2026-08-31 15:34:48,WCB (Carbon Steel Casting),16065,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_ebc7b92b0db3.npz
+f0bdedb3c2e3,2026-09-01 10:26:10,WCB (Carbon Steel Casting),344339,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_f0bdedb3c2e3.npz
+f444859693b7,2026-09-01 10:29:55,WCB (Carbon Steel Casting),53288,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_f444859693b7.npz
+81d0bcebeccf,2026-09-01 11:06:59,WCB (Carbon Steel Casting),53288,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_81d0bcebeccf.npz
+4f4b254f907b,2026-09-02 05:44:06,WCB (Carbon Steel Casting),33305,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_4f4b254f907b.npz
+f9360930d316,2026-09-17 17:41:35,C958 (Aluminum Bronze),405011,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_f9360930d316.npz
+8756b40e832e,2026-09-17 18:25:42,WCB (Carbon Steel Casting),19305,64,data/surrogate_dataset/run_8756b40e832e.npz
+1c49351352f1,2026-09-17 18:25:43,CF8 (Stainless Steel 304),19305,64,data/surrogate_dataset/run_1c49351352f1.npz
+20d256ceda90,2026-09-17 18:25:44,C958 (Aluminum Bronze),19305,64,data/surrogate_dataset/run_20d256ceda90.npz
+39324a96c73e,2026-09-17 18:25:45,C964 (CuNi),19305,64,data/surrogate_dataset/run_39324a96c73e.npz
+4fc6414714b5,2026-09-17 18:25:47,CA6NM (Cast Steel),19305,64,data/surrogate_dataset/run_4fc6414714b5.npz
+c4bc2d5cc2d1,2026-09-17 18:25:48,MONEL400 (Monel 400 Nickel-Copper),19305,64,data/surrogate_dataset/run_c4bc2d5cc2d1.npz
+7b70085acd53,2026-09-17 18:25:49,IN625 (Inconel 625),19305,64,data/surrogate_dataset/run_7b70085acd53.npz
+07dae1f551ef,2026-09-17 18:25:53,WCB (Carbon Steel Casting),45093,64,data/surrogate_dataset/run_07dae1f551ef.npz
+70025e24257d,2026-09-17 18:25:57,CF8 (Stainless Steel 304),45093,64,data/surrogate_dataset/run_70025e24257d.npz
+16ee00c7147a,2026-09-17 18:26:01,C958 (Aluminum Bronze),45093,64,data/surrogate_dataset/run_16ee00c7147a.npz
+c512c911cd4a,2026-09-17 18:26:05,C964 (CuNi),45093,64,data/surrogate_dataset/run_c512c911cd4a.npz
+2bbe377e58b5,2026-09-17 18:26:09,CA6NM (Cast Steel),45093,64,data/surrogate_dataset/run_2bbe377e58b5.npz
+2e1d11de32cb,2026-09-17 18:26:13,MONEL400 (Monel 400 Nickel-Copper),45093,64,data/surrogate_dataset/run_2e1d11de32cb.npz
+ace2fd6fe3f3,2026-09-17 18:26:16,IN625 (Inconel 625),45093,64,data/surrogate_dataset/run_ace2fd6fe3f3.npz
+7f3109f4179d,2026-09-17 18:26:18,WCB (Carbon Steel Casting),24935,64,data/surrogate_dataset/run_7f3109f4179d.npz
+a8e56c6b7043,2026-09-17 18:26:20,CF8 (Stainless Steel 304),24935,64,data/surrogate_dataset/run_a8e56c6b7043.npz
+1682875511c3,2026-09-17 18:26:21,C958 (Aluminum Bronze),24935,64,data/surrogate_dataset/run_1682875511c3.npz
+66c7c581b2b5,2026-09-17 18:26:23,C964 (CuNi),24935,64,data/surrogate_dataset/run_66c7c581b2b5.npz
+e383b06c001a,2026-09-17 18:26:25,CA6NM (Cast Steel),24935,64,data/surrogate_dataset/run_e383b06c001a.npz
+4db8b94a9e2f,2026-09-17 18:26:26,MONEL400 (Monel 400 Nickel-Copper),24935,64,data/surrogate_dataset/run_4db8b94a9e2f.npz
+db7bed60e79d,2026-09-17 18:26:28,IN625 (Inconel 625),24935,64,data/surrogate_dataset/run_db7bed60e79d.npz
+30976f055115,2026-09-17 18:26:29,WCB (Carbon Steel Casting),20605,64,data/surrogate_dataset/run_30976f055115.npz
+7c0276544a8d,2026-09-17 18:26:30,CF8 (Stainless Steel 304),20605,64,data/surrogate_dataset/run_7c0276544a8d.npz
+222f188bbfb5,2026-09-17 18:26:31,C958 (Aluminum Bronze),20605,64,data/surrogate_dataset/run_222f188bbfb5.npz
+4b6d9ff00adf,2026-09-17 18:26:32,C964 (CuNi),20605,64,data/surrogate_dataset/run_4b6d9ff00adf.npz
+1bb01e3d812c,2026-09-17 18:26:34,CA6NM (Cast Steel),20605,64,data/surrogate_dataset/run_1bb01e3d812c.npz
+e04661888c4c,2026-09-17 18:26:35,MONEL400 (Monel 400 Nickel-Copper),20605,64,data/surrogate_dataset/run_e04661888c4c.npz
+4bd24f944c98,2026-09-17 18:26:36,IN625 (Inconel 625),20605,64,data/surrogate_dataset/run_4bd24f944c98.npz
+4cbb3c52b28f,2026-09-17 18:26:37,WCB (Carbon Steel Casting),19454,64,data/surrogate_dataset/run_4cbb3c52b28f.npz
+d354fb77a4c0,2026-09-17 18:26:38,CF8 (Stainless Steel 304),19454,64,data/surrogate_dataset/run_d354fb77a4c0.npz
+1d4cb6450d56,2026-09-17 18:26:40,C958 (Aluminum Bronze),19454,64,data/surrogate_dataset/run_1d4cb6450d56.npz
+18145b5f4012,2026-09-17 18:26:41,C964 (CuNi),19454,64,data/surrogate_dataset/run_18145b5f4012.npz
+c4e5ce46b2cd,2026-09-17 18:26:42,CA6NM (Cast Steel),19454,64,data/surrogate_dataset/run_c4e5ce46b2cd.npz
+abccf1e1cf6b,2026-09-17 18:26:43,MONEL400 (Monel 400 Nickel-Copper),19454,64,data/surrogate_dataset/run_abccf1e1cf6b.npz
+1b502783351c,2026-09-17 18:26:44,IN625 (Inconel 625),19454,64,data/surrogate_dataset/run_1b502783351c.npz
+6876e327e471,2026-09-17 18:26:46,WCB (Carbon Steel Casting),30545,64,data/surrogate_dataset/run_6876e327e471.npz
+344c366fd565,2026-09-17 18:26:48,CF8 (Stainless Steel 304),30545,64,data/surrogate_dataset/run_344c366fd565.npz
+88af43b70058,2026-09-17 18:26:50,C958 (Aluminum Bronze),30545,64,data/surrogate_dataset/run_88af43b70058.npz
+d8d2d1416337,2026-09-17 18:26:51,C964 (CuNi),30545,64,data/surrogate_dataset/run_d8d2d1416337.npz
+939b49315dba,2026-09-17 18:26:53,CA6NM (Cast Steel),30545,64,data/surrogate_dataset/run_939b49315dba.npz
+4cb242214f5c,2026-09-17 18:26:55,MONEL400 (Monel 400 Nickel-Copper),30545,64,data/surrogate_dataset/run_4cb242214f5c.npz
+8857c8d80292,2026-09-17 18:26:56,IN625 (Inconel 625),30545,64,data/surrogate_dataset/run_8857c8d80292.npz
+a7f6f29788d3,2026-09-17 18:27:00,WCB (Carbon Steel Casting),46996,64,data/surrogate_dataset/run_a7f6f29788d3.npz
+f4c9f3064c64,2026-09-17 18:27:04,CF8 (Stainless Steel 304),46996,64,data/surrogate_dataset/run_f4c9f3064c64.npz
+1b96e1be48c0,2026-09-17 18:27:08,C958 (Aluminum Bronze),46996,64,data/surrogate_dataset/run_1b96e1be48c0.npz
+efebc901280a,2026-09-17 18:27:12,C964 (CuNi),46996,64,data/surrogate_dataset/run_efebc901280a.npz
+bc3ed2395be8,2026-09-17 18:27:16,CA6NM (Cast Steel),46996,64,data/surrogate_dataset/run_bc3ed2395be8.npz
+201f9a7c3183,2026-09-17 18:27:20,MONEL400 (Monel 400 Nickel-Copper),46996,64,data/surrogate_dataset/run_201f9a7c3183.npz
+50d97e1ca909,2026-09-17 18:27:23,IN625 (Inconel 625),46996,64,data/surrogate_dataset/run_50d97e1ca909.npz
+1e7fba65a694,2026-09-17 18:27:25,WCB (Carbon Steel Casting),30525,64,data/surrogate_dataset/run_1e7fba65a694.npz
+9e6133361716,2026-09-17 18:27:27,CF8 (Stainless Steel 304),30525,64,data/surrogate_dataset/run_9e6133361716.npz
+9764c621dfa9,2026-09-17 18:27:29,C958 (Aluminum Bronze),30525,64,data/surrogate_dataset/run_9764c621dfa9.npz
+420d007ff081,2026-09-17 18:27:31,C964 (CuNi),30525,64,data/surrogate_dataset/run_420d007ff081.npz
+95e3810ad2bc,2026-09-17 18:27:33,CA6NM (Cast Steel),30525,64,data/surrogate_dataset/run_95e3810ad2bc.npz
+8b30b241d2be,2026-09-17 18:27:36,MONEL400 (Monel 400 Nickel-Copper),30525,64,data/surrogate_dataset/run_8b30b241d2be.npz
+c627f2c1acab,2026-09-17 18:27:38,IN625 (Inconel 625),30525,64,data/surrogate_dataset/run_c627f2c1acab.npz
+a69a46041b98,2026-09-17 18:27:41,WCB (Carbon Steel Casting),41664,64,data/surrogate_dataset/run_a69a46041b98.npz
+59b592d34ea1,2026-09-17 18:27:43,CF8 (Stainless Steel 304),41664,64,data/surrogate_dataset/run_59b592d34ea1.npz
+0feb73cda021,2026-09-17 18:27:46,C958 (Aluminum Bronze),41664,64,data/surrogate_dataset/run_0feb73cda021.npz
+3b89e58a2a7a,2026-09-17 18:27:49,C964 (CuNi),41664,64,data/surrogate_dataset/run_3b89e58a2a7a.npz
+5f749e4feb40,2026-09-17 18:27:51,CA6NM (Cast Steel),41664,64,data/surrogate_dataset/run_5f749e4feb40.npz
+353904d105c2,2026-09-17 18:27:54,MONEL400 (Monel 400 Nickel-Copper),41664,64,data/surrogate_dataset/run_353904d105c2.npz
+b593f4878a5f,2026-09-17 18:27:56,IN625 (Inconel 625),41664,64,data/surrogate_dataset/run_b593f4878a5f.npz
+a1689331e4c4,2026-09-17 18:27:57,WCB (Carbon Steel Casting),8217,64,data/surrogate_dataset/run_a1689331e4c4.npz
+d2035bf8091b,2026-09-17 18:27:58,CF8 (Stainless Steel 304),8217,64,data/surrogate_dataset/run_d2035bf8091b.npz
+3e95cf42006a,2026-09-17 18:27:58,C958 (Aluminum Bronze),8217,64,data/surrogate_dataset/run_3e95cf42006a.npz
+b954459a4049,2026-09-17 18:27:59,C964 (CuNi),8217,64,data/surrogate_dataset/run_b954459a4049.npz
+88ea46fa01a6,2026-09-17 18:28:00,CA6NM (Cast Steel),8217,64,data/surrogate_dataset/run_88ea46fa01a6.npz
+e866d294b9d4,2026-09-17 18:28:00,MONEL400 (Monel 400 Nickel-Copper),8217,64,data/surrogate_dataset/run_e866d294b9d4.npz
+e04165dad5dd,2026-09-17 18:28:01,IN625 (Inconel 625),8217,64,data/surrogate_dataset/run_e04165dad5dd.npz
+8bdcf68f7da4,2026-09-17 18:28:10,WCB (Carbon Steel Casting),150558,64,data/surrogate_dataset/run_8bdcf68f7da4.npz
+2816355c1e61,2026-09-17 18:28:19,CF8 (Stainless Steel 304),150558,64,data/surrogate_dataset/run_2816355c1e61.npz
+5b6cd709aa51,2026-09-17 18:28:28,C958 (Aluminum Bronze),150558,64,data/surrogate_dataset/run_5b6cd709aa51.npz
+f1d11ccbf9e0,2026-09-17 18:28:38,C964 (CuNi),150558,64,data/surrogate_dataset/run_f1d11ccbf9e0.npz
+c6ff9d5fe201,2026-09-17 18:28:46,CA6NM (Cast Steel),150558,64,data/surrogate_dataset/run_c6ff9d5fe201.npz
+c89a1d3662af,2026-09-17 18:28:54,MONEL400 (Monel 400 Nickel-Copper),150558,64,data/surrogate_dataset/run_c89a1d3662af.npz
+b8946f4641cb,2026-09-17 18:29:02,IN625 (Inconel 625),150558,64,data/surrogate_dataset/run_b8946f4641cb.npz
+330ce48c084d,2026-09-17 18:29:08,WCB (Carbon Steel Casting),77805,64,data/surrogate_dataset/run_330ce48c084d.npz
+8535bd130bbc,2026-09-17 18:29:13,CF8 (Stainless Steel 304),77805,64,data/surrogate_dataset/run_8535bd130bbc.npz
+a16004f49243,2026-09-17 18:29:20,C958 (Aluminum Bronze),77805,64,data/surrogate_dataset/run_a16004f49243.npz
+6206ebb2eca3,2026-09-17 18:29:26,C964 (CuNi),77805,64,data/surrogate_dataset/run_6206ebb2eca3.npz
+4ac777d69915,2026-09-17 18:29:31,CA6NM (Cast Steel),77805,64,data/surrogate_dataset/run_4ac777d69915.npz
+db92471c859c,2026-09-17 18:29:36,MONEL400 (Monel 400 Nickel-Copper),77805,64,data/surrogate_dataset/run_db92471c859c.npz
+7351ab66643d,2026-09-17 18:29:40,IN625 (Inconel 625),77805,64,data/surrogate_dataset/run_7351ab66643d.npz
+da4ca4c4e172,2026-09-17 18:29:41,WCB (Carbon Steel Casting),7839,64,data/surrogate_dataset/run_da4ca4c4e172.npz
+971124ada792,2026-09-17 18:29:42,CF8 (Stainless Steel 304),7839,64,data/surrogate_dataset/run_971124ada792.npz
+048d7c451de5,2026-09-17 18:29:43,C958 (Aluminum Bronze),7839,64,data/surrogate_dataset/run_048d7c451de5.npz
+8098ab6e8786,2026-09-17 18:29:45,C964 (CuNi),7839,64,data/surrogate_dataset/run_8098ab6e8786.npz
+c7d05bd74012,2026-09-17 18:29:46,CA6NM (Cast Steel),7839,64,data/surrogate_dataset/run_c7d05bd74012.npz
+25d21b23b9e9,2026-09-17 18:29:47,MONEL400 (Monel 400 Nickel-Copper),7839,64,data/surrogate_dataset/run_25d21b23b9e9.npz
+c300513e834a,2026-09-17 18:29:48,IN625 (Inconel 625),7839,64,data/surrogate_dataset/run_c300513e834a.npz
+cc5150e81591,2026-09-17 18:29:49,WCB (Carbon Steel Casting),17707,64,data/surrogate_dataset/run_cc5150e81591.npz
+f493e866b1e2,2026-09-17 18:29:51,CF8 (Stainless Steel 304),17707,64,data/surrogate_dataset/run_f493e866b1e2.npz
+b76c46bc94c8,2026-09-17 18:29:52,C958 (Aluminum Bronze),17707,64,data/surrogate_dataset/run_b76c46bc94c8.npz
+6f3e7d82a45d,2026-09-17 18:29:54,C964 (CuNi),17707,64,data/surrogate_dataset/run_6f3e7d82a45d.npz
+7b0a6b87d11e,2026-09-17 18:29:55,CA6NM (Cast Steel),17707,64,data/surrogate_dataset/run_7b0a6b87d11e.npz
+e306394d96e3,2026-09-17 18:29:57,MONEL400 (Monel 400 Nickel-Copper),17707,64,data/surrogate_dataset/run_e306394d96e3.npz
+f86cd6c48a90,2026-09-17 18:29:58,IN625 (Inconel 625),17707,64,data/surrogate_dataset/run_f86cd6c48a90.npz
+b1ac42342a75,2026-09-17 18:30:01,WCB (Carbon Steel Casting),25594,64,data/surrogate_dataset/run_b1ac42342a75.npz
+bb03f99f6456,2026-09-17 18:30:02,CF8 (Stainless Steel 304),25594,64,data/surrogate_dataset/run_bb03f99f6456.npz
+7efb5b13b894,2026-09-17 18:30:05,C958 (Aluminum Bronze),25594,64,data/surrogate_dataset/run_7efb5b13b894.npz
+545f4df17ee3,2026-09-17 18:30:07,C964 (CuNi),25594,64,data/surrogate_dataset/run_545f4df17ee3.npz
+74ae2af48163,2026-09-17 18:30:09,CA6NM (Cast Steel),25594,64,data/surrogate_dataset/run_74ae2af48163.npz
+8585b721d8ae,2026-09-17 18:30:11,MONEL400 (Monel 400 Nickel-Copper),25594,64,data/surrogate_dataset/run_8585b721d8ae.npz
+27f57b4d0795,2026-09-17 18:30:12,IN625 (Inconel 625),25594,64,data/surrogate_dataset/run_27f57b4d0795.npz
+593be2ef3761,2026-09-17 18:30:14,WCB (Carbon Steel Casting),34970,64,data/surrogate_dataset/run_593be2ef3761.npz
+ebefb52790d6,2026-09-17 18:30:16,CF8 (Stainless Steel 304),34970,64,data/surrogate_dataset/run_ebefb52790d6.npz
+4d43947de7be,2026-09-17 18:30:18,C958 (Aluminum Bronze),34970,64,data/surrogate_dataset/run_4d43947de7be.npz
+5f4550ad701a,2026-09-17 18:30:20,C964 (CuNi),34970,64,data/surrogate_dataset/run_5f4550ad701a.npz
+58db84c7e62d,2026-09-17 18:30:22,CA6NM (Cast Steel),34970,64,data/surrogate_dataset/run_58db84c7e62d.npz
+1ebfa9757637,2026-09-17 18:30:23,MONEL400 (Monel 400 Nickel-Copper),34970,64,data/surrogate_dataset/run_1ebfa9757637.npz
+f9da504bc9e9,2026-09-17 18:30:25,IN625 (Inconel 625),34970,64,data/surrogate_dataset/run_f9da504bc9e9.npz
+61053a914cc7,2026-09-17 18:30:27,WCB (Carbon Steel Casting),37281,64,data/surrogate_dataset/run_61053a914cc7.npz
+d7e818a5bb90,2026-09-17 18:30:30,CF8 (Stainless Steel 304),37281,64,data/surrogate_dataset/run_d7e818a5bb90.npz
+b649e9bc9502,2026-09-17 18:30:32,C958 (Aluminum Bronze),37281,64,data/surrogate_dataset/run_b649e9bc9502.npz
+ecd09a4c5ebd,2026-09-17 18:30:34,C964 (CuNi),37281,64,data/surrogate_dataset/run_ecd09a4c5ebd.npz
+32c91883872c,2026-09-17 18:30:36,CA6NM (Cast Steel),37281,64,data/surrogate_dataset/run_32c91883872c.npz
+e7c251922391,2026-09-17 18:30:38,MONEL400 (Monel 400 Nickel-Copper),37281,64,data/surrogate_dataset/run_e7c251922391.npz
+f24a1bb26594,2026-09-17 18:30:41,IN625 (Inconel 625),37281,64,data/surrogate_dataset/run_f24a1bb26594.npz
+1839ee1d612d,2026-09-17 18:30:42,WCB (Carbon Steel Casting),29436,64,data/surrogate_dataset/run_1839ee1d612d.npz
+921a290f4ffe,2026-09-17 18:30:44,CF8 (Stainless Steel 304),29436,64,data/surrogate_dataset/run_921a290f4ffe.npz
+6e084a66856a,2026-09-17 18:30:46,C958 (Aluminum Bronze),29436,64,data/surrogate_dataset/run_6e084a66856a.npz
+b25cbc9637bf,2026-09-17 18:30:47,C964 (CuNi),29436,64,data/surrogate_dataset/run_b25cbc9637bf.npz
+4ace3077e42c,2026-09-17 18:30:49,CA6NM (Cast Steel),29436,64,data/surrogate_dataset/run_4ace3077e42c.npz
+528b269a87a7,2026-09-17 18:30:50,MONEL400 (Monel 400 Nickel-Copper),29436,64,data/surrogate_dataset/run_528b269a87a7.npz
+39a9a4e91753,2026-09-17 18:30:52,IN625 (Inconel 625),29436,64,data/surrogate_dataset/run_39a9a4e91753.npz
+d3b8e70ebe39,2026-09-17 18:30:55,WCB (Carbon Steel Casting),40563,64,data/surrogate_dataset/run_d3b8e70ebe39.npz
+23d74b5c29ad,2026-09-17 18:30:58,CF8 (Stainless Steel 304),40563,64,data/surrogate_dataset/run_23d74b5c29ad.npz
+331cc82e51f9,2026-09-17 18:31:00,C958 (Aluminum Bronze),40563,64,data/surrogate_dataset/run_331cc82e51f9.npz
+305e302f572e,2026-09-17 18:31:03,C964 (CuNi),40563,64,data/surrogate_dataset/run_305e302f572e.npz
+42a8b019c1cd,2026-09-17 18:31:06,CA6NM (Cast Steel),40563,64,data/surrogate_dataset/run_42a8b019c1cd.npz
+0181e5170ea2,2026-09-17 18:31:09,MONEL400 (Monel 400 Nickel-Copper),40563,64,data/surrogate_dataset/run_0181e5170ea2.npz
+121d4aba6913,2026-09-17 18:31:12,IN625 (Inconel 625),40563,64,data/surrogate_dataset/run_121d4aba6913.npz
+183ce33a532b,2026-09-17 18:31:13,WCB (Carbon Steel Casting),26832,64,data/surrogate_dataset/run_183ce33a532b.npz
+93142194209c,2026-09-17 18:31:15,CF8 (Stainless Steel 304),26832,64,data/surrogate_dataset/run_93142194209c.npz
+6251e15df01d,2026-09-17 18:31:16,C958 (Aluminum Bronze),26832,64,data/surrogate_dataset/run_6251e15df01d.npz
+c00aa251f571,2026-09-17 18:31:18,C964 (CuNi),26832,64,data/surrogate_dataset/run_c00aa251f571.npz
+0f04c03a4e92,2026-09-17 18:31:19,CA6NM (Cast Steel),26832,64,data/surrogate_dataset/run_0f04c03a4e92.npz
+bbc309b4e751,2026-09-17 18:31:21,MONEL400 (Monel 400 Nickel-Copper),26832,64,data/surrogate_dataset/run_bbc309b4e751.npz
+379f2d5d85af,2026-09-17 18:31:22,IN625 (Inconel 625),26832,64,data/surrogate_dataset/run_379f2d5d85af.npz
+8535670ee88c,2026-09-17 18:31:23,WCB (Carbon Steel Casting),9241,64,data/surrogate_dataset/run_8535670ee88c.npz
+4cc7fc10d844,2026-09-17 18:31:23,CF8 (Stainless Steel 304),9241,64,data/surrogate_dataset/run_4cc7fc10d844.npz
+c47c14da83b2,2026-09-17 18:31:24,C958 (Aluminum Bronze),9241,64,data/surrogate_dataset/run_c47c14da83b2.npz
+7d70db5c0588,2026-09-17 18:31:25,C964 (CuNi),9241,64,data/surrogate_dataset/run_7d70db5c0588.npz
+c0d5d77cf927,2026-09-17 18:31:26,CA6NM (Cast Steel),9241,64,data/surrogate_dataset/run_c0d5d77cf927.npz
+84772097b03d,2026-09-17 18:31:26,MONEL400 (Monel 400 Nickel-Copper),9241,64,data/surrogate_dataset/run_84772097b03d.npz
+eb3f53d3ac24,2026-09-17 18:31:27,IN625 (Inconel 625),9241,64,data/surrogate_dataset/run_eb3f53d3ac24.npz
+6ec4fcdbc92a,2026-09-17 18:31:28,WCB (Carbon Steel Casting),14904,64,data/surrogate_dataset/run_6ec4fcdbc92a.npz
+3f1e4ef25088,2026-09-17 18:31:30,CF8 (Stainless Steel 304),14904,64,data/surrogate_dataset/run_3f1e4ef25088.npz
+ad795c16e689,2026-09-17 18:31:31,C958 (Aluminum Bronze),14904,64,data/surrogate_dataset/run_ad795c16e689.npz
+7e00ff18b6b2,2026-09-17 18:31:33,C964 (CuNi),14904,64,data/surrogate_dataset/run_7e00ff18b6b2.npz
+50b99e307f85,2026-09-17 18:31:34,CA6NM (Cast Steel),14904,64,data/surrogate_dataset/run_50b99e307f85.npz
+91a30de86e19,2026-09-17 18:31:35,MONEL400 (Monel 400 Nickel-Copper),14904,64,data/surrogate_dataset/run_91a30de86e19.npz
+1a0a679830d3,2026-09-17 18:31:37,IN625 (Inconel 625),14904,64,data/surrogate_dataset/run_1a0a679830d3.npz
+ab233d83ee22,2026-09-17 18:31:41,WCB (Carbon Steel Casting),69615,64,data/surrogate_dataset/run_ab233d83ee22.npz
+7277d25e84fb,2026-09-17 18:31:45,CF8 (Stainless Steel 304),69615,64,data/surrogate_dataset/run_7277d25e84fb.npz
+7b18b548291f,2026-09-17 18:31:49,C958 (Aluminum Bronze),69615,64,data/surrogate_dataset/run_7b18b548291f.npz
+1cd2c7bf1127,2026-09-17 18:31:53,C964 (CuNi),69615,64,data/surrogate_dataset/run_1cd2c7bf1127.npz
+3815d629e26c,2026-09-17 18:31:57,CA6NM (Cast Steel),69615,64,data/surrogate_dataset/run_3815d629e26c.npz
+9d7875b5f8ee,2026-09-17 18:32:01,MONEL400 (Monel 400 Nickel-Copper),69615,64,data/surrogate_dataset/run_9d7875b5f8ee.npz
+a8e45dc33188,2026-09-17 18:32:05,IN625 (Inconel 625),69615,64,data/surrogate_dataset/run_a8e45dc33188.npz
+a412a6f5947b,2026-09-17 18:32:08,WCB (Carbon Steel Casting),37747,64,data/surrogate_dataset/run_a412a6f5947b.npz
+eac447233107,2026-09-17 18:32:10,CF8 (Stainless Steel 304),37747,64,data/surrogate_dataset/run_eac447233107.npz
+2c1f74f1aabb,2026-09-17 18:32:13,C958 (Aluminum Bronze),37747,64,data/surrogate_dataset/run_2c1f74f1aabb.npz
+e3f8ffb75eaa,2026-09-17 18:32:16,C964 (CuNi),37747,64,data/surrogate_dataset/run_e3f8ffb75eaa.npz
+8e0e5b43d92f,2026-09-17 18:32:18,CA6NM (Cast Steel),37747,64,data/surrogate_dataset/run_8e0e5b43d92f.npz
+165db68fc972,2026-09-17 18:32:20,MONEL400 (Monel 400 Nickel-Copper),37747,64,data/surrogate_dataset/run_165db68fc972.npz
+da926c14f843,2026-09-17 18:32:23,IN625 (Inconel 625),37747,64,data/surrogate_dataset/run_da926c14f843.npz
+9cd218672033,2026-09-17 18:32:23,WCB (Carbon Steel Casting),12135,64,data/surrogate_dataset/run_9cd218672033.npz
+b21e471aa45d,2026-09-17 18:32:24,CF8 (Stainless Steel 304),12135,64,data/surrogate_dataset/run_b21e471aa45d.npz
+496a2702f4c3,2026-09-17 18:32:25,C958 (Aluminum Bronze),12135,64,data/surrogate_dataset/run_496a2702f4c3.npz
+25e03a0f7b66,2026-09-17 18:32:26,C964 (CuNi),12135,64,data/surrogate_dataset/run_25e03a0f7b66.npz
+eb6d6d679b45,2026-09-17 18:32:27,CA6NM (Cast Steel),12135,64,data/surrogate_dataset/run_eb6d6d679b45.npz
+8d260d448161,2026-09-17 18:32:28,MONEL400 (Monel 400 Nickel-Copper),12135,64,data/surrogate_dataset/run_8d260d448161.npz
+0f215a64b99c,2026-09-17 18:32:29,IN625 (Inconel 625),12135,64,data/surrogate_dataset/run_0f215a64b99c.npz
+640414bb7627,2026-09-17 18:32:30,WCB (Carbon Steel Casting),20345,64,data/surrogate_dataset/run_640414bb7627.npz
+76c71ca80afa,2026-09-17 18:32:32,CF8 (Stainless Steel 304),20345,64,data/surrogate_dataset/run_76c71ca80afa.npz
+96b193e31e12,2026-09-17 18:32:33,C958 (Aluminum Bronze),20345,64,data/surrogate_dataset/run_96b193e31e12.npz
+e6b3726acac1,2026-09-17 18:32:35,C964 (CuNi),20345,64,data/surrogate_dataset/run_e6b3726acac1.npz
+39a7b5545d60,2026-09-17 18:32:37,CA6NM (Cast Steel),20345,64,data/surrogate_dataset/run_39a7b5545d60.npz
+a696635e8b1b,2026-09-17 18:32:38,MONEL400 (Monel 400 Nickel-Copper),20345,64,data/surrogate_dataset/run_a696635e8b1b.npz
+818339a49121,2026-09-17 18:32:39,IN625 (Inconel 625),20345,64,data/surrogate_dataset/run_818339a49121.npz
+fb5dae8fc6b8,2026-09-17 18:32:42,WCB (Carbon Steel Casting),32634,64,data/surrogate_dataset/run_fb5dae8fc6b8.npz
+7bf49793b504,2026-09-17 18:32:44,CF8 (Stainless Steel 304),32634,64,data/surrogate_dataset/run_7bf49793b504.npz
+1e43fb80013f,2026-09-17 18:32:46,C958 (Aluminum Bronze),32634,64,data/surrogate_dataset/run_1e43fb80013f.npz
+91a15dfeffa2,2026-09-17 18:32:49,C964 (CuNi),32634,64,data/surrogate_dataset/run_91a15dfeffa2.npz
+5102aea2497e,2026-09-17 18:32:51,CA6NM (Cast Steel),32634,64,data/surrogate_dataset/run_5102aea2497e.npz
+a4cb17d52be2,2026-09-17 18:32:53,MONEL400 (Monel 400 Nickel-Copper),32634,64,data/surrogate_dataset/run_a4cb17d52be2.npz
+921f320ec769,2026-09-17 18:32:55,IN625 (Inconel 625),32634,64,data/surrogate_dataset/run_921f320ec769.npz
+adc3d2285051,2026-09-17 18:32:57,WCB (Carbon Steel Casting),29636,64,data/surrogate_dataset/run_adc3d2285051.npz
+224ad4242fe8,2026-09-17 18:32:59,CF8 (Stainless Steel 304),29636,64,data/surrogate_dataset/run_224ad4242fe8.npz
+fe0cd9e73926,2026-09-17 18:33:02,C958 (Aluminum Bronze),29636,64,data/surrogate_dataset/run_fe0cd9e73926.npz
+dc976c8ce346,2026-09-17 18:33:05,C964 (CuNi),29636,64,data/surrogate_dataset/run_dc976c8ce346.npz
+2ef73c34529d,2026-09-17 18:33:07,CA6NM (Cast Steel),29636,64,data/surrogate_dataset/run_2ef73c34529d.npz
+2fafd6ac5067,2026-09-17 18:33:09,MONEL400 (Monel 400 Nickel-Copper),29636,64,data/surrogate_dataset/run_2fafd6ac5067.npz
+40e090b38591,2026-09-17 18:33:11,IN625 (Inconel 625),29636,64,data/surrogate_dataset/run_40e090b38591.npz
+37668a801ba5,2026-09-17 18:33:15,WCB (Carbon Steel Casting),43880,64,data/surrogate_dataset/run_37668a801ba5.npz
+3a8589e22526,2026-09-17 18:33:18,CF8 (Stainless Steel 304),43880,64,data/surrogate_dataset/run_3a8589e22526.npz
+db49507de44b,2026-09-17 18:33:21,C958 (Aluminum Bronze),43880,64,data/surrogate_dataset/run_db49507de44b.npz
+0533ea9db304,2026-09-17 18:33:24,C964 (CuNi),43880,64,data/surrogate_dataset/run_0533ea9db304.npz
+330586eab115,2026-09-17 18:33:27,CA6NM (Cast Steel),43880,64,data/surrogate_dataset/run_330586eab115.npz
+4f0b06aeee42,2026-09-17 18:33:31,MONEL400 (Monel 400 Nickel-Copper),43880,64,data/surrogate_dataset/run_4f0b06aeee42.npz
+c4e71ee48c0e,2026-09-17 18:33:34,IN625 (Inconel 625),43880,64,data/surrogate_dataset/run_c4e71ee48c0e.npz
+5810c3759277,2026-09-17 18:33:36,WCB (Carbon Steel Casting),32453,64,data/surrogate_dataset/run_5810c3759277.npz
+2fcdbc3cf66c,2026-09-17 18:33:38,CF8 (Stainless Steel 304),32453,64,data/surrogate_dataset/run_2fcdbc3cf66c.npz
+9f86fdd0d8ec,2026-09-17 18:33:40,C958 (Aluminum Bronze),32453,64,data/surrogate_dataset/run_9f86fdd0d8ec.npz
+cfbc70bc6582,2026-09-17 18:33:43,C964 (CuNi),32453,64,data/surrogate_dataset/run_cfbc70bc6582.npz
+5d5971eb59a0,2026-09-17 18:33:45,CA6NM (Cast Steel),32453,64,data/surrogate_dataset/run_5d5971eb59a0.npz
+ed424596e54c,2026-09-17 18:33:47,MONEL400 (Monel 400 Nickel-Copper),32453,64,data/surrogate_dataset/run_ed424596e54c.npz
+b13c43a11a3f,2026-09-17 18:33:49,IN625 (Inconel 625),32453,64,data/surrogate_dataset/run_b13c43a11a3f.npz
+770366ae7e06,2026-09-17 18:33:51,WCB (Carbon Steel Casting),14960,64,data/surrogate_dataset/run_770366ae7e06.npz
+c35a1226f6a7,2026-09-17 18:33:52,CF8 (Stainless Steel 304),14960,64,data/surrogate_dataset/run_c35a1226f6a7.npz
+6d565358df4a,2026-09-17 18:33:53,C958 (Aluminum Bronze),14960,64,data/surrogate_dataset/run_6d565358df4a.npz
+9a8b69321606,2026-09-17 18:33:54,C964 (CuNi),14960,64,data/surrogate_dataset/run_9a8b69321606.npz
+bff2ab5332f5,2026-09-17 18:33:55,CA6NM (Cast Steel),14960,64,data/surrogate_dataset/run_bff2ab5332f5.npz
+e5078efbe246,2026-09-17 18:33:56,MONEL400 (Monel 400 Nickel-Copper),14960,64,data/surrogate_dataset/run_e5078efbe246.npz
+30af631a99f2,2026-09-17 18:33:58,IN625 (Inconel 625),14960,64,data/surrogate_dataset/run_30af631a99f2.npz
+ba4932e39fdf,2026-09-17 18:33:59,WCB (Carbon Steel Casting),23049,64,data/surrogate_dataset/run_ba4932e39fdf.npz
+dc1363113e50,2026-09-17 18:34:00,CF8 (Stainless Steel 304),23049,64,data/surrogate_dataset/run_dc1363113e50.npz
+b78066bf774d,2026-09-17 18:34:02,C958 (Aluminum Bronze),23049,64,data/surrogate_dataset/run_b78066bf774d.npz
+cd47f4352503,2026-09-17 18:34:03,C964 (CuNi),23049,64,data/surrogate_dataset/run_cd47f4352503.npz
+7e150950aa8b,2026-09-17 18:34:04,CA6NM (Cast Steel),23049,64,data/surrogate_dataset/run_7e150950aa8b.npz
+1678ee112ed1,2026-09-17 18:34:06,MONEL400 (Monel 400 Nickel-Copper),23049,64,data/surrogate_dataset/run_1678ee112ed1.npz
+5c67b74d5537,2026-09-17 18:34:07,IN625 (Inconel 625),23049,64,data/surrogate_dataset/run_5c67b74d5537.npz
+919157e0d619,2026-09-17 18:34:11,WCB (Carbon Steel Casting),45849,64,data/surrogate_dataset/run_919157e0d619.npz
+04fd2e494c58,2026-09-17 18:34:14,CF8 (Stainless Steel 304),45849,64,data/surrogate_dataset/run_04fd2e494c58.npz
+4aace806323c,2026-09-17 18:34:18,C958 (Aluminum Bronze),45849,64,data/surrogate_dataset/run_4aace806323c.npz
+5fdfe4fcb242,2026-09-17 18:34:21,C964 (CuNi),45849,64,data/surrogate_dataset/run_5fdfe4fcb242.npz
+2fac38a7e7e5,2026-09-17 18:34:24,CA6NM (Cast Steel),45849,64,data/surrogate_dataset/run_2fac38a7e7e5.npz
+e457d42192ec,2026-09-17 18:34:27,MONEL400 (Monel 400 Nickel-Copper),45849,64,data/surrogate_dataset/run_e457d42192ec.npz
+208323b85d40,2026-09-17 18:34:30,IN625 (Inconel 625),45849,64,data/surrogate_dataset/run_208323b85d40.npz
+046adee127fb,2026-09-17 18:34:41,WCB (Carbon Steel Casting),130449,64,data/surrogate_dataset/run_046adee127fb.npz
+d8d2118b962c,2026-09-17 18:34:50,CF8 (Stainless Steel 304),130449,64,data/surrogate_dataset/run_d8d2118b962c.npz
+29771ce255c2,2026-09-17 18:35:02,C958 (Aluminum Bronze),130449,64,data/surrogate_dataset/run_29771ce255c2.npz
+eb8120764c99,2026-09-17 18:35:14,C964 (CuNi),130449,64,data/surrogate_dataset/run_eb8120764c99.npz
+fb2491b7673f,2026-09-17 18:35:26,CA6NM (Cast Steel),130449,64,data/surrogate_dataset/run_fb2491b7673f.npz
+b7cac78ba61c,2026-09-17 18:35:35,MONEL400 (Monel 400 Nickel-Copper),130449,64,data/surrogate_dataset/run_b7cac78ba61c.npz
+6d27339b3fbc,2026-09-17 18:35:44,IN625 (Inconel 625),130449,64,data/surrogate_dataset/run_6d27339b3fbc.npz
+cf0a5f4be7cc,2026-09-17 18:35:49,WCB (Carbon Steel Casting),76291,64,data/surrogate_dataset/run_cf0a5f4be7cc.npz
+1fc14d4793fe,2026-09-17 18:35:53,CF8 (Stainless Steel 304),76291,64,data/surrogate_dataset/run_1fc14d4793fe.npz
+72c8a81cf32b,2026-09-17 18:35:58,C958 (Aluminum Bronze),76291,64,data/surrogate_dataset/run_72c8a81cf32b.npz
+cf32d2438b9a,2026-09-17 18:36:03,C964 (CuNi),76291,64,data/surrogate_dataset/run_cf32d2438b9a.npz
+cb1c69ee4f88,2026-09-17 18:36:07,CA6NM (Cast Steel),76291,64,data/surrogate_dataset/run_cb1c69ee4f88.npz
+da29c65b13d5,2026-09-17 18:36:12,MONEL400 (Monel 400 Nickel-Copper),76291,64,data/surrogate_dataset/run_da29c65b13d5.npz
+ab04cf02166a,2026-09-17 18:36:17,IN625 (Inconel 625),76291,64,data/surrogate_dataset/run_ab04cf02166a.npz
+aff45e6aefc6,2026-09-17 18:36:18,WCB (Carbon Steel Casting),13938,64,data/surrogate_dataset/run_aff45e6aefc6.npz
+a1b80f462203,2026-09-17 18:36:19,CF8 (Stainless Steel 304),13938,64,data/surrogate_dataset/run_a1b80f462203.npz
+38692db4fd4d,2026-09-17 18:36:20,C958 (Aluminum Bronze),13938,64,data/surrogate_dataset/run_38692db4fd4d.npz
+8e49dcd139d8,2026-09-17 18:36:21,C964 (CuNi),13938,64,data/surrogate_dataset/run_8e49dcd139d8.npz
+7b53c9c3e5f1,2026-09-17 18:36:22,CA6NM (Cast Steel),13938,64,data/surrogate_dataset/run_7b53c9c3e5f1.npz
+dd47796fe4dc,2026-09-17 18:36:23,MONEL400 (Monel 400 Nickel-Copper),13938,64,data/surrogate_dataset/run_dd47796fe4dc.npz
+390cfb6621b7,2026-09-17 18:36:25,IN625 (Inconel 625),13938,64,data/surrogate_dataset/run_390cfb6621b7.npz
+c37c5d016e07,2026-09-17 18:36:26,WCB (Carbon Steel Casting),30485,64,data/surrogate_dataset/run_c37c5d016e07.npz
+a4e0527cbe64,2026-09-17 18:36:28,CF8 (Stainless Steel 304),30485,64,data/surrogate_dataset/run_a4e0527cbe64.npz
+a9455fb1cd4e,2026-09-17 18:36:30,C958 (Aluminum Bronze),30485,64,data/surrogate_dataset/run_a9455fb1cd4e.npz
+db89a2c00a02,2026-09-17 18:36:31,C964 (CuNi),30485,64,data/surrogate_dataset/run_db89a2c00a02.npz
+34830ced1859,2026-09-17 18:36:33,CA6NM (Cast Steel),30485,64,data/surrogate_dataset/run_34830ced1859.npz
+7bfa0555b716,2026-09-17 18:36:35,MONEL400 (Monel 400 Nickel-Copper),30485,64,data/surrogate_dataset/run_7bfa0555b716.npz
+4aea86d7213f,2026-09-17 18:36:37,IN625 (Inconel 625),30485,64,data/surrogate_dataset/run_4aea86d7213f.npz
+eca9406718c7,2026-09-17 18:36:39,WCB (Carbon Steel Casting),29127,64,data/surrogate_dataset/run_eca9406718c7.npz
+83570c402b6f,2026-09-17 18:36:41,CF8 (Stainless Steel 304),29127,64,data/surrogate_dataset/run_83570c402b6f.npz
+8275b6191a2d,2026-09-17 18:36:43,C958 (Aluminum Bronze),29127,64,data/surrogate_dataset/run_8275b6191a2d.npz
+fe74a5a3d628,2026-09-17 18:36:45,C964 (CuNi),29127,64,data/surrogate_dataset/run_fe74a5a3d628.npz
+4f2ad8031ea8,2026-09-17 18:36:47,CA6NM (Cast Steel),29127,64,data/surrogate_dataset/run_4f2ad8031ea8.npz
+85e3c938774e,2026-09-17 18:36:49,MONEL400 (Monel 400 Nickel-Copper),29127,64,data/surrogate_dataset/run_85e3c938774e.npz
+a30158d497ba,2026-09-17 18:36:51,IN625 (Inconel 625),29127,64,data/surrogate_dataset/run_a30158d497ba.npz
+99b7fbbd458e,2026-09-17 18:36:53,WCB (Carbon Steel Casting),44064,64,data/surrogate_dataset/run_99b7fbbd458e.npz
+2edc39eb8ea1,2026-09-17 18:36:56,CF8 (Stainless Steel 304),44064,64,data/surrogate_dataset/run_2edc39eb8ea1.npz
+7219eedd8edc,2026-09-17 18:36:58,C958 (Aluminum Bronze),44064,64,data/surrogate_dataset/run_7219eedd8edc.npz
+851777866170,2026-09-17 18:37:01,C964 (CuNi),44064,64,data/surrogate_dataset/run_851777866170.npz
+1f90b7700623,2026-09-17 18:37:04,CA6NM (Cast Steel),44064,64,data/surrogate_dataset/run_1f90b7700623.npz
+e6ff06b2cc10,2026-09-17 18:37:06,MONEL400 (Monel 400 Nickel-Copper),44064,64,data/surrogate_dataset/run_e6ff06b2cc10.npz
+91be624a2e13,2026-09-17 18:37:09,IN625 (Inconel 625),44064,64,data/surrogate_dataset/run_91be624a2e13.npz
+5f895990a525,2026-09-17 18:37:11,WCB (Carbon Steel Casting),18720,64,data/surrogate_dataset/run_5f895990a525.npz
+70c79d201085,2026-09-17 18:37:13,CF8 (Stainless Steel 304),18720,64,data/surrogate_dataset/run_70c79d201085.npz
+7e586bf94dc3,2026-09-17 18:37:15,C958 (Aluminum Bronze),18720,64,data/surrogate_dataset/run_7e586bf94dc3.npz
+5a2d5a36ef70,2026-09-17 18:37:17,C964 (CuNi),18720,64,data/surrogate_dataset/run_5a2d5a36ef70.npz
+5cbca2f093d9,2026-09-17 18:37:20,CA6NM (Cast Steel),18720,64,data/surrogate_dataset/run_5cbca2f093d9.npz
+f76239f5f35a,2026-09-17 18:37:22,MONEL400 (Monel 400 Nickel-Copper),18720,64,data/surrogate_dataset/run_f76239f5f35a.npz
+475b3905ff2f,2026-09-17 18:37:24,IN625 (Inconel 625),18720,64,data/surrogate_dataset/run_475b3905ff2f.npz
+ca7a5a953d44,2026-09-17 23:05:30,WCB (Carbon Steel Casting),23223,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_ca7a5a953d44.npz
+b9a412d02e13,2026-09-17 23:32:37,WCB (Carbon Steel Casting),264573,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_b9a412d02e13.npz
+4ad18414f2c7,2026-09-17 23:33:47,WCB (Carbon Steel Casting),20306,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_4ad18414f2c7.npz
+09d9db563ca6,2026-09-18 06:56:39,WCB (Carbon Steel Casting),193448,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_09d9db563ca6.npz
+d4c399e78a07,2026-09-18 10:47:57,WCB (Carbon Steel Casting),32343,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_d4c399e78a07.npz
+2423861bd5d3,2026-09-18 11:38:21,WCB (Carbon Steel Casting),4706,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_2423861bd5d3.npz
+c49c493eddf7,2026-09-18 12:54:02,WCB (Carbon Steel Casting),79156,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_c49c493eddf7.npz
+889b07330f2d,2026-10-02 13:57:58,WCB (Carbon Steel Casting),98883,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_889b07330f2d.npz
+c28fc5dc70de,2026-10-02 14:03:14,WCB (Carbon Steel Casting),98883,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_c28fc5dc70de.npz
+50e25792190e,2026-10-02 14:14:07,WCB (Carbon Steel Casting),19682,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_50e25792190e.npz
+7c477cc0ea0f,2026-10-09 09:33:20,WCB (Carbon Steel Casting),34633,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_7c477cc0ea0f.npz,tet
+9f97df8f605f,2026-10-09 09:35:08,WCB (Carbon Steel Casting),23811,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_9f97df8f605f.npz,voxel
+616aa0cd06ad,2026-10-09 09:36:27,WCB (Carbon Steel Casting),34811,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_616aa0cd06ad.npz,tet
+5be19f025746,2026-10-09 10:41:19,WCB (Carbon Steel Casting),34883,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_5be19f025746.npz,tet
+bc7a10a3b698,2026-10-09 11:47:31,WCB (Carbon Steel Casting),4922,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_bc7a10a3b698.npz,tet
+2dda1aca03c0,2026-10-09 19:26:27,WCB (Carbon Steel Casting),244608,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_2dda1aca03c0.npz,voxel,1
+715a69b5f99b,2026-10-10 08:47:15,WCB (Carbon Steel Casting),244608,16,/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/data/surrogate_dataset/run_715a69b5f99b.npz,voxel,1

@@ -1,0 +1,29 @@
+# Optional deep-learning stack (core/deep_model/). Not installed in CI;
+# the deep-model tests skip cleanly when torch is absent.
+
+# ============================================================================
+# DEEP LEARNING MODULE (optional; core/deep_model/)
+# ============================================================================
+# Required for the 3D U-Net solidification surrogate, its NPU exports
+# (Apple ANE / Snapdragon / Google Tensor), and background auto-training.
+# torch is imported lazily — the app launches without it, and auto-train
+# skips cleanly when it is absent.
+# Install with: venv/bin/pip install torch coremltools onnx onnxruntime
+torch>=2.6.0               # Training + inference (MPS on Apple Silicon; 2.6+ for Python 3.13)
+coremltools>=8.3           # Apple ANE export (.mlpackage)
+onnx>=1.16.0               # Snapdragon/ONNX export + graph validation
+onnxruntime>=1.18.0        # ONNX validation + inference (CPU EP; also CUDA/TensorRT if the GPU build is installed)
+# NPU inference: replace onnxruntime with the vendor build for the machine.
+# Only one onnxruntime package may be installed at a time.
+#   Qualcomm Snapdragon X (Hexagon NPU):  onnxruntime-qnn
+#   Intel Core Ultra (NPU):               onnxruntime-openvino
+#   AMD Ryzen AI (XDNA NPU):              Ryzen AI Software (Vitis AI EP)
+#   Windows DirectML (GPU/NPU):           onnxruntime-directml
+#   NVIDIA GPU:                           onnxruntime-gpu
+onnxscript>=0.1.0          # torch ONNX exporter dependency (torch >= 2.12)
+onnx2tf>=1.22.0            # Google Tensor TFLite export (torch -> ONNX -> tflite)
+# tflite-runtime is NOT on PyPI — install separately from Google's index:
+#   venv/bin/pip install --index-url https://google-coral.github.io/py-repo/ tflite-runtime
+# TFLite export still works without it (validation is skipped with a note).
+# NOTE: onnx2tf may not yet publish Python 3.13 / arm64 wheels — the TFLite
+# export fails with a clear message instead of crashing in that case.
