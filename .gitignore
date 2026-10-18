@@ -67,3 +67,9 @@ models/deep_model/
 
 # fTetWild writes this into the working directory
 __tracked_surface.stl
+
+# CAD models (STEP/STL). Large binary geometry that does not belong in source
+# control; keep these out of every push.
+*.step
+*.stp
+*.stl
