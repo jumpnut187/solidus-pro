@@ -377,6 +377,8 @@ class SolverTest(unittest.TestCase):
             np.full(n, 1.0 / inches_to_meters(0.1) ** 2),
             rng.uniform(-1.0, 1.0, n),
             0.05,
+            # Contact h*dx on ~30 % of cells, so links crossing a contact are covered.
+            np.where(rng.random(n) < 0.3, rng.uniform(0.1, 5.0, n), 0.0),
         )
         kernel = heat_transfer.update_heterogeneous_cut_cell_parallel(*args)
         reference = heat_transfer.update_heterogeneous_cut_cell_numpy(*args)
@@ -718,7 +720,8 @@ class CutCellKernelParityTest(unittest.TestCase):
             a = heat_transfer.cut_cell_link_apertures(weights)
             f = heat_transfer.cut_cell_conductance_factors(weights, neighbors, a)
             args = (rng.uniform(20.0, 1600.0, n), neighbors, rng.uniform(5e-6, 2e-5, n), rng.uniform(1e6, 5e6, n),
-                    weights, f, a, np.full(n, 1.0 / inches_to_meters(0.1) ** 2), rng.uniform(-1.0, 1.0, n), 0.05)
+                    weights, f, a, np.full(n, 1.0 / inches_to_meters(0.1) ** 2), rng.uniform(-1.0, 1.0, n), 0.05,
+                    np.where(rng.random(n) < 0.3, rng.uniform(0.1, 5.0, n), 0.0))
             np.testing.assert_allclose(
                 heat_transfer.update_heterogeneous_cut_cell_parallel(*args),
                 heat_transfer.update_heterogeneous_cut_cell_numpy(*args), rtol=1e-12, atol=1e-9, err_msg=f"{slots} slots",

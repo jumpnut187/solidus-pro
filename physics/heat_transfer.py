@@ -191,6 +191,7 @@ class HeatTransferModel:
         boundary_areas: Optional[np.ndarray] = None,
         slave_cells: Optional[tuple[np.ndarray, np.ndarray]] = None,
         cut_cell_apertures: bool = True,
+        contact_conductance: Optional[tuple[np.ndarray, float]] = None,
     ):
         """
         Initialize heat transfer model.
@@ -227,6 +228,14 @@ class HeatTransferModel:
             slave_cells: Optional ``(slaves, masters)`` index pair. After
                 each step a slave copies its master's temperature; the
                 caller has moved the slave's capacity and area to the master.
+            contact_conductance: Optional ``(indices, h)`` pair: the cells of
+                a contacting body (e.g. a sand core) and the interface heat
+                transfer coefficient h in W/(m^2 K). Every link with exactly
+                one end in ``indices`` carries h in series with the pair
+                conductivity: k_ij -> k_ij / (1 + k_ij / (h * dx)), dx the
+                contacting cell's size, so the interface conductance per area
+                is 1 / (dx / k_ij + 1 / h). Links only lose conductance, so the
+                stable step is unchanged.
         """
         self.n_voxels = n_voxels
         self.voxel_size = voxel_size
@@ -292,8 +301,7 @@ class HeatTransferModel:
         self._boundary_area_per_volume: Optional[FloatArray] = None
         self._slave_cells: Optional[tuple[IntArray, IntArray]] = None
         # rho*cp at the curve points (J/m3/K). Cut cells with property curves
-        # use rho(T)*cp(T) for capacity, Robin and latent beta, the same
-        # interpolation of the product the tet solver uses.
+        # use rho(T)*cp(T) for capacity, Robin and latent beta.
         self._capacity_curve: Optional[FloatArray] = None
         self._step_rho_cp: Optional[FloatArray] = None
         if capacity_weights is None and boundary_areas is not None:
@@ -330,6 +338,21 @@ class HeatTransferModel:
                 np.asarray(masters, dtype=np.int64).reshape(-1),
             )
         
+        # h * dx_i on contacting cells, 0 elsewhere (``contact_conductance``).
+        self._contact_hdx = np.zeros(n_voxels, dtype=np.float64)
+        self._has_contact = False
+        if contact_conductance is not None:
+            contact_idx, contact_h = contact_conductance
+            contact_idx = np.asarray(contact_idx, dtype=np.int64).reshape(-1)
+            if contact_idx.size > 0 and float(contact_h) > 0.0:
+                sizes = (
+                    self._voxel_sizes[contact_idx]
+                    if self._voxel_sizes is not None
+                    else np.full(contact_idx.size, voxel_size, dtype=np.float64)
+                )
+                self._contact_hdx[contact_idx] = float(contact_h) * sizes
+                self._has_contact = True
+
         # Count neighbors for each voxel (kept for API compatibility; the
         # weighted 27-point Laplacian no longer normalizes by neighbor count).
         self._neighbor_counts = np.sum(neighbors >= 0, axis=1).astype(np.float64)
@@ -680,8 +703,14 @@ class HeatTransferModel:
             and not isinstance(alpha, np.ndarray)
             and self._rho_cp_overrides is None
             and not cut_cells
+            and not self._has_contact
         )
-        heterogeneous = isinstance(alpha, np.ndarray) or self._rho_cp_overrides is not None or cut_cells
+        heterogeneous = (
+            isinstance(alpha, np.ndarray)
+            or self._rho_cp_overrides is not None
+            or cut_cells
+            or self._has_contact
+        )
         use_heterogeneous_numba = bool(NUMBA_AVAILABLE and heterogeneous)
         self._last_step_used_numba = use_numba_kernels or use_heterogeneous_numba
 
@@ -799,6 +828,7 @@ class HeatTransferModel:
                     self._inv_dx2_arr,
                     source_term,
                     dt,
+                    self._contact_hdx,
                 )
             elif use_heterogeneous_numba:
                 alpha_arr = (
@@ -814,6 +844,7 @@ class HeatTransferModel:
                     self._inv_dx2_arr,
                     source_term,
                     dt,
+                    self._contact_hdx,
                 )
             else:
                 # NumPy reference for the conservative two-point flux (used
@@ -824,6 +855,7 @@ class HeatTransferModel:
                 corner_start = min(18, max_slot)
                 corner_end = min(26, max_slot)
                 k_arr = alpha * rho_cp_arr
+                g_arr = self._contact_hdx
 
                 flux = np.zeros(self.n_voxels, dtype=np.float64)
                 k0 = k_arr
@@ -836,8 +868,12 @@ class HeatTransferModel:
                     v_b = n_b >= 0
                     k_a = np.where(v_a, k_arr[np.maximum(n_a, 0)], 0.0)
                     k_b = np.where(v_b, k_arr[np.maximum(n_b, 0)], 0.0)
-                    k_ia = 2.0 * k0 * k_a / (k0 + k_a + 1e-30)
-                    k_ib = 2.0 * k0 * k_b / (k0 + k_b + 1e-30)
+                    k_ia = contact_limited_conductivity(
+                        2.0 * k0 * k_a / (k0 + k_a + 1e-30), g_arr, g_arr[np.maximum(n_a, 0)]
+                    )
+                    k_ib = contact_limited_conductivity(
+                        2.0 * k0 * k_b / (k0 + k_b + 1e-30), g_arr, g_arr[np.maximum(n_b, 0)]
+                    )
                     dT_a = np.where(v_a, T[np.maximum(n_a, 0)] - T, 0.0)
                     dT_b = np.where(v_b, T[np.maximum(n_b, 0)] - T, 0.0)
                     flux += 0.5 * (k_ia * dT_a + k_ib * dT_b)
@@ -849,8 +885,12 @@ class HeatTransferModel:
                     v_b = n_b >= 0
                     k_a = np.where(v_a, k_arr[np.maximum(n_a, 0)], 0.0)
                     k_b = np.where(v_b, k_arr[np.maximum(n_b, 0)], 0.0)
-                    k_ia = 2.0 * k0 * k_a / (k0 + k_a + 1e-30)
-                    k_ib = 2.0 * k0 * k_b / (k0 + k_b + 1e-30)
+                    k_ia = contact_limited_conductivity(
+                        2.0 * k0 * k_a / (k0 + k_a + 1e-30), g_arr, g_arr[np.maximum(n_a, 0)]
+                    )
+                    k_ib = contact_limited_conductivity(
+                        2.0 * k0 * k_b / (k0 + k_b + 1e-30), g_arr, g_arr[np.maximum(n_b, 0)]
+                    )
                     dT_a = np.where(v_a, T[np.maximum(n_a, 0)] - T, 0.0)
                     dT_b = np.where(v_b, T[np.maximum(n_b, 0)] - T, 0.0)
                     flux += 0.125 * (k_ia * dT_a + k_ib * dT_b)
@@ -859,7 +899,9 @@ class HeatTransferModel:
                     n_j = self.neighbors[:, j]
                     valid = n_j >= 0
                     k_j = np.where(valid, k_arr[np.maximum(n_j, 0)], 0.0)
-                    k_ij = 2.0 * k0 * k_j / (k0 + k_j + 1e-30)
+                    k_ij = contact_limited_conductivity(
+                        2.0 * k0 * k_j / (k0 + k_j + 1e-30), g_arr, g_arr[np.maximum(n_j, 0)]
+                    )
                     dT_j = np.where(valid, T[np.maximum(n_j, 0)] - T, 0.0)
                     flux += 0.125 * (k_ij * dT_j)
 
@@ -1116,6 +1158,20 @@ def cut_cell_conductance_factors(
     return factors
 
 
+def contact_limited_conductivity(k_pair: FloatArray, g_i: FloatArray, g_j: FloatArray) -> FloatArray:
+    """Pair conductivity with a contact resistance on links that cross a contact.
+
+    ``g`` is h * dx (W/(m K)) on the cells of a contacting body and 0
+    elsewhere. A link with exactly one end in the body becomes
+    k / (1 + k / g); every other link keeps k.
+    """
+    crossing = (g_i > 0.0) != (g_j > 0.0)
+    if not np.any(crossing):
+        return k_pair
+    g = np.where(crossing, g_i + g_j, 1.0)
+    return np.where(crossing, k_pair / (1.0 + k_pair / g), k_pair)
+
+
 def update_heterogeneous_cut_cell_numpy(
     T: FloatArray,
     neighbors: IntArray,
@@ -1127,6 +1183,7 @@ def update_heterogeneous_cut_cell_numpy(
     inv_dx2: FloatArray,
     source: FloatArray,
     dt: float,
+    contact_hdx: FloatArray,
 ) -> FloatArray:
     """NumPy reference for ``update_heterogeneous_cut_cell_parallel``.
 
@@ -1135,7 +1192,8 @@ def update_heterogeneous_cut_cell_numpy(
                    * sum_j w_slot_j * min(f_i, f_j) * k_ij * (T_j - T_i)
                    + dt * source[i]
     Cells with w_i = 0 keep T[i]. Slots are summed in the same symmetric
-    pairs as ``update_heterogeneous_parallel``.
+    pairs as ``update_heterogeneous_parallel``. ``contact_hdx`` adds the
+    contact resistance of :func:`contact_limited_conductivity`.
     """
     n = len(T)
     max_slot = neighbors.shape[1]
@@ -1149,7 +1207,9 @@ def update_heterogeneous_cut_cell_numpy(
         safe = np.maximum(nb, 0)
         k_n = np.where(valid, k_arr[safe], 0.0)
         s = np.minimum(f, np.where(valid, f[safe], 0.0)) * 0.5 * (apertures + apertures[safe])
-        k_in = s * (2.0 * k_arr * k_n / (k_arr + k_n + 1e-30))
+        k_in = s * contact_limited_conductivity(
+            2.0 * k_arr * k_n / (k_arr + k_n + 1e-30), contact_hdx, contact_hdx[safe]
+        )
         return np.where(valid, k_in * (T[safe] - T), 0.0)
 
     for j_a in range(0, min(6, max_slot) - 1, 2):
@@ -1348,6 +1408,14 @@ if NUMBA_AVAILABLE:
         
         return T_new
 
+    @njit(inline="always")
+    def _link_conductivity(k_i: float, k_j: float, g_i: float, g_j: float) -> float:
+        """Harmonic-mean pair conductivity, with ``contact_limited_conductivity`` applied."""
+        k = (2.0 * k_i * k_j) / (k_i + k_j + 1e-30)
+        if (g_i > 0.0) != (g_j > 0.0):
+            k = k / (1.0 + k / (g_i + g_j))
+        return k
+
     @njit(parallel=True, fastmath=True, cache=True)
     def update_heterogeneous_parallel(
         T: FloatArray,
@@ -1357,6 +1425,7 @@ if NUMBA_AVAILABLE:
         inv_dx2: FloatArray,
         source: FloatArray,
         dt: float,
+        contact_hdx: FloatArray,
     ) -> FloatArray:
         """
         Conservative two-point flux update for heterogeneous material layouts.
@@ -1374,7 +1443,8 @@ if NUMBA_AVAILABLE:
         weight 0.5, edges (slots 6-17) weight 0.0 (excluded), corners (slots
         18-25) weight 0.125. Slots are iterated in symmetric pairs in the same
         fixed order as the NumPy reference so the per-voxel float accumulation
-        order is identical.
+        order is identical. ``contact_hdx`` adds the contact resistance of
+        ``contact_limited_conductivity``.
         """
         n = len(T)
         max_slot = neighbors.shape[1]
@@ -1386,6 +1456,7 @@ if NUMBA_AVAILABLE:
         for i in prange(n):
             t_i = T[i]
             k_i = alpha[i] * rho_cp[i]
+            g_i = contact_hdx[i]
             flux_sum = 0.0
 
             # Faces (weight 0.5), summed in symmetric pairs (slots 0-5).
@@ -1394,12 +1465,12 @@ if NUMBA_AVAILABLE:
                 n_a = neighbors[i, j]
                 if n_a >= 0:
                     k_a = alpha[n_a] * rho_cp[n_a]
-                    x_a = (2.0 * k_i * k_a) / (k_i + k_a + 1e-30) * (T[n_a] - t_i)
+                    x_a = _link_conductivity(k_i, k_a, g_i, contact_hdx[n_a]) * (T[n_a] - t_i)
                 x_b = 0.0
                 n_b = neighbors[i, j + 1]
                 if n_b >= 0:
                     k_b = alpha[n_b] * rho_cp[n_b]
-                    x_b = (2.0 * k_i * k_b) / (k_i + k_b + 1e-30) * (T[n_b] - t_i)
+                    x_b = _link_conductivity(k_i, k_b, g_i, contact_hdx[n_b]) * (T[n_b] - t_i)
                 flux_sum += 0.5 * (x_a + x_b)
 
             # Edge neighbors (slots 6-17) carry weight 0.0 and are skipped.
@@ -1411,12 +1482,12 @@ if NUMBA_AVAILABLE:
                 n_a = neighbors[i, j]
                 if n_a >= 0:
                     k_a = alpha[n_a] * rho_cp[n_a]
-                    x_a = (2.0 * k_i * k_a) / (k_i + k_a + 1e-30) * (T[n_a] - t_i)
+                    x_a = _link_conductivity(k_i, k_a, g_i, contact_hdx[n_a]) * (T[n_a] - t_i)
                 x_b = 0.0
                 n_b = neighbors[i, j + 1]
                 if n_b >= 0:
                     k_b = alpha[n_b] * rho_cp[n_b]
-                    x_b = (2.0 * k_i * k_b) / (k_i + k_b + 1e-30) * (T[n_b] - t_i)
+                    x_b = _link_conductivity(k_i, k_b, g_i, contact_hdx[n_b]) * (T[n_b] - t_i)
                 flux_sum += 0.125 * (x_a + x_b)
                 j += 2
             # Lone trailing corner slot for non-canonical shapes.
@@ -1425,7 +1496,7 @@ if NUMBA_AVAILABLE:
                 if n_a >= 0:
                     k_a = alpha[n_a] * rho_cp[n_a]
                     flux_sum += 0.125 * (
-                        (2.0 * k_i * k_a) / (k_i + k_a + 1e-30) * (T[n_a] - t_i)
+                        _link_conductivity(k_i, k_a, g_i, contact_hdx[n_a]) * (T[n_a] - t_i)
                     )
 
             T_new[i] = (
@@ -1448,6 +1519,7 @@ if NUMBA_AVAILABLE:
         inv_dx2: FloatArray,
         source: FloatArray,
         dt: float,
+        contact_hdx: FloatArray,
     ) -> FloatArray:
         """Cut-cell form of ``update_heterogeneous_parallel``.
 
@@ -1458,6 +1530,8 @@ if NUMBA_AVAILABLE:
         ``capacity_weights`` w_i scale the heat capacity, and
         ``conductance_factors`` f_i scale each link (pair value min(f_i, f_j),
         so the flux stays antisymmetric). Cells with w_i = 0 keep T[i].
+        ``contact_hdx`` adds the contact resistance of
+        ``contact_limited_conductivity``.
         NumPy reference: ``update_heterogeneous_cut_cell_numpy``.
         """
         n = len(T)
@@ -1474,6 +1548,7 @@ if NUMBA_AVAILABLE:
                 T_new[i] = t_i
                 continue
             k_i = alpha[i] * rho_cp[i]
+            g_i = contact_hdx[i]
             f_i = conductance_factors[i]
             a_i = apertures[i]
             flux_sum = 0.0
@@ -1484,13 +1559,13 @@ if NUMBA_AVAILABLE:
                 if n_a >= 0:
                     k_a = alpha[n_a] * rho_cp[n_a]
                     s_a = min(f_i, conductance_factors[n_a]) * 0.5 * (a_i + apertures[n_a])
-                    x_a = s_a * ((2.0 * k_i * k_a) / (k_i + k_a + 1e-30)) * (T[n_a] - t_i)
+                    x_a = s_a * _link_conductivity(k_i, k_a, g_i, contact_hdx[n_a]) * (T[n_a] - t_i)
                 x_b = 0.0
                 n_b = neighbors[i, j + 1]
                 if n_b >= 0:
                     k_b = alpha[n_b] * rho_cp[n_b]
                     s_b = min(f_i, conductance_factors[n_b]) * 0.5 * (a_i + apertures[n_b])
-                    x_b = s_b * ((2.0 * k_i * k_b) / (k_i + k_b + 1e-30)) * (T[n_b] - t_i)
+                    x_b = s_b * _link_conductivity(k_i, k_b, g_i, contact_hdx[n_b]) * (T[n_b] - t_i)
                 flux_sum += 0.5 * (x_a + x_b)
 
             j = slot_corner_start
@@ -1500,13 +1575,13 @@ if NUMBA_AVAILABLE:
                 if n_a >= 0:
                     k_a = alpha[n_a] * rho_cp[n_a]
                     s_a = min(f_i, conductance_factors[n_a]) * 0.5 * (a_i + apertures[n_a])
-                    x_a = s_a * ((2.0 * k_i * k_a) / (k_i + k_a + 1e-30)) * (T[n_a] - t_i)
+                    x_a = s_a * _link_conductivity(k_i, k_a, g_i, contact_hdx[n_a]) * (T[n_a] - t_i)
                 x_b = 0.0
                 n_b = neighbors[i, j + 1]
                 if n_b >= 0:
                     k_b = alpha[n_b] * rho_cp[n_b]
                     s_b = min(f_i, conductance_factors[n_b]) * 0.5 * (a_i + apertures[n_b])
-                    x_b = s_b * ((2.0 * k_i * k_b) / (k_i + k_b + 1e-30)) * (T[n_b] - t_i)
+                    x_b = s_b * _link_conductivity(k_i, k_b, g_i, contact_hdx[n_b]) * (T[n_b] - t_i)
                 flux_sum += 0.125 * (x_a + x_b)
                 j += 2
             if j < slot_corner_end:
@@ -1515,7 +1590,7 @@ if NUMBA_AVAILABLE:
                     k_a = alpha[n_a] * rho_cp[n_a]
                     s_a = min(f_i, conductance_factors[n_a]) * 0.5 * (a_i + apertures[n_a])
                     flux_sum += 0.125 * (
-                        s_a * ((2.0 * k_i * k_a) / (k_i + k_a + 1e-30)) * (T[n_a] - t_i)
+                        s_a * _link_conductivity(k_i, k_a, g_i, contact_hdx[n_a]) * (T[n_a] - t_i)
                     )
 
             T_new[i] = (

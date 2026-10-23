@@ -10,7 +10,7 @@ import numpy as np
 from config.hardware_config import hardware
 from core.thread_budget import resolve_thread_budget
 from core.stepping import should_capture_fraction_history
-from core.part_manager import PART_TYPE_RISER
+from core.part_manager import PART_TYPE_CORE, PART_TYPE_RISER
 from physics.units import inches_to_mm
 
 try:
@@ -137,14 +137,19 @@ def _least_squares_gradients_c_per_mm(
     neighbors: np.ndarray,
     target_indices: np.ndarray,
     cast_mask: np.ndarray,
+    excluded_neighbor_mask: Optional[np.ndarray] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return local temperature-gradient magnitudes and quality flags.
 
     ``cast_mask`` selects which voxels are *evaluated*; neighbour temperatures
-    are sampled from every in-mesh voxel regardless of part type. Chill, riser
-    and core voxels are solved cells carrying valid temperatures, and at a chill
-    face they hold nearly the whole local delta-T - dropping them would collapse
-    the gradient exactly where it is steepest.
+    are sampled from every in-mesh voxel except those in
+    ``excluded_neighbor_mask``. Chill and riser voxels are solved cells
+    carrying valid temperatures, and at a chill face they hold nearly the
+    whole local delta-T - dropping them would collapse the gradient exactly
+    where it is steepest. Sand core voxels are the opposite case: low-k sand
+    carries the steep delta-T on its own side of the interface, so sampling
+    it would inflate the metal gradient next to a core (and hide the hot spot
+    a saturated core makes). The caller excludes them.
     """
     gradients = np.zeros(len(target_indices), dtype=np.float32)
     quality = np.zeros(len(target_indices), dtype=np.int8)
@@ -156,6 +161,8 @@ def _least_squares_gradients_c_per_mm(
         neighbor_indices = neighbors[voxel_i]
         in_bounds = (neighbor_indices >= 0) & (neighbor_indices < len(centers_in))
         valid_neighbors = neighbor_indices[in_bounds]
+        if excluded_neighbor_mask is not None:
+            valid_neighbors = valid_neighbors[~excluded_neighbor_mask[valid_neighbors]]
         if len(valid_neighbors) == 0:
             continue
 
@@ -419,9 +426,13 @@ def _capture_niyama_history_step(
     eval_fs = float(getattr(engine, "niyama_eval_fraction_solid", NIYAMA_EVAL_FRACTION_SOLID))
     crossed = (~sampled) & (previous_states < eval_fs) & (current_states >= eval_fs)
     part_types = getattr(engine.mesh, "voxel_part_types", None)
+    core_mask: Optional[np.ndarray] = None
     if part_types is not None and len(part_types) == len(crossed):
         cast_mask = np.asarray(part_types, dtype=np.int32) == 0
         crossed &= cast_mask
+        core_mask = np.asarray(part_types, dtype=np.int32) == PART_TYPE_CORE
+        if not np.any(core_mask):
+            core_mask = None
     else:
         cast_mask = np.ones(len(crossed), dtype=bool)
 
@@ -442,6 +453,7 @@ def _capture_niyama_history_step(
         neighbors=np.asarray(engine.mesh.voxel_neighbors, dtype=np.int32),
         target_indices=target_indices,
         cast_mask=cast_mask,
+        excluded_neighbor_mask=core_mask,
     )
     rates = np.maximum(np.asarray(cooling_rate_step[target_indices], dtype=np.float32), 1e-6)
     niyama = gradients / np.sqrt(rates)

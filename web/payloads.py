@@ -405,9 +405,9 @@ def build_fork_artifact(result: PipelineResult) -> Dict[str, Any]:
         if len(arr) != len(source_centers):
             continue
         payload_arr = np.where(np.isfinite(arr), arr, 0.0).astype(np.float32)
-        # Feed modulus is only meaningful for cast metal; exclude chills.
+        # Feed modulus is only meaningful for cast metal; exclude chills and cores.
         if key == "feed_modulus" and part_types is not None and len(part_types) == len(source_centers):
-            chill_mask = np.asarray(part_types, dtype=np.int32) == 2
+            chill_mask = np.isin(np.asarray(part_types, dtype=np.int32), (2, 4))
             if np.any(chill_mask):
                 payload_arr = payload_arr.copy()
                 payload_arr[chill_mask] = 0.0

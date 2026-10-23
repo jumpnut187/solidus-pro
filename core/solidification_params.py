@@ -162,6 +162,21 @@ class ThermalBoundaryParams:
     # h_pen(t) = k / sqrt(pi * alpha * t).
     mold_thermal_conductivity: float = 0.6     # W/(m·K)
     mold_thermal_diffusivity: float = 3.3e-7   # m²/s (k/(rho*cp))
+    # Sand core body (bonded silica sand). Core voxels are a conducting sand
+    # volume, so a core absorbs heat early and saturates when metal encloses
+    # it, then insulates the metal around it (a late hot spot). The defaults
+    # give alpha = 0.6 / (1600 * 1140) = 3.3e-7 m²/s, the mold sand above.
+    core_thermal_conductivity: float = 0.6     # W/(m·K)
+    core_density: float = 1600.0               # kg/m³
+    core_specific_heat: float = 1140.0         # J/(kg·K), mean over 20-1500 °C
+    # W/(m^2*K) contact conductance between metal and core. The casting
+    # shrinks onto a core rather than away from it, so this keeps no air-gap
+    # decay; the sand's own heating supplies the late-time drop.
+    htc_core_contact: float = 1000.0
+    # W/(m^2*K) core print (core sand seated in mold sand) to the mold, with
+    # a low late-time floor so the sand penetration decay governs.
+    htc_core_print: float = 300.0
+    core_print_htc_floor_fraction: float = 0.1
 
     def __post_init__(self) -> None:
         self.chill_ambient_htc = _clamp_float(
@@ -188,6 +203,12 @@ class ThermalBoundaryParams:
             1e-3,
             3.3e-7,
         )
+        self.core_thermal_conductivity = _clamp_float(self.core_thermal_conductivity, 0.05, 500.0, 0.6)
+        self.core_density = _clamp_float(self.core_density, 100.0, 20000.0, 1600.0)
+        self.core_specific_heat = _clamp_float(self.core_specific_heat, 50.0, 5000.0, 1140.0)
+        self.htc_core_contact = _clamp_float(self.htc_core_contact, 1.0, 1e5, 1000.0)
+        self.htc_core_print = _clamp_float(self.htc_core_print, 1.0, 1e4, 300.0)
+        self.core_print_htc_floor_fraction = _clamp_float(self.core_print_htc_floor_fraction, 0.0, 1.0, 0.1)
 
 
 @dataclass
@@ -448,6 +469,13 @@ class SolidificationParameters:
             1e-3,
             3.3e-7,
         )
+        tb = self.thermal_boundary
+        tb.core_thermal_conductivity = _clamp_float(tb.core_thermal_conductivity, 0.05, 500.0, 0.6)
+        tb.core_density = _clamp_float(tb.core_density, 100.0, 20000.0, 1600.0)
+        tb.core_specific_heat = _clamp_float(tb.core_specific_heat, 50.0, 5000.0, 1140.0)
+        tb.htc_core_contact = _clamp_float(tb.htc_core_contact, 1.0, 1e5, 1000.0)
+        tb.htc_core_print = _clamp_float(tb.htc_core_print, 1.0, 1e4, 300.0)
+        tb.core_print_htc_floor_fraction = _clamp_float(tb.core_print_htc_floor_fraction, 0.0, 1.0, 0.1)
         self.filling.fill_grid_coarsening = _clamp_int(
             self.filling.fill_grid_coarsening, 1, 8, 2,
         )
@@ -538,6 +566,12 @@ class SolidificationParameters:
                 'chill_htc_floor_fraction': self.thermal_boundary.chill_htc_floor_fraction,
                 'mold_thermal_conductivity': self.thermal_boundary.mold_thermal_conductivity,
                 'mold_thermal_diffusivity': self.thermal_boundary.mold_thermal_diffusivity,
+                'core_thermal_conductivity': self.thermal_boundary.core_thermal_conductivity,
+                'core_density': self.thermal_boundary.core_density,
+                'core_specific_heat': self.thermal_boundary.core_specific_heat,
+                'htc_core_contact': self.thermal_boundary.htc_core_contact,
+                'htc_core_print': self.thermal_boundary.htc_core_print,
+                'core_print_htc_floor_fraction': self.thermal_boundary.core_print_htc_floor_fraction,
             },
             'timing': {
                 'chvorinov_mold_constant': self.timing.chvorinov_mold_constant,

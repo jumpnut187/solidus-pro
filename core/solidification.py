@@ -453,9 +453,14 @@ class SolidificationEngine:
         self._thermal_niyama_quality = np.zeros(n_voxels, dtype=np.int8)
 
     def _initial_thermal_temperatures(
-        self, n_voxels: int, chill_indices: np.ndarray, chill_temperature: float
+        self,
+        n_voxels: int,
+        chill_indices: np.ndarray,
+        chill_temperature: float,
+        core_indices: Optional[np.ndarray] = None,
+        core_temperature: Optional[float] = None,
     ) -> np.ndarray:
-        """Fill field (or pouring temperature) with chills forced to chill temperature."""
+        """Fill field (or pouring temperature) with chills and cores forced to their start temperatures."""
         if self._initial_temperature_field is not None:
             # A pour/filling stage computed where the metal actually is and how
             # much heat it lost on the way in. Use it instead of assuming the
@@ -470,6 +475,10 @@ class SolidificationEngine:
         # what the metal did, so this override applies in both cases.
         if len(chill_indices) > 0:
             initial_temperatures[chill_indices] = chill_temperature
+        # Sand cores likewise start at mold temperature. Without this they
+        # took the pouring temperature (no fill) and froze as extra metal.
+        if core_indices is not None and len(core_indices) > 0 and core_temperature is not None:
+            initial_temperatures[core_indices] = core_temperature
         # Cut cells: a slaved cell starts at its master's temperature, as it is
         # after every step. fs starts at 0 (1 for chills, and a slave shares its
         # master's part code), so the two then invert identically.
@@ -478,24 +487,29 @@ class SolidificationEngine:
             initial_temperatures[cut_cell_merge.slaves] = initial_temperatures[cut_cell_merge.masters]
         return initial_temperatures
 
-    def _preset_chill_solid_state(self, chill_indices: np.ndarray) -> None:
-        """Chills start pre-solid: fs = 1, start/end/local times 0, feeding fs 1."""
-        if len(chill_indices) > 0:
+    def _preset_mold_solid_state(self, mold_indices: np.ndarray) -> None:
+        """Chills and sand cores start pre-solid: fs = 1, start/end/local times 0, feeding fs 1.
+
+        fs_prev = 1 makes the latent-heat correction a no-op on these cells, so
+        they never release latent heat; fs = 1 keeps them out of the feeding
+        trace and lets the all-solid stop test pass.
+        """
+        if len(mold_indices) > 0:
             thermal_model = self._thermal_solidification_model
-            thermal_model._fraction_solid[chill_indices] = 1.0
-            thermal_model._fraction_solid_prev[chill_indices] = 1.0
-            thermal_model._solidification_start[chill_indices] = 0.0
-            thermal_model._solidification_end[chill_indices] = 0.0
+            thermal_model._fraction_solid[mold_indices] = 1.0
+            thermal_model._fraction_solid_prev[mold_indices] = 1.0
+            thermal_model._solidification_start[mold_indices] = 0.0
+            thermal_model._solidification_end[mold_indices] = 0.0
 
         self.mesh.voxel_states[:] = 0.0
-        if len(chill_indices) > 0:
-            self.mesh.voxel_states[chill_indices] = 1.0
-            self.solidification_start_times[chill_indices] = 0.0
-            self.solidification_end_times[chill_indices] = 0.0
-            self.local_solidification_time[chill_indices] = 0.0
-            self.solidification_times[chill_indices] = 0.0
+        if len(mold_indices) > 0:
+            self.mesh.voxel_states[mold_indices] = 1.0
+            self.solidification_start_times[mold_indices] = 0.0
+            self.solidification_end_times[mold_indices] = 0.0
+            self.local_solidification_time[mold_indices] = 0.0
+            self.solidification_times[mold_indices] = 0.0
             if self.feeding_fraction_solid is not None:
-                self.feeding_fraction_solid[chill_indices] = 1.0
+                self.feeding_fraction_solid[mold_indices] = 1.0
 
     def _mold_interface_decay(self, h0: float, floor: Optional[float] = None) -> Callable[[float], float]:
         """
@@ -557,18 +571,36 @@ class SolidificationEngine:
         chill_indices = self._get_chill_voxel_indices()
         chill_alpha = CHILL_THERMAL_DIFFUSIVITY_M2_S
         chill_rho_cp = CHILL_RHO_CP_J_M3_K
+        # Sand cores are a conducting sand volume (core_* thermal-boundary
+        # params), joined to the metal through the htc_core_contact
+        # conductance, so a core heats up, saturates and then insulates.
+        boundary_params = self.analysis_options.solidification_params.thermal_boundary
+        core_indices = self._get_core_voxel_indices()
+        core_rho_cp = float(boundary_params.core_density) * float(boundary_params.core_specific_heat)
+        core_alpha = float(boundary_params.core_thermal_conductivity) / core_rho_cp
         diffusivity_overrides = None
         rho_cp_overrides = None
-        if len(chill_indices) > 0:
-            chill_idx_arr = chill_indices.astype(np.int64)
+        if len(chill_indices) > 0 or len(core_indices) > 0:
+            override_idx = np.concatenate([chill_indices, core_indices]).astype(np.int64)
             diffusivity_overrides = (
-                chill_idx_arr,
-                np.full(len(chill_indices), chill_alpha, dtype=np.float64),
+                override_idx,
+                np.concatenate([
+                    np.full(len(chill_indices), chill_alpha, dtype=np.float64),
+                    np.full(len(core_indices), core_alpha, dtype=np.float64),
+                ]),
             )
             rho_cp_overrides = (
-                chill_idx_arr,
-                np.full(len(chill_indices), chill_rho_cp, dtype=np.float64),
+                override_idx,
+                np.concatenate([
+                    np.full(len(chill_indices), chill_rho_cp, dtype=np.float64),
+                    np.full(len(core_indices), core_rho_cp, dtype=np.float64),
+                ]),
             )
+        contact_conductance = (
+            (core_indices.astype(np.int64), float(boundary_params.htc_core_contact))
+            if len(core_indices) > 0
+            else None
+        )
 
         # B6: temperature-dependent material property curves (k, cp, rho) with
         # reference points spanning room temperature through above-liquidus.
@@ -585,6 +617,7 @@ class SolidificationEngine:
             diffusivity_overrides=diffusivity_overrides,
             property_curves=property_curves,
             rho_cp_overrides=rho_cp_overrides,
+            contact_conductance=contact_conductance,
             **self._cut_cell_solver_inputs(neighbors),
         )
         self._thermal_solidification_model = ThermalSolidificationModel(
@@ -593,11 +626,10 @@ class SolidificationEngine:
         )
         self._allocate_thermal_tracking_arrays(n_voxels)
 
-        boundary_params = self.analysis_options.solidification_params.thermal_boundary
         mold_temperature = boundary_params.mold_temperature
         chill_temperature = boundary_params.chill_temperature
         initial_temperatures = self._initial_thermal_temperatures(
-            n_voxels, chill_indices, chill_temperature
+            n_voxels, chill_indices, chill_temperature, core_indices, mold_temperature
         )
 
         self._thermal_heat_model.set_initial_temperature(initial_temperatures)
@@ -606,7 +638,7 @@ class SolidificationEngine:
             mold_temperature=mold_temperature, chill_temperature=chill_temperature
         )
 
-        self._preset_chill_solid_state(chill_indices)
+        self._preset_mold_solid_state(np.concatenate([chill_indices, core_indices]).astype(np.int64))
 
         self._thermal_latest_temperatures = initial_temperatures.astype(np.float32, copy=True)
         self._thermal_latest_gradients = np.zeros(n_voxels, dtype=np.float32)
@@ -741,15 +773,17 @@ class SolidificationEngine:
                 T_infinity=mold_temperature,
                 time_function=_mold_interface_decay(tb.htc_gating),
             )
-        # A sand core is mold material bounded by metal, so its exposed faces
-        # see the same contact conductance as the casting-to-sand interface.
+        # Core prints: core sand seated in mold sand. The core body itself is
+        # a sand volume in the field, so only these exposed faces need a
+        # boundary; there is no metal air gap, so the floor is low and the
+        # sand penetration decay governs.
         if core_surface.size > 0:
             self._thermal_heat_model.add_boundary(
                 core_surface,
                 BoundaryType.INTERFACE,
-                htc=tb.htc_cast_interface,
+                htc=tb.htc_core_print,
                 T_infinity=mold_temperature,
-                time_function=_mold_interface_decay(tb.htc_cast_interface),
+                time_function=_mold_interface_decay(tb.htc_core_print, tb.core_print_htc_floor_fraction),
             )
         # B4: chills are finite heat sinks, not fixed-temperature pins. Their
         # exposed surface loses heat into the mold/ambient through the same
@@ -1037,13 +1071,18 @@ class SolidificationEngine:
         solver_mode = self._get_solver_mode()
         surface_indices = self.mesh.get_surface_voxel_indices()
 
-        # Step 1: Initialize state (cast/riser start liquid; chill/tooling is pre-solid)
+        # Step 1: Initialize state (cast/riser start liquid; chill/core is pre-solid)
         self.mesh.voxel_states[:] = 0.0
         chill_indices = self._get_chill_voxel_indices()
         if len(chill_indices) > 0:
             self.mesh.voxel_states[chill_indices] = 1.0
             if show_progress:
                 print(f"  Chill voxels initialized: {len(chill_indices):,}")
+        core_indices = self._get_core_voxel_indices()
+        if len(core_indices) > 0:
+            self.mesh.voxel_states[core_indices] = 1.0
+            if show_progress:
+                print(f"  Core voxels initialized: {len(core_indices):,}")
 
         if show_progress:
             print(f"  Initial solidification fronts: {len(surface_indices):,}")
@@ -1552,11 +1591,11 @@ class SolidificationEngine:
         self.cast_surface_distances = self._compute_cast_surface_distances(voxel_centers)
         self._risk_moduli = None
 
-    def _get_material_surface_indices(self) -> np.ndarray:
+    def _get_material_surface_indices(self, include_cores: bool = True) -> np.ndarray:
         """Material surface indices, falling back to the geometric surface."""
         getter = getattr(self.mesh, "get_material_surface_voxel_indices", None)
         if callable(getter):
-            return getter()
+            return getter(include_cores=include_cores)
         return self.mesh.get_surface_voxel_indices()
 
     def _compute_cast_surface_distances(self, voxel_centers: np.ndarray) -> np.ndarray:
@@ -1605,6 +1644,31 @@ class SolidificationEngine:
         if self.mesh.voxel_part_types is None:
             return np.array([], dtype=int)
         return np.where(self.mesh.voxel_part_types == PART_TYPE_CHILL)[0]
+
+    def _get_core_voxel_indices(self) -> np.ndarray:
+        """Get indices of voxels that are part of sand cores"""
+        if self.mesh.voxel_part_types is None:
+            return np.array([], dtype=int)
+        return np.where(self.mesh.voxel_part_types == PART_TYPE_CORE)[0]
+
+    def _get_core_contact_cast_indices(self) -> np.ndarray:
+        """Cast voxels with a sand-core voxel among their neighbours."""
+        part_types = self.mesh.voxel_part_types
+        neighbors = self.mesh.voxel_neighbors
+        if part_types is None or neighbors is None:
+            return np.array([], dtype=int)
+        part_types = np.asarray(part_types, dtype=np.int32)
+        if not np.any(part_types == PART_TYPE_CORE):
+            return np.array([], dtype=int)
+        neighbors = np.asarray(neighbors)
+        touches_core = np.zeros(len(part_types), dtype=bool)
+        # Chunked so the neighbour-type temporary stays small on large meshes.
+        chunk = 100_000
+        for start in range(0, len(part_types), chunk):
+            nbr = neighbors[start:start + chunk]
+            nbr_types = np.where(nbr >= 0, part_types[np.maximum(nbr, 0)], -1)
+            touches_core[start:start + chunk] = np.any(nbr_types == PART_TYPE_CORE, axis=1)
+        return np.flatnonzero(touches_core & (part_types == PART_TYPE_CAST))
 
     def _get_orphan_metal_mask(self) -> np.ndarray:
         """Phantom "metal" voxels that are not real casting metal.
@@ -3539,11 +3603,15 @@ class SolidificationEngine:
             self._calculate_shrinkage_evidence(feeding_effectiveness)
         )
         
-        # Only exclude chills (external cooling devices)
+        # Only exclude chills and sand cores (mold material, never metal)
         # Risers ARE included - they should show shrinkage (riser pipe)
+        core_indices = self._get_core_voxel_indices()
+        mold_indices = np.concatenate([chill_indices, core_indices]).astype(np.int64)
         chill_set = set(chill_indices)
         print(f"  Including {len(riser_indices):,} riser voxels in shrinkage analysis (risers contain shrinkage)")
         print(f"  Excluding {len(chill_set):,} chill voxels (external cooling devices)")
+        if len(core_indices) > 0:
+            print(f"  Excluding {len(core_indices):,} core voxels (sand)")
         if len(chill_indices) > 0:
             min_reduction = np.min(chill_reduction)
             affected_by_chill = np.sum(chill_reduction < 1.0)
@@ -3559,10 +3627,9 @@ class SolidificationEngine:
         n_workers = hardware.get_optimal_thread_count('compute')
         print(f"  Computing shrinkage probability (vectorized + multiprocessing/JIT)...")
         
-        # Create exclusion mask - only exclude chills
+        # Create exclusion mask - only exclude chills and cores
         exclude_mask = np.zeros(n_voxels, dtype=bool)
-        for idx in chill_set:
-            exclude_mask[idx] = True
+        exclude_mask[mold_indices] = True
         include_mask = ~exclude_mask
         
         # Create riser mask for boosted shrinkage
@@ -3745,18 +3812,18 @@ class SolidificationEngine:
         pipe_fraction = self._compute_riser_pipe_fraction()
         self.riser_pipe_fraction = pipe_fraction
         self.shrinkage_risk = np.maximum(self.shrinkage_risk, pipe_fraction).astype(np.float32)
-        if len(chill_indices) > 0:
-            self.shrinkage_risk[chill_indices] = 0.0
+        if len(mold_indices) > 0:
+            self.shrinkage_risk[mold_indices] = 0.0
         self.shrinkage_probability = self.shrinkage_risk
         stage_timings["riser_pipe_balance"] = (
             stage_timings.get("riser_pipe_balance", 0.0) + time.perf_counter() - stage_start
         )
 
         if len(valid_indices) > 0:
-            # Chills are external cooling devices: never shrinkage candidates,
+            # Chills and cores are mold material: never shrinkage candidates,
             # even if a feeding-path edge case let one through the masks.
-            if len(chill_indices) > 0:
-                self.shrinkage_risk[chill_indices] = 0.0
+            if len(mold_indices) > 0:
+                self.shrinkage_risk[mold_indices] = 0.0
             get_orphans = getattr(self, "_get_orphan_metal_indices", None)
             orphan_indices = get_orphans() if callable(get_orphans) else np.array([], dtype=int)
             if len(orphan_indices) > 0:
@@ -3849,7 +3916,7 @@ class SolidificationEngine:
             part_types = np.asarray(part_types, dtype=np.int32)
             cast_mask = part_types == PART_TYPE_CAST
             riser_mask = part_types == PART_TYPE_RISER
-            chill_mask = part_types == PART_TYPE_CHILL
+            chill_mask = (part_types == PART_TYPE_CHILL) | (part_types == PART_TYPE_CORE)
             riser_post_mask = part_types == PART_TYPE_RISER_POST
         else:
             cast_mask = np.ones(n_voxels, dtype=bool)
@@ -4129,9 +4196,10 @@ class SolidificationEngine:
             0.0
         ).astype(np.float32)
         
-        # Zero out chills
+        # Zero out chills and cores (mold material)
         for idx in chill_set:
             self.hotspot_intensity[idx] = 0.0
+        self.hotspot_intensity[self._get_core_voxel_indices()] = 0.0
         
         # Count hot spots (moderate intensity threshold for counting)
         self.hotspot_count = np.sum(self.hotspot_intensity > 0.2)
@@ -4346,7 +4414,9 @@ class SolidificationEngine:
         # Exclude surface voxels (they're always fine - high gradient).
         # Uses the material surface so cast voxels backed by a chill - which are
         # geometrically buried but thermally a boundary - are guarded too.
-        surface_indices = self._get_material_surface_indices()
+        # Core-backed voxels are not: a saturated core insulates, and the
+        # metal against it is where the late hot spot forms.
+        surface_indices = self._get_material_surface_indices(include_cores=False)
         self.niyama_defect_risk[surface_indices] = False
         self.niyama_risk[surface_indices] = 0.0
         self.combined_feed_risk[surface_indices] = 0.0
@@ -5241,6 +5311,11 @@ class SolidificationEngine:
                 self.sand_burn_in_zones[chill_indices] = False
         except Exception:
             pass  # Already logged above if chill detection failed
+        # Core-print voxels are sand, not casting surface.
+        core_indices = self._get_core_voxel_indices()
+        if len(core_indices) > 0:
+            self.sand_burn_in_zones[core_indices] = False
+            self.sand_burn_in_risk[core_indices] = 0.0
         
         # Count affected zones
         self.sand_burn_in_count = np.sum(self.sand_burn_in_zones)
@@ -5305,10 +5380,20 @@ class SolidificationEngine:
         entrapment_exponent = 2.0
         niyama_coupling_alpha = 0.5
 
-        # 1. Compute SGI₀ per surface voxel.
+        # 1. Compute SGI₀ per surface voxel. A core enclosed by metal is not
+        # on the geometric surface, yet its faces are the strongest gas
+        # source, so the cast voxels against a core stand in for its surface
+        # (with the metal's own local solidification time). The core voxels
+        # themselves are pre-solid sand with no local time of their own.
+        gas_part_types = self.mesh.voxel_part_types
+        core_contact = self._get_core_contact_cast_indices()
+        if len(core_contact) > 0:
+            gas_part_types = np.asarray(gas_part_types, dtype=np.int32).copy()
+            gas_part_types[core_contact] = PART_TYPE_CORE
+            surface_indices = np.union1d(surface_indices, core_contact).astype(np.int32)
         sgi0 = compute_surface_gas_generation(
             surface_indices=surface_indices,
-            voxel_part_types=self.mesh.voxel_part_types,
+            voxel_part_types=gas_part_types,
             local_solidification_times=self.local_solidification_time,
             humidity=humidity,
             binder_type=binder_type,
@@ -5491,7 +5576,7 @@ class SolidificationEngine:
         )
         part_types = getattr(self.mesh, "voxel_part_types", None)
         if part_types is not None and len(part_types) == len(shrinkage_mask):
-            chill_mask = np.asarray(part_types, dtype=np.int32) == 2
+            chill_mask = np.isin(np.asarray(part_types, dtype=np.int32), (PART_TYPE_CHILL, PART_TYPE_CORE))
             shrinkage_mask = shrinkage_mask & ~chill_mask
         return np.where(shrinkage_mask)[0]
     
@@ -5511,13 +5596,13 @@ class SolidificationEngine:
         return float(intensities[voxel_index])
 
     def _mask_display_risk(self, values: Optional[np.ndarray]) -> np.ndarray:
-        """Clip a 0-1 risk field and force CHILL and orphan-metal points to 0."""
+        """Clip a 0-1 risk field and force CHILL, CORE and orphan-metal points to 0."""
         if values is None:
             return np.zeros(0, dtype=np.float32)
         display = np.asarray(values, dtype=np.float32).copy()
         part_types = getattr(self.mesh, "voxel_part_types", None)
         if part_types is not None and len(part_types) == len(display):
-            chill_mask = np.asarray(part_types, dtype=np.int32) == 2
+            chill_mask = np.isin(np.asarray(part_types, dtype=np.int32), (PART_TYPE_CHILL, PART_TYPE_CORE))
             if np.any(chill_mask):
                 display[chill_mask] = 0.0
             orphan_mask = self._get_orphan_metal_mask()
@@ -5576,7 +5661,7 @@ class SolidificationEngine:
         part_types = getattr(self.mesh, "voxel_part_types", None)
         if part_types is not None and len(part_types) == len(display):
             part_types_arr = np.asarray(part_types, dtype=np.int32)
-            chill_mask = part_types_arr == 2
+            chill_mask = np.isin(part_types_arr, (PART_TYPE_CHILL, PART_TYPE_CORE))
             if np.any(chill_mask):
                 display[chill_mask] = 0.0
             orphan_mask = self._get_orphan_metal_mask()
@@ -5680,10 +5765,11 @@ class SolidificationEngine:
         bookkeeping (local solidification time == 0) normally yields zero
         fraction liquid, but a partial/NaN bookkeeping edge case on a chill
         surface voxel must never surface as liquid; mask them defensively.
+        Sand cores are pre-solid the same way.
         """
         part_types = getattr(self.mesh, "voxel_part_types", None)
         if part_types is not None and len(part_types) == len(fraction_liquid):
-            non_cast = np.asarray(part_types, dtype=np.int32) == 2  # CHILL
+            non_cast = np.isin(np.asarray(part_types, dtype=np.int32), (PART_TYPE_CHILL, PART_TYPE_CORE))
             fraction_liquid = np.asarray(fraction_liquid, dtype=np.float32).copy()
             fraction_liquid[non_cast] = 0.0
             # Phantom metal pockets (gap-fill voxels around chills with no

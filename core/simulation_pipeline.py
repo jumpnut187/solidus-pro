@@ -310,10 +310,10 @@ def build_visualization_payload(
         feed_modulus = np.asarray(local_modulus, dtype=np.float32)
         if len(feed_modulus) == n_voxels:
             feed_modulus_in = np.where(np.isfinite(feed_modulus), feed_modulus, 0.0).astype(np.float32)
-            # Feed modulus is only meaningful for cast metal; exclude chills.
+            # Feed modulus is only meaningful for cast metal; exclude chills and cores.
             part_types = getattr(voxel_mesh, "voxel_part_types", None)
             if part_types is not None and len(part_types) == n_voxels:
-                chill_mask = np.asarray(part_types, dtype=np.int32) == 2
+                chill_mask = np.isin(np.asarray(part_types, dtype=np.int32), (2, 4))
                 if np.any(chill_mask):
                     feed_modulus_in = feed_modulus_in.copy()
                     feed_modulus_in[chill_mask] = 0.0

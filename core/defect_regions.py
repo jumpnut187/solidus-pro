@@ -70,6 +70,7 @@ def compute_merged_shrink_display_intensity(
     porosity_probability: Optional[np.ndarray],
     voxel_part_types: Optional[np.ndarray],
     chill_part_type: int = 2,
+    core_part_type: int = 4,
 ) -> np.ndarray:
     """Build the merged max(shrink, microporosity) intensity.
 
@@ -104,7 +105,7 @@ def compute_merged_shrink_display_intensity(
 
     if voxel_part_types is not None and len(voxel_part_types) == display.shape[0]:
         part_types = np.asarray(voxel_part_types, dtype=np.int32)
-        chill_mask = part_types == int(chill_part_type)
+        chill_mask = (part_types == int(chill_part_type)) | (part_types == int(core_part_type))
         if np.any(chill_mask):
             display[chill_mask] = 0.0
 

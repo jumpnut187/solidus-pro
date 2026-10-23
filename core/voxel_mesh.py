@@ -721,8 +721,10 @@ class AdaptiveVoxelMesh:
         self.voxel_states = None
         self.surface_voxels = None
         # Cached union of geometric surface voxels and cast voxels backed by a
-        # mold-like part (chill/core). Invalidated whenever part types change.
+        # mold-like part (chill/core), and the same backed by a chill only.
+        # Invalidated whenever part types change.
         self._material_surface_indices = None
+        self._chill_surface_indices = None
         # Bounding boxes of metal parts (CAST/RISER/RISER_POST), recorded in
         # assign_part_types; used to detect phantom gap-fill voxels.
         self.metal_part_bounds = None
@@ -1859,6 +1861,7 @@ class AdaptiveVoxelMesh:
         
         n_voxels = len(self.voxel_centers)
         self._material_surface_indices = None
+        self._chill_surface_indices = None
 
         # Initialize all voxels as CAST (0) by default
         self.voxel_part_types = create_managed_array(
@@ -1975,6 +1978,7 @@ class AdaptiveVoxelMesh:
 
         # Neighbour graph and part types are both final now.
         self._material_surface_indices = None
+        self._chill_surface_indices = None
 
     #: Above this many candidates the boundary claim pass is skipped; a model
     #: that large has bigger problems than a ring of mislabeled skin cells.
@@ -2731,7 +2735,7 @@ class AdaptiveVoxelMesh:
             return np.array([], dtype=int)
         return np.where(self.surface_voxels)[0]
 
-    def get_material_surface_voxel_indices(self) -> np.ndarray:
+    def get_material_surface_voxel_indices(self, include_cores: bool = True) -> np.ndarray:
         """Geometric surface voxels plus cast voxels backed by a chill or core.
 
         Surface detection is purely geometric over the combined assembly, so a
@@ -2739,23 +2743,27 @@ class AdaptiveVoxelMesh:
         though that face is a heat-extraction boundary just like sand. Risk
         analyses need the physical notion, not the geometric one.
 
+        ``include_cores=False`` counts chill-backed cast voxels only. A sand
+        core extracts heat early but saturates and insulates late, so a
+        guard that assumes a steep gradient at the face must not treat a
+        core face as one.
+
         Riser and riser-post neighbours are deliberately excluded - those are
         metallurgically continuous with the casting, not a boundary.
         """
-        if self._material_surface_indices is not None:
-            return self._material_surface_indices
+        cached = self._material_surface_indices if include_cores else self._chill_surface_indices
+        if cached is not None:
+            return cached
 
         geometric = self.get_surface_voxel_indices()
         part_types = self.voxel_part_types
         neighbors = self.voxel_neighbors
         if part_types is None or neighbors is None or self.voxel_centers is None:
-            self._material_surface_indices = geometric
-            return geometric
+            return self._cache_material_surface(geometric, include_cores)
 
         part_types = np.asarray(part_types)
         if not np.any(is_mold(part_types)):
-            self._material_surface_indices = geometric
-            return geometric
+            return self._cache_material_surface(geometric, include_cores)
 
         n_voxels = len(self.voxel_centers)
         mask = np.zeros(n_voxels, dtype=bool)
@@ -2768,11 +2776,18 @@ class AdaptiveVoxelMesh:
             nbr = neighbors[start:end]
             valid = nbr >= 0
             nbr_types = np.where(valid, part_types[np.maximum(nbr, 0)], -1)
-            mold_adjacent = np.any((nbr_types == 2) | (nbr_types == 4), axis=1)
+            backing = (nbr_types == 2) | (nbr_types == 4) if include_cores else nbr_types == 2
+            mold_adjacent = np.any(backing, axis=1)
             mask[start:end] |= mold_adjacent & (part_types[start:end] == 0)
 
-        self._material_surface_indices = np.flatnonzero(mask)
-        return self._material_surface_indices
+        return self._cache_material_surface(np.flatnonzero(mask), include_cores)
+
+    def _cache_material_surface(self, indices: np.ndarray, include_cores: bool) -> np.ndarray:
+        if include_cores:
+            self._material_surface_indices = indices
+        else:
+            self._chill_surface_indices = indices
+        return indices
 
     def cleanup(self):
         """Clean up memory-mapped files"""

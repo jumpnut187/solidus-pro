@@ -91,8 +91,9 @@ class HeatTransferNumbaBackendTests(unittest.TestCase):
             inv_dx2: np.ndarray,
             source: np.ndarray,
             dt: float,
+            contact_hdx: np.ndarray,
         ) -> np.ndarray:
-            del neighbors, rho_cp, inv_dx2, source, dt
+            del neighbors, rho_cp, inv_dx2, source, dt, contact_hdx
             return temperatures + 1.0 * alpha
 
         with (
@@ -131,8 +132,9 @@ class HeatTransferNumbaBackendTests(unittest.TestCase):
             inv_dx2: np.ndarray,
             source: np.ndarray,
             dt: float,
+            contact_hdx: np.ndarray,
         ) -> np.ndarray:
-            del neighbors, alpha, rho_cp, inv_dx2, source, dt
+            del neighbors, alpha, rho_cp, inv_dx2, source, dt, contact_hdx
             return temperatures.copy()
 
         with (
