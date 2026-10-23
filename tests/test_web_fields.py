@@ -1470,6 +1470,56 @@ class LatticeBudgetEndpointTests(unittest.TestCase):
             self.assertEqual(response.get_json()["code"], "lattice_too_large", msg=path)
 
 
+class RemovedTetResultTests(unittest.TestCase):
+    """A result stored by the removed tetrahedral mesher is a 410, not a 500."""
+
+    def setUp(self) -> None:
+        fields.clear_cache()
+        self.temp_dir = tempfile.TemporaryDirectory()
+        root = Path(self.temp_dir.name)
+        self.database_path = root / "simulations.db"
+        repo.init_db(self.database_path)
+        app = Flask(__name__)
+        app.config["DATABASE"] = self.database_path
+        app.extensions["simulation_queue_manager"] = _SpyQueueManager()
+        app.register_blueprint(fields_bp)
+        self.client = app.test_client()
+
+        artifact = _synthetic_artifact()
+        artifact["visualization"]["mesh_type"] = "tet"
+        self.project_id = repo.create_project(self.database_path, {"name": "Old tet run"})
+        self.artifact_path = root / f"{self.project_id}.json"
+        self.artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
+        repo.mark_project_completed(self.database_path, self.project_id, artifact["summary"], str(self.artifact_path))
+
+    def tearDown(self) -> None:
+        fields.clear_cache()
+        self.temp_dir.cleanup()
+
+    def _assert_removed(self) -> None:
+        for path in ["grid", "grid/mask", "grid/shrinkage"]:
+            response = self.client.get(f"/api/projects/{self.project_id}/{path}")
+            self.assertEqual(response.status_code, 410, msg=path)
+            self.assertIn("removed tetrahedral mesher", response.get_json()["error"], msg=path)
+
+    def test_a_tet_marked_artifact_is_refused(self) -> None:
+        self._assert_removed()
+
+    def test_a_tet_marked_sidecar_is_refused_and_kept(self) -> None:
+        sidecar = fields.sidecar_path(self.artifact_path)
+        voxel_artifact = _synthetic_artifact()
+        fields.save_sidecar(sidecar, fields.build_field_grids(voxel_artifact["visualization"], voxel_artifact["summary"]))
+        with np.load(sidecar) as data:
+            payload = {key: data[key] for key in data.files}
+        meta = json.loads(bytes(payload["meta_json"]).decode("utf-8"))
+        meta["mesh_type"] = "tet"
+        payload["meta_json"] = np.frombuffer(json.dumps(meta).encode("utf-8"), dtype=np.uint8)
+        np.savez_compressed(sidecar, **payload)
+
+        self._assert_removed()
+        self.assertTrue(sidecar.exists())
+
+
 @unittest.skipUnless(
     REAL_ARTIFACT.exists(),
     f"Seeded run artifact not present at {REAL_ARTIFACT}",

@@ -180,16 +180,10 @@ def run_post_analyses(engine: Any, *, show_progress: bool) -> None:
         print("=" * 60)
         print(f"Total simulation time: {engine.time:.1f}s")
         if engine.analysis_options.shrinkage:
-            if getattr(engine.mesh, "mesh_type", "voxel") == "tet":
-                print(
-                    f"Nodes with shrinkage risk: {engine.affected_voxel_count:,} "
-                    f"({engine.get_shrinkage_percentage():.1f}% of volume)"
-                )
-            else:
-                print(
-                    f"Voxels with shrinkage risk: {engine.affected_voxel_count:,} "
-                    f"({engine.affected_voxel_count / len(engine.mesh.voxel_centers) * 100:.1f}%)"
-                )
+            print(
+                f"Voxels with shrinkage risk: {engine.affected_voxel_count:,} "
+                f"({engine.affected_voxel_count / len(engine.mesh.voxel_centers) * 100:.1f}%)"
+            )
             print(f"Estimated shrinkage volume: {engine.total_shrinkage_volume:.4f} in³")
         if engine.analysis_options.hotspot:
             print(f"Hot spots detected: {engine.hotspot_count:,}")

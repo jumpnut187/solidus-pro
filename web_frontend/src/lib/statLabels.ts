@@ -118,9 +118,6 @@ const OVERRIDES: Record<string, { label?: string; hint?: string; decimals?: numb
   fill_max_time_s: { label: 'Fill time' },
   fill_filled_voxel_count: { label: 'Filled voxels' },
   fill_unfilled_voxel_count: { label: 'Unfilled voxels' },
-  // Tet runs: web/payloads.py renames the fill counts; they count mesh nodes.
-  fill_nodes_filled_count: { label: 'Filled nodes' },
-  fill_nodes_unfilled_count: { label: 'Unfilled nodes' },
   fraction_liquid_snapshots: { label: 'Liquid-fraction frames' },
   shrink_scalar: {
     label: 'Shrink scalar',
@@ -129,22 +126,6 @@ const OVERRIDES: Record<string, { label?: string; hint?: string; decimals?: numb
   },
   shrink_scalar_formula: { label: 'Shrink scalar formula' }
 };
-
-/**
- * Tet runs (`stats.mesh_type === 'tet'`): counts are mesh nodes, and
- * `shrinkage_percentage` is a node-volume share (core/simulation_pipeline.py),
- * not a count share. Every other label swaps "voxel" for "node".
- */
-const TET_OVERRIDES: Record<string, { label?: string; hint?: string }> = {
-  shrinkage_percentage: {
-    label: 'Share of volume flagged',
-    hint: 'Volume of the flagged nodes as a share of the casting volume.'
-  }
-};
-
-function tetWording(text: string): string {
-  return text.replace(/\bVoxels\b/g, 'Nodes').replace(/\bvoxels\b/g, 'nodes').replace(/\bVoxel\b/g, 'Node').replace(/\bvoxel\b/g, 'node');
-}
 
 /** Section headings, matched against the start of a key, longest prefix first. */
 const GROUPS: { prefix: string; label: string }[] = [
@@ -228,6 +209,9 @@ function renderValue(value: number | string, spec: ReturnType<typeof describe>):
   return spec.unit ? `${text} ${spec.unit}` : text;
 }
 
+/** Summary keys written by runs from before the tet mesher was removed; not shown. */
+const LEGACY_MESH_KEYS = new Set(['mesh_type', 'requested_mesh_type', 'mesh_fallback_reason', 'tet_count', 'tet_edge_length_in']);
+
 function groupFor(key: string): string {
   const match = GROUPS.find((group) => key.startsWith(group.prefix));
   return match ? match.label : 'Overview';
@@ -255,19 +239,15 @@ export function buildStatGroups(
     else byGroup.set(group, [row]);
   };
 
-  // On a tet run GridMeta's counts are mesh nodes (web/fields.py).
-  const tet = stats.mesh_type === 'tet';
   if (extras.voxelCount > 0) {
-    push('Overview', { key: '_voxels', label: tet ? 'Nodes' : 'Voxels', value: formatCount(extras.voxelCount) });
+    push('Overview', { key: '_voxels', label: 'Voxels', value: formatCount(extras.voxelCount) });
   }
   if (extras.castVoxelCount > 0) {
     push('Overview', {
       key: '_cast_voxels',
-      label: tet ? 'Cast nodes' : 'Cast voxels',
+      label: 'Cast voxels',
       value: formatCount(extras.castVoxelCount),
-      hint: tet
-        ? 'Mesh nodes belonging to cast, riser and riser-post bodies.'
-        : 'Voxels belonging to cast, riser and riser-post bodies.'
+      hint: 'Voxels belonging to cast, riser and riser-post bodies.'
     });
   }
   if (extras.totalVolumeIn3 > 0) {
@@ -277,31 +257,25 @@ export function buildStatGroups(
       value: `${formatNumber(extras.totalVolumeIn3, 1)} in³`
     });
   }
-  // Tet: the element size is the requested edge length from the run summary;
-  // GridMeta's spacing is only the display-lattice pitch.
-  const edgeLength = tet ? Number(stats.tet_edge_length_in) : NaN;
-  const size = tet && Number.isFinite(edgeLength) && edgeLength > 0 ? edgeLength : extras.spacing;
-  if (size > 0) {
+  if (extras.spacing > 0) {
     push('Overview', {
       key: '_spacing',
-      label: tet ? 'Element size' : 'Voxel size',
-      value: `${formatNumber(size, 3)} in`
+      label: 'Voxel size',
+      value: `${formatNumber(extras.spacing, 3)} in`
     });
   }
 
   for (const [key, value] of Object.entries(stats)) {
     // Already shown from GridMeta's own fields, in better units.
-    if (key === 'voxel_count' || key === 'total_volume' || key === 'tet_edge_length_in') continue;
-    // A sentence, shown as the Results panel's fallback banner.
-    if (key === 'mesh_fallback_reason') continue;
+    if (key === 'voxel_count' || key === 'total_volume') continue;
+    // Mesh-type bookkeeping carried by runs stored before the tet mesher was removed.
+    if (LEGACY_MESH_KEYS.has(key)) continue;
     const spec = describe(key);
-    const hint = OVERRIDES[key]?.hint;
-    const tetOverride = tet ? TET_OVERRIDES[key] : undefined;
     push(groupFor(key), {
       key,
-      label: tetOverride?.label ?? (tet ? tetWording(spec.label) : spec.label),
+      label: spec.label,
       value: renderValue(value, spec),
-      hint: tetOverride?.hint ?? (tet && hint ? tetWording(hint) : hint)
+      hint: OVERRIDES[key]?.hint
     });
   }
 

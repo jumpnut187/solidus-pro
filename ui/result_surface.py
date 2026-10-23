@@ -12,9 +12,7 @@ Data flow, once per simulation:
 
 1. :meth:`ResultSurfaceRenderer.set_voxels` turns the engine's sparse voxels
    into a dense uniform lattice (``core.dense_grid``): an occupancy mask,
-   the voxel <-> cell maps, and a nearest-metal fill map. A tet run calls
-   :meth:`ResultSurfaceRenderer.set_tet_mesh` instead, which samples the
-   per-node values onto a ``core.tet_lattice.TetLatticeSampler`` lattice.
+   the voxel <-> cell maps, and a nearest-metal fill map.
 2. :meth:`ResultSurfaceRenderer.set_skins` subdivides each metal part's skin
    to roughly the voxel pitch and records, per skin vertex, the lattice cell
    a half voxel inside the surface. Vertex colours then come straight from the
@@ -44,9 +42,7 @@ from core.dense_grid import (
     LatticeTooLargeError,
     derive_lattice,
     flat_indices,
-    lattice_from_sampler,
     nearest_known_map,
-    sample_node_values,
     scatter_and_fill,
 )
 from core.part_manager import METAL_PART_CODES, PART_TYPE_TO_CODE
@@ -265,12 +261,8 @@ class ResultSurfaceRenderer:
         self.visible: bool = True
         self.ghost_opacity: float = 0.35
 
-        # Lattice state (set_voxels / set_tet_mesh). On a tet run the
-        # per-"voxel" arrays below are per inside lattice cell, and show()
-        # samples its per-node inputs onto those cells first.
+        # Lattice state (set_voxels)
         self.lattice: Optional[Lattice] = None
-        self._sampler = None                             # TetLatticeSampler on tet runs
-        self._input_count: int = 0                       # length show() expects
         self._cell_of_voxel: Optional[np.ndarray] = None
         self._voxel_of_cell: Optional[np.ndarray] = None
         self._occupancy: Optional[np.ndarray] = None    # bool, per cell, before display mask
@@ -326,65 +318,23 @@ class ResultSurfaceRenderer:
         """Build the dense lattice for a run. Returns False when it is too large."""
         centers = np.asarray(centers, dtype=np.float64).reshape(-1, 3)
         sizes_arr = None if sizes is None else np.asarray(sizes, dtype=np.float64).reshape(-1)
-        self._sampler = None
         try:
             lattice = derive_lattice(centers, sizes_arr if sizes_arr is not None and sizes_arr.size == len(centers) else None)
         except LatticeTooLargeError as exc:
             logger.warning("Result lattice too large for surface rendering", context={"error": str(exc)})
             self.lattice = None
             return False
-        cells = flat_indices(centers, lattice)
-        codes = None
-        if part_types is not None and len(part_types) == len(centers):
-            codes = np.asarray(part_types, dtype=np.int32)
-        self._install_lattice(lattice, cells, codes)
-        self._input_count = len(centers)
-        return True
-
-    def set_tet_mesh(self, node_xyz: np.ndarray, tets: np.ndarray, tet_part_types: np.ndarray,
-                     spacing: float) -> bool:
-        """Build the dense lattice for a tet run. Returns False when it is too large.
-
-        A :class:`core.tet_lattice.TetLatticeSampler` at ``spacing`` (inches)
-        locates every cell centre in a tet. :meth:`show` then takes per-node
-        values and samples them onto the inside cells barycentrically; per-node
-        flags (``valid``, ``paint_mask``, ``flat_paint``, the display mask)
-        follow each cell's ``nearest_node``. :meth:`voxel_at` returns a node.
-        """
-        from core.tet_lattice import TetLatticeSampler
-
-        node_xyz = np.asarray(node_xyz, dtype=np.float64).reshape(-1, 3)
-        try:
-            sampler = TetLatticeSampler(node_xyz, tets, tet_part_types, float(spacing))
-        except LatticeTooLargeError as exc:
-            logger.warning("Result lattice too large for surface rendering", context={"error": str(exc)})
-            self.lattice = None
-            self._sampler = None
-            return False
-        self._sampler = sampler
-        self._install_lattice(
-            lattice_from_sampler(sampler),
-            np.asarray(sampler.cell_flat, dtype=np.int64),
-            np.asarray(sampler.cell_part_types, dtype=np.int32),
-        )
-        self._input_count = len(node_xyz)
-        return True
-
-    def _install_lattice(self, lattice: Lattice, cells: np.ndarray, codes: Optional[np.ndarray]) -> None:
-        """Lattice, cell maps, occupancy and the VTK image for one run.
-
-        ``cells`` is the flat cell of each lattice "voxel": a voxel of a voxel
-        run, or an inside cell of a tet run. ``codes`` are their part codes.
-        """
         self.lattice = lattice
+        cells = flat_indices(centers, lattice)
         self._cell_of_voxel = cells
         voxel_of_cell = np.full(lattice.cell_count, -1, dtype=np.int64)
-        voxel_of_cell[cells] = np.arange(len(cells), dtype=np.int64)
+        voxel_of_cell[cells] = np.arange(len(centers), dtype=np.int64)
         self._voxel_of_cell = voxel_of_cell
         occupancy = np.zeros(lattice.cell_count, dtype=bool)
         occupancy[cells] = True
         self._occupancy = occupancy
-        if codes is not None:
+        if part_types is not None and len(part_types) == len(centers):
+            codes = np.asarray(part_types, dtype=np.int32)
             metal_voxels = np.isin(codes, np.asarray(METAL_PART_CODES, dtype=np.int32))
             metal = np.zeros(lattice.cell_count, dtype=bool)
             metal[cells[metal_voxels]] = True
@@ -409,23 +359,12 @@ class ResultSurfaceRenderer:
         self._contour.SetInputArrayToProcess(0, 0, 0, vtk.vtkDataObject.FIELD_ASSOCIATION_POINTS, "field")
         self._write_occupancy()
         self._resample_skins()
-
-    def _node_flags_to_cells(self, flags: np.ndarray) -> np.ndarray:
-        """Per-node bools -> per inside cell, through each cell's nearest node."""
-        return np.asarray(flags, dtype=bool).reshape(-1)[self._sampler.nearest_node]
-
-    def _node_values_to_cells(self, values: np.ndarray) -> np.ndarray:
-        """Per-node values -> per inside cell; NaN where no usable node reaches."""
-        values = np.asarray(values, dtype=np.float64).reshape(-1)
-        cell_values, known = sample_node_values(self._sampler, values, np.isfinite(values))
-        return np.where(known, cell_values, np.nan).astype(np.float32)
+        return True
 
     def set_display_mask(self, mask: Optional[np.ndarray]) -> None:
-        """Per-voxel (per-node on tet runs) drawable mask (hidden components); None shows everything."""
-        if mask is not None and self._cell_of_voxel is not None and len(mask) != self._input_count:
+        """Per-voxel drawable mask (hidden components); None shows everything."""
+        if mask is not None and self._cell_of_voxel is not None and len(mask) != len(self._cell_of_voxel):
             mask = None
-        if mask is not None and self._sampler is not None:
-            mask = self._node_flags_to_cells(mask)
         self._display_mask = None if mask is None else np.asarray(mask, dtype=bool)
         if self._image is not None:
             self._write_occupancy()
@@ -550,7 +489,7 @@ class ResultSurfaceRenderer:
             return False
         if self._skins_dirty:
             self._build_skins()
-        n = self._input_count
+        n = len(self._cell_of_voxel)
         values = np.asarray(values, dtype=np.float32).reshape(-1)
         if len(values) != n:
             logger.warning("Result values do not match the voxel count", context={"values": len(values), "voxels": n})
@@ -559,18 +498,6 @@ class ResultSurfaceRenderer:
                                palette=palette, valid=valid, paint_mask=paint_mask, paint_values=paint_values,
                                paint_min=paint_min, paint_max=paint_max, glow=glow,
                                envelope_color=envelope_color, flat_paint=dict(flat_paint or {}))
-        flat_items = dict(self.view.flat_paint)
-        if self._sampler is not None:
-            # The view keeps the per-node inputs (a re-show resamples them);
-            # everything below works on the inside lattice cells.
-            values = self._node_values_to_cells(values)
-            if valid is not None:
-                valid = self._node_flags_to_cells(valid)
-            if paint_mask is not None:
-                paint_mask = self._node_flags_to_cells(paint_mask)
-            if paint_values is not None:
-                paint_values = self._node_values_to_cells(paint_values)
-            flat_items = {key: (self._node_flags_to_cells(flag[0]), flag[1]) for key, flag in flat_items.items()}
 
         drawable = np.isfinite(values)
         if valid is not None:
@@ -604,7 +531,7 @@ class ResultSurfaceRenderer:
         self._paint_grid = paint_grid
         self._painted_cells = painted_cells
         self._flat_grids = {}
-        for key, flag in flat_items.items():
+        for key, flag in self.view.flat_paint.items():
             flag_arr = np.asarray(flag[0], dtype=bool) & drawable
             grid = np.zeros(lattice.cell_count, dtype=bool)
             grid[cells[flag_arr]] = True
@@ -831,18 +758,13 @@ class ResultSurfaceRenderer:
         return actors
 
     def voxel_at(self, position: Sequence[float]) -> int:
-        """Index of the voxel nearest a picked world position, or -1.
-
-        On a tet run this is a node: the ``nearest_node`` of the picked cell.
-        """
+        """Index of the voxel nearest a picked world position, or -1."""
         if self.lattice is None or self._voxel_of_cell is None:
             return -1
         cell = int(self.lattice.world_to_cell(np.asarray(position, dtype=np.float64))[0])
         voxel = int(self._voxel_of_cell[cell])
         if voxel < 0 and self._nearest is not None:
             voxel = int(self._voxel_of_cell[int(self._nearest[cell])])
-        if voxel >= 0 and self._sampler is not None:
-            voxel = int(self._sampler.nearest_node[voxel])
         return voxel
 
     def actors_for_clipping(self) -> List[vtk.vtkActor]:

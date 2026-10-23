@@ -826,7 +826,7 @@ def _apply_enthalpy_correction_numpy(
     Fallback for when the Numba kernel is unavailable, and the parity
     reference the kernel is tested against. Writes into ``T_final``; see
     ``_run_thermal_coupled_integration`` for the derivation. ``beta`` is a
-    scalar (voxel path) or a per-point array (tet path, ``L_i / C_i``).
+    scalar or a per-point array (``L_i / C_i``).
     """
     beta_all = np.broadcast_to(np.asarray(beta, dtype=np.float64), T_post.shape)
     T_final[:] = T_post
@@ -884,7 +884,7 @@ def _invert_enthalpy_numpy(
     T_sol: float,
     beta: np.ndarray,
 ) -> None:
-    """Exact enthalpy inversion per point (``core.tet_thermal.invert_tet_enthalpy`` semantics).
+    """Exact enthalpy inversion per point.
 
     The heat step left h = T_post + beta * (1 - fs_prev). T_final solves
     h = T + beta * (1 - fs(T)) with fs(T) = max(fs_prev, lever(T)):
@@ -1199,15 +1199,6 @@ def run_time_integration(
     Execute the solidification time loop and update engine state in place.
     """
     _configure_numba_threads_for_solidification(engine, show_progress=show_progress)
-
-    if getattr(getattr(engine, "mesh", None), "mesh_type", "voxel") == "tet":
-        from core.tet_thermal import run_tet_thermal_integration
-
-        return run_tet_thermal_integration(
-            engine,
-            show_progress=show_progress,
-            progress_callback=progress_callback,
-        )
 
     solver_mode = getattr(getattr(engine, "analysis_options", None), "solver_mode", None)
     if solver_mode == THERMAL_COUPLED_SOLVER_MODE:

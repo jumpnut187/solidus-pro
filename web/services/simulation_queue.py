@@ -124,8 +124,6 @@ def build_pipeline_inputs(
         solidification_params=sim_data.get("solidification_params") or {},
         thread_budget_provider=thread_budget_provider,
         pour_location=sim_data.get("pour_location"),
-        # None (absent) means settings.mesh.mesh_type.
-        mesh_type=performance.get("mesh_type"),
         # None (absent) means settings.mesh.voxel_cut_cells.
         voxel_cut_cells=(
             None if performance.get("voxel_cut_cells") is None else bool(performance.get("voxel_cut_cells"))
@@ -247,11 +245,7 @@ def _simulation_process_worker(
             sim_memory_mb[sim_id] = float(min_sim_memory_mb)
 
         from web.payloads import build_part_manager
-        from core.simulation_pipeline import (
-            MESH_FALLBACK_MESSAGE_PREFIX,
-            SimulationCancelledError,
-            run_pipeline,
-        )
+        from core.simulation_pipeline import SimulationCancelledError, run_pipeline
 
         part_manager = build_part_manager(parts_data)
         if _check_cancelled():
@@ -266,10 +260,7 @@ def _simulation_process_worker(
             # Bucketed into four canned strings below, which throws away the
             # detail the solver bothered to produce. Log the real line first.
             _log(message)
-            if message.startswith(MESH_FALLBACK_MESSAGE_PREFIX):
-                # Tet meshing was skipped or failed; the voxel mesh comes next.
-                _set_progress(12, message)
-            elif message.startswith("Generating adaptive voxel mesh"):
+            if message.startswith("Generating adaptive voxel mesh"):
                 _set_progress(15, "Generating adaptive voxel mesh...")
             elif message.startswith("Assigning part types"):
                 _set_progress(42, "Assigning cast, riser, chill, and riser-post voxels...")
@@ -328,13 +319,8 @@ def _simulation_process_worker(
         with queue_lock:
             simulation_results.pop(sim_id, None)
 
-        complete_message = (
-            "Simulation complete (ran on the voxel mesh: tet mesh fallback)"
-            if isinstance(getattr(result, "mesh_fallback_reason", None), str)
-            else "Simulation complete"
-        )
-        _log(complete_message)
-        _update_active(status="completed", message=complete_message, progress=100)
+        _log("Simulation complete")
+        _update_active(status="completed", message="Simulation complete", progress=100)
 
     except Exception as exc:
         from core.simulation_pipeline import SimulationCancelledError

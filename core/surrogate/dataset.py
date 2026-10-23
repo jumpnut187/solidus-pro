@@ -4,11 +4,12 @@ Every traditional simulation can opt-in (``surrogate.auto_capture``) to append
 its input channels and schedule fields as a compact ``.npz`` record.  The
 trainer aggregates these records to fit a surrogate model.
 
-Records and index rows carry ``mesh_type`` ("voxel" or "tet") and
-``cut_cells`` (True for a voxel run with ``settings.mesh.voxel_cut_cells``,
-``core/cut_cells.py``). Records and rows written before a field existed read
-as "voxel" and False. Both are metadata only: they are not part of the
-conditioning vector, so model input shapes do not change.
+Records and index rows carry ``mesh_type`` (always "voxel" now; older
+records may say "tet") and ``cut_cells`` (True for a run with
+``settings.mesh.voxel_cut_cells``, ``core/cut_cells.py``). Records and rows
+written before a field existed read as "voxel" and False. Both are metadata
+only: they are not part of the conditioning vector, so model input shapes do
+not change.
 """
 
 from __future__ import annotations
@@ -31,7 +32,6 @@ from core.surrogate.fields import (
     encode_channels,
     encode_field,
     encoding_points,
-    is_tet_mesh,
 )
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -59,23 +59,13 @@ ZERO_BOOST_TOL = 1e-6
 _LAST_LOAD_SKIPS: List[Tuple[str, str]] = []
 
 
-def _mesh_type(mesh: Any) -> str:
-    return "tet" if is_tet_mesh(mesh) else DEFAULT_MESH_TYPE
-
-
 def _has_cut_cells(mesh: Any) -> bool:
-    return bool(getattr(mesh, "cut_cells", False)) and not is_tet_mesh(mesh)
+    return bool(getattr(mesh, "cut_cells", False))
 
 
 def _config_for_engine(engine: Any, voxel_size: float) -> Dict[str, float]:
-    """Extract the conditioning config scalars from an engine + mesh.
-
-    On a tet mesh the ``voxel_size`` feature is the tet edge length
-    (``mesh.base_voxel_size``), not the caller's ``voxel_size``.
-    """
+    """Extract the conditioning config scalars from an engine + mesh."""
     mesh = getattr(engine, "mesh", None)
-    if is_tet_mesh(mesh):
-        voxel_size = float(getattr(mesh, "base_voxel_size", voxel_size) or voxel_size)
     centers = getattr(mesh, "voxel_centers", None)
     max_dim = 1.0
     if centers is not None and len(centers) > 0:
@@ -115,17 +105,12 @@ def capture_run(
 
     Args:
         engine: A completed ``SolidificationEngine``.
-        voxel_size: The voxel size used for the mesh (inches). Ignored on a
-            tet mesh, whose edge length is used instead.
+        voxel_size: The voxel size used for the mesh (inches).
         resolution: Grid resolution for the stored channels.
         out_dir: Output directory (default ``data/surrogate_dataset``).
 
     Returns:
         Path of the written ``.npz`` file, or ``None`` when capture failed.
-
-    On a tet mesh the channels and the start/end/local targets are encoded
-    from lattice cell centres (``fields.encoding_points``), and the index
-    ``voxel_count`` column holds the node count.
     """
     try:
         if getattr(engine, "mesh", None) is None:
@@ -145,7 +130,7 @@ def capture_run(
             chill_boost = engine._calculate_chill_influence()
         riser_slowdown = engine._calculate_riser_influence()
 
-        mesh_type = _mesh_type(engine.mesh)
+        mesh_type = DEFAULT_MESH_TYPE
         cut_cells = _has_cut_cells(engine.mesh)
         points = encoding_points(engine.mesh, resolution)
         channels, meta = encode_channels(
@@ -348,7 +333,7 @@ def load_dataset(
         List of records with ``channels``, ``conditioning`` (Conditioning),
         ``end``/``start``/``local`` fields, ``meta``, ``mesh_type``
         ("voxel" for records captured before the field existed) and
-        ``cut_cells`` (False likewise). Voxel and tet records load together.
+        ``cut_cells`` (False likewise). Older tet records load alongside voxel ones.
     """
     records: List[Dict[str, Any]] = []
     _LAST_LOAD_SKIPS.clear()

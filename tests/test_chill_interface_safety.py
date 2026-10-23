@@ -112,15 +112,8 @@ def _index_chill_bands(cls) -> None:
     voxel_size = float(np.max(cls.engine.mesh.voxel_sizes))
     distances, _ = cKDTree(centers[chill_indices]).query(centers[cast_indices], k=1)
 
-    if getattr(cls.engine.mesh, "mesh_type", "voxel") == "tet":
-        # Tet: the interface nodes are shared by cast and chill tets and typed CAST.
-        tets = np.asarray(cls.engine.mesh.tets)
-        on_chill_tet = np.zeros(len(part_types), dtype=bool)
-        on_chill_tet[tets[np.asarray(cls.engine.mesh.tet_part_types) == CHILL].ravel()] = True
-        cls.chill_adjacent = cast_indices[on_chill_tet[cast_indices]]
-    else:
-        # Cast voxels sharing a face with the chill.
-        cls.chill_adjacent = cast_indices[distances <= voxel_size * 1.05]
+    # Cast voxels sharing a face with the chill.
+    cls.chill_adjacent = cast_indices[distances <= voxel_size * 1.05]
     assert len(cls.chill_adjacent) > 0, "no cast voxels adjacent to the chill"
     # Cast voxels on the far side of the block, for a directional comparison.
     cls.far_side = cast_indices[distances >= np.percentile(distances, 75)]
@@ -447,15 +440,6 @@ class ChillInterfaceWithRiserTests(unittest.TestCase):
         # a chill face must never trip it.
         display = np.asarray(self.engine.get_shrinkage_display_intensity())
         self.assertLess(float(np.max(display[self.chill_adjacent])), 0.35)
-
-
-class ChillInterfaceRiskTetTests(ChillInterfaceRiskTests):
-    """Same guarantees on the tet mesh, at the nodes shared with the chill."""
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.engine = _run_pipeline_with_patched_memory(_cast_with_chill_manager(), mesh_type="tet")
-        _index_chill_bands(cls)
 
 
 class ChillInterfaceRiskLegacySolverTests(ChillInterfaceRiskTests):

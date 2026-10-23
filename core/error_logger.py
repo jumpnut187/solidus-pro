@@ -201,7 +201,7 @@ class SimulatorLogger:
     
     def log_performance(self, operation: str, duration_seconds: float,
                         voxel_count: Optional[int] = None, count_unit: str = "voxels"):
-        """Log performance metrics. ``count_unit`` names the counted points ("nodes" on tet runs)."""
+        """Log performance metrics. ``count_unit`` names the counted points."""
         context = {
             'operation': operation,
             'duration_seconds': duration_seconds,

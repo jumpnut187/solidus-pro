@@ -30,18 +30,11 @@ export const VOXEL_CUT_CELLS_DEFAULT = true;
  * `web/services/simulation_queue.py` and had no web control before; the
  * desktop defaults it on from `config.settings.use_gpu`.
  *
- * `mesh_type` ('voxel' | 'tet') reaches `PipelineInputs.mesh_type` through
- * `build_pipeline_inputs`. The server does not expose
- * `settings.mesh.mesh_type`, so the client default mirrors its default, 'voxel'.
- * Tet is opt-in; the server falls back to voxel when tet meshing fails, runs
- * too long or the model is too large (`result_data.mesh_fallback_reason`).
- *
- * `voxel_cut_cells` reaches `PipelineInputs.voxel_cut_cells` the same way and
- * mirrors `settings.mesh.voxel_cut_cells` (core/cut_cells.py). It applies to
- * voxel meshes, including the voxel mesh a tet run falls back to.
+ * `voxel_cut_cells` reaches `PipelineInputs.voxel_cut_cells` through
+ * `build_pipeline_inputs` and mirrors `settings.mesh.voxel_cut_cells`
+ * (core/cut_cells.py).
  */
 export const performanceDefaults: PerformanceOptions = {
-  mesh_type: 'voxel',
   voxel_cut_cells: VOXEL_CUT_CELLS_DEFAULT,
   use_gpu: true,
   use_incremental: false,
@@ -73,26 +66,10 @@ export function buildSolidificationDefaults(): SolidificationParams {
 
 export const solidificationDefaults: SolidificationParams = buildSolidificationDefaults();
 
-export type MeshType = 'voxel' | 'tet';
-
 /** `performance_options.voxel_cut_cells`, the default when absent or not a boolean. */
 export function voxelCutCellsOf(options: PerformanceOptions): boolean {
   const value = options.voxel_cut_cells;
   return typeof value === 'boolean' ? value : VOXEL_CUT_CELLS_DEFAULT;
-}
-
-/** The mesh type stored in `performance_options`, 'voxel' when absent or unknown. */
-export function meshTypeOf(options: PerformanceOptions): MeshType {
-  return options.mesh_type === 'tet' ? 'tet' : 'voxel';
-}
-
-/**
- * Tet edge length / mesh size, i.e. the server's `settings.mesh.tet_edge_length_factor`,
- * read back from a mesh-preview or ML-mesh response. Null when it cannot be derived.
- */
-export function tetEdgeFactorOf(edgeLengthIn: number | undefined, sizeIn: number): number | null {
-  if (edgeLengthIn === undefined || !(sizeIn > 0) || !(edgeLengthIn > 0)) return null;
-  return Math.round((edgeLengthIn / sizeIn) * 1000) / 1000;
 }
 
 export const meshDefaults = {

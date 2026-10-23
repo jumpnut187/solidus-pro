@@ -166,24 +166,22 @@ class MetalFractionTest(unittest.TestCase):
     def test_open_mesh_containment_stays_on_the_winding_number(self) -> None:
         # review_cut_cells.md P2: above WINDING_NUMBER_MAX_PAIRS the winding
         # number fell back to the ray test; contains() now chunks the points.
-        import core.tet_mesh as tet_mesh
-
         open_box = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
         open_box.update_faces(open_box.face_normals[:, 2] < 0.5)  # drop the top face
         self.assertFalse(open_box.is_watertight)
         points = np.random.default_rng(5).uniform(-0.8, 0.8, (500, 3))
-        expected = tet_mesh.winding_number_contains(open_box, points)
+        expected = cut_cells.winding_number_contains(open_box, points)
         cap = 30 * len(open_box.faces)
         calls = []
-        original = tet_mesh.winding_number_contains
+        original = cut_cells.winding_number_contains
 
         def spy(mesh, query, **kwargs):
             calls.append(len(query))
             return original(mesh, query, **kwargs)
 
-        with mock.patch.object(tet_mesh, "WINDING_NUMBER_MAX_PAIRS", cap), \
-                mock.patch.object(tet_mesh, "winding_number_contains", spy), \
-                self.assertNoLogs(tet_mesh.logger, level="WARNING"):
+        with mock.patch.object(cut_cells, "WINDING_NUMBER_MAX_PAIRS", cap), \
+                mock.patch.object(cut_cells, "winding_number_contains", spy), \
+                self.assertNoLogs(cut_cells.logger, level="WARNING"):
             actual = cut_cells.contains(open_box, points)
         np.testing.assert_array_equal(actual, expected)
         self.assertGreater(len(calls), 1)
@@ -193,6 +191,42 @@ class MetalFractionTest(unittest.TestCase):
         counts = np.array([[10, 5, 0], [8, 8, 0], [0, 0, 0], [0, 3, 9]], dtype=np.uint16)
         codes = dominant_part_codes(counts, [0, 1, 2])
         np.testing.assert_array_equal(codes, [0, 1, -1, 2])
+
+
+def _open_cylinder(radius, height, center, *, open_end: str, sections=32) -> trimesh.Trimesh:
+    """Cylinder with its ``"top"`` or ``"bottom"`` cap removed: an open, non-watertight surface."""
+    mesh = trimesh.creation.cylinder(radius=radius, height=height, sections=sections)
+    mesh.apply_translation(center)
+    normal_z = mesh.face_normals[:, 2]
+    keep = normal_z < 0.99 if open_end == "top" else normal_z > -0.99
+    return trimesh.Trimesh(mesh.vertices, mesh.faces[keep], process=True)
+
+
+class WindingNumberTest(unittest.TestCase):
+    """Containment on non-watertight parts uses the generalized winding number."""
+
+    # Riser z 1..3 with its top cap missing.
+    OPEN_RISER = _open_cylinder(0.8, 2.0, (0.0, 0.0, 2.0), open_end="top")
+
+    def test_winding_number_matches_exact_containment_where_ray_tests_fail(self) -> None:
+        riser = self.OPEN_RISER
+        self.assertFalse(riser.is_watertight)
+        points = np.random.default_rng(0).uniform([-1.0, -1.0, 0.0], [1.0, 1.0, 3.0], (20000, 3))
+        exact = (np.hypot(points[:, 0], points[:, 1]) < 0.8) & (points[:, 2] > 1.0) & (points[:, 2] < 3.0)
+        winding_wrong = int(np.sum(cut_cells.winding_number_contains(riser, points) != exact))
+        ray_wrong = int(np.sum(riser.contains(points) != exact))
+        # Measured: 47 (faceting of the 32-gon) vs 1933 of 6737 inside points.
+        self.assertLess(winding_wrong, 0.02 * len(points))
+        self.assertGreater(ray_wrong, 0.05 * len(points))
+
+    def test_work_above_the_pair_cap_falls_back_with_a_warning(self) -> None:
+        points = np.array([[0.0, 0.0, 2.0], [0.0, 0.0, 5.0]])
+        with mock.patch.object(cut_cells, "WINDING_NUMBER_MAX_PAIRS", 1), mock.patch(
+            "core.voxel_mesh._robust_contains_check_impl", return_value=np.array([True, False])
+        ) as robust, self.assertLogs("core.cut_cells", level="WARNING"):
+            inside = cut_cells.winding_number_contains(self.OPEN_RISER, points)
+        robust.assert_called_once()
+        np.testing.assert_array_equal(inside, [True, False])
 
 
 class MergeTest(unittest.TestCase):
@@ -452,9 +486,8 @@ class LatentHeatTest(unittest.TestCase):
         self.assertLess(drift / released, 2e-3)
 
     @unittest.skipUnless(NUMBA, "Numba unavailable")
-    def test_exact_inversion_kernel_matches_numpy_and_tet(self) -> None:
+    def test_exact_inversion_kernel_matches_numpy(self) -> None:
         from core.solidification_loop import _invert_enthalpy_kernel, _invert_enthalpy_numpy
-        from core.tet_thermal import invert_tet_enthalpy
 
         rng = np.random.default_rng(7)
         n = 50_000
@@ -465,9 +498,7 @@ class LatentHeatTest(unittest.TestCase):
         reference = np.empty(n)
         _invert_enthalpy_kernel(T_post, fs_prev, kernel, 1500.0, 1450.0, beta)
         _invert_enthalpy_numpy(T_post, fs_prev, reference, 1500.0, 1450.0, beta)
-        tet, _ = invert_tet_enthalpy(T_post, fs_prev, beta, 1500.0, 1450.0)
         np.testing.assert_allclose(kernel, reference, rtol=1e-12, atol=1e-9)
-        np.testing.assert_allclose(reference, tet, rtol=1e-12, atol=1e-9)
 
     @unittest.skipUnless(NUMBA, "Numba unavailable")
     def test_capacity_and_rate_kernels_match_numpy(self) -> None:
@@ -594,7 +625,7 @@ class FlagOffTest(unittest.TestCase):
         def boom(*_a, **_k):
             raise AssertionError("cut-cell code reached with the flag off")
 
-        inputs = sp.PipelineInputs("WCB", 0.25, 0, mesh_type="voxel",
+        inputs = sp.PipelineInputs("WCB", 0.25, 0,
                                    analysis_options={"shrinkage": True, "hotspot": True, "filling": False})
         with mock.patch.object(get_settings().mesh, "voxel_cut_cells", False), \
                 mock.patch.object(cut_cells, "compute_cut_cell_geometry", boom), \
@@ -824,7 +855,7 @@ def _sphere_manager():
 def _run_sphere(voxel_cut_cells, setting: bool):
     import core.simulation_pipeline as sp
 
-    inputs = sp.PipelineInputs("WCB", 0.2, 0, mesh_type="voxel", voxel_cut_cells=voxel_cut_cells,
+    inputs = sp.PipelineInputs("WCB", 0.2, 0, voxel_cut_cells=voxel_cut_cells,
                                analysis_options={"shrinkage": True, "hotspot": True, "filling": False})
     with mock.patch.object(get_settings().mesh, "voxel_cut_cells", setting), contextlib.redirect_stdout(io.StringIO()):
         return sp.run_pipeline(inputs, part_manager=_sphere_manager())

@@ -43,10 +43,7 @@ ALLOY_FEATURE_RANGES: Dict[str, tuple] = {
 
 CONFIG_FEATURE_RANGES: Dict[str, tuple] = {
     "max_dim": (1.0, 60.0),
-    # Mesh length scale, inches: the voxel pitch on a voxel run, the tet edge
-    # length (``TetVolumeMesh.base_voxel_size``) on a tet run. The mesh type
-    # itself is record metadata (``mesh_type``), not a feature, so the vector
-    # length and every trained model's input shape stay the same.
+    # Mesh length scale, inches: the voxel pitch.
     "voxel_size": (0.02, 0.5),
     "feeding_zone_vertical_bias": (0.0, 1.0),
     "chvorinov_mold_constant": (150.0, 400.0),

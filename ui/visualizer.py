@@ -680,8 +680,7 @@ class MeasurementTool:
         self.point2 = None
     
     def calculate_defect_volume(self, voxel_centers: np.ndarray, voxel_sizes: np.ndarray,
-                                 intensities: np.ndarray, threshold: float,
-                                 voxel_volumes: Optional[np.ndarray] = None) -> float:
+                                 intensities: np.ndarray, threshold: float) -> float:
         """
         Calculate total volume of defect voxels above minimum risk.
         
@@ -690,15 +689,11 @@ class MeasurementTool:
             voxel_sizes: N array of voxel sizes
             intensities: N array of intensity values
             threshold: Minimum risk as 0-1 fraction (0.7 = 70%-100% risk)
-            voxel_volumes: N array of per-point volumes (in3). Given on tet
-                runs, where voxel_sizes is an edge length, not a cube side.
             
         Returns:
             Total volume in cubic inches
         """
         mask = intensities >= threshold
-        if voxel_volumes is not None:
-            return float(np.sum(np.asarray(voxel_volumes, dtype=np.float64)[mask]))
         defect_sizes = voxel_sizes[mask]
         total_volume = np.sum(defect_sizes ** 3)  # Volume of cubes
         return total_volume
@@ -986,9 +981,6 @@ class CastingVisualizer(QWidget):
         # Built in _init_ui once the renderer exists.
         self.result_surface = None
         self._result_lattice_key = None
-        # Lumped node volumes (in3) of a registered tet mesh; defect volume
-        # sums these, because a node's voxel_sizes is an edge length.
-        self._result_point_volumes: Optional[np.ndarray] = None
 
         # Data the main window reads back (mode -> (centers, sizes, values))
         self.current_mesh = None
@@ -2172,9 +2164,6 @@ class CastingVisualizer(QWidget):
                 porosity_risk=data["porosity_risk"],
                 threshold=data["threshold"],
                 connectivity=data["connectivity"],
-                # On a tet mesh the neighbour rows are node adjacency, not
-                # 26 lattice slots; defect_regions then uses the full row.
-                mesh_type=getattr(mesh, "mesh_type", "voxel"),
             )
             if pocket is None:
                 return None
@@ -2235,11 +2224,8 @@ class CastingVisualizer(QWidget):
             return None
         
         voxel_centers, voxel_sizes, intensities = self.current_shrinkage_data
-        volumes = self._result_point_volumes
-        if volumes is not None and len(volumes) != len(intensities):
-            volumes = None
         return self.measurement_tool.calculate_defect_volume(
-            voxel_centers, voxel_sizes, intensities, threshold, voxel_volumes=volumes
+            voxel_centers, voxel_sizes, intensities, threshold
         )
     
     # ==================== Animation Export Methods ====================
@@ -2569,28 +2555,13 @@ class CastingVisualizer(QWidget):
         key = (id(voxel_mesh), int(len(centers)))
         if key == self._result_lattice_key and self.result_surface.lattice is not None:
             return True
-        self._result_point_volumes = None
-        if getattr(voxel_mesh, "mesh_type", "voxel") == "tet":
-            # Tet nodes are not on a lattice: sample through the tets at the
-            # pitch the web sidecar and the fill use.
-            from core.dense_grid import tet_presentation_spacing
-
-            ok = self.result_surface.set_tet_mesh(
-                np.asarray(voxel_mesh.node_xyz),
-                np.asarray(voxel_mesh.tets),
-                np.asarray(voxel_mesh.tet_part_types),
-                tet_presentation_spacing(voxel_mesh),
-            )
-            if ok:
-                self._result_point_volumes = np.asarray(voxel_mesh.voxel_volumes, dtype=np.float64)
-        else:
-            sizes = getattr(voxel_mesh, "voxel_sizes", None)
-            part_types = getattr(voxel_mesh, "voxel_part_types", None)
-            ok = self.result_surface.set_voxels(
-                centers,
-                None if sizes is None else np.asarray(sizes),
-                None if part_types is None else np.asarray(part_types),
-            )
+        sizes = getattr(voxel_mesh, "voxel_sizes", None)
+        part_types = getattr(voxel_mesh, "voxel_part_types", None)
+        ok = self.result_surface.set_voxels(
+            centers,
+            None if sizes is None else np.asarray(sizes),
+            None if part_types is None else np.asarray(part_types),
+        )
         self._result_lattice_key = key if ok else None
         if ok and self._voxel_display_mask is not None:
             self.result_surface.set_display_mask(self._voxel_display_mask)
@@ -2814,7 +2785,6 @@ class CastingVisualizer(QWidget):
             self.result_surface.clear()
             self.result_surface.clear_skins()
         self._result_lattice_key = None
-        self._result_point_volumes = None
         # The voxel array is about to change; the hidden component ids are
         # kept so the main window can rebuild the mask for the next mesh.
         self._voxel_display_mask = None

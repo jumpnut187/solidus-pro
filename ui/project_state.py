@@ -8,7 +8,6 @@ import math
 import os
 from typing import Any, Dict, List, Optional
 
-from config.settings import MESH_TYPES
 from core.part_manager import PartManager
 from core.solidification_params import migrate_legacy_pour_rate
 from ui.result_types import canonical_result_type
@@ -182,21 +181,15 @@ def load_project_state(payload: Dict[str, Any]) -> ProjectState:
 
 
 def _normalize_performance_options(value: Any) -> Dict[str, Any]:
-    """Copy ``performance_options``, keeping ``mesh_type`` only when it names a known mesh.
+    """Copy ``performance_options``, dropping a legacy ``mesh_type``.
 
-    ``mesh_type`` ("voxel" or "tet") lives here so it round-trips without a
-    schema bump. Absent (projects saved before the toggle) or unknown means
-    "use ``settings.mesh.mesh_type``", so an unknown value is dropped.
-    ``voxel_cut_cells`` works the same way: kept when it is a bool,
+    Projects saved while tetrahedral meshing existed stored ``mesh_type``
+    here; every run is voxel now, so it is dropped (an old "tet" project
+    opens as voxel). ``voxel_cut_cells`` is kept when it is a bool and
     dropped otherwise (absent means ``settings.mesh.voxel_cut_cells``).
     """
     options = dict(value) if isinstance(value, dict) else {}
-    if "mesh_type" in options:
-        mesh_type = str(options["mesh_type"] or "").strip().lower()
-        if mesh_type in MESH_TYPES:
-            options["mesh_type"] = mesh_type
-        else:
-            del options["mesh_type"]
+    options.pop("mesh_type", None)
     if "voxel_cut_cells" in options and not isinstance(options["voxel_cut_cells"], bool):
         del options["voxel_cut_cells"]
     return options

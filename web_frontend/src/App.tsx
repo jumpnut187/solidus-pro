@@ -54,9 +54,7 @@ import {
   isPlaceholderProjectName,
   loadStoredSettings,
   meshDefaults,
-  meshTypeOf,
   performanceDefaults,
-  tetEdgeFactorOf,
   voxelCutCellsOf,
   projectNameFromFile,
   saveStoredSettings
@@ -167,8 +165,6 @@ export function App() {
   const [animationProgress, setAnimationProgress] = useState(0);
   const [animationError, setAnimationError] = useState<string | null>(null);
   const [meshEstimate, setMeshEstimate] = useState<MeshStatus>(null);
-  // settings.mesh.tet_edge_length_factor, learned from the server's mesh-preview response.
-  const [tetEdgeFactor, setTetEdgeFactor] = useState<number | null>(null);
   const [mlStatus, setMlStatus] = useState<MeshStatus>(null);
   const [loop, setLoop] = useState(true);
 
@@ -733,26 +729,10 @@ export function App() {
   }, [applyPositions, parts, warn]);
 
   // --- Mesh ----------------------------------------------------------------
-  const meshType = meshTypeOf(settings.performance_options);
   const estimateMesh = useCallback(async () => {
     try {
       const target = await ensureProject();
-      const preview = await api.meshPreview(target, settings.voxel_size, meshType);
-      if (preview.mesh_type === 'tet') {
-        setTetEdgeFactor((current) => tetEdgeFactorOf(preview.edge_length_in, settings.voxel_size) ?? current);
-        const detail =
-          `About ${formatCount(preview.estimated_nodes)} nodes at ${preview.edge_length_in.toFixed(3)} in ` +
-          `(limit ${formatCount(preview.max_nodes)})`;
-        const fallback = preview.falls_back_to_voxel ? ' The run will use the voxel mesh instead.' : '';
-        setMeshEstimate({
-          text:
-            preview.can_proceed || preview.recommended_voxel_size === null
-              ? detail
-              : `${detail}.${fallback} Mesh size for tet: ${preview.recommended_voxel_size.toFixed(3)} in.`,
-          tone: preview.can_proceed ? 'success' : 'warning'
-        });
-        return;
-      }
+      const preview = await api.meshPreview(target, settings.voxel_size);
       const detail = `${formatCount(preview.estimated_voxels)} voxels, ${preview.estimated_memory_mb.toFixed(0)} MB`;
       setMeshEstimate({
         text: preview.can_proceed
@@ -763,59 +743,30 @@ export function App() {
     } catch (error) {
       fail(error, 'Mesh estimate failed');
     }
-  }, [ensureProject, settings.voxel_size, meshType, fail]);
-
-  // The Mesh panel shows the tet edge length next to the size control. Ask the
-  // server once for its edge factor (a node estimate, no project changes).
-  const meshPanelOpen = shell.activePanel === 'mesh';
-  useEffect(() => {
-    if (!meshPanelOpen || meshType !== 'tet' || tetEdgeFactor !== null || !projectId || parts.length === 0) return;
-    let cancelled = false;
-    const size = settings.voxel_size;
-    api
-      .meshPreview(projectId, size, 'tet')
-      .then((preview) => {
-        if (!cancelled && preview.mesh_type === 'tet') setTetEdgeFactor(tetEdgeFactorOf(preview.edge_length_in, size));
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [meshPanelOpen, meshType, tetEdgeFactor, projectId, parts.length, settings.voxel_size]);
+  }, [ensureProject, settings.voxel_size, fail]);
 
   const applyMlMesh = useCallback(async () => {
     setMlStatus({ text: 'Requesting a recommendation...', tone: 'info' });
     try {
       const target = await ensureProject();
-      const recommendation = await api.mlMesh(target, meshType);
-      setTetEdgeFactor(
-        (current) => tetEdgeFactorOf(recommendation.edge_length_in, recommendation.base_voxel_size) ?? current
-      );
+      const recommendation = await api.mlMesh(target);
       setSettings((current) => ({
         ...current,
         voxel_size: recommendation.base_voxel_size,
         refinement_level: recommendation.refinement_level
       }));
       const source = recommendation.used_model ? 'ML model' : 'heuristic';
-      const nodes =
-        recommendation.mesh_type === 'tet' && recommendation.estimated_nodes !== undefined
-          ? ` About ${formatCount(recommendation.estimated_nodes)} tet nodes` +
-            (recommendation.can_proceed === false
-              ? `, above the limit of ${formatCount(recommendation.max_nodes ?? 0)}.`
-              : '.')
-          : '';
       setMlStatus({
         text:
           `${source}: ${recommendation.base_voxel_size.toFixed(3)} in at refinement ${recommendation.refinement_level} ` +
           `(confidence ${recommendation.confidence.toFixed(2)}). ${recommendation.reason}` +
-          nodes +
           (recommendation.warning ? ` Warning: ${recommendation.warning}` : ''),
-        tone: recommendation.warning || recommendation.can_proceed === false ? 'warning' : 'success'
+        tone: recommendation.warning ? 'warning' : 'success'
       });
     } catch (error) {
       setMlStatus({ text: error instanceof Error ? error.message : 'ML mesh failed', tone: 'warning' });
     }
-  }, [ensureProject, meshType]);
+  }, [ensureProject]);
 
   // --- Run -----------------------------------------------------------------
   const runSimulation = useCallback(async () => {
@@ -1185,7 +1136,6 @@ export function App() {
             onEstimate={() => void estimateMesh()}
             onApplyMlMesh={() => void applyMlMesh()}
             estimate={meshEstimate}
-            tetEdgeFactor={tetEdgeFactor}
             mlStatus={mlStatus}
             busy={job.isBusy}
             hasParts={parts.length > 0}
@@ -1197,7 +1147,6 @@ export function App() {
                 memory_mode: 'auto',
                 performance_options: {
                   ...current.performance_options,
-                  mesh_type: performanceDefaults.mesh_type,
                   voxel_cut_cells: performanceDefaults.voxel_cut_cells
                 }
               }))
@@ -1239,12 +1188,11 @@ export function App() {
               }))
             }
             onReset={() =>
-              // mesh_type and voxel_cut_cells belong to the Mesh panel; their reset is there.
+              // voxel_cut_cells belongs to the Mesh panel; its reset is there.
               setSettings((current) => ({
                 ...current,
                 performance_options: {
                   ...performanceDefaults,
-                  mesh_type: meshTypeOf(current.performance_options),
                   voxel_cut_cells: voxelCutCellsOf(current.performance_options)
                 }
               }))
@@ -1302,7 +1250,6 @@ export function App() {
     estimateMesh,
     applyMlMesh,
     meshEstimate,
-    tetEdgeFactor,
     mlStatus,
     job.isBusy,
     hasPourLocation,

@@ -34,19 +34,10 @@ Load your full casting assembly in one go:
 
 Automatic part-type detection from filenames. Parallel point-containment assignment that scales to massive assemblies.
 
-### Mesh Type — Voxel (default) or Tetrahedral (opt-in)
-The Mesh dialog (desktop) and Mesh panel (web) choose the simulation mesh:
-- **Voxel** (default) — adaptive voxel grid, explicit thermal solver.
-- **Tetrahedral** (opt-in) — conforming tet mesh from fTetWild (`pytetwild`), implicit P1 finite-element thermal solve. It follows the CAD surface, so metal volume matches the CAD instead of overshooting at coarse sizes. The tet edge length is the mesh size times `mesh.tet_edge_length_factor` (2.0). Requires `thermal_coupled` (forced). Tet results are the accuracy reference for the voxel path.
-
-Projects saved without a mesh type open as Voxel in both UIs. Select tet with `mesh.mesh_type: tet` in `castsim.yaml`, `CASTSIM_MESH_TYPE=tet`, or the Mesh dialog/panel.
-
-A tet run falls back to the voxel mesh automatically (`mesh.tet_auto_fallback`, on by default) and finishes as a voxel run when the estimated node count is above `mesh.tet_auto_max_nodes` (300,000), when fTetWild fails on every attempt, or when fTetWild runs longer than `mesh.tet_mesh_timeout_s` (600 s). The reason shows in the status line and an after-run notice on the desktop, and in a banner on the web Results panel. With the fallback off, those cases stop the run with an error, and tet meshes above `mesh.tet_max_nodes` (3,000,000) are refused with a message giving a safe mesh size.
-
 ### Cut Cells — CAD-Accurate Voxel Boundary (default on)
-"Cut cells (CAD-accurate boundary)" in the Mesh dialog (desktop) and Mesh panel (web), `mesh.voxel_cut_cells` in `castsim.yaml`, or `CASTSIM_VOXEL_CUT_CELLS`. Each boundary voxel carries the metal fraction and the mold-contact area of the CAD inside it (`core/cut_cells.py`), so the voxel mesh holds the CAD metal volume and cooling surface instead of a staircase. It applies to voxel runs, including a tet run that falls back to voxel. Turn it off to reproduce results from before the option existed, bit for bit.
+"Cut cells (CAD-accurate boundary)" in the Mesh dialog (desktop) and Mesh panel (web), `mesh.voxel_cut_cells` in `castsim.yaml`, or `CASTSIM_VOXEL_CUT_CELLS`. Each boundary voxel carries the metal fraction and the mold-contact area of the CAD inside it (`core/cut_cells.py`), so the voxel mesh holds the CAD metal volume and cooling surface instead of a staircase. Turn it off to reproduce results from before the option existed, bit for bit.
 
-Measured against a tet reference at 0.05 in (`tools/benchmark_cut_cells.py`), voxel size 0.1 in:
+Measured against a 0.05 in tetrahedral finite-element reference (from before the tet mesher was removed), voxel size 0.1 in:
 
 | case | total time, plain voxels | total time, cut cells | field error, cut cells | wall time on/off |
 |---|---|---|---|---|
@@ -131,8 +122,7 @@ The voxel caps below come from `core/memory_limits.py`, which sets them from tot
 - RAM above 64 GB does not raise the voxel cap. Cores above 16 still speed up the Numba loops, because the code sets no core cap.
 - The tiers use total RAM as the OS reports it. A 64 GB machine that reports 63.x GB lands in the 32 GB tier.
 - Apple Silicon raises the soft cap by 20 % (M1), 25 % (M2) or 30 % (M3, M4).
-- Intel Macs are not supported. `torch>=2.6` and `pytetwild` publish no macOS x86_64 wheels.
-- Tet meshes fall back to voxel above 300,000 nodes and are refused above 3,000,000 nodes.
+- Intel Macs are not supported. `torch>=2.6` publishes no macOS x86_64 wheels.
 
 ### GCP (Web App on Compute Engine)
 
@@ -265,7 +255,6 @@ References: [NIST Scheil notes](https://www.ctcms.nist.gov/~kattner/solidifc/sch
 | CPU Accel | Numba (JIT + parallel), joblib |
 | GPU Accel | MLX, Taichi (Metal) · CuPy (CUDA) · PyOpenCL (OpenCL) |
 | Mesh I/O | Trimesh, numpy-stl, cascadio (optional, for STEP) |
-| Tet meshing | pytetwild (fTetWild, MPL-2.0) + pyvista |
 | Persistence | SQLite (web projects) |
 | Reports | Jinja2 (HTML / PDF / Markdown) |
 | Plugin System | Custom materials, analysis types, viz modes |

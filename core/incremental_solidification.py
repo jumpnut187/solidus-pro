@@ -191,7 +191,7 @@ def expand_front(front_indices: np.ndarray,
     
     # Collect new front candidates from neighbors of newly solid voxels.
     # Max size: each newly solid point adds at most one row of neighbors
-    # (26 lattice slots on voxels, K = max node degree on tets).
+    # (26 lattice slots).
     max_new_front = n_front + n_newly_solid * neighbors.shape[1]
     new_front = np.empty(max_new_front, dtype=np.int32)
     new_front_count = 0

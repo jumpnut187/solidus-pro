@@ -87,7 +87,6 @@ class CompoundVoxelizeCaptureTests(unittest.TestCase):
             refinement_level=1,
             memory_mode="ram",
             analysis_options={"shrinkage": False, "hotspot": False, "fraction_liquid": False},
-            mesh_type="voxel",  # checks the voxelization of the overlap is solid
         )
 
         def _solve():

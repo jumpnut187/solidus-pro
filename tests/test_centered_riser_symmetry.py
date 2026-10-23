@@ -43,7 +43,6 @@ def _build_pipeline_inputs() -> PipelineInputs:
             "solver_mode": "thermal_coupled",
         },
         show_progress=False,
-        mesh_type="voxel",  # regression for the voxel canonical neighbour-order bias; tet nodes are unstructured
     )
 
 

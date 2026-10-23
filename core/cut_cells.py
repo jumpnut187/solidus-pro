@@ -30,18 +30,20 @@ Units: inches throughout (geometry zone, see ``physics/units.py``).
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import trimesh
+from numba import njit, prange
 from scipy.spatial import cKDTree
 
 logger = logging.getLogger(__name__)
 
 #: Sub-points per boundary cell for the metal fraction. Chosen by
-#: measurement (docs/tet_migration/cut_cells.md).
+#: measurement (docs/cut_cells.md).
 DEFAULT_SUBSAMPLES = 64
 #: Area-sample spacing as a fraction of the pitch (16 samples per pitch^2).
 DEFAULT_AREA_SAMPLE_SPACING = 0.25
@@ -52,6 +54,10 @@ DEFAULT_AREA_SAMPLE_SPACING = 0.25
 INTERFACE_PROBE_OFFSET = 0.5
 #: Cells below this metal fraction are merged into a face neighbour.
 DEFAULT_PHI_MIN = 0.25
+#: Point x triangle pairs above which ``winding_number_contains`` falls back
+#: to the voxel path's containment check. Measured 1.8e9 pairs/s on 18
+#: cores, so the cap is about 6 s there.
+WINDING_NUMBER_MAX_PAIRS = 10_000_000_000
 
 _POINT_CHUNK = 2_000_000
 _KEY_OFFSET = 1 << 20
@@ -108,7 +114,7 @@ def contains(mesh: trimesh.Trimesh, points: np.ndarray) -> np.ndarray:
     """Point-in-part test: embree ray test when watertight, winding number otherwise.
 
     Open meshes are queried in point chunks small enough that every chunk
-    stays under ``core.tet_mesh.WINDING_NUMBER_MAX_PAIRS``, so the winding
+    stays under ``WINDING_NUMBER_MAX_PAIRS``, so the winding
     number is never replaced by the ray test, which is unreliable on open
     surfaces.
     """
@@ -116,8 +122,6 @@ def contains(mesh: trimesh.Trimesh, points: np.ndarray) -> np.ndarray:
         return np.zeros(0, dtype=bool)
     if mesh.is_watertight:
         return np.asarray(mesh.contains(points), dtype=bool)
-    from core.tet_mesh import WINDING_NUMBER_MAX_PAIRS, winding_number_contains
-
     points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     chunk = max(1, WINDING_NUMBER_MAX_PAIRS // max(1, len(mesh.faces)))
     inside = np.zeros(len(points), dtype=bool)
@@ -125,6 +129,78 @@ def contains(mesh: trimesh.Trimesh, points: np.ndarray) -> np.ndarray:
         stop = min(len(points), start + chunk)
         inside[start:stop] = np.asarray(winding_number_contains(mesh, points[start:stop]), dtype=bool)
     return inside
+
+
+def winding_number_contains(
+    mesh: trimesh.Trimesh, points: np.ndarray, *, near_surface_tol: float = 0.0
+) -> np.ndarray:
+    """(P,) bool: generalized winding number of ``mesh`` at each point above 0.5.
+
+    Valid for open and non-manifold surfaces, where ``Trimesh.contains`` ray
+    tests are not. Points within ``near_surface_tol`` (inches) of the surface
+    also count as inside. Above ``WINDING_NUMBER_MAX_PAIRS`` point x triangle
+    pairs it logs a warning and returns
+    ``core.voxel_mesh._robust_contains_check_impl(mesh, points, near_surface_tol)``.
+    """
+    from core.voxel_mesh import _near_surface_mask, _robust_contains_check_impl
+
+    query = np.ascontiguousarray(points, dtype=np.float64).reshape(-1, 3)
+    if len(query) == 0 or len(mesh.faces) == 0:
+        return np.zeros(len(query), dtype=bool)
+    pairs = len(query) * len(mesh.faces)
+    if pairs > WINDING_NUMBER_MAX_PAIRS:
+        logger.warning(
+            "winding-number containment skipped: %d points x %d faces exceeds %d pairs; "
+            "using the ray-test containment check, which is unreliable on open surfaces",
+            len(query),
+            len(mesh.faces),
+            WINDING_NUMBER_MAX_PAIRS,
+        )
+        return np.asarray(_robust_contains_check_impl(mesh, query, near_surface_tol), dtype=bool)
+    triangles = np.ascontiguousarray(mesh.triangles, dtype=np.float64)
+    inside = _winding_numbers(triangles, query) > 0.5
+    if near_surface_tol > 0.0:
+        inside |= np.asarray(_near_surface_mask(mesh, query, near_surface_tol), dtype=bool)
+    return inside
+
+
+@njit(parallel=True, cache=True)
+def _winding_numbers(triangles: np.ndarray, points: np.ndarray) -> np.ndarray:
+    """(P,) generalized winding numbers: sum of signed triangle solid angles / 4 pi.
+
+    Solid angle by Van Oosterom and Strackee (1983).
+    """
+    n_points = points.shape[0]
+    n_faces = triangles.shape[0]
+    result = np.empty(n_points, dtype=np.float64)
+    for i in prange(n_points):
+        px = points[i, 0]
+        py = points[i, 1]
+        pz = points[i, 2]
+        total = 0.0
+        for f in range(n_faces):
+            ax = triangles[f, 0, 0] - px
+            ay = triangles[f, 0, 1] - py
+            az = triangles[f, 0, 2] - pz
+            bx = triangles[f, 1, 0] - px
+            by = triangles[f, 1, 1] - py
+            bz = triangles[f, 1, 2] - pz
+            cx = triangles[f, 2, 0] - px
+            cy = triangles[f, 2, 1] - py
+            cz = triangles[f, 2, 2] - pz
+            la = math.sqrt(ax * ax + ay * ay + az * az)
+            lb = math.sqrt(bx * bx + by * by + bz * bz)
+            lc = math.sqrt(cx * cx + cy * cy + cz * cz)
+            det = ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx)
+            den = (
+                la * lb * lc
+                + (ax * bx + ay * by + az * bz) * lc
+                + (bx * cx + by * cy + bz * cz) * la
+                + (cx * ax + cy * ay + cz * az) * lb
+            )
+            total += 2.0 * math.atan2(det, den)
+        result[i] = total / (4.0 * math.pi)
+    return result
 
 
 def _keys(ijk: np.ndarray) -> np.ndarray:

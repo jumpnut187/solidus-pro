@@ -18,51 +18,27 @@ main.py (desktop)                    run_web.py -> web/app_factory.py
                      v               v
         core/simulation_pipeline.py :: run_pipeline(PipelineInputs)
                             |
-    prepare_mesh_and_geometry()  -- resolve_mesh_type(inputs) --
-         voxel: core/voxel_mesh.py  AdaptiveVoxelMesh
-                + core/cut_cells.py (phi, A; resolve_voxel_cut_cells)
-         tet:   core/tet_mesh.py    build_tet_mesh -> TetVolumeMesh
-                (too large / failed / timed out -> voxel, reason recorded)
+    prepare_mesh_and_geometry()  ->  core/voxel_mesh.py  AdaptiveVoxelMesh
+                                     + core/cut_cells.py (phi, A; resolve_voxel_cut_cells)
     create_analysis_options()    ->  AnalysisOptions
-    run_filling_for_mesh()       ->  voxel: core/filling_stage.py
-                                     tet:   core/tet_filling.py (lattice view,
-                                            fill mapped back to nodes)
+    maybe_run_filling()          ->  core/filling_stage.py
     SolidificationEngine(...)    ->  core/solidification.py
         .initialize()
         .run_simulation()
-             voxel -> core/solidification_loop.py  run_time_integration
-                  -> physics/heat_transfer.py         HeatTransferModel
-                  -> physics/solidification_physics.py SolidificationModel
-             tet   -> core/tet_thermal.py  run_tet_thermal_integration
-                  -> physics/tet_heat_transfer.py     TetHeatTransferModel
-                  -> physics/solidification_physics.py SolidificationModel
+             -> core/solidification_loop.py  run_time_integration
+             -> physics/heat_transfer.py         HeatTransferModel
+             -> physics/solidification_physics.py SolidificationModel
              -> core/analysis_strategies.py  run_post_analyses
         .export_results()
     build_visualization_payload()
                             |
-                     PipelineResult (.mesh_type)
+                     PipelineResult
 ```
 
-`resolve_mesh_type` takes `PipelineInputs.mesh_type`, else
-`settings.mesh.mesh_type`, which defaults to `"voxel"`. `"tet"` is opt-in
-(`mesh.mesh_type: tet` or `CASTSIM_MESH_TYPE=tet`). The tet edge length is
-the voxel size times `mesh.tet_edge_length_factor` (2.0).
-
-With `mesh.tet_auto_fallback` on (default), a tet run falls back to the
-voxel mesh inside `prepare_mesh_and_geometry`, so `run_pipeline` and the
-surrogate pipeline both get it: estimated nodes above
-`mesh.tet_auto_max_nodes` (300,000), `MeshGenerationError` from
-`build_tet_mesh`, or fTetWild past `mesh.tet_mesh_timeout_s` (600 s). The
-voxel mesh is built exactly as a voxel run builds it and carries
-`mesh_fallback_reason`; `PipelineResult` exposes it with
-`requested_mesh_type = "tet"`, and `result_data` / the visualization payload
-carry both keys on a fallback.
-
-The tet branch forces `thermal_coupled`. Lattice consumers (filling, the
-surrogate and deep-model encoding, `web/fields.py`, `ui/result_surface.py`)
-sample node values onto a uniform lattice with
-`core/tet_lattice.py::TetLatticeSampler` and never see tets. Contracts:
-`docs/tet_migration/DESIGN.md`.
+The simulation mesh is always the voxel mesh. A tetrahedral (fTetWild + P1
+FEM) path existed until October 2026 and was removed: it rarely ran (it fell
+back to voxel when large, failed or slow) and showed no benefit over cut
+cells.
 
 `run_pipeline` has three production callers: `ui/workers.py`,
 `web/services/simulation_queue.py` and `core/surrogate/training.py`.
@@ -158,36 +134,12 @@ surface cell, while the old voxel physics loses heat: the capped enthalpy
 correction discards about 7 % of the latent heat and constant `rho_l*cp`
 loses about 3.5 % of sensible heat. With the geometry fixed and the old
 physics, cut cells ran 7-11 % fast at 0.1 in; with both fixed they are within
-1 % of a 0.05 in tet reference. A flag-off total time can sit near the
+1 % of a 0.05 in tetrahedral FEM reference. A flag-off total time can sit near the
 reference while the field is off (l_bracket at 0.1 in: +14.2 % total, 16 %
 field error). Calibrations tuned on flag-off totals (shrinkage thresholds,
 porosity case packs, surrogate data) absorbed these errors; surrogate records
 carry `cut_cells` to keep the two apart. Measurements:
-`docs/tet_migration/cut_cells_integration.md`.
-
-### Mesh object contract
-
-`TetVolumeMesh` (`core/tet_mesh.py`) duck-types `AdaptiveVoxelMesh`. It
-exposes the same `voxel_*` names and methods (`get_voxel_count`,
-`get_voxels_by_type`, `get_surface_voxel_indices`, ...) with **node**
-semantics, so the engine and the graph-generic post-analyses run unchanged.
-The DOF is the mesh node: every engine per-point array has length N nodes.
-
-| attribute | voxel mesh | tet mesh |
-|---|---|---|
-| `mesh_type` | absent (`"voxel"`) | `"tet"` |
-| `voxel_centers` | cell centres | node coordinates (`node_xyz` as float32) |
-| `voxel_sizes` | cell pitch | mean incident edge length |
-| `voxel_volumes` | cell volume | lumped node volume (sum of incident tet volume / 4) |
-| `voxel_neighbors` | (N, 26) canonical slots | (N, K max degree), ascending, -1 padded |
-| `voxel_moduli` | distance to surface cell centre | distance to nearest boundary face, 0 on boundary |
-| `grid_shape` | bbox estimate | `None` |
-| extra | | `tets`, `tet_part_types`, `boundary_faces`, `adj_indptr`/`adj_indices`, `mean_edge_length`, `quality_summary()` |
-
-Code that needs tet semantics branches on
-`getattr(mesh, "mesh_type", "voxel") == "tet"`. Volume shares, length
-scales and adjacency counts must use `voxel_volumes`, per-node `voxel_sizes`
-and the row's valid entries, not a scalar pitch or 26.
+`docs/cut_cells_integration.md`.
 
 ### Part types
 

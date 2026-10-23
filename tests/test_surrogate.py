@@ -519,7 +519,6 @@ class PipelineTests(unittest.TestCase):
             analysis_options={"shrinkage": True, "hotspot": True, "fraction_liquid": True},
             max_voxels_for_visualization=50_000,
             show_progress=False,
-            mesh_type="voxel",  # compares two meshings point-wise; fTetWild is not bit-deterministic
         )
         with contextlib.redirect_stdout(io.StringIO()):
             ref = run_pipeline(inputs, stl_loader=loader)

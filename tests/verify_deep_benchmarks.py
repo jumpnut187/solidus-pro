@@ -65,7 +65,6 @@ def _inputs(loader, alloy="WCB", voxel_size=0.5):
         analysis_options={"shrinkage": False, "hotspot": False, "fraction_liquid": False},
         max_voxels_for_visualization=50_000,
         show_progress=False,
-        mesh_type="voxel",  # benchmarks surrogates trained on voxel records against the voxel solver
     )
 
 

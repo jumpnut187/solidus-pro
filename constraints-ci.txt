@@ -48,7 +48,6 @@ pyparsing==3.3.2
 pyside6==6.11.2
 pyside6-addons==6.11.2
 pyside6-essentials==6.11.2
-pytetwild==0.4.2
 python-dateutil==2.9.0.post0
 python-utils==4.0.0
 pyvista==0.49.0

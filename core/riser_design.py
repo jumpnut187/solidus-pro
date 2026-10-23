@@ -272,35 +272,19 @@ class HeuversCircleMethod:
         voxel_positions: FloatArray,
         voxel_size: float,
         surface_mask: BoolArray,
-        voxel_volumes: Optional[FloatArray] = None,
-        mesh_type: str = "voxel",
     ):
         """
         Initialize Heuvers' circle method.
         
         Args:
             voxel_positions: Position of each voxel (n x 3)
-            voxel_size: Size of each voxel (tet meshes: nominal edge length)
+            voxel_size: Size of each voxel
             surface_mask: Boolean mask of surface voxels
-            voxel_volumes: Per-point volume (in^3). Used on tet meshes, whose
-                lumped node volumes are not ``voxel_size ** 3``. ``None`` keeps
-                the ``count * voxel_size ** 3`` estimate.
-            mesh_type: ``"voxel"`` or ``"tet"``
         """
         self.positions = voxel_positions
         self.voxel_size = voxel_size
         self.surface_mask = surface_mask
         self.n_voxels = len(voxel_positions)
-        self.mesh_type = mesh_type
-        self.voxel_volumes = (
-            None if voxel_volumes is None else np.asarray(voxel_volumes, dtype=np.float64).reshape(-1)
-        )
-        if (
-            mesh_type == "tet"
-            and self.voxel_volumes is not None
-            and len(self.voxel_volumes) != self.n_voxels
-        ):
-            raise ValueError("voxel_volumes needs one volume per mesh node.")
         
         # Cached distance-to-surface
         self._distance_to_surface: Optional[FloatArray] = None
@@ -391,13 +375,8 @@ class HeuversCircleMethod:
             cluster_mask &= cluster_dists < 3 * distances[idx]
             
             cluster_indices = np.where(cluster_mask)[0].tolist()
-            if self.mesh_type == "tet" and self.voxel_volumes is not None:
-                cluster_volume = float(np.sum(self.voxel_volumes[cluster_indices]))
-                # Node volumes vary, so weight by volume, not node count.
-                cluster_size = cluster_volume
-            else:
-                cluster_volume = len(cluster_indices) * (self.voxel_size ** 3)
-                cluster_size = len(cluster_indices)
+            cluster_volume = len(cluster_indices) * (self.voxel_size ** 3)
+            cluster_size = len(cluster_indices)
             
             hotspot = HotSpot(
                 center_index=idx,
@@ -489,24 +468,17 @@ class RiserDesigner:
         surface_mask: BoolArray,
         alloy: MaterialRiserProperties,
         params: Optional[RiserDesignParameters] = None,
-        voxel_volumes: Optional[FloatArray] = None,
-        mesh_type: str = "voxel",
     ):
         """
         Initialize riser designer.
         
         Args:
             voxel_positions: Position of each voxel (n x 3)
-            voxel_size: Size of each voxel (tet meshes: nominal edge length)
-            neighbors: Neighbor connectivity array. Tet meshes: the ``(n, K)``
-                edge adjacency (``mesh.voxel_neighbors``), used for the
-                attachment-point search in :meth:`optimize_positions`.
+            voxel_size: Size of each voxel
+            neighbors: Neighbor connectivity array
             surface_mask: Boolean mask of surface voxels
             alloy: Material properties
             params: Design parameters
-            voxel_volumes: Per-point volume (in^3), used on tet meshes;
-                ``None`` keeps ``count * voxel_size ** 3``
-            mesh_type: ``"voxel"`` or ``"tet"``
         """
         self.positions = voxel_positions
         self.voxel_size = voxel_size
@@ -514,25 +486,11 @@ class RiserDesigner:
         self.surface_mask = surface_mask
         self.alloy = alloy
         self.params = params or RiserDesignParameters()
-        self.mesh_type = mesh_type
         
         self.n_voxels = len(voxel_positions)
-        if mesh_type == "tet":
-            table = np.asarray(neighbors)
-            if table.ndim != 2 or table.shape[0] != self.n_voxels:
-                raise ValueError(
-                    "Tet riser design needs the (n_nodes, K) edge adjacency as neighbors."
-                )
         
         # Initialize Heuvers method
-        self._heuvers = HeuversCircleMethod(
-            voxel_positions, voxel_size, surface_mask,
-            voxel_volumes=voxel_volumes, mesh_type=mesh_type,
-        )
-        # Tet coverage is a volume share; voxel coverage stays a count share.
-        self._node_volumes: Optional[FloatArray] = (
-            self._heuvers.voxel_volumes if mesh_type == "tet" else None
-        )
+        self._heuvers = HeuversCircleMethod(voxel_positions, voxel_size, surface_mask)
         
         # Load standard riser database
         self._riser_db = load_riser_database()
@@ -768,11 +726,7 @@ class RiserDesigner:
         return self.params.feeding_constant * np.sqrt(modulus)
     
     def _covered_fraction(self, covered: set) -> float:
-        """Fed share of the casting: node-volume share on tets, count share on voxels."""
-        if self._node_volumes is not None:
-            total = float(np.sum(self._node_volumes))
-            if total > 0.0:
-                return float(np.sum(self._node_volumes[list(covered)])) / total
+        """Fed share of the casting (voxel count share)."""
         return len(covered) / self.n_voxels
 
     def analyze_coverage(self) -> Dict[str, float]:
@@ -867,21 +821,10 @@ class RiserDesigner:
     ) -> List[Tuple[int, Vector3]]:
         """Attachment points one step away from ``riser``'s current one.
 
-        Voxel meshes: the 8 lattice offsets of +-voxel_size in x and y,
-        each snapped to the nearest top-surface voxel. Tet meshes have no
-        lattice, so a step is one mesh edge: the surface nodes adjacent to
-        the current attachment node.
+        The 8 lattice offsets of +-voxel_size in x and y, each snapped to
+        the nearest top-surface voxel.
         """
         moves: List[Tuple[int, Vector3]] = []
-        if self.mesh_type == "tet":
-            # Same top-band preference as _find_attachment_point.
-            surface_z = self.positions[np.asarray(self.surface_mask, dtype=bool), 2]
-            band_floor = float(np.max(surface_z)) - self.voxel_size * 3 if surface_z.size else -np.inf
-            row = np.asarray(self.neighbors)[riser.voxel_index]
-            for node in row[row >= 0]:
-                if self.surface_mask[node] and self.positions[node, 2] > band_floor:
-                    moves.append((int(node), tuple(self.positions[node])))
-            return moves
         for dx in [-self.voxel_size, 0, self.voxel_size]:
             for dy in [-self.voxel_size, 0, self.voxel_size]:
                 if dx == 0 and dy == 0:

@@ -29,13 +29,13 @@ from core.simulation_pipeline import (
     build_visualization_payload,
     create_analysis_options,
     prepare_mesh_and_geometry,
-    run_filling_for_mesh,
 )
+from core.filling_stage import maybe_run_filling
 from core.solidification import SOLVER_MODE_SCHEDULE_LEGACY, SolidificationEngine
 from core.part_manager import is_chill
 from core.solidification_loop import build_schedule_fraction_history, compute_schedule_fraction_solid
 from core.surrogate.conditioning import Conditioning, build_conditioning_vector
-from core.surrogate.fields import encode_channels, is_tet_mesh, unproject_grid
+from core.surrogate.fields import encode_channels, unproject_grid
 from core.surrogate.model import SurrogateModel
 from config.exceptions import SimulationError
 
@@ -198,13 +198,11 @@ def run_surrogate_pipeline(
     disabled_analyses = _disable_unsupported_analyses(analysis_options)
 
 
-    # On a tet run the fill solves on a lattice and comes back per node.
-    filling_result = run_filling_for_mesh(
+    filling_result = maybe_run_filling(
         voxel_mesh,
         alloy,
         analysis_options,
         inputs,
-        parts_with_types=parts_with_types,
         cancel_callback=cancel_callback,
         progress_message_callback=progress_message_callback,
     )
@@ -228,9 +226,6 @@ def run_surrogate_pipeline(
     engine._air_gap_slowdown = np.ones(len(voxel_mesh.voxel_centers), dtype=np.float32)
 
     config = _build_config(inputs, bounds_to_use, analysis_options)
-    if is_tet_mesh(voxel_mesh):
-        # Same feature capture_run records on a tet run: the tet edge length.
-        config["voxel_size"] = float(voxel_mesh.base_voxel_size)
     conditioning = build_conditioning_vector(alloy, config)
     resolution = int(getattr(model.manifest, "grid_resolution", 64) or 64)
 
@@ -241,7 +236,6 @@ def run_surrogate_pipeline(
     channels, meta = encode_channels(engine, chill_boost, riser_slowdown, resolution=resolution)
     prediction = model.predict(channels, conditioning)
 
-    # Voxel centres, or node coordinates on a tet run (voxel_centers == node_xyz).
     centers = np.asarray(voxel_mesh.voxel_centers, dtype=np.float64)
     start = unproject_grid(prediction[0], centers, meta)
     local = unproject_grid(prediction[2], centers, meta)
