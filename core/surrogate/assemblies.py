@@ -307,6 +307,10 @@ def build_assembly(family: str, rng: np.random.Generator, index: int = 0) -> Geo
         params["chill_count"] = float(sum(1 for _, c in parts if c == PART_TYPE_CHILL))
         params["fed_fraction"] = report.metrics.get("fed_fraction", 0.0)
         params = _round_params(params)
+        # Rigging ray-cast these meshes; drop the cached embree scenes, or a
+        # batch holding hundreds of specs exhausts native memory and segfaults.
+        for mesh, _code in parts:
+            mesh._cache.clear()
         return GeometrySpec(
             name=_spec_name(f"rig_{family}", index, params),
             family=f"rig_{family}",

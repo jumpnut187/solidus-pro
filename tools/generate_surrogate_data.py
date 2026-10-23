@@ -50,6 +50,7 @@ from core.surrogate.geometries import FAMILIES, iter_geometries, named_catalog, 
 from core.surrogate.training import (
     _load_plan,
     _plan_record_exists,
+    _run_on_large_stack,
     alloys_for_geometry,
     generate_dataset,
     generation_plan_key,
@@ -105,7 +106,10 @@ def main() -> int:
     default_families = COMPLEX_FAMILIES if args.complex else ASSEMBLY_FAMILIES if args.assemblies else FAMILIES
     families = [f.strip() for f in args.families.split(",") if f.strip()] or list(default_families)
     if args.assemblies or args.complex:
-        specs = list(iter_assemblies(args.count, seed=args.seed, families=families))
+        # Built on the solver's large-stack thread: rigging rasterises and
+        # ray-casts every design, and the same native recursion that needs it
+        # in the solver segfaults on the 8 MB macOS main-thread stack.
+        specs = _run_on_large_stack(lambda: list(iter_assemblies(args.count, seed=args.seed, families=families)))
     elif args.catalog:
         specs = list(named_catalog().values())
     else:

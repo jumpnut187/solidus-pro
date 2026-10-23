@@ -43,6 +43,7 @@ import numpy as np
 import trimesh
 from scipy import ndimage
 
+from core.cut_cells import winding_number_contains
 from core.part_manager import PART_TYPE_CAST, PART_TYPE_CHILL, PART_TYPE_CORE, PART_TYPE_RISER
 
 SAND, METAL, CORE, CHILL, RISER = 0, 1, 2, 3, 4
@@ -130,7 +131,11 @@ def rasterize(parts: Sequence[Part], frame: Optional[Raster] = None) -> Raster:
                 idx = np.stack(np.meshgrid(*[np.arange(a, b) for a, b in zip(i0, i1)], indexing="ij"), -1).reshape(-1, 3)
                 if len(idx) == 0:
                     continue
-                inside = np.asarray(shell.contains(origin + idx * pitch), dtype=bool)
+                # Winding number, not shell.contains: contains builds an embree
+                # scene per new shell object, rigging rasterises hundreds of
+                # times per design, and the scenes pile up until embree
+                # segfaults while building one.
+                inside = np.asarray(winding_number_contains(shell, origin + idx * pitch), dtype=bool)
                 hit = idx[inside]
                 labels[hit[:, 0], hit[:, 1], hit[:, 2]] = _LABEL_OF_CODE[code]
     return Raster(labels=labels, origin=origin, pitch=float(pitch))
@@ -253,11 +258,31 @@ def _place_riser(raster: Raster, target: np.ndarray, top, top_label, risers: Lis
     return None if best is None else best[1]
 
 
+def _axis_hits(mesh: trimesh.Trimesh, point: Sequence[float], axis: int) -> np.ndarray:
+    """Coordinates along ``axis`` where the axis-parallel line through ``point`` crosses ``mesh``.
+
+    A NumPy point-in-triangle test on the projection, not ``mesh.ray``:
+    the embree intersector builds a native scene per mesh object, rigging
+    draws many meshes, and the scenes pile up until embree segfaults.
+    """
+    other = [a for a in range(3) if a != axis]
+    tri = np.asarray(mesh.triangles, dtype=np.float64)
+    p = np.asarray(point, dtype=np.float64)[other]
+    a, b, c = tri[:, 0, other], tri[:, 1, other], tri[:, 2, other]
+    v0, v1, v2 = b - a, c - a, p - a
+    den = v0[:, 0] * v1[:, 1] - v1[:, 0] * v0[:, 1]
+    ok = np.abs(den) > 1e-12
+    den = np.where(ok, den, 1.0)
+    u = (v2[:, 0] * v1[:, 1] - v1[:, 0] * v2[:, 1]) / den
+    v = (v0[:, 0] * v2[:, 1] - v2[:, 0] * v0[:, 1]) / den
+    inside = ok & (u >= 0) & (v >= 0) & (u + v <= 1)
+    t = tri[inside]
+    return t[:, 0, axis] + u[inside] * (t[:, 1, axis] - t[:, 0, axis]) + v[inside] * (t[:, 2, axis] - t[:, 0, axis])
+
+
 def _riser_mesh(r: _Riser, cast: trimesh.Trimesh) -> trimesh.Trimesh:
-    hits, _, _ = cast.ray.intersects_location(
-        ray_origins=[[r.x, r.y, float(cast.bounds[1][2]) + 1.0]], ray_directions=[[0.0, 0.0, -1.0]]
-    )
-    top = float(np.max(hits[:, 2])) if len(hits) else r.z_base
+    hits = _axis_hits(cast, (r.x, r.y, 0.0), 2)
+    top = float(np.max(hits)) if len(hits) else r.z_base
     height = RISER_HEIGHT_RATIO * r.diameter
     mesh = trimesh.creation.cylinder(radius=r.diameter / 2, height=height, sections=48)
     mesh.apply_translation((r.x, r.y, top - RISER_SINK_IN + height / 2))
@@ -314,13 +339,8 @@ def _face_chill(
         centre[other], size[other] = centre_other, size_other
         if cast is not None:
             # Snap flush to the real face: the raster only knows it to a cell.
-            origin = centre.copy()
-            origin[axis] = face_coord + side * 2.0
-            direction = np.zeros(3)
-            direction[axis] = -side
-            hits, _, _ = cast.ray.intersects_location(ray_origins=[origin], ray_directions=[direction])
-            if len(hits):
-                coords = hits[:, axis]
+            coords = _axis_hits(cast, centre, axis)
+            if len(coords):
                 face_coord = float(coords.max() if side > 0 else coords.min())
         centre[axis] = face_coord + side * chill_t / 2
         size[axis] = chill_t
