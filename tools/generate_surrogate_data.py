@@ -27,6 +27,9 @@ Examples:
 
     # 120 rigged assemblies (riser, chill, sand core), 3 alloys each
     python tools/generate_surrogate_data.py --assemblies --count 120 --alloys-per-geometry 3
+
+    # 160 large multi-feature assemblies (12-36 in, several risers/cores/chills)
+    python tools/generate_surrogate_data.py --complex --count 160 --alloys-per-geometry 2
 """
 
 from __future__ import annotations
@@ -42,7 +45,7 @@ if PROJECT_ROOT not in sys.path:
 
 from core.materials import get_all_alloy_names
 from core.surrogate.dataset import DEFAULT_DATASET_DIR, last_load_skips, load_dataset
-from core.surrogate.assemblies import ASSEMBLY_FAMILIES, iter_assemblies
+from core.surrogate.assemblies import ASSEMBLY_FAMILIES, COMPLEX_FAMILIES, iter_assemblies
 from core.surrogate.geometries import FAMILIES, iter_geometries, named_catalog, voxel_size_for
 from core.surrogate.training import (
     _load_plan,
@@ -69,6 +72,10 @@ def main() -> int:
     parser.add_argument("--assemblies", action="store_true",
                         help="Rigged assemblies (casting + riser, optional chill, sand cores) from "
                              "core.surrogate.assemblies instead of bare castings.")
+    parser.add_argument("--complex", action="store_true",
+                        help=f"Large multi-feature assemblies ({', '.join(COMPLEX_FAMILIES)}); "
+                             "raises the voxel-size rule defaults to 250000 target / 400000 cap so "
+                             "the voxel size follows the encoding cell instead of the voxel count.")
     parser.add_argument("--alloys-per-geometry", type=int, default=None,
                         help="Run each geometry with this many of the alloys (seeded by name) "
                              "instead of all of them.")
@@ -78,21 +85,26 @@ def main() -> int:
     parser.add_argument("--out-dir", default=DEFAULT_DATASET_DIR, help="Record directory.")
     parser.add_argument("--grid", type=int, default=64, help="Encoding grid resolution (default 64).")
     parser.add_argument("--voxel-size", type=float, default=None, help="Fixed voxel size in inches (default: per-geometry rule).")
-    parser.add_argument("--target-voxels", type=int, default=20_000, help="Voxel-size rule target (default 20000).")
-    parser.add_argument("--max-voxels", type=int, default=50_000, help="Voxel-size rule hard cap (default 50000).")
+    parser.add_argument("--target-voxels", type=int, default=None,
+                        help="Voxel-size rule target (default 20000; 250000 with --complex).")
+    parser.add_argument("--max-voxels", type=int, default=None,
+                        help="Voxel-size rule hard cap (default 50000; 400000 with --complex).")
     parser.add_argument("--dense", action="store_true",
                         help="Force voxel size <= encoding cell (max_dim / grid) so the 64^3 occupancy "
                              "is dense like UI captures; raises voxel counts for small parts.")
     parser.add_argument("--no-retry-failed", action="store_true", help="Do not re-run combinations marked failed in the plan.")
     parser.add_argument("--dry-run", action="store_true", help="Print the plan and exit without solving.")
     args = parser.parse_args()
+    if args.target_voxels is None:
+        args.target_voxels = 250_000 if args.complex else 20_000
+    if args.max_voxels is None:
+        args.max_voxels = 400_000 if args.complex else 50_000
 
     alloys = [a.strip() for a in args.alloys.split(",") if a.strip()] or get_all_alloy_names()
     mold_constants = _parse_floats(args.mold_constants) or [280.0]
-    families = [f.strip() for f in args.families.split(",") if f.strip()] or list(
-        ASSEMBLY_FAMILIES if args.assemblies else FAMILIES
-    )
-    if args.assemblies:
+    default_families = COMPLEX_FAMILIES if args.complex else ASSEMBLY_FAMILIES if args.assemblies else FAMILIES
+    families = [f.strip() for f in args.families.split(",") if f.strip()] or list(default_families)
+    if args.assemblies or args.complex:
         specs = list(iter_assemblies(args.count, seed=args.seed, families=families))
     elif args.catalog:
         specs = list(named_catalog().values())

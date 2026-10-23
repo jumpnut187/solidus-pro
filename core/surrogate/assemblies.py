@@ -1,30 +1,32 @@
 """Seeded casting assemblies (casting + riser + chill + sand core) for surrogate training data.
 
 ``core.surrogate.geometries`` yields bare castings, so every record trained on
-them is a single CAST body cooling into sand. Real jobs are rigged: a riser
-feeds the heavy section, chills pull heat from a face, and sand cores form
-internal cavities that saturate and turn into hot spots. This module builds
-those assemblies as ``GeometrySpec`` objects carrying a ``parts`` list of
-``(mesh, part_code)`` pairs, which ``generate_dataset`` loads into a
-``PartManager`` like a user's multi-STL job.
+them is a single CAST body cooling into sand. Real jobs are rigged: risers
+feed the heavy sections, chills pull heat where feeding falls short, and sand
+cores form internal cavities that saturate and turn into hot spots. This
+module builds such assemblies as ``GeometrySpec`` objects carrying a
+``parts`` list of ``(mesh, part_code)`` pairs, which ``generate_dataset``
+loads into a ``PartManager`` like a user's multi-STL job.
 
-Rigging rules (inches; every assembly gets a riser):
+Every assembly is a sound design, because a model learns whatever its
+training castings show: a builder makes the casting and its cores, then
+``core.surrogate.design_rules.rig`` places and sizes the risers and chills
+from steel-foundry rules (modulus, feeding distance, chill placement) and
+``design_rules.check`` vets the result. A sample that cannot be rigged
+soundly is drawn again. Cores always have prints, are at least 0.5 in across
+and leave at least ``MIN_WALL_IN`` of metal around them.
 
-- Riser: a cylinder of height 1.5 D standing on the top face, sunk
-  ``RISER_SINK_IN`` into it. D follows the modulus rule
-  ``M_riser = 0.214 D >= 1.2 M_cast`` with ``M_cast = V / A`` of the
-  casting, times a factor in [0.7, 1.5], so some risers are undersized and
-  the casting shows shrinkage. D is capped by the top face.
-- Chill (probability ``CHILL_PROBABILITY``): a graphite block flush against
-  the bottom or the -x face, covering part of it.
-- Core (cored families only): a box or cylinder inside the casting, either
-  fully enclosed (no prints: the saturating case) or running through it with
-  prints that stand out of the casting. Walls around a core are at least
-  ``MIN_WALL_IN``. Core overlap with the casting is claimed by the core
-  (the higher part code), which is how a core forms a cavity.
+Two size classes:
+
+- ``ASSEMBLY_FAMILIES`` (3-14 in): cored boxes and cylinders, and the bare
+  ``geometries`` families rigged.
+- ``COMPLEX_FAMILIES`` (12-36 in): ribbed plates with cored bosses, cored
+  housings with a heavy pad, flanged hubs with a cored bore and cored bolt
+  bosses, stepped blocks with a cored heavy step. Solve these with the
+  larger voxel budget of ``tools/generate_surrogate_data.py --complex``.
 
 Part codes resolve overlap toward the higher code (CAST 0 < RISER 1 < CHILL 2
-< CORE 4), so the parts only need to touch or overlap; no booleans are needed.
+< CORE 4), so parts only need to touch or overlap; no booleans are needed.
 """
 
 from __future__ import annotations
@@ -34,8 +36,10 @@ from typing import Dict, Iterator, List, Sequence, Tuple
 import numpy as np
 import trimesh
 
-from core.part_manager import PART_TYPE_CAST, PART_TYPE_CHILL, PART_TYPE_CORE, PART_TYPE_RISER
+from core.part_manager import PART_TYPE_CHILL
+from core.surrogate import design_rules
 from core.surrogate.geometries import (
+    JUNCTION_OVERLAP_FRACTION,
     GeometrySpec,
     _box,
     _concat,
@@ -46,222 +50,272 @@ from core.surrogate.geometries import (
     sample_params,
 )
 
-#: Casting size range for assemblies (smaller than bare geometries: a rig
-#: adds a riser and core detail that need voxels).
 MIN_MAX_DIM_IN = 3.0
 MAX_MAX_DIM_IN = 14.0
-MIN_WALL_IN = 0.3
-RISER_SINK_IN = 0.1
-CHILL_PROBABILITY = 0.5
+COMPLEX_MIN_DIM_IN = 12.0
+COMPLEX_MAX_DIM_IN = 36.0
+MIN_WALL_IN = 0.375
+MIN_CORE_DIAMETER_IN = design_rules.MIN_CORE_DIAMETER_IN
+#: Draws per assembly before giving up on a family/seed position.
+MAX_DESIGN_ATTEMPTS = 25
 
-#: Families with a sand core.
 CORED_FAMILIES: List[str] = ["cored_box", "cored_cylinder", "cored_flanged_cylinder"]
-#: Families rigged with a riser and optional chill, no core.
 RIGGED_FAMILIES: List[str] = ["plate_with_boss", "t_section", "l_bracket", "stepped_plate", "box", "wedge"]
 ASSEMBLY_FAMILIES: List[str] = CORED_FAMILIES + RIGGED_FAMILIES
+COMPLEX_FAMILIES: List[str] = [
+    "complex_ribbed_plate",
+    "complex_cored_housing",
+    "complex_flanged_hub",
+    "complex_stepped_block",
+]
 
-Part = Tuple[trimesh.Trimesh, int]
+Built = Tuple[trimesh.Trimesh, List[trimesh.Trimesh], Dict[str, float], float]
 
 
-def _sample_dim(rng: np.random.Generator) -> float:
-    return float(np.exp(rng.uniform(np.log(MIN_MAX_DIM_IN), np.log(MAX_MAX_DIM_IN))))
+class DesignError(RuntimeError):
+    """No sound design was found for an assembly."""
+
+
+def _log_uniform(rng: np.random.Generator, lo: float, hi: float) -> float:
+    return float(np.exp(rng.uniform(np.log(lo), np.log(hi))))
 
 
 def _scaled_params(family: str, rng: np.random.Generator) -> Dict[str, float]:
     """``geometries.sample_params`` for ``family``, rescaled into the assembly size range."""
     params = sample_params(family, rng)
     spec = make_spec(family, params)
-    scale = _sample_dim(rng) / max(spec.max_dim, 1e-6)
-    out = {}
-    for key, value in params.items():
-        out[key] = value if key.endswith("_count") else max(0.25, value * scale)
-    return out
+    scale = _log_uniform(rng, MIN_MAX_DIM_IN, MAX_MAX_DIM_IN) / max(spec.max_dim, 1e-6)
+    return {k: v if k.endswith("_count") else max(0.25, v * scale) for k, v in params.items()}
 
 
-def _modulus(mesh: trimesh.Trimesh) -> float:
-    """Casting modulus V / A (inches); concatenated shells overcount both a little."""
-    return float(abs(mesh.volume)) / max(float(mesh.area), 1e-9)
+def _y_cylinder(radius: float, length: float, centre) -> trimesh.Trimesh:
+    """Cylinder with its axis along y."""
+    mesh = _cylinder(radius, length)
+    mesh.apply_transform(trimesh.transformations.rotation_matrix(np.pi / 2, (1, 0, 0)))
+    mesh.apply_translation(np.asarray(centre, dtype=np.float64))
+    return mesh
 
 
-def _riser_site(cast: trimesh.Trimesh) -> Tuple[Tuple[float, float], float]:
-    """Point on the topmost face to stand a riser on, and the largest diameter that fits there.
-
-    Samples a 21 x 21 grid just below the top of the bounding box, keeps the
-    points inside the casting (so a riser over an off-centre boss lands on
-    the boss, not in air), and picks the one nearest their centroid. The
-    diameter limit is twice its distance to the nearest point that missed.
-    """
-    lo, hi = cast.bounds
-    xs = np.linspace(lo[0], hi[0], 23)[1:-1]
-    ys = np.linspace(lo[1], hi[1], 23)[1:-1]
-    gx, gy = np.meshgrid(xs, ys, indexing="ij")
-    points = np.column_stack([gx.ravel(), gy.ravel(), np.full(gx.size, hi[2] - 1.5 * RISER_SINK_IN)])
-    inside = np.asarray(cast.contains(points), dtype=bool)
-    if not np.any(inside):
-        return (0.5 * (lo[0] + hi[0]), 0.5 * (lo[1] + hi[1])), 0.8 * float(min(hi[0] - lo[0], hi[1] - lo[1]))
-    hits = points[inside, :2]
-    centre = hits[np.argmin(np.linalg.norm(hits - hits.mean(axis=0), axis=1))]
-    misses = points[~inside, :2]
-    edge = np.min(np.linalg.norm(misses - centre, axis=1)) if len(misses) else 0.5 * float(min(hi[0] - lo[0], hi[1] - lo[1]))
-    return (float(centre[0]), float(centre[1])), 1.6 * float(edge)
-
-
-def _riser(cast: trimesh.Trimesh, rng: np.random.Generator, xy=None, max_diameter=None) -> Tuple[trimesh.Trimesh, float]:
-    """Cylinder riser on the top face at ``xy`` (default: ``_riser_site``)."""
-    lo, hi = cast.bounds
-    face_limit = 0.8 * float(min(hi[0] - lo[0], hi[1] - lo[1]))
-    if xy is None:
-        xy, site_limit = _riser_site(cast)
-        face_limit = min(face_limit, site_limit)
-    if max_diameter is not None:
-        face_limit = min(face_limit, float(max_diameter))
-    diameter = 1.2 * _modulus(cast) / 0.214 * rng.uniform(0.7, 1.5)
-    diameter = float(np.clip(diameter, 0.5, max(0.5, face_limit)))
-    height = 1.5 * diameter
-    # Stand on the local top surface (sloped and stepped tops sit below the
-    # bounding box), found by a ray straight down through the site.
-    hits, _, _ = cast.ray.intersects_location(
-        ray_origins=[[xy[0], xy[1], float(hi[2]) + 1.0]], ray_directions=[[0.0, 0.0, -1.0]]
-    )
-    top = float(np.max(hits[:, 2])) if len(hits) else float(hi[2])
-    z0 = top - RISER_SINK_IN
-    return _cylinder(diameter / 2.0, height, (xy[0], xy[1], z0 + height / 2.0)), diameter
-
-
-def _chill(cast: trimesh.Trimesh, rng: np.random.Generator, faces: Sequence[str]) -> Tuple[trimesh.Trimesh, str]:
-    """Graphite block flush against one of ``faces`` ("bottom" or "-x")."""
-    lo, hi = cast.bounds
-    ext = hi - lo
-    face = str(rng.choice(list(faces)))
-    thickness = float(np.clip(0.3 * float(ext.min()) * rng.uniform(0.6, 1.4), 0.3, 1.5))
-    cover = rng.uniform(0.35, 0.8)
-    if face == "bottom":
-        size = (ext[0] * cover, ext[1] * cover, thickness)
-        centre = (lo[0] + ext[0] * rng.uniform(cover / 2, 1 - cover / 2), 0.5 * (lo[1] + hi[1]), lo[2] - thickness / 2)
-    else:
-        size = (thickness, ext[1] * cover, ext[2] * cover)
-        centre = (lo[0] - thickness / 2, 0.5 * (lo[1] + hi[1]), lo[2] + ext[2] * rng.uniform(cover / 2, 1 - cover / 2))
-    return _box(size, centre), face
-
-
-def _cored_box(rng: np.random.Generator) -> Tuple[List[Part], Dict[str, float], float]:
-    D = _sample_dim(rng)
-    L, W, H = D, max(1.5, D * rng.uniform(0.4, 1.0)), max(1.5, D * rng.uniform(0.3, 0.8))
-    cast = _box((L, W, H))
-    wall = float(np.clip(min(L, W, H) * rng.uniform(0.12, 0.35), MIN_WALL_IN, None))
-    core_h = max(0.4, H - 2 * wall)
-    core_w = max(0.4, (L - 2 * wall) * rng.uniform(0.3, 1.0))
-    enclosed = bool(rng.uniform() < 0.5)
-    # Through cores run along y with prints standing 0.5-1.5 in out of both
-    # faces, so a bottom or -x chill and a top riser never meet them.
-    core_l = W - 2 * wall if enclosed else W + 2 * rng.uniform(0.5, 1.5)
-    cylindrical = bool(rng.uniform() < 0.5)
+def _through_core_y(width: float, height: float, length_in_metal: float, centre, rng, cylindrical: bool):
+    """Core along y running through the casting with a print 0.75-1.5 in out of each face."""
+    length = length_in_metal + 2 * rng.uniform(0.75, 1.5)
     if cylindrical:
-        radius = 0.5 * min(core_h, core_w)
-        core = _cylinder(radius, max(0.4, core_l), (0.0, 0.0, 0.0))
-        core.apply_transform(trimesh.transformations.rotation_matrix(np.pi / 2, (1, 0, 0)))
-        core_w = core_h = 2 * radius
-    else:
-        core = _box((core_w, max(0.4, core_l), core_h))
-    parts: List[Part] = [(cast, PART_TYPE_CAST), (core, PART_TYPE_CORE)]
-    params = {
-        "length": L, "width": W, "height": H, "wall": wall,
-        "core_width": core_w, "core_height": core_h, "core_length": core_l,
-        "core_enclosed": float(enclosed), "core_cylindrical": float(cylindrical),
-    }
-    return parts, params, wall
+        return _y_cylinder(0.5 * min(width, height), length, centre)
+    return _box((width, length, height), centre)
 
 
-def _cored_cylinder(rng: np.random.Generator) -> Tuple[List[Part], Dict[str, float], float]:
-    D = _sample_dim(rng)
+# ---------------------------------------------------------------------------
+# Small cored families (3-14 in)
+# ---------------------------------------------------------------------------
+
+
+def _cored_box(rng: np.random.Generator) -> Built:
+    D = _log_uniform(rng, MIN_MAX_DIM_IN, MAX_MAX_DIM_IN)
+    L, W, H = D, max(2.0, D * rng.uniform(0.4, 1.0)), max(2.0, D * rng.uniform(0.3, 0.8))
+    cast = _box((L, W, H))
+    wall = float(max(min(L, W, H) * rng.uniform(0.12, 0.3), MIN_WALL_IN))
+    core_h = H - 2 * wall
+    core_w = (L - 2 * wall) * rng.uniform(0.3, 1.0)
+    cylindrical = bool(rng.uniform() < 0.5)
+    core = _through_core_y(core_w, core_h, W, (0.0, 0.0, 0.0), rng, cylindrical)
+    params = {"length": L, "width": W, "height": H, "wall": wall, "core_width": core_w,
+              "core_height": core_h, "core_cylindrical": float(cylindrical)}
+    return cast, [core], params, wall
+
+
+def _cored_cylinder(rng: np.random.Generator) -> Built:
+    D = _log_uniform(rng, MIN_MAX_DIM_IN, MAX_MAX_DIM_IN)
     tall = bool(rng.uniform() < 0.5)
-    r_out = max(1.0, (D * rng.uniform(0.15, 0.4)) if tall else D / 2)
-    height = D if tall else max(1.5, D * rng.uniform(0.3, 0.8))
+    r_out = max(1.25, (D * rng.uniform(0.15, 0.4)) if tall else D / 2)
+    height = D if tall else max(2.0, D * rng.uniform(0.3, 0.8))
     cast = _cylinder(r_out, height)
-    r_core = max(0.25, (r_out - MIN_WALL_IN) * rng.uniform(0.2, 0.7))
-    enclosed = bool(rng.uniform() < 0.4)
-    if enclosed:
-        core_len = max(0.5, height - 2 * max(MIN_WALL_IN, r_out - r_core))
-        core = _cylinder(r_core, core_len)
+    r_core = max(0.5 * MIN_CORE_DIAMETER_IN, (r_out - MIN_WALL_IN) * rng.uniform(0.25, 0.7))
+    # Bore open at the bottom (print) and capped at the top, or through with prints both ends.
+    print_len = rng.uniform(0.75, 1.5)
+    if rng.uniform() < 0.5:
+        cap = max(MIN_WALL_IN, 0.2 * height)
+        length = height - cap + print_len
+        core = _cylinder(r_core, length, (0.0, 0.0, -height / 2 - print_len + length / 2))
     else:
-        # Through bore with a print out of the bottom only: the riser stands
-        # on the top face ring, and prints at both ends would sit under it.
-        print_len = rng.uniform(0.5, 1.5)
-        core_len = height - max(MIN_WALL_IN, 0.25 * height) + print_len
-        core = _cylinder(r_core, core_len, (0.0, 0.0, -height / 2 - print_len + core_len / 2))
-    parts: List[Part] = [(cast, PART_TYPE_CAST), (core, PART_TYPE_CORE)]
-    params = {
-        "outer_radius": r_out, "height": height, "core_radius": r_core,
-        "core_length": core_len, "core_enclosed": float(enclosed),
-    }
-    return parts, params, r_out - r_core
+        core = _cylinder(r_core, height + 2 * print_len)
+    params = {"outer_radius": r_out, "height": height, "core_radius": r_core}
+    return cast, [core], params, r_out - r_core
 
 
-def _cored_flanged_cylinder(rng: np.random.Generator) -> Tuple[List[Part], Dict[str, float], float]:
+def _cored_flanged_cylinder(rng: np.random.Generator) -> Built:
     params = _scaled_params("flanged_cylinder", rng)
-    # Room for a bore: body radius >= 1 in, flange wider than the body.
-    params["radius"] = max(params["radius"], 1.0)
-    params["flange_radius"] = max(params["flange_radius"], 1.3 * params["radius"])
+    params["radius"] = max(params["radius"], 1.25)
+    params["flange_radius"] = max(params["flange_radius"], 1.4 * params["radius"])
+    params["flange_thickness"] = max(params["flange_thickness"], MIN_WALL_IN)
     cast = make_spec("flanged_cylinder", params).mesh
-    r_core = max(0.25, (params["radius"] - MIN_WALL_IN) * rng.uniform(0.3, 0.75))
+    r_core = max(0.5 * MIN_CORE_DIAMETER_IN, (params["radius"] - MIN_WALL_IN) * rng.uniform(0.45, 0.75))
     lo, hi = cast.bounds
-    print_len = rng.uniform(0.5, 1.5)
-    length = float(hi[2] - lo[2]) + print_len
-    core = _cylinder(r_core, length, (0.0, 0.0, float(lo[2]) - print_len + length / 2 - MIN_WALL_IN))
-    params = dict(params, core_radius=r_core, core_length=length)
-    parts: List[Part] = [(cast, PART_TYPE_CAST), (core, PART_TYPE_CORE)]
-    return parts, params, min(params["flange_thickness"], params["radius"] - r_core)
+    print_len = rng.uniform(0.75, 1.5)
+    length = float(hi[2] - lo[2]) + 2 * print_len
+    core = _cylinder(r_core, length, (0.0, 0.0, 0.5 * float(lo[2] + hi[2])))
+    params["core_radius"] = r_core
+    return cast, [core], params, min(params["flange_thickness"], params["radius"] - r_core)
+
+
+def _rigged(family: str):
+    def build(rng: np.random.Generator) -> Built:
+        params = _scaled_params(family, rng)
+        spec = make_spec(family, params)
+        return spec.mesh, [], params, spec.min_thickness
+    return build
+
+
+# ---------------------------------------------------------------------------
+# Complex families (12-36 in)
+# ---------------------------------------------------------------------------
+
+
+def _complex_ribbed_plate(rng: np.random.Generator) -> Built:
+    """Plate with ribs along x and bosses in the bays; about half the bosses carry a cored bolt hole."""
+    L = _log_uniform(rng, COMPLEX_MIN_DIM_IN, COMPLEX_MAX_DIM_IN)
+    W = L * rng.uniform(0.45, 0.8)
+    t = float(np.clip(L * rng.uniform(0.03, 0.06), 0.6, 2.0))
+    n_ribs = int(rng.integers(2, 5))
+    rib_t = t * rng.uniform(0.7, 1.1)
+    rib_h = t * rng.uniform(1.5, 3.0)
+    overlap = JUNCTION_OVERLAP_FRACTION * min(t, rib_t)
+    shells = [_box((L, W, t), (0.0, 0.0, t / 2))]
+    rib_y = [-W / 2 + W * (i + 1) / (n_ribs + 1) for i in range(n_ribs)]
+    for y in rib_y:
+        shells.append(_box((0.92 * L, rib_t, rib_h), (0.0, y, t - overlap + rib_h / 2)))
+    bay_y = [(-W / 2 + rib_y[0]) / 2] + [(a + b) / 2 for a, b in zip(rib_y, rib_y[1:])] + [(rib_y[-1] + W / 2) / 2]
+    bay_w = W / (n_ribs + 1) - rib_t
+    n_bosses = int(rng.integers(2, 5))
+    boss_r = float(max(0.42 * bay_w * rng.uniform(0.6, 1.0), 0.75))
+    boss_h = rib_h * rng.uniform(1.1, 1.8)
+    cores = []
+    for x in np.linspace(-0.38 * L, 0.38 * L, n_bosses):
+        y = float(rng.choice(bay_y))
+        shells.append(_cylinder(boss_r, boss_h, (float(x), y, t - overlap + boss_h / 2)))
+        top = t - overlap + boss_h
+        r_core = boss_r * rng.uniform(0.35, 0.55)
+        if rng.uniform() < 0.5 and 2 * r_core >= MIN_CORE_DIAMETER_IN and boss_r - r_core >= MIN_WALL_IN:
+            print_len = rng.uniform(0.75, 1.5)
+            cores.append(_cylinder(r_core, top + 2 * print_len, (float(x), y, top / 2)))
+    params = {"length": L, "width": W, "thickness": t, "rib_count": float(n_ribs), "rib_thickness": rib_t,
+              "rib_height": rib_h, "boss_count": float(n_bosses), "boss_radius": boss_r,
+              "boss_height": boss_h, "core_count": float(len(cores))}
+    return _concat(shells), cores, params, min(t, rib_t)
+
+
+def _complex_cored_housing(rng: np.random.Generator) -> Built:
+    """Box housing with a through cavity core and a heavy top pad carrying its own through core."""
+    L = _log_uniform(rng, COMPLEX_MIN_DIM_IN, COMPLEX_MAX_DIM_IN)
+    W = L * rng.uniform(0.5, 0.85)
+    H = L * rng.uniform(0.3, 0.55)
+    wall = float(max(min(L, W, H) * rng.uniform(0.08, 0.16), 0.6))
+    pad_l = L * rng.uniform(0.25, 0.4)
+    pad_w = W * rng.uniform(0.45, 0.7)
+    pad_h = float(max(H * rng.uniform(0.2, 0.4), 2.0))
+    pad_x = float(rng.choice([-1.0, 1.0])) * (L / 2 - pad_l / 2 - wall)
+    overlap = JUNCTION_OVERLAP_FRACTION * min(wall, pad_h)
+    cast = _concat([_box((L, W, H), (0.0, 0.0, H / 2)), _box((pad_l, pad_w, pad_h), (pad_x, 0.0, H - overlap + pad_h / 2))])
+    cavity = _through_core_y(L - 2 * wall, H - 2 * wall, W, (0.0, 0.0, H / 2), rng, cylindrical=False)
+    # The pad core is a cored hole along y through the pad: small core, heavy metal.
+    pad_core_d = float(max(min(pad_l, pad_h) * rng.uniform(0.25, 0.45), MIN_CORE_DIAMETER_IN))
+    pad_core = _through_core_y(pad_core_d, pad_core_d, pad_w, (pad_x, 0.0, H - overlap + pad_h / 2), rng, cylindrical=True)
+    params = {"length": L, "width": W, "height": H, "wall": wall, "pad_length": pad_l, "pad_width": pad_w,
+              "pad_height": pad_h, "pad_core_diameter": pad_core_d}
+    return cast, [cavity, pad_core], params, wall
+
+
+def _complex_flanged_hub(rng: np.random.Generator) -> Built:
+    """Large flanged hub: cored bore and cored bolt bosses on the flange."""
+    rf = _log_uniform(rng, COMPLEX_MIN_DIM_IN, COMPLEX_MAX_DIM_IN) / 2
+    tf = float(max(rf * rng.uniform(0.08, 0.15), 0.75))
+    r = rf * rng.uniform(0.4, 0.6)
+    h = rf * rng.uniform(0.5, 1.1)
+    overlap = JUNCTION_OVERLAP_FRACTION * min(tf, h)
+    shells = [_cylinder(rf, tf, (0.0, 0.0, tf / 2)), _cylinder(r, h, (0.0, 0.0, tf - overlap + h / 2))]
+    top = tf - overlap + h
+    r_bore = r * rng.uniform(0.55, 0.75)
+    print_len = rng.uniform(1.0, 2.0)
+    cores = [_cylinder(r_bore, top + 2 * print_len, (0.0, 0.0, top / 2))]
+    n_bolts = int(rng.integers(3, 7))
+    bolt_at = 0.5 * (r + rf)
+    boss_r = float(max(0.35 * (rf - r) * rng.uniform(0.6, 1.0), 0.75))
+    boss_h = tf * rng.uniform(0.8, 1.6)
+    for a in np.linspace(0.0, 2 * np.pi, n_bolts, endpoint=False) + rng.uniform(0, np.pi):
+        x, y = bolt_at * np.cos(a), bolt_at * np.sin(a)
+        shells.append(_cylinder(boss_r, boss_h, (x, y, tf - overlap + boss_h / 2)))
+        cores.append(_cylinder(boss_r * 0.45, tf + boss_h + 2.0, (x, y, (tf + boss_h) / 2)))
+    params = {"flange_radius": rf, "flange_thickness": tf, "radius": r, "height": h,
+              "bore_radius": r_bore, "bolt_count": float(n_bolts), "boss_radius": boss_r}
+    return _concat(shells), cores, params, min(tf, r - r_bore, 0.55 * boss_r)
+
+
+def _complex_stepped_block(rng: np.random.Generator) -> Built:
+    """3-4 steps of different thickness with a cored hole through the heaviest step."""
+    L = _log_uniform(rng, COMPLEX_MIN_DIM_IN, COMPLEX_MAX_DIM_IN)
+    W = L * rng.uniform(0.3, 0.6)
+    steps = int(rng.integers(3, 5))
+    lengths = rng.dirichlet(np.ones(steps) * 3.0) * L
+    thick = np.sort(np.clip(L * rng.uniform(0.04, 0.25, steps), 0.75, None))
+    if rng.uniform() < 0.5:
+        thick = thick[::-1]
+    shells, centres, x0 = [], [], -L / 2
+    for length, t in zip(lengths, thick):
+        shells.append(_box((length + 0.25, W, t), (x0 + length / 2, 0.0, t / 2)))
+        centres.append(x0 + length / 2)
+        x0 += length
+    heavy = int(np.argmax(thick))
+    t_h, l_h = float(thick[heavy]), float(lengths[heavy])
+    cores = []
+    core_d = min(t_h, l_h) * rng.uniform(0.3, 0.5)
+    if core_d >= MIN_CORE_DIAMETER_IN and (t_h - core_d) / 2 >= MIN_WALL_IN:
+        cores.append(_through_core_y(core_d, core_d, W, (centres[heavy], 0.0, t_h / 2), rng, cylindrical=True))
+    params = {"length": L, "width": W, "step_count": float(steps), "max_thickness": t_h,
+              "min_thickness": float(thick.min()), "core_diameter": float(core_d if cores else 0.0)}
+    for i in range(steps):
+        params[f"step_length_{i}"] = float(lengths[i])
+        params[f"step_thickness_{i}"] = float(thick[i])
+    return _concat(shells), cores, params, float(thick.min())
+
+
+_BUILDERS = {
+    "cored_box": _cored_box,
+    "cored_cylinder": _cored_cylinder,
+    "cored_flanged_cylinder": _cored_flanged_cylinder,
+    **{family: _rigged(family) for family in RIGGED_FAMILIES},
+    "complex_ribbed_plate": _complex_ribbed_plate,
+    "complex_cored_housing": _complex_cored_housing,
+    "complex_flanged_hub": _complex_flanged_hub,
+    "complex_stepped_block": _complex_stepped_block,
+}
 
 
 def build_assembly(family: str, rng: np.random.Generator, index: int = 0) -> GeometrySpec:
-    """One seeded assembly of ``family`` (see module docstring)."""
-    if family in CORED_FAMILIES:
-        parts, params, min_thickness = {
-            "cored_box": _cored_box,
-            "cored_cylinder": _cored_cylinder,
-            "cored_flanged_cylinder": _cored_flanged_cylinder,
-        }[family](rng)
-    elif family in RIGGED_FAMILIES:
-        params = _scaled_params(family, rng)
-        spec = make_spec(family, params)
-        parts, min_thickness = [(spec.mesh, PART_TYPE_CAST)], spec.min_thickness
-    else:
+    """One sound assembly of ``family``: draws until ``design_rules.rig`` finds a design that passes.
+
+    Raises ``DesignError`` after ``MAX_DESIGN_ATTEMPTS`` unsound draws.
+    """
+    if family not in _BUILDERS:
         raise ValueError(f"Unknown assembly family: {family}")
-
-    cast = parts[0][0]
-    if family == "cored_cylinder":
-        # Ring top face: stand the riser on the metal between bore and rim.
-        r_out, r_core = params["outer_radius"], params["core_radius"]
-        ring = r_out - r_core
-        riser, diameter = _riser(cast, rng, xy=(r_core + ring / 2, 0.0), max_diameter=0.9 * ring)
-    elif family == "cored_flanged_cylinder":
-        ring = params["radius"] - params["core_radius"]
-        riser, diameter = _riser(
-            cast, rng, xy=(params["core_radius"] + ring / 2, 0.0), max_diameter=0.9 * ring
+    for _attempt in range(MAX_DESIGN_ATTEMPTS):
+        cast, cores, params, min_thickness = _BUILDERS[family](rng)
+        parts = design_rules.rig(cast, cores, rng)
+        if parts is None:
+            continue
+        report = design_rules.check(parts)
+        params = dict(params)
+        params["riser_count"] = report.metrics.get("riser_count", 0.0)
+        params["chill_count"] = float(sum(1 for _, c in parts if c == PART_TYPE_CHILL))
+        params["fed_fraction"] = report.metrics.get("fed_fraction", 0.0)
+        params = _round_params(params)
+        return GeometrySpec(
+            name=_spec_name(f"rig_{family}", index, params),
+            family=f"rig_{family}",
+            mesh=_concat([mesh for mesh, _ in parts]),
+            params=params,
+            min_thickness=float(max(min_thickness, 0.25)),
+            parts=parts,
         )
-    else:
-        riser, diameter = _riser(cast, rng)
-    parts.append((riser, PART_TYPE_RISER))
-    params["riser_diameter"] = diameter
-
-    if rng.uniform() < CHILL_PROBABILITY:
-        faces = ("bottom",) if family in ("cored_cylinder", "cored_flanged_cylinder") else ("bottom", "-x")
-        if family in ("cored_cylinder", "cored_flanged_cylinder") and not params.get("core_enclosed", 0.0):
-            faces = ()  # the bore print stands out of the bottom face
-        if faces:
-            chill, face = _chill(cast, rng, faces)
-            parts.append((chill, PART_TYPE_CHILL))
-            params["chill_face_bottom"] = float(face == "bottom")
-
-    params = _round_params(params)
-    return GeometrySpec(
-        name=_spec_name(f"rig_{family}", index, params),
-        family=f"rig_{family}",
-        mesh=_concat([mesh for mesh, _ in parts]),
-        params=params,
-        min_thickness=float(max(min_thickness, 0.25)),
-        parts=parts,
-    )
+    raise DesignError(f"no sound {family} design in {MAX_DESIGN_ATTEMPTS} draws")
 
 
 def iter_assemblies(
@@ -269,15 +323,20 @@ def iter_assemblies(
     seed: int = 0,
     families: Sequence[str] = tuple(ASSEMBLY_FAMILIES),
 ) -> Iterator[GeometrySpec]:
-    """Yield ``count`` seeded assemblies, cycling through ``families``.
+    """Yield up to ``count`` sound assemblies, cycling through ``families``.
 
     Deterministic in ``(count, seed, families)``; a shorter run is a prefix
-    of a longer one.
+    of a longer one. A family position that yields no sound design in
+    ``MAX_DESIGN_ATTEMPTS`` draws is skipped, so fewer than ``count`` may
+    come back.
     """
     families = list(families)
-    unknown = [f for f in families if f not in ASSEMBLY_FAMILIES]
+    unknown = [f for f in families if f not in _BUILDERS]
     if unknown:
         raise ValueError(f"Unknown assembly families: {unknown}")
     rng = np.random.default_rng(seed)
     for index in range(int(count)):
-        yield build_assembly(families[index % len(families)], rng, index=index)
+        try:
+            yield build_assembly(families[index % len(families)], rng, index=index)
+        except DesignError:
+            continue
