@@ -150,6 +150,26 @@ def _scatter(centers: np.ndarray, values: np.ndarray, meta: GridMeta) -> np.ndar
     return grid.reshape(r, r, r)
 
 
+def _scatter_mode(centers: np.ndarray, codes: np.ndarray, meta: GridMeta) -> np.ndarray:
+    """Majority part code of the voxels in each grid cell (ties to the higher code), 0 where empty.
+
+    Part codes are categories, so they are not averaged: half CAST (0) and
+    half CORE (4/3) would average to 2/3, the CHILL code, and every metal
+    cell on a core face would read as chill.
+    """
+    r = meta.resolution
+    flat_idx = _grid_cells(centers, meta.bbox[:, 0], meta.cell_size, r)
+    codes = np.asarray(codes, dtype=np.int64)
+    best = np.zeros(r * r * r, dtype=np.int64)
+    best_count = np.zeros(r * r * r, dtype=np.int64)
+    for code in np.unique(codes):
+        count = np.bincount(flat_idx[codes == code], minlength=r * r * r)
+        wins = (count > 0) & (count >= best_count)
+        best[wins] = code
+        best_count[wins] = count[wins]
+    return best.reshape(r, r, r)
+
+
 @dataclass
 class EncodingPoints:
     """The points a mesh is encoded from: the voxel centres, framed by the voxel-centre box."""
@@ -250,11 +270,7 @@ def encode_channels(
     channels = np.zeros((len(CHANNELS), resolution, resolution, resolution), dtype=np.float32)
 
     channels[0] = _scatter(centers, np.ones(n_voxels, dtype=np.float32), meta)
-    channels[1] = _scatter(
-        centers,
-        apply_part_type_aliases(part_types).astype(np.float32) / PART_TYPE_DIVISOR,
-        meta,
-    )
+    channels[1] = _scatter_mode(centers, apply_part_type_aliases(part_types), meta).astype(np.float32) / PART_TYPE_DIVISOR
     channels[2] = _scatter(centers, np.clip(surface_distances / max_dim, 0.0, 1.0), meta)
     channels[3] = _scatter(centers, np.clip(moduli / max_dim, 0.0, 1.0), meta)
     channels[4] = _scatter(centers, np.clip(heights, 0.0, 1.0), meta)

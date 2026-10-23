@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterator, List, Sequence
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 import trimesh
@@ -60,6 +60,9 @@ class GeometrySpec:
         mesh: Closed trimesh (single shell or concatenated shells).
         params: Sampled dimensions in inches.
         min_thickness: Thinnest section (inches); used by the voxel-size rule.
+        parts: Optional ``(mesh, part_code)`` list for a multi-part assembly
+            (``core.surrogate.assemblies``); ``mesh`` is then their
+            concatenation, used for sizing only. None: ``mesh`` is one CAST.
     """
 
     name: str
@@ -67,6 +70,7 @@ class GeometrySpec:
     mesh: trimesh.Trimesh
     params: Dict[str, float] = field(default_factory=dict)
     min_thickness: float = 1.0
+    parts: Optional[List[Tuple[trimesh.Trimesh, int]]] = None
 
     @property
     def max_dim(self) -> float:

@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import tempfile
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -156,6 +157,36 @@ def _plan_record_exists(entry: Dict[str, Any], out_dir: str) -> bool:
     return os.path.exists(path) or os.path.exists(os.path.join(out_dir, os.path.basename(path)))
 
 
+def _part_manager_for(spec: Any, work_dir: str):
+    """``PartManager`` holding ``spec.parts``, each written to an STL in ``work_dir`` and loaded in place."""
+    from core.part_manager import CODE_TO_PART_TYPE, PartManager
+
+    manager = PartManager()
+    for index, (mesh, code) in enumerate(spec.parts):
+        path = os.path.join(work_dir, f"part_{index}.stl")
+        mesh.export(path)
+        part_id = manager.load_part(path, name=f"{CODE_TO_PART_TYPE[int(code)].value}_{index}", preserve_origin=True)
+        if part_id is None:
+            raise RuntimeError(f"could not load assembly part {index} of {spec.name}")
+        manager.get_part(part_id).set_part_type(CODE_TO_PART_TYPE[int(code)])
+    return manager
+
+
+def alloys_for_geometry(name: str, alloys: List[str], per_geometry: Optional[int]) -> List[str]:
+    """The alloys one geometry runs with: all of them, or a subset of ``per_geometry`` seeded by its name.
+
+    A subset spreads a fixed solver budget over more shapes; seeding by name
+    keeps a resumed batch on the same combinations.
+    """
+    if per_geometry is None or per_geometry >= len(alloys):
+        return list(alloys)
+    import hashlib
+
+    seed = int(hashlib.sha1(name.encode()).hexdigest()[:8], 16)
+    picks = np.random.default_rng(seed).choice(len(alloys), size=max(1, int(per_geometry)), replace=False)
+    return [alloys[i] for i in sorted(picks)]
+
+
 def _as_geometry_specs(geometries) -> List[Any]:
     """Accept ``GeometrySpec`` objects or ``(name, mesh)`` pairs."""
     from core.surrogate.geometries import GeometrySpec
@@ -195,6 +226,7 @@ def generate_dataset(
     mold_constants: Optional[List[float]] = None,
     plan_path: Optional[str] = None,
     retry_failed: bool = True,
+    alloys_per_geometry: Optional[int] = None,
 ) -> int:
     """Run the full solver over geometries x alloys x mold constants and capture runs.
 
@@ -221,6 +253,12 @@ def generate_dataset(
             ``invalid`` are skipped, which makes a batch resumable even though
             ``capture_run`` names files from a time hash.
         retry_failed: Re-run combinations the plan marks ``failed``.
+        alloys_per_geometry: Run each geometry with this many of ``alloys``
+            (``alloys_for_geometry``) instead of all of them.
+
+    A ``GeometrySpec`` with ``parts`` (``core.surrogate.assemblies``) runs as
+    a multi-part job: casting, riser, chill and core loaded into a
+    ``PartManager`` with their part types.
 
     Every run executes on a 256 MB-stack thread (``_run_on_large_stack``) and
     inside ``try/except`` so one failure does not stop the batch.
@@ -247,15 +285,15 @@ def generate_dataset(
     mold_constants = [float(m) for m in (mold_constants or [280.0])]
 
     plan = _load_plan(plan_path)
-    total = len(specs) * len(alloys) * len(mold_constants)
+    total = sum(len(alloys_for_geometry(spec.name, alloys, alloys_per_geometry)) for spec in specs) * len(mold_constants)
     generated = 0
     done = 0
     for spec in specs:
         run_voxel_size = float(voxel_size) if voxel_size is not None else voxel_size_for(
             spec, grid=grid, target_voxels=target_voxels, max_voxels=max_voxels, dense=dense
         )
-        loader = _loader_for_trimesh(spec.mesh)
-        for alloy in alloys:
+        loader = _loader_for_trimesh(spec.mesh) if spec.parts is None else None
+        for alloy in alloys_for_geometry(spec.name, alloys, alloys_per_geometry):
             for mold_constant in mold_constants:
                 _check_cancel(cancel_cb)
                 done += 1
@@ -288,7 +326,10 @@ def generate_dataset(
                 try:
                     def _solve():
                         with contextlib.redirect_stdout(io.StringIO()):
-                            return run_pipeline(inputs, stl_loader=loader)
+                            if spec.parts is None:
+                                return run_pipeline(inputs, stl_loader=loader)
+                            with tempfile.TemporaryDirectory(prefix="surrogate_parts_") as work_dir:
+                                return run_pipeline(inputs, part_manager=_part_manager_for(spec, work_dir))
 
                     result = _run_on_large_stack(_solve)
                     entry["voxels"] = int(len(result.engine.mesh.voxel_centers))

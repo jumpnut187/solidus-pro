@@ -24,6 +24,9 @@ Examples:
     # Smoke batch into a temp dir
     python tools/generate_surrogate_data.py --count 3 --alloys WCB,CF8 \
         --out-dir /tmp/surrogate_smoke
+
+    # 120 rigged assemblies (riser, chill, sand core), 3 alloys each
+    python tools/generate_surrogate_data.py --assemblies --count 120 --alloys-per-geometry 3
 """
 
 from __future__ import annotations
@@ -39,8 +42,15 @@ if PROJECT_ROOT not in sys.path:
 
 from core.materials import get_all_alloy_names
 from core.surrogate.dataset import DEFAULT_DATASET_DIR, last_load_skips, load_dataset
+from core.surrogate.assemblies import ASSEMBLY_FAMILIES, iter_assemblies
 from core.surrogate.geometries import FAMILIES, iter_geometries, named_catalog, voxel_size_for
-from core.surrogate.training import _load_plan, _plan_record_exists, generate_dataset, generation_plan_key
+from core.surrogate.training import (
+    _load_plan,
+    _plan_record_exists,
+    alloys_for_geometry,
+    generate_dataset,
+    generation_plan_key,
+)
 
 PLAN_FILENAME = "generation_plan.json"
 
@@ -53,7 +63,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Generate surrogate training records from synthetic geometries.")
     parser.add_argument("--count", type=int, default=20, help="Number of seeded geometries (default 20).")
     parser.add_argument("--seed", type=int, default=0, help="Geometry RNG seed (default 0).")
-    parser.add_argument("--families", default="", help=f"Comma-separated subset of {FAMILIES} (default all).")
+    parser.add_argument("--families", default="",
+                        help=f"Comma-separated subset of {FAMILIES}, or of {ASSEMBLY_FAMILIES} "
+                             "with --assemblies (default all).")
+    parser.add_argument("--assemblies", action="store_true",
+                        help="Rigged assemblies (casting + riser, optional chill, sand cores) from "
+                             "core.surrogate.assemblies instead of bare castings.")
+    parser.add_argument("--alloys-per-geometry", type=int, default=None,
+                        help="Run each geometry with this many of the alloys (seeded by name) "
+                             "instead of all of them.")
     parser.add_argument("--catalog", action="store_true", help="Use the fixed named catalog instead of seeded geometries.")
     parser.add_argument("--alloys", default="", help="Comma-separated alloy names (default: all catalog alloys).")
     parser.add_argument("--mold-constants", default="280", help="Comma-separated chvorinov_mold_constant values (default 280).")
@@ -71,16 +89,21 @@ def main() -> int:
 
     alloys = [a.strip() for a in args.alloys.split(",") if a.strip()] or get_all_alloy_names()
     mold_constants = _parse_floats(args.mold_constants) or [280.0]
-    families = [f.strip() for f in args.families.split(",") if f.strip()] or list(FAMILIES)
-    if args.catalog:
+    families = [f.strip() for f in args.families.split(",") if f.strip()] or list(
+        ASSEMBLY_FAMILIES if args.assemblies else FAMILIES
+    )
+    if args.assemblies:
+        specs = list(iter_assemblies(args.count, seed=args.seed, families=families))
+    elif args.catalog:
         specs = list(named_catalog().values())
     else:
         specs = list(iter_geometries(args.count, seed=args.seed, families=families))
     plan_path = os.path.join(args.out_dir, PLAN_FILENAME)
     plan = _load_plan(plan_path)
 
-    total = len(specs) * len(alloys) * len(mold_constants)
-    print(f"Plan: {len(specs)} geometries x {len(alloys)} alloys x {len(mold_constants)} mold constants = {total} runs")
+    total = sum(len(alloys_for_geometry(s.name, alloys, args.alloys_per_geometry)) for s in specs) * len(mold_constants)
+    per = f"{args.alloys_per_geometry} of {len(alloys)}" if args.alloys_per_geometry else f"{len(alloys)}"
+    print(f"Plan: {len(specs)} geometries x {per} alloys x {len(mold_constants)} mold constants = {total} runs")
     print(f"  out-dir: {args.out_dir}  grid: {args.grid}  plan: {plan_path}")
     pending = 0
     for spec in specs:
@@ -91,7 +114,7 @@ def main() -> int:
         est = spec.mesh.volume / vs ** 3
         cell = spec.max_dim / args.grid
         statuses = []
-        for alloy in alloys:
+        for alloy in alloys_for_geometry(spec.name, alloys, args.alloys_per_geometry):
             for mc in mold_constants:
                 entry = plan.get(generation_plan_key(spec.name, alloy, mc, vs, args.grid))
                 status = entry.get("status") if entry else "pending"
@@ -123,6 +146,7 @@ def main() -> int:
         mold_constants=mold_constants,
         plan_path=plan_path,
         retry_failed=not args.no_retry_failed,
+        alloys_per_geometry=args.alloys_per_geometry,
     )
     elapsed = time.time() - started
     plan = _load_plan(plan_path)
