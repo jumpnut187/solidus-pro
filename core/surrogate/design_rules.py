@@ -15,9 +15,12 @@ Rules (steel; ``core/riser_design.py`` uses the same constants):
 - Riser modulus (Caine / Wlodawer): ``MEF * M_riser >= RISER_MODULUS_FACTOR *
   M_zone`` (MEF: insulating sleeve, ``RISER_SLEEVE_MEF``), where the zone is the metal a riser feeds (nearest riser) and
   ``M_zone = V / A`` with A the zone's cooling surface: faces to sand and
-  chill count fully, faces to a core count half (a core heats up and stops
-  extracting heat), faces to a riser or to another zone not at all. A
-  cylinder riser with H = 1.5 D standing on the casting has M = 0.214 D.
+  chill count fully; faces to a core, a riser or another zone not at all. A
+  core saturates (heats through) well before the metal around it freezes,
+  so it stops extracting heat; counting core faces at half cooling left the
+  metal around cores freezing after the risers in most solved housings and
+  hubs. A cylinder riser with H = 1.5 D standing on the casting has
+  M = 0.214 D.
 - Riser placement: each riser stands on a flat, clear patch of the top
   surface over the heaviest unfed section (largest inscribed radius).
 - Feeding distance (SFSA plate/bar rules): metal is fed when it lies within
@@ -32,6 +35,9 @@ Rules (steel; ``core/riser_design.py`` uses the same constants):
   Cored holes are at least ``MIN_CORE_DIAMETER_IN`` across.
 - One connected casting; every riser fully seated on metal; every chill in
   contact with the casting.
+
+Rules of thumb can still miss a hot spot, so the solved run is checked too
+(``unfed_metal``): the last metal to freeze must be in a riser.
 """
 
 from __future__ import annotations
@@ -67,7 +73,7 @@ FED_FRACTION_REQUIRED = 0.99
 CHILL_EXTENSION_T = 2.0
 CHILL_EXTENSION_MAX_IN = 2.0
 MIN_CORE_DIAMETER_IN = 0.5
-CORE_FACE_WEIGHT = 0.5
+CORE_FACE_WEIGHT = 0.0
 MAX_RASTER_CELLS = 1_200_000
 
 Part = Tuple[trimesh.Trimesh, int]
@@ -91,6 +97,28 @@ class DesignReport:
     @property
     def ok(self) -> bool:
         return not self.violations
+
+
+def unfed_metal(part_types: np.ndarray, end_times: np.ndarray) -> Optional[str]:
+    """Why a solved assembly is unsound, or ``None``: casting metal that freezes after every riser.
+
+    ``part_types`` and ``end_times`` are per solver voxel. Metal still liquid
+    when the last riser freezes cannot be fed, so it shrinks.
+    """
+    part_types = np.asarray(part_types)
+    end_times = np.asarray(end_times, dtype=np.float64)
+    cast = part_types == PART_TYPE_CAST
+    riser = part_types == PART_TYPE_RISER
+    if not riser.any() or not cast.any():
+        return None
+    riser_end = float(end_times[riser].max())
+    late = cast & (end_times > riser_end)
+    if not late.any():
+        return None
+    return (
+        f"unfed metal: {late.sum() / cast.sum():.2%} of the casting freezes after the last riser "
+        f"({float(end_times[cast].max()):.0f} s vs {riser_end:.0f} s)"
+    )
 
 
 def feeding_distance(thickness_in: float) -> float:
@@ -334,14 +362,24 @@ def _face_chill(
         centre_other = raster.origin[other] + cols.mean(axis=0) * pitch
         face_index = face if side < 0 else depth - 1 - face
         face_coord = raster.origin[axis] + (face_index + 0.5 * side) * pitch
+        if cast is not None:
+            # Keep the block inside the casting outline, then snap it flush to
+            # the real face (the raster only knows it to a cell), sampling the
+            # whole footprint: its centre can sit over a thinner step.
+            lo_o = np.maximum(centre_other - size_other / 2, cast.bounds[0][other])
+            hi_o = np.minimum(centre_other + size_other / 2, cast.bounds[1][other])
+            centre_other, size_other = (lo_o + hi_o) / 2, hi_o - lo_o
+            hits = []
+            for u in np.linspace(lo_o[0], hi_o[0], 7)[1:-1]:
+                for v in np.linspace(lo_o[1], hi_o[1], 7)[1:-1]:
+                    point = np.zeros(3)
+                    point[other] = (u, v)
+                    hits.extend(_axis_hits(cast, point, axis))
+            if hits:
+                face_coord = float(max(hits) if side > 0 else min(hits))
         centre = np.zeros(3)
         size = np.zeros(3)
         centre[other], size[other] = centre_other, size_other
-        if cast is not None:
-            # Snap flush to the real face: the raster only knows it to a cell.
-            coords = _axis_hits(cast, centre, axis)
-            if len(coords):
-                face_coord = float(coords.max() if side > 0 else coords.min())
         centre[axis] = face_coord + side * chill_t / 2
         size[axis] = chill_t
         if axis == 2 and any(np.hypot(centre[0] - r.x, centre[1] - r.y) < r.diameter for r in risers):

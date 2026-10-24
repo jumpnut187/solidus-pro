@@ -30,6 +30,9 @@ Examples:
 
     # 160 large multi-feature assemblies (12-36 in, several risers/cores/chills)
     python tools/generate_surrogate_data.py --complex --count 160 --alloys-per-geometry 2
+
+    # 160 heavy-section assemblies (18-48 in, 6-14 in sections, 1000-3500 s freezes)
+    python tools/generate_surrogate_data.py --heavy --count 160 --alloys-per-geometry 2
 """
 
 from __future__ import annotations
@@ -45,7 +48,7 @@ if PROJECT_ROOT not in sys.path:
 
 from core.materials import get_all_alloy_names
 from core.surrogate.dataset import DEFAULT_DATASET_DIR, last_load_skips, load_dataset
-from core.surrogate.assemblies import ASSEMBLY_FAMILIES, COMPLEX_FAMILIES, iter_assemblies
+from core.surrogate.assemblies import ASSEMBLY_FAMILIES, COMPLEX_FAMILIES, HEAVY_FAMILIES, iter_assemblies
 from core.surrogate.geometries import FAMILIES, iter_geometries, named_catalog, voxel_size_for
 from core.surrogate.training import (
     _load_plan,
@@ -77,6 +80,9 @@ def main() -> int:
                         help=f"Large multi-feature assemblies ({', '.join(COMPLEX_FAMILIES)}); "
                              "raises the voxel-size rule defaults to 250000 target / 400000 cap so "
                              "the voxel size follows the encoding cell instead of the voxel count.")
+    parser.add_argument("--heavy", action="store_true",
+                        help=f"Heavy-section assemblies ({', '.join(HEAVY_FAMILIES)}), 18-48 in with "
+                             "6-14 in sections; same voxel-size rule defaults as --complex.")
     parser.add_argument("--alloys-per-geometry", type=int, default=None,
                         help="Run each geometry with this many of the alloys (seeded by name) "
                              "instead of all of them.")
@@ -87,25 +93,31 @@ def main() -> int:
     parser.add_argument("--grid", type=int, default=64, help="Encoding grid resolution (default 64).")
     parser.add_argument("--voxel-size", type=float, default=None, help="Fixed voxel size in inches (default: per-geometry rule).")
     parser.add_argument("--target-voxels", type=int, default=None,
-                        help="Voxel-size rule target (default 20000; 250000 with --complex).")
+                        help="Voxel-size rule target (default 20000; 250000 with --complex/--heavy).")
     parser.add_argument("--max-voxels", type=int, default=None,
-                        help="Voxel-size rule hard cap (default 50000; 400000 with --complex).")
+                        help="Voxel-size rule hard cap (default 50000; 400000 with --complex/--heavy).")
     parser.add_argument("--dense", action="store_true",
                         help="Force voxel size <= encoding cell (max_dim / grid) so the 64^3 occupancy "
                              "is dense like UI captures; raises voxel counts for small parts.")
     parser.add_argument("--no-retry-failed", action="store_true", help="Do not re-run combinations marked failed in the plan.")
     parser.add_argument("--dry-run", action="store_true", help="Print the plan and exit without solving.")
     args = parser.parse_args()
+    large = args.complex or args.heavy
     if args.target_voxels is None:
-        args.target_voxels = 250_000 if args.complex else 20_000
+        args.target_voxels = 250_000 if large else 20_000
     if args.max_voxels is None:
-        args.max_voxels = 400_000 if args.complex else 50_000
+        args.max_voxels = 400_000 if large else 50_000
 
     alloys = [a.strip() for a in args.alloys.split(",") if a.strip()] or get_all_alloy_names()
     mold_constants = _parse_floats(args.mold_constants) or [280.0]
-    default_families = COMPLEX_FAMILIES if args.complex else ASSEMBLY_FAMILIES if args.assemblies else FAMILIES
+    if args.heavy:
+        default_families = HEAVY_FAMILIES
+    elif args.complex:
+        default_families = COMPLEX_FAMILIES
+    else:
+        default_families = ASSEMBLY_FAMILIES if args.assemblies else FAMILIES
     families = [f.strip() for f in args.families.split(",") if f.strip()] or list(default_families)
-    if args.assemblies or args.complex:
+    if args.assemblies or large:
         # Built on the solver's large-stack thread: rigging rasterises and
         # ray-casts every design, and the same native recursion that needs it
         # in the solver segfaults on the 8 MB macOS main-thread stack.

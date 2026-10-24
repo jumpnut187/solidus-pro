@@ -24,6 +24,7 @@ import numpy as np
 
 from core.materials import get_all_alloy_names
 from core.simulation_pipeline import PipelineInputs, run_pipeline
+from core.surrogate import design_rules
 from core.surrogate.dataset import DEFAULT_DATASET_DIR, capture_run, load_dataset
 from core.surrogate.metrics import (
     aggregate_schedule_metrics,
@@ -258,7 +259,9 @@ def generate_dataset(
 
     A ``GeometrySpec`` with ``parts`` (``core.surrogate.assemblies``) runs as
     a multi-part job: casting, riser, chill and core loaded into a
-    ``PartManager`` with their part types.
+    ``PartManager`` with their part types. Such a run whose casting freezes
+    after its last riser (``design_rules.unfed_metal``) is marked ``invalid``
+    in the plan and no record is written.
 
     Every run executes on a 256 MB-stack thread (``_run_on_large_stack``) and
     inside ``try/except`` so one failure does not stop the batch.
@@ -333,27 +336,39 @@ def generate_dataset(
 
                     result = _run_on_large_stack(_solve)
                     entry["voxels"] = int(len(result.engine.mesh.voxel_centers))
-                    captured = capture_run(
-                        result.engine,
-                        voxel_size=run_voxel_size,
-                        resolution=grid,
-                        out_dir=out_dir,
+                    # Train only on sound rigging: a design the rules passed
+                    # can still leave metal freezing after its risers.
+                    unsound = None if spec.parts is None else design_rules.unfed_metal(
+                        result.engine.mesh.voxel_part_types, result.engine.solidification_times
                     )
-                    entry["wall_s"] = round(time.time() - started, 2)
-                    if not captured:
-                        raise RuntimeError("capture_run returned None")
-                    entry["path"] = captured
-                    reason = validate_record(load_record(captured))
-                    if reason is None:
-                        entry["status"] = "done"
-                        generated += 1
-                        if progress_cb:
-                            progress_cb(f"    ok: {entry['voxels']} voxels, {entry['wall_s']:.1f}s -> {os.path.basename(captured)}")
-                    else:
+                    if unsound is not None:
                         entry["status"] = "invalid"
-                        entry["error"] = reason
+                        entry["error"] = unsound
+                        entry["wall_s"] = round(time.time() - started, 2)
                         if progress_cb:
-                            progress_cb(f"    captured but fails validation ({reason}): {os.path.basename(captured)}")
+                            progress_cb(f"    rejected, {unsound}")
+                    else:
+                        captured = capture_run(
+                            result.engine,
+                            voxel_size=run_voxel_size,
+                            resolution=grid,
+                            out_dir=out_dir,
+                        )
+                        entry["wall_s"] = round(time.time() - started, 2)
+                        if not captured:
+                            raise RuntimeError("capture_run returned None")
+                        entry["path"] = captured
+                        reason = validate_record(load_record(captured))
+                        if reason is None:
+                            entry["status"] = "done"
+                            generated += 1
+                            if progress_cb:
+                                progress_cb(f"    ok: {entry['voxels']} voxels, {entry['wall_s']:.1f}s -> {os.path.basename(captured)}")
+                        else:
+                            entry["status"] = "invalid"
+                            entry["error"] = reason
+                            if progress_cb:
+                                progress_cb(f"    captured but fails validation ({reason}): {os.path.basename(captured)}")
                 except TrainingCancelledError:
                     raise
                 except Exception as exc:

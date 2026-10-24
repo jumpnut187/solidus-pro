@@ -5,13 +5,22 @@ from __future__ import annotations
 import tempfile
 import unittest
 from collections import Counter
+from unittest import mock
 
 import numpy as np
 import trimesh
+from scipy import ndimage
 
 from core.part_manager import PART_TYPE_CAST, PART_TYPE_CHILL, PART_TYPE_CORE, PART_TYPE_RISER
 from core.surrogate import design_rules
-from core.surrogate.assemblies import ASSEMBLY_FAMILIES, COMPLEX_FAMILIES, CORED_FAMILIES, iter_assemblies
+from core.surrogate.assemblies import (
+    ASSEMBLY_FAMILIES,
+    COMPLEX_FAMILIES,
+    CORED_FAMILIES,
+    HEAVY_FAMILIES,
+    HEAVY_SECTION_IN,
+    iter_assemblies,
+)
 from core.surrogate.dataset import load_dataset
 from core.surrogate.fields import CHANNELS, PART_TYPE_DIVISOR
 from core.surrogate.training import alloys_for_geometry, generate_dataset
@@ -22,35 +31,46 @@ class AssemblyGeneratorTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.specs = list(iter_assemblies(len(ASSEMBLY_FAMILIES), seed=3))
         cls.complex = list(iter_assemblies(len(COMPLEX_FAMILIES), seed=3, families=COMPLEX_FAMILIES))
+        cls.heavy = list(iter_assemblies(len(HEAVY_FAMILIES), seed=3, families=HEAVY_FAMILIES))
 
     def test_deterministic_and_prefix_stable(self) -> None:
         short = [s.name for s in iter_assemblies(3, seed=3)]
         self.assertEqual(short, [s.name for s in self.specs[:3]])
 
     def test_every_assembly_passes_the_design_rules(self) -> None:
-        for spec in self.specs + self.complex:
+        for spec in self.specs + self.complex + self.heavy:
             report = design_rules.check(spec.parts)
             self.assertTrue(report.ok, f"{spec.name}: {report.violations}")
             self.assertGreaterEqual(report.metrics["fed_fraction"], design_rules.FED_FRACTION_REQUIRED - 0.01)
 
     def test_one_casting_and_at_least_one_riser(self) -> None:
-        for spec in self.specs + self.complex:
+        for spec in self.specs + self.complex + self.heavy:
             codes = Counter(code for _, code in spec.parts)
             self.assertEqual(codes[PART_TYPE_CAST], 1, spec.name)
             self.assertGreaterEqual(codes[PART_TYPE_RISER], 1, spec.name)
 
     def test_cored_families_carry_cores(self) -> None:
-        for spec in self.specs + self.complex:
+        for spec in self.specs + self.complex + self.heavy:
             family = spec.family.removeprefix("rig_")
-            if family in CORED_FAMILIES or family in ("complex_cored_housing", "complex_flanged_hub"):
+            if family in CORED_FAMILIES or family.endswith(("_cored_housing", "_flanged_hub")):
                 self.assertTrue(any(c == PART_TYPE_CORE for _, c in spec.parts), spec.name)
 
     def test_chills_sit_flush_on_the_casting(self) -> None:
-        for spec in self.specs + self.complex:
+        for spec in self.specs + self.complex + self.heavy:
             cast = spec.parts[0][0]
             for chill in (m for m, c in spec.parts if c == PART_TYPE_CHILL):
                 gap = np.maximum(cast.bounds[0] - chill.bounds[1], chill.bounds[0] - cast.bounds[1])
                 self.assertLessEqual(float(np.max(gap)), 0.02, spec.name)
+
+    def test_heavy_assemblies_carry_a_heavy_section(self) -> None:
+        self.assertTrue(self.heavy)
+        for spec in self.heavy:
+            raster = design_rules.rasterize(spec.parts)
+            # A core inside a section saturates and freezes with it, so it counts as section.
+            section = np.isin(raster.labels, (design_rules.METAL, design_rules.CORE))
+            thickness = 2.0 * float(ndimage.distance_transform_edt(section).max()) * raster.pitch
+            self.assertGreaterEqual(spec.max_dim, 18.0, spec.name)
+            self.assertGreaterEqual(thickness, 0.8 * HEAVY_SECTION_IN[0], spec.name)
 
     def test_alloy_subset_is_seeded_by_name(self) -> None:
         alloys = ["A", "B", "C", "D", "E"]
@@ -99,6 +119,25 @@ class DesignRuleTests(unittest.TestCase):
             [(self.cast, PART_TYPE_CAST), (chill, PART_TYPE_CHILL), (self._riser(3.0), PART_TYPE_RISER)]
         )
         self.assertTrue(any("does not touch" in v for v in report.violations), report.violations)
+
+    def test_core_faces_do_not_count_as_cooling(self) -> None:
+        # A through core leaves 1 in walls; a riser that would feed them if the
+        # core faces cooled at half rate is too small once they do not.
+        core = trimesh.creation.box(extents=(2.0, 6.0, 1.0))
+        core.apply_translation((0.0, 0.0, 1.0))
+        parts = [(self.cast, PART_TYPE_CAST), (core, PART_TYPE_CORE), (self._riser(1.6), PART_TYPE_RISER)]
+        report = design_rules.check(parts)
+        self.assertTrue(any("modulus" in v for v in report.violations), report.violations)
+        with mock.patch.object(design_rules, "CORE_FACE_WEIGHT", 0.5):
+            half = design_rules.check(parts)
+        self.assertFalse(any("modulus" in v for v in half.violations), half.violations)
+
+    def test_metal_freezing_after_the_last_riser_is_unfed(self) -> None:
+        parts = np.array([PART_TYPE_CAST, PART_TYPE_CAST, PART_TYPE_RISER, PART_TYPE_CORE])
+        self.assertIsNone(design_rules.unfed_metal(parts, np.array([10.0, 20.0, 30.0, 0.0])))
+        reason = design_rules.unfed_metal(parts, np.array([10.0, 40.0, 30.0, 0.0]))
+        self.assertIn("50.00% of the casting", reason)
+        self.assertIsNone(design_rules.unfed_metal(parts[:2], np.array([10.0, 40.0])))
 
     def test_feeding_distance_follows_the_steel_rule(self) -> None:
         self.assertAlmostEqual(design_rules.feeding_distance(1.0), 4.5)

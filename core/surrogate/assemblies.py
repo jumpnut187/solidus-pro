@@ -24,6 +24,10 @@ Two size classes:
   housings with a heavy pad, flanged hubs with a cored bore and cored bolt
   bosses, stepped blocks with a cored heavy step. Solve these with the
   larger voxel budget of ``tools/generate_surrogate_data.py --complex``.
+- ``HEAVY_FAMILIES`` (18-48 in): cored blocks on a thinner foot, plates
+  carrying large bosses, and stepped blocks and flanged hubs drawn with
+  6-14 in sections, for the slow-freezing (1000-3500 s) heavy work the
+  other classes barely reach. Solve with ``--heavy``.
 
 Part codes resolve overlap toward the higher code (CAST 0 < RISER 1 < CHILL 2
 < CORE 4), so parts only need to touch or overlap; no booleans are needed.
@@ -31,7 +35,8 @@ Part codes resolve overlap toward the higher code (CAST 0 < RISER 1 < CHILL 2
 
 from __future__ import annotations
 
-from typing import Dict, Iterator, List, Sequence, Tuple
+from functools import partial
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 import trimesh
@@ -54,6 +59,10 @@ MIN_MAX_DIM_IN = 3.0
 MAX_MAX_DIM_IN = 14.0
 COMPLEX_MIN_DIM_IN = 12.0
 COMPLEX_MAX_DIM_IN = 36.0
+HEAVY_MIN_DIM_IN = 18.0
+HEAVY_MAX_DIM_IN = 48.0
+#: Thickness range of the heaviest section in the heavy families.
+HEAVY_SECTION_IN = (6.0, 14.0)
 MIN_WALL_IN = 0.375
 MIN_CORE_DIAMETER_IN = design_rules.MIN_CORE_DIAMETER_IN
 #: Draws per assembly before giving up on a family/seed position.
@@ -67,6 +76,12 @@ COMPLEX_FAMILIES: List[str] = [
     "complex_cored_housing",
     "complex_flanged_hub",
     "complex_stepped_block",
+]
+HEAVY_FAMILIES: List[str] = [
+    "heavy_cored_block",
+    "heavy_stepped_block",
+    "heavy_bossed_plate",
+    "heavy_flanged_hub",
 ]
 
 Built = Tuple[trimesh.Trimesh, List[trimesh.Trimesh], Dict[str, float], float]
@@ -224,16 +239,33 @@ def _complex_cored_housing(rng: np.random.Generator) -> Built:
     return cast, [cavity, pad_core], params, wall
 
 
-def _complex_flanged_hub(rng: np.random.Generator) -> Built:
-    """Large flanged hub: cored bore and cored bolt bosses on the flange."""
-    rf = _log_uniform(rng, COMPLEX_MIN_DIM_IN, COMPLEX_MAX_DIM_IN) / 2
-    tf = float(max(rf * rng.uniform(0.08, 0.15), 0.75))
+def _complex_flanged_hub(
+    rng: np.random.Generator,
+    dims: Tuple[float, float] = (COMPLEX_MIN_DIM_IN, COMPLEX_MAX_DIM_IN),
+    flange_frac: Tuple[float, float] = (0.08, 0.15),
+    min_flange: float = 0.75,
+    bore_frac: Tuple[float, float] = (0.55, 0.75),
+    hub_wall: Optional[Tuple[float, float]] = None,
+) -> Built:
+    """Large flanged hub: cored bore and cored bolt bosses on the flange.
+
+    ``hub_wall`` draws the hub wall (hub radius minus bore radius) from that
+    range instead of ``bore_frac``, widening the hub up to 0.85 of the
+    flange radius to fit it around a bore at least 2 in across.
+    """
+    rf = _log_uniform(rng, *dims) / 2
+    tf = float(max(rf * rng.uniform(*flange_frac), min_flange))
     r = rf * rng.uniform(0.4, 0.6)
+    wall = None
+    if hub_wall is not None:
+        wall = rng.uniform(*hub_wall)
+        r = min(max(r, wall + 1.0), 0.85 * rf)
+        wall = min(wall, r - 1.0)
     h = rf * rng.uniform(0.5, 1.1)
     overlap = JUNCTION_OVERLAP_FRACTION * min(tf, h)
     shells = [_cylinder(rf, tf, (0.0, 0.0, tf / 2)), _cylinder(r, h, (0.0, 0.0, tf - overlap + h / 2))]
     top = tf - overlap + h
-    r_bore = r * rng.uniform(0.55, 0.75)
+    r_bore = r * rng.uniform(*bore_frac) if wall is None else r - wall
     print_len = rng.uniform(1.0, 2.0)
     cores = [_cylinder(r_bore, top + 2 * print_len, (0.0, 0.0, top / 2))]
     n_bolts = int(rng.integers(3, 7))
@@ -249,13 +281,23 @@ def _complex_flanged_hub(rng: np.random.Generator) -> Built:
     return _concat(shells), cores, params, min(tf, r - r_bore, 0.55 * boss_r)
 
 
-def _complex_stepped_block(rng: np.random.Generator) -> Built:
-    """3-4 steps of different thickness with a cored hole through the heaviest step."""
-    L = _log_uniform(rng, COMPLEX_MIN_DIM_IN, COMPLEX_MAX_DIM_IN)
+def _complex_stepped_block(
+    rng: np.random.Generator,
+    dims: Tuple[float, float] = (COMPLEX_MIN_DIM_IN, COMPLEX_MAX_DIM_IN),
+    heavy_step: Optional[Tuple[float, float]] = None,
+) -> Built:
+    """3-4 steps of different thickness with a cored hole through the heaviest step.
+
+    ``heavy_step`` redraws the heaviest step's thickness from that range (at
+    most the block width).
+    """
+    L = _log_uniform(rng, *dims)
     W = L * rng.uniform(0.3, 0.6)
     steps = int(rng.integers(3, 5))
     lengths = rng.dirichlet(np.ones(steps) * 3.0) * L
     thick = np.sort(np.clip(L * rng.uniform(0.04, 0.25, steps), 0.75, None))
+    if heavy_step is not None:
+        thick[-1] = max(min(rng.uniform(*heavy_step), W), thick[-2])
     if rng.uniform() < 0.5:
         thick = thick[::-1]
     shells, centres, x0 = [], [], -L / 2
@@ -277,6 +319,57 @@ def _complex_stepped_block(rng: np.random.Generator) -> Built:
     return _concat(shells), cores, params, float(thick.min())
 
 
+# ---------------------------------------------------------------------------
+# Heavy families (18-48 in, 6-14 in sections)
+# ---------------------------------------------------------------------------
+
+
+def _heavy_cored_block(rng: np.random.Generator) -> Built:
+    """Heavy block on a thinner full-length foot, with 0-2 cored holes along y through the block."""
+    L = _log_uniform(rng, HEAVY_MIN_DIM_IN, HEAVY_MAX_DIM_IN)
+    W = L * rng.uniform(0.4, 0.8)
+    H = float(min(rng.uniform(*HEAVY_SECTION_IN), W))
+    block_l = L * rng.uniform(0.45, 0.75)
+    foot_t = float(np.clip(H * rng.uniform(0.15, 0.35), 1.25, 3.5))
+    block_x = float(rng.uniform(-1.0, 1.0)) * (L - block_l) / 2
+    overlap = JUNCTION_OVERLAP_FRACTION * foot_t
+    cast = _concat([_box((L, W, foot_t), (0.0, 0.0, foot_t / 2)),
+                    _box((block_l, W, H), (block_x, 0.0, foot_t - overlap + H / 2))])
+    z_mid = foot_t - overlap + H / 2
+    core_d = H * rng.uniform(0.2, 0.35)
+    n_cores = int(rng.integers(0, 3)) if block_l >= 2 * core_d + 3 * MIN_WALL_IN else 0
+    cores = [_through_core_y(core_d, core_d, W, (block_x + dx, 0.0, z_mid), rng, cylindrical=True)
+             for dx in (np.linspace(-0.25, 0.25, n_cores) * block_l if n_cores > 1 else [0.0] * n_cores)]
+    params = {"length": L, "width": W, "height": H, "block_length": block_l, "foot_thickness": foot_t,
+              "core_count": float(n_cores), "core_diameter": float(core_d if cores else 0.0)}
+    return cast, cores, params, foot_t
+
+
+def _heavy_bossed_plate(rng: np.random.Generator) -> Built:
+    """2-5 in plate carrying 1-3 heavy bosses (6-14 in across); about half are cored from below."""
+    L = _log_uniform(rng, HEAVY_MIN_DIM_IN, HEAVY_MAX_DIM_IN)
+    W = L * rng.uniform(0.5, 0.9)
+    t = float(np.clip(L * rng.uniform(0.06, 0.12), 2.0, 5.0))
+    n = int(rng.integers(1, 4))
+    boss_d = float(min(rng.uniform(*HEAVY_SECTION_IN), 0.8 * W, 0.8 * L / n))
+    boss_h = boss_d * rng.uniform(0.6, 1.2)
+    overlap = JUNCTION_OVERLAP_FRACTION * t
+    shells = [_box((L, W, t), (0.0, 0.0, t / 2))]
+    cores = []
+    for x in ((np.arange(n) + 0.5) / n - 0.5) * L:
+        y = float(rng.uniform(-0.25, 0.25)) * (W - boss_d)
+        shells.append(_cylinder(boss_d / 2, boss_h, (float(x), y, t - overlap + boss_h / 2)))
+        if rng.uniform() < 0.5:
+            # Blind hole from below: the print sits in the drag, the top stays clear for a riser.
+            r_core = boss_d / 2 * rng.uniform(0.2, 0.35)
+            print_len = rng.uniform(0.75, 1.5)
+            top = t - overlap + boss_h * rng.uniform(0.4, 0.7)
+            cores.append(_cylinder(r_core, top + print_len, (float(x), y, (top - print_len) / 2)))
+    params = {"length": L, "width": W, "thickness": t, "boss_count": float(n), "boss_diameter": boss_d,
+              "boss_height": boss_h, "core_count": float(len(cores))}
+    return _concat(shells), cores, params, t
+
+
 _BUILDERS = {
     "cored_box": _cored_box,
     "cored_cylinder": _cored_cylinder,
@@ -286,6 +379,15 @@ _BUILDERS = {
     "complex_cored_housing": _complex_cored_housing,
     "complex_flanged_hub": _complex_flanged_hub,
     "complex_stepped_block": _complex_stepped_block,
+    "heavy_cored_block": _heavy_cored_block,
+    "heavy_stepped_block": partial(
+        _complex_stepped_block, dims=(HEAVY_MIN_DIM_IN, HEAVY_MAX_DIM_IN), heavy_step=HEAVY_SECTION_IN,
+    ),
+    "heavy_bossed_plate": _heavy_bossed_plate,
+    "heavy_flanged_hub": partial(
+        _complex_flanged_hub, dims=(HEAVY_MIN_DIM_IN, HEAVY_MAX_DIM_IN),
+        flange_frac=(0.15, 0.25), min_flange=2.0, hub_wall=HEAVY_SECTION_IN,
+    ),
 }
 
 
