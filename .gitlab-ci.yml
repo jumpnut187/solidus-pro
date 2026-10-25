@@ -116,9 +116,6 @@ python-unittest:
   script:
     - python -m unittest discover tests
   timeout: 1h
-  # 3 known baseline failures are documented in docs/tet_migration/wave3_integration.md.
-  # Non-blocking until they are fixed, then remove allow_failure.
-  allow_failure: true
 
 # Standalone TypeScript kernel/orientation checks (esbuild + node).
 frontend-checks:
