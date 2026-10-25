@@ -55,6 +55,7 @@ from core.part_manager import (
     PART_TYPE_CORE,
     PART_TYPE_FILTER,
     PART_TYPE_GATE,
+    PART_TYPE_MOLD,
     PART_TYPE_POUR_CUP,
     PART_TYPE_RISER,
     PART_TYPE_RISER_POST,
@@ -102,6 +103,9 @@ COARSENING_PRIORITY: Tuple[int, ...] = (
     PART_TYPE_FILTER,
     PART_TYPE_CHILL,
     PART_TYPE_CORE,
+    # Mold sand stays out of the voxel mesh (core/mold_setup.py); listed so
+    # the table covers every code.
+    PART_TYPE_MOLD,
     PART_TYPE_GATE,
     PART_TYPE_RUNNER,
     PART_TYPE_SPRUE,

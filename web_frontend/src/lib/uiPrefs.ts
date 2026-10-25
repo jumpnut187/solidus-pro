@@ -20,6 +20,7 @@ export type PanelId =
   | 'analysis'
   | 'performance'
   | 'solidification'
+  | 'mold'
   | 'projects';
 
 /** Foldable sections of the results panel, keyed by `CollapsibleGroup` id. */

@@ -33,6 +33,7 @@ from core.simulation_pipeline import (
 from core.filling_stage import maybe_run_filling
 from core.solidification import SOLVER_MODE_SCHEDULE_LEGACY, SolidificationEngine
 from core.part_manager import is_chill
+from core.solidification_params import DEFAULT_MAX_SIMULATION_TIME_S
 from core.solidification_loop import build_schedule_fraction_history, compute_schedule_fraction_solid
 from core.surrogate.conditioning import Conditioning, build_conditioning_vector
 from core.surrogate.fields import encode_channels, unproject_grid
@@ -67,7 +68,7 @@ def _build_config(inputs: PipelineInputs, bounds_to_use: Any, analysis_options: 
         "safety_factor_no_risers": _g(timing, "safety_factor_no_risers", 1.5),
         "safety_factor_with_risers": _g(timing, "safety_factor_with_risers", 1.8),
         "min_simulation_time": _g(timing, "min_simulation_time", 120.0),
-        "max_simulation_time": _g(timing, "max_simulation_time", 14400.0),
+        "max_simulation_time": _g(timing, "max_simulation_time", DEFAULT_MAX_SIMULATION_TIME_S),
     }
 
 

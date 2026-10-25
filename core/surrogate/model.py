@@ -30,6 +30,8 @@ from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 
+from core.solidification_params import DEFAULT_MAX_SIMULATION_TIME_S
+
 from core.surrogate.backend import Backend
 from core.surrogate.conditioning import Conditioning, raw_from_conditioning
 from core.surrogate.fields import CHANNELS, PART_TYPE_DIVISOR
@@ -373,7 +375,7 @@ class NumpyWeightsModel(SurrogateModel):
 
     def predict(self, channels: np.ndarray, conditioning: Conditioning) -> np.ndarray:
         raw = raw_from_conditioning(conditioning)
-        max_time_cap = float(raw.get("max_simulation_time", 14400.0))
+        max_time_cap = float(raw.get("max_simulation_time", DEFAULT_MAX_SIMULATION_TIME_S))
         X, active = self._features(channels, conditioning)
         log_end = self.weights @ X
         end = np.exp(log_end)

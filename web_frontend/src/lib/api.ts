@@ -1,7 +1,7 @@
 /** Typed client for the Solidus Pro HTTP API. */
 import type { CutFeature, ExtrudeFeature, ReferencePlane } from './modeling/types';
 
-/** The ten part types the engine understands (`core/part_manager.py`). */
+/** The part types the engine understands (`core/part_manager.py`). */
 export type PartType =
   | 'cast'
   | 'riser'
@@ -12,7 +12,40 @@ export type PartType =
   | 'sprue'
   | 'runner'
   | 'filter'
-  | 'gate';
+  | 'gate'
+  | 'mold';
+
+/** `GET /api/sands`: the mold and core sands (`core/mold_materials.py`). Code 0 is the custom sand. */
+export type SandInfo = {
+  code: number;
+  label: string;
+  uses: string;
+  notes: string;
+  bulk_density: number | null;
+};
+
+/** One display mesh from `POST /api/projects/<id>/mold-preview`. */
+export type PreviewMesh = {
+  vertices: number[];
+  faces: number[];
+  vertex_count: number;
+  face_count: number;
+};
+
+export type MoldPreview = {
+  mold: PreviewMesh[];
+  cores: PreviewMesh[];
+  summary: {
+    pitch_in: number;
+    mold_cells: number;
+    auto_core_cells: number;
+    shaft_cells: number;
+    gap_cells: number;
+    wall_in: number;
+    box_lo_in: [number, number, number];
+    box_hi_in: [number, number, number];
+  } | null;
+};
 
 export type MeshData = {
   vertices: number[];
@@ -460,6 +493,11 @@ export const api = {
   // --- Mesh ----------------------------------------------------------------
   meshPreview: (projectId: string, voxelSize: number) =>
     requestJson<MeshPreview>(`/api/projects/${projectId}/mesh-preview`, jsonBody({ voxel_size: voxelSize })),
+
+  // --- Mold and cores ------------------------------------------------------
+  sands: () => requestJson<SandInfo[]>('/api/sands'),
+  moldPreview: (projectId: string, mold: Record<string, number>, voxelSize: number) =>
+    requestJson<MoldPreview>(`/api/projects/${projectId}/mold-preview`, jsonBody({ mold, voxel_size: voxelSize })),
   mlMesh: (projectId: string, targetAccuracy?: number) =>
     requestJson<MlMeshRecommendation>(
       `/api/projects/${projectId}/ml-mesh`,

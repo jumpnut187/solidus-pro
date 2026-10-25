@@ -34,7 +34,8 @@ export const PART_COLORS: Record<string, [number, number, number]> = {
   riser: [0.9, 0.6, 0.2],
   riser_post: [0.8, 0.5, 0.3],
   chill: [0.3, 0.3, 0.5],
-  core: [0.6, 0.5, 0.4],
+  core: [0.3, 0.78, 0.4],
+  mold: [0.62, 0.4, 0.86],
   pour_cup: [0.45, 0.8, 0.75],
   sprue: [0.3, 0.68, 0.7],
   runner: [0.2, 0.55, 0.65],
@@ -59,6 +60,7 @@ const PART_FINISH: Record<string, { metallic: number; roughness: number }> = {
   riser_post: { metallic: 0.0, roughness: 0.7 },
   chill: { metallic: 0.0, roughness: 0.55 },
   core: { metallic: 0.0, roughness: 0.9 },
+  mold: { metallic: 0.0, roughness: 0.95 },
   pour_cup: { metallic: 0.0, roughness: 0.75 },
   sprue: { metallic: 0.0, roughness: 0.7 },
   runner: { metallic: 0.0, roughness: 0.7 },
@@ -72,6 +74,21 @@ const EDGE_ALPHA_OPAQUE = 0.85;
 const EDGE_ALPHA_GHOST = 0.35;
 
 const SELECTION_COLOR = new Color3(1, 0.78, 0.2);
+
+/**
+ * Sand bodies -- mold and core parts and the automatic mold and core preview
+ * -- are see-through while setting up, so the casting inside them stays in
+ * view, and are not drawn while a result is on screen: the result is about
+ * the casting, its riser posts and its risers.
+ */
+export const SAND_ALPHA = 0.28;
+
+/** Id prefix of the automatic mold and core preview bodies (display only, not pickable). */
+export const AUTO_SAND_PREFIX = '__auto_';
+
+function isSand(part: ProjectPart): boolean {
+  return part.part_type === 'mold' || part.part_type === 'core';
+}
 
 /**
  * The casting when it is only there to say where the result *is*.
@@ -148,6 +165,8 @@ function createPartMesh(
   if (!positions?.length || !indices?.length) return null;
 
   const mesh = new Mesh(`part-${part.id}`, scene);
+  // The automatic preview is not a part: nothing to select or edit.
+  mesh.isPickable = !part.id.startsWith(AUTO_SAND_PREFIX);
   // Crease-angle normals, not ComputeNormals' all-faces average: see
   // creaseGeometry.ts for the starburst shading the average produced on flat
   // faces that meet a bore or a chamfer.
@@ -244,6 +263,8 @@ export type PartAppearance = {
    * by the plugin, so that the molten liquid body still comes through.
    */
   neutralGhost: boolean;
+  /** A result is on screen: sand bodies are hidden. */
+  resultsShowing: boolean;
 };
 
 export function applyPartAppearance(
@@ -259,13 +280,22 @@ export function applyPartAppearance(
     if (!entry) continue;
     const { mesh, material } = entry;
     const finish = PART_FINISH[part.part_type] ?? PART_FINISH.cast;
+    const sand = isSand(part);
+    const ghost = appearance.neutralGhost && !sand;
+    const alpha = sand ? Math.min(opacity, SAND_ALPHA) : opacity;
 
-    material.albedoColor = appearance.neutralGhost ? GHOST_COLOR : partColor(part.part_type);
-    material.metallic = appearance.neutralGhost ? GHOST_FINISH.metallic : finish.metallic;
-    material.roughness = appearance.neutralGhost ? GHOST_FINISH.roughness : finish.roughness;
-    material.alpha = opacity;
+    material.albedoColor = ghost ? GHOST_COLOR : partColor(part.part_type);
+    material.metallic = ghost ? GHOST_FINISH.metallic : finish.metallic;
+    material.roughness = ghost ? GHOST_FINISH.roughness : finish.roughness;
+    material.alpha = alpha;
 
-    if (translucent) {
+    if (sand) {
+      // No depth pre-pass: a sand shell around the casting would otherwise
+      // hide the casting it surrounds.
+      material.transparencyMode = PBRMaterial.PBRMATERIAL_ALPHABLEND;
+      material.needDepthPrePass = false;
+      material.separateCullingPass = true;
+    } else if (translucent) {
       material.transparencyMode = PBRMaterial.PBRMATERIAL_ALPHABLEND;
       // Without a depth pre-pass a translucent casting shows its own back
       // faces through its front ones and reads as a bag of triangles rather
@@ -281,9 +311,9 @@ export function applyPartAppearance(
 
     // The engine's static-XYZ rotation, as a quaternion; see partTransform.ts.
     applyPartTransform(mesh, part);
-    mesh.setEnabled(appearance.showModel && part.visible !== false);
+    mesh.setEnabled(appearance.showModel && part.visible !== false && !(sand && appearance.resultsShowing));
     if (entry.edges) {
-      entry.edges.alpha = translucent ? EDGE_ALPHA_GHOST : EDGE_ALPHA_OPAQUE;
+      entry.edges.alpha = translucent || sand ? EDGE_ALPHA_GHOST : EDGE_ALPHA_OPAQUE;
     }
 
     // Selection reads as an outline rather than as an emissive tint: tinting

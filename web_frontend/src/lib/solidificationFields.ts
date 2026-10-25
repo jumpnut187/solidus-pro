@@ -467,13 +467,13 @@ export const PARAM_DEFS: ParamDef[] = [
     group: 'timing',
     key: 'max_simulation_time',
     label: 'Max Simulation Time',
-    default: 14400.0,
+    default: 57600.0,
     min: 600.0,
     max: 86400.0,
     step: 600.0,
     decimals: 0,
     unit: 'seconds',
-    help: 'Maximum simulation time cap (thermal-coupled mode). 14400 s = 4 hours.'
+    help: 'Maximum simulation time cap (thermal-coupled mode). 57600 s = 16 hours; runs stop when solid.'
   },
   {
     group: 'timing',

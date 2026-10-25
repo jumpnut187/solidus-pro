@@ -48,6 +48,16 @@ except ImportError:
 # to be a single-body mesh (STL, OBJ, PLY, GLB, ...).
 _STEP_EXTENSIONS = (".step", ".stp")
 
+# Extensions stripped from a part or body name. Only these: a name such as
+# "Rigging Rev 1.0 - Chill_12" has a dot that is not an extension.
+CAD_FILE_EXTENSIONS = (".stl", ".obj", ".ply", ".glb", ".gltf", ".3mf", ".off") + _STEP_EXTENSIONS
+
+
+def strip_cad_extension(name: str) -> str:
+    """``name`` without a trailing CAD file extension, if it has one."""
+    root, ext = os.path.splitext(name)
+    return root if ext.lower() in CAD_FILE_EXTENSIONS else name
+
 # Conversion factor from meters to inches. Used to undo cascadio's
 # meters-unit GLB output for STEP files (see ``_scale_step_to_inches``).
 _METERS_TO_INCHES = 39.3701
@@ -421,6 +431,10 @@ class PartType(Enum):
     - RUNNER: Horizontal channel distributing metal to the gates
     - FILTER: Ceramic foam filter - a refractory body metal flows *through*
     - GATE: Ingate where metal enters the casting cavity
+
+    - MOLD: Sand mold (flask, cope, drag). Never voxelised with the metal: the
+      mold stage (``core/mold_setup.py``) rasterises it on the solver lattice
+      and the thermal solve carries it as a sand domain around the assembly.
     """
     CAST = "cast"
     RISER = "riser"
@@ -432,6 +446,7 @@ class PartType(Enum):
     RUNNER = "runner"
     FILTER = "filter"
     GATE = "gate"
+    MOLD = "mold"
 
     def __str__(self):
         return self.value.replace('_', ' ').title()
@@ -461,6 +476,7 @@ PART_TYPE_SPRUE = 6
 PART_TYPE_RUNNER = 7
 PART_TYPE_FILTER = 8
 PART_TYPE_GATE = 9
+PART_TYPE_MOLD = 10
 
 #: Authoritative PartType -> voxel code mapping.
 PART_TYPE_TO_CODE = {
@@ -474,6 +490,7 @@ PART_TYPE_TO_CODE = {
     PartType.RUNNER: PART_TYPE_RUNNER,
     PartType.FILTER: PART_TYPE_FILTER,
     PartType.GATE: PART_TYPE_GATE,
+    PartType.MOLD: PART_TYPE_MOLD,
 }
 
 CODE_TO_PART_TYPE = {code: part_type for part_type, code in PART_TYPE_TO_CODE.items()}
@@ -508,7 +525,10 @@ FEEDER_PART_CODES = (PART_TYPE_RISER, PART_TYPE_RISER_POST)
 #: a core. It differs from them *hydrodynamically* -- metal flows through its
 #: pores rather than around it -- which is why the filling solver uses
 #: :func:`is_flow_restrictor` rather than ``is_mold`` to build its obstacle mask.
-MOLD_PART_CODES = (PART_TYPE_CHILL, PART_TYPE_CORE, PART_TYPE_FILTER)
+MOLD_PART_CODES = (PART_TYPE_CHILL, PART_TYPE_CORE, PART_TYPE_FILTER, PART_TYPE_MOLD)
+
+#: Bonded-sand codes: a core inside the assembly and the mold around it.
+SAND_PART_CODES = (PART_TYPE_CORE, PART_TYPE_MOLD)
 
 #: Metal that is part of the casting assembly proper and IS scored for
 #: shrinkage and porosity. Risers are deliberately included -- see
@@ -605,7 +625,10 @@ PART_TYPE_COLORS = {
     PartType.RISER: (0.9, 0.6, 0.2),    # Orange (exothermic sleeve color)
     PartType.RISER_POST: (0.8, 0.5, 0.3),  # Darker orange (riser neck/post)
     PartType.CHILL: (0.3, 0.3, 0.5),    # Dark blue-grey (cold metal appearance)
-    PartType.CORE: (0.6, 0.5, 0.4),     # Brownish (sand core appearance)
+    # Sand bodies. Drawn translucent while setting up and hidden in results,
+    # where only the casting, its riser posts and risers are of interest.
+    PartType.CORE: (0.30, 0.78, 0.40),  # Green
+    PartType.MOLD: (0.62, 0.40, 0.86),  # Purple
     # Gating system: a blue-green family, distinct from the warm riser oranges
     # and the cool chill blues, and ordered light-to-dark along the flow path.
     PartType.POUR_CUP: (0.45, 0.80, 0.75),  # Pale teal (entry point)
@@ -670,6 +693,7 @@ PART_TYPE_ABBREVIATIONS = {
     PartType.RUNNER: "Ru",
     PartType.FILTER: "F",
     PartType.GATE: "G",
+    PartType.MOLD: "M",
 }
 
 #: Emoji badges for the parts dialog's type breakdown. Same totality rule as
@@ -685,6 +709,7 @@ PART_TYPE_BADGES = {
     PartType.RUNNER: "➡️",
     PartType.FILTER: "🧱",
     PartType.GATE: "🚪",
+    PartType.MOLD: "📦",
 }
 
 
@@ -702,6 +727,7 @@ PART_TYPE_KEYWORDS = {
     PartType.SPRUE: ['downsprue', 'down_sprue', 'down sprue', 'sprue'],
     PartType.RUNNER: ['runner'],
     PartType.GATE: ['ingate', 'in_gate', 'in gate', 'gate'],
+    PartType.MOLD: ['mold', 'mould', 'flask', 'cope', 'drag'],
 }
 
 
@@ -720,10 +746,12 @@ def infer_part_type_from_name(name: str) -> PartType:
     - SPRUE: 'downsprue', 'down_sprue', 'down sprue', 'sprue'
     - RUNNER: 'runner'
     - GATE: 'ingate', 'in_gate', 'in gate', 'gate'
+    - MOLD: 'mold', 'mould', 'flask', 'cope', 'drag'
 
     The gating types are checked before RISER_POST and RISER because those two
     carry the generic keywords 'post', 'pad' and 'bridge', which would otherwise
-    swallow a name like "Runner Post".
+    swallow a name like "Runner Post". MOLD is checked after CAST, so a
+    "molded_part" stays a casting.
 
     The input is lowercased and matched as substrings, so underscores,
     spaces, and concatenated words are all handled. When checking a
@@ -731,15 +759,16 @@ def infer_part_type_from_name(name: str) -> PartType:
     each body's CAD name (e.g. ``"Riser_Sleeve"`` → ``RISER``).
 
     Args:
-        name: A bare name or full filename. Path and extension are
-              stripped if present; matching is otherwise identical to
+        name: A bare name or full filename. Path and CAD file extension
+              are stripped if present (a dot elsewhere, as in "Rev 1.0",
+              is kept); matching is otherwise identical to
               :func:`infer_part_type_from_filename`.
 
     Returns:
         Inferred :class:`PartType`, defaults to ``CAST`` if no
         keywords match.
     """
-    base_name = os.path.splitext(os.path.basename(name))[0].lower()
+    base_name = strip_cad_extension(os.path.basename(name)).lower()
 
     # CORE first (most specific for internal cavities)
     for keyword in PART_TYPE_KEYWORDS[PartType.CORE]:
@@ -778,6 +807,10 @@ def infer_part_type_from_name(name: str) -> PartType:
     for keyword in PART_TYPE_KEYWORDS[PartType.CAST]:
         if keyword in base_name:
             return PartType.CAST
+
+    for keyword in PART_TYPE_KEYWORDS[PartType.MOLD]:
+        if keyword in base_name:
+            return PartType.MOLD
 
     return PartType.CAST
 
@@ -1586,7 +1619,11 @@ class PartManager:
     def get_parts_with_types(self) -> List[Tuple[trimesh.Trimesh, int]]:
         """
         Get all visible parts with their type codes for voxel assignment.
-        
+
+        Mold parts are left out: the mold stage rasterises them on the solver
+        lattice (:meth:`get_mold_meshes`), and voxelising a flask with the
+        metal would fill it as metal.
+
         Returns:
             List of tuples (transformed_mesh, part_type_int) where:
             - transformed_mesh: The part's transformed trimesh
@@ -1594,12 +1631,11 @@ class PartManager:
         """
         result = []
 
-        for part in self.get_all_parts():
-            if part.visible:
-                mesh = part.get_transformed_mesh()
-                type_code = PART_TYPE_TO_CODE.get(part.part_type, PART_TYPE_CAST)
-                result.append((mesh, type_code))
-        
+        for part in self._voxel_parts():
+            mesh = part.get_transformed_mesh()
+            type_code = PART_TYPE_TO_CODE.get(part.part_type, PART_TYPE_CAST)
+            result.append((mesh, type_code))
+
         return result
     
     def clear_all(self):
@@ -1608,14 +1644,41 @@ class PartManager:
         self._part_order.clear()
         print("Cleared all parts")
     
+    def _voxel_parts(self) -> List[Part]:
+        """Visible parts the voxeliser sees: everything but the mold."""
+        return [
+            p for p in self.get_all_parts()
+            if p.visible and p.part_type is not PartType.MOLD
+        ]
+
+    def get_mold_meshes(self) -> List[trimesh.Trimesh]:
+        """Transformed meshes of the visible mold parts (flask, cope, drag)."""
+        return [
+            p.get_transformed_mesh() for p in self.get_all_parts()
+            if p.visible and p.part_type is PartType.MOLD
+        ]
+
+    def get_mold_setup_parts(self) -> List[Tuple[trimesh.Trimesh, int, bool]]:
+        """``(mesh, part code, is_open_top)`` of every visible non-mold part, for the mold stage."""
+        return [
+            (
+                p.get_transformed_mesh(),
+                PART_TYPE_TO_CODE.get(p.part_type, PART_TYPE_CAST),
+                bool(p.is_open_top),
+            )
+            for p in self._voxel_parts()
+        ]
+
     def get_combined_mesh(self) -> Optional[trimesh.Trimesh]:
         """
         Combine all visible parts into a single mesh for simulation.
-        
+
+        Mold parts are excluded (see :meth:`get_parts_with_types`).
+
         Returns:
             Combined trimesh object, or None if no parts
         """
-        visible_parts = [p for p in self.parts.values() if p.visible]
+        visible_parts = self._voxel_parts()
         
         if not visible_parts:
             return None
@@ -1630,8 +1693,8 @@ class PartManager:
         return combined
     
     def get_combined_bounds(self) -> Optional[np.ndarray]:
-        """Get bounds encompassing all visible parts"""
-        visible_parts = [p for p in self.parts.values() if p.visible]
+        """Get bounds encompassing all visible parts except the mold"""
+        visible_parts = self._voxel_parts()
         
         if not visible_parts:
             return None
@@ -1648,8 +1711,8 @@ class PartManager:
         return combined
     
     def get_total_volume(self) -> float:
-        """Get total volume of all visible parts"""
-        return sum(p.get_volume() for p in self.parts.values() if p.visible)
+        """Get total volume of all visible parts except the mold"""
+        return sum(p.get_volume() for p in self._voxel_parts())
     
     def get_total_surface_area(self) -> float:
         """Get total surface area of all visible parts"""

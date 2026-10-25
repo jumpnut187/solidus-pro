@@ -1,4 +1,4 @@
-import { Box, FlaskConical, FolderOpen, Gauge, Grid3x3, Layers, PencilRuler, Rotate3d, Thermometer } from 'lucide-react';
+import { Box, Boxes, FlaskConical, FolderOpen, Gauge, Grid3x3, Layers, PencilRuler, Rotate3d, Thermometer } from 'lucide-react';
 import type { ComponentType } from 'react';
 
 import type { PanelId } from '../lib/uiPrefs';
@@ -24,6 +24,7 @@ const ENTRIES: RailEntry[] = [
   { id: 'analysis', label: 'Analysis', title: 'Analysis options', Icon: Layers },
   { id: 'performance', label: 'Perf', title: 'Performance options', Icon: Gauge },
   { id: 'solidification', label: 'Params', title: 'Solidification parameters', Icon: Thermometer },
+  { id: 'mold', label: 'Mold', title: 'Sand mold and cores: automatic mold box and cores, open and closed risers, sands', Icon: Boxes },
   { id: 'projects', label: 'Projects', title: 'Saved projects', Icon: FolderOpen }
 ];
 

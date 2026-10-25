@@ -123,10 +123,15 @@ def generation_plan_key(
 ) -> str:
     """Deterministic key for one (geometry, alloy, mold constant) run.
 
-    Plans may also hold keys ending in ``|mesh=tet`` from removed tet runs;
-    they never match and are left alone.
+    Plans may also hold keys ending in ``|mesh=tet`` from removed tet runs,
+    or keys without ``|mold=sand`` from runs on the sand boundary before the
+    explicit sand mold became the default; they never match and are left
+    alone.
     """
-    return f"{geometry_name}|{alloy}|mc={float(mold_constant):.1f}|vs={float(voxel_size):.3f}|grid={int(grid)}"
+    return (
+        f"{geometry_name}|{alloy}|mc={float(mold_constant):.1f}|vs={float(voxel_size):.3f}"
+        f"|grid={int(grid)}|mold=sand"
+    )
 
 
 def _load_plan(plan_path: Optional[str]) -> Dict[str, Dict[str, Any]]:

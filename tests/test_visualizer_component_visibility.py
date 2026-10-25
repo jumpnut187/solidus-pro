@@ -117,7 +117,30 @@ class ComponentVisibilityTests(unittest.TestCase):
         viz.result_surface = _SurfaceStub()
         viz.renderer = _DummyVTKClass()
         viz.render_window = _DummyVTKClass()
+        viz._sand_part_ids = set()
+        viz._mold_preview_ids = []
         return viz
+
+    # ---- sand bodies (mold, cores) ------------------------------------------
+
+    def test_sand_bodies_show_while_setting_up_and_hide_in_results(self) -> None:
+        viz = self._bare_visualizer()
+        viz.part_actors = {"cast": _ActorStub(), "riser": _ActorStub(), "core": _ActorStub(), "__auto_mold_0": _ActorStub()}
+        viz._sand_part_ids = {"core", "__auto_mold_0"}
+
+        viz._apply_part_actor_visibility()
+        self.assertTrue(all(actor.visible for actor in viz.part_actors.values()))
+
+        viz.result_surface.view = object()
+        viz._apply_part_actor_visibility()
+        self.assertTrue(viz.part_actors["cast"].visible)
+        self.assertTrue(viz.part_actors["riser"].visible)
+        self.assertFalse(viz.part_actors["core"].visible)
+        self.assertFalse(viz.part_actors["__auto_mold_0"].visible)
+
+        viz.result_surface.visible = False  # "Show Results" off
+        viz._apply_part_actor_visibility()
+        self.assertTrue(viz.part_actors["core"].visible)
 
     # ---- skin actors ------------------------------------------------------
 

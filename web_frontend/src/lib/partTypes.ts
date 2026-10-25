@@ -1,5 +1,5 @@
 /**
- * The ten part types the simulation engine understands, mirroring
+ * The part types the simulation engine understands, mirroring
  * `core/part_manager.py` (`PartType`, `PART_TYPE_COLORS`, `PART_TYPE_KEYWORDS`,
  * `infer_part_type_from_name`).
  *
@@ -23,13 +23,21 @@ export const PART_TYPES: PartTypeDef[] = [
   { id: 'riser', label: 'Riser', color: '#e69933', hint: 'Feeder. Slows cooling and supplies feed metal.' },
   { id: 'riser_post', label: 'Riser Post', color: '#cc804d', hint: 'Neck connecting a riser to the casting.' },
   { id: 'chill', label: 'Chill', color: '#4d4d80', hint: 'External chill. Accelerates local solidification.' },
-  { id: 'core', label: 'Core', color: '#998066', hint: 'Sand core forming an internal cavity. Not metal.' },
+  { id: 'core', label: 'Core', color: '#4dc766', hint: 'Sand core forming an internal cavity. Not metal.' },
   { id: 'pour_cup', label: 'Pour Cup', color: '#73ccbf', hint: 'Pouring basin at the top of the sprue.' },
   { id: 'sprue', label: 'Sprue', color: '#4dadb3', hint: 'Vertical downsprue.' },
   { id: 'runner', label: 'Runner', color: '#338ca6', hint: 'Horizontal channel feeding the gates.' },
   { id: 'filter', label: 'Filter', color: '#d9d959', hint: 'Ceramic foam filter. Metal flows through it.' },
-  { id: 'gate', label: 'Gate', color: '#267399', hint: 'Ingate where metal enters the cavity.' }
+  { id: 'gate', label: 'Gate', color: '#267399', hint: 'Ingate where metal enters the cavity.' },
+  { id: 'mold', label: 'Mold', color: '#9e66db', hint: 'Sand mold (flask, cope, drag) around the assembly. Not metal.' }
 ];
+
+/** Sand bodies: translucent while setting up, hidden while a result is on screen. */
+export const SAND_TYPES: readonly PartType[] = ['core', 'mold'];
+
+export function isSandType(partType: string): boolean {
+  return SAND_TYPES.includes(partType as PartType);
+}
 
 const BY_ID = new Map(PART_TYPES.map((type) => [type.id, type]));
 
@@ -60,7 +68,8 @@ export function supportsOpenTop(partType: string): boolean {
  * Keyword table from `PART_TYPE_KEYWORDS`, in the same precedence order
  * `infer_part_type_from_name` walks: core, chill, the gating group (whose names
  * would otherwise be swallowed by the generic 'post' / 'pad' / 'bridge'
- * keywords), riser post, riser, then cast.
+ * keywords), riser post, riser, cast, then mold (so "molded_part" stays a
+ * casting).
  */
 const KEYWORD_ORDER: { type: PartType; keywords: string[] }[] = [
   { type: 'core', keywords: ['core', 'sand_core', 'sand core'] },
@@ -72,7 +81,8 @@ const KEYWORD_ORDER: { type: PartType; keywords: string[] }[] = [
   { type: 'gate', keywords: ['ingate', 'in_gate', 'in gate', 'gate'] },
   { type: 'riser_post', keywords: ['riser_post', 'riser post', 'post', 'neck'] },
   { type: 'riser', keywords: ['feeder', 'riser', 'bridge', 'pad'] },
-  { type: 'cast', keywords: ['casting', 'part'] }
+  { type: 'cast', keywords: ['casting', 'part'] },
+  { type: 'mold', keywords: ['mold', 'mould', 'flask', 'cope', 'drag'] }
 ];
 
 /**

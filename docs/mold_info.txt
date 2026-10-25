@@ -1,0 +1,149 @@
+Sand Mold and Cores (MoldParams, core/mold_setup.py) — Behavior
+=================================================================
+
+The mold can be carried two ways:
+
+Default: the explicit mold, generated automatically (auto_mold = 1), with
+automatic cores (auto_cores = 1). Supplied geometry overrides both: a loaded
+mold part replaces the automatic box, and loaded core parts replace the
+automatic cores.
+
+- Sand boundary (auto_mold 0 and no mold part). Metal surfaces lose
+  heat through a Robin condition to the mold temperature with the
+  semi-infinite sand penetration decay (ThermalBoundaryParams). Its 0.35
+  air-gap floor (175 W/m²K after about 5 s) keeps the outer mold from ever
+  saturating, so it runs fast: a 2 in WCB cube freezes in ~140 s.
+- Explicit mold (default; a part typed Mold, or MoldParams.auto_mold). The mold is
+  sand cells in the thermal solve, as MAGMASOFT meshes it: it heats up,
+  saturates in corners and pockets, and its outer faces radiate and convect
+  to the air. The same cube freezes in ~225 s, inside the 180-252 s
+  Chvorinov estimate for hot PUNB silica (b² = 1.0-1.4e6).
+
+1. Mold stage (core/simulation_pipeline.py::_prepare_mold_stage)
+   Runs after part types are assigned, before filling and solidification,
+   on the solver's own voxel lattice:
+   - Mold box: the interior of loaded mold parts (flask, cope, drag;
+     PartType.MOLD, code 10, never voxelised with the metal), or with
+     auto_mold a box wall_thickness_in beyond the assembly. 0 (default)
+     is automatic: 3 x the half-thickness of the heaviest metal section,
+     0.75-8 in (auto_wall_thickness) -- three heat-penetration depths at the
+     freeze time, since by Chvorinov sqrt(alpha t_f) is about the modulus
+     for steel in silica. A 2 in WCB cube froze at 248 s with 2 in and with
+     4 in walls; sand further out only costs time on a uniform grid.
+     MAGMASOFT's steel validation molds carry about 4 in.
+   - Top of the box (mold_box): with open risers or pour cups, the cope is
+     flush with the highest open top, raised where needed so blind risers
+     and the casting keep closed_riser_cover_in (2 in) of sand over them.
+     Without open tops: body tops plus the wall, blind risers plus the
+     cover. An open body below the cope surface gets a shaft of air above
+     it. Pour cups are always open; a riser is open when Part.is_open_top.
+   - Gaps: a cell with assembly on both sides along an axis is a one-cell
+     gap the lattice cannot resolve (bodies touching in CAD). It is neither
+     sand nor air; the mesh's bridging links keep the contact.
+   - Auto cores (auto_cores, skipped when any core part is loaded):
+     core_rule_code 0 "draw" (default): sand with
+     the assembly both above and below it in its column cannot be formed by
+     a pattern drawn vertically out of cope and drag -- enclosed cavities,
+     horizontal holes, undercuts. 1 "enclosed": MAGMASOFT 4.4's automatic
+     core, a flood fill from the mold faces; only sand the outside cannot
+     reach. Auto cores are appended to the voxel mesh as CORE voxels (full
+     cells), so every core analysis applies; metal voxels lose the exterior
+     area they showed to them.
+   - The mold sand itself never enters the mesh: voxel_mesh.mold_layout
+     carries it to the engine.
+
+2. Thermal solve (core/mold_setup.py::build_thermal_extension,
+   core/solidification.py::_build_coupled_mold, physics/mold_coupling.py)
+   The mold is its own HeatTransferModel, coupled to the casting model
+   (metal, chills, cores; mesh-sized, so every analysis and display is
+   unchanged) by CoupledMoldSolver. Sand diffuses ~15x more slowly than
+   steel, so the mold steps once a second of simulated time while the
+   casting steps at its own limit; each coupled casting cell sees its mold
+   cells as a sink held for the step, and the heat each pair carried,
+   G (integral T_i dt - tau T_j), goes to the mold exactly (energy conserved
+   to round-off). A 2 in WCB cube freezes within 1.6 % of the single-field
+   solve; a small rigged box runs in ~15 s instead of ~52 s.
+   - Mold to mold: the 27-point stencil. Core to mold: stencil pairs with the
+     stencil's own link weights and htc_core_contact (1000 W/m²K,
+     MAGMASOFT uses C500-C800).
+   - Metal and chills to mold: contact pairs, conductance
+     A / (dx_i/2k_i + 1/h + dx_j/2k_j). A is the cell's exterior area (the
+     cut-cell CAD area, or one face per exposed face) shared over its
+     exposed faces; a 2 in cube carries exactly 24 in².
+       metal (casting, gating, filters) to sand: htc_cast_mold (1000) times
+         the steel-sand air-gap curve below the solidus when
+         interface_htc_curve = 1 (STEEL_SAND_AIR_GAP_CURVE, read from
+         Williams/Hardin/Beckermann SFSA 2015 Fig. 3: 1000 above solidus,
+         ~380 at 900 °C, ~50 at 600 °C), else constant ("C1000").
+       risers: an insulating sleeve per riser, h = riser_sleeve_htc (61.7)
+         * M^-0.68, M the riser's modulus (in) over the area it shows the
+         mold and air. A sleeve wall thickens with the riser; a constant
+         coefficient gave MEF 1.31 on a 2 x 3 in riser but 1.15 at 6 x 9 in.
+         Calibrated: MEF 1.309 / 1.313 / 1.304 at M = 0.375 / 0.75 / 1.125 in,
+         the 1.3 core/surrogate/design_rules.py sizes risers for (measured
+         insulating sleeves 1.07-1.28, Williams et al. 2016). The sand
+         boundary's htc_riser 220 gives 1.39 there, but only 1.17 against
+         explicit sand, where the sand resistance dominates.
+       riser posts: htc_riser_post (350).
+       chills: htc_chill_mold (1500).
+   - Air: faces with no cell beyond them (outer mold faces, shafts, open
+     riser and pour cup tops) get BoundaryType.RADIATION: air_htc (10) plus
+     eps*sigma*(T^4 - T_air^4), metal_emissivity 0.8, sand_emissivity 0.9,
+     to ambient_temperature. MAGMASOFT's default outer boundary is the same
+     radiation plus convection to ~20 °C air; it has no flask.
+   - Sand cells start at ThermalBoundaryParams.mold_temperature.
+
+3. Sands (core/mold_materials.py)
+   Codes are saved in projects; append only. 0 = custom constant sand
+   (core_* params for cores; mold_thermal_conductivity / diffusivity for
+   the mold). Database sands are TabulatedBody cells: k(T) and
+   rho(T)*cp(T) every step, moved by enthalpy so a step across a latent
+   peak still pays its heat.
+     1 green sand (3.5 % water: 2257 kJ/kg over 100-104 °C, water cp below)
+     2 silica, chemically bonded (Midea & Shah PUNB mold sand; default mold)
+     3 silica core sand, fine (Midea & Shah furan core sand)
+     4 ceramic (mullite beads)       5 chromite        6 zircon
+     7 olivine                       8 shell sand      9 dry silica
+    10 bauxite beads                11 alumina-silicate (andalusite)
+    12 silicon carbide (aluminum chill sand, not for steel)
+   Bonded silica tables are measured (AFS 2002). cp of the other sands is
+   mineral calorimetry (NIST-JANAF, DSC) scaled to measured mold means;
+   their k(T) curves are estimates anchored to single published values
+   (about +-30 %), noted per sand. Chilling power sqrt(k rho cp) at 600 °C
+   relative to bonded silica: chromite 1.25, zircon 1.26, olivine 1.13,
+   ceramic 1.0. The often-quoted "zircon chills 4x quartz" is not borne
+   out by measured data.
+
+4. Display
+   Mold parts draw purple and core parts green, translucent (0.28), while
+   setting up, in both front ends; the automatic mold box and cores are
+   previewed the same way (desktop: Simulation > Mold & Cores; web: Mold
+   panel, POST /api/projects/<id>/mold-preview). All sand bodies are hidden
+   while a result is on screen: the engineer reviews the casting, its riser
+   posts and its risers.
+
+5. Cost and limits
+   - Run length: the Chvorinov horizon stretches 4x (EXPLICIT_MOLD_TIME_FACTOR,
+     floor 2 x min_simulation_time); explicit-mold freezes run 1.6-2.5x
+     longer than the boundary's (bronze L-bracket 285 s -> 694 s), and the
+     old horizon cut runs off with liquid left.
+   - Mold cells cost solver time like any cell: a 2 in cube with 4 in walls
+     is 1.3 k metal and 131 k sand cells. The ratio falls with casting size.
+     max_mold_cells (40 M) stops a run before memory runs out. Sand cells
+     update their properties only after moving 0.01 K and skip the enthalpy
+     correction below 1e-3 K (Numba kernels), so sand that never warms costs
+     only the conduction stencil. A small rigged training box (22 k metal,
+     619 k sand cells at 0.055 in) runs in ~27 s against ~5 s on the sand
+     boundary.
+   - Surrogate records carry explicit_mold; the training set in
+     data/surrogate_dataset was regenerated on the explicit mold on
+     2026-10-24 (the boundary-mold set is kept in
+     data/surrogate_dataset_boundary_mold_2026-10-24).
+   - The lattice is uniform; MAGMASOFT grades its mesh coarser in the mold.
+     Convergence of the explicit cube: 248 s (0.2 in), 228 s (0.1 in),
+     224 s (0.067 in).
+   - Moisture migration in green sand (the condensation zone) and binder
+     burn-off gas are not modelled thermally; only the evaporation heat.
+   - Auto cores of the draw rule assume a vertical draw (z up) and an
+     optimal parting surface.
+   - tests/test_mold_setup.py covers all of the above.

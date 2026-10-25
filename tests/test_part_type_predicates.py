@@ -34,6 +34,7 @@ from core.part_manager import (
     PART_TYPE_CORE,
     PART_TYPE_FILTER,
     PART_TYPE_GATE,
+    PART_TYPE_MOLD,
     PART_TYPE_POUR_CUP,
     PART_TYPE_RISER,
     PART_TYPE_RISER_POST,
@@ -158,10 +159,10 @@ class PredicateTests(unittest.TestCase):
             ),
         )
 
-    def test_is_mold_selects_chill_core_and_filter(self) -> None:
+    def test_is_mold_selects_chill_core_filter_and_mold(self) -> None:
         np.testing.assert_array_equal(
             is_mold(ALL_CODES),
-            _expected(PART_TYPE_CHILL, PART_TYPE_CORE, PART_TYPE_FILTER),
+            _expected(PART_TYPE_CHILL, PART_TYPE_CORE, PART_TYPE_FILTER, PART_TYPE_MOLD),
         )
 
     def test_is_feeder_selects_riser_and_post(self) -> None:

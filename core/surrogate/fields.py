@@ -24,6 +24,7 @@ from core.part_manager import (
     PART_TYPE_CORE,
     PART_TYPE_FILTER,
     PART_TYPE_GATE,
+    PART_TYPE_MOLD,
     PART_TYPE_POUR_CUP,
     PART_TYPE_RUNNER,
     PART_TYPE_SPRUE,
@@ -87,6 +88,9 @@ SURROGATE_PART_TYPE_ALIASES = {
     PART_TYPE_RUNNER: PART_TYPE_CAST,
     PART_TYPE_GATE: PART_TYPE_CAST,
     PART_TYPE_FILTER: PART_TYPE_CORE,
+    # Mold sand never enters the voxel mesh (core.mold_setup keeps it in the
+    # thermal field only); aliased anyway so a stray code stays in range.
+    PART_TYPE_MOLD: PART_TYPE_CORE,
 }
 
 

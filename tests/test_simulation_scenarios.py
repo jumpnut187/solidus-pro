@@ -39,6 +39,7 @@ def _run_pipeline_with_patched_memory(
     sand_restraint_index: float = 0.5,
     extra_analysis_options: dict | None = None,
     voxel_cut_cells: bool | None = None,
+    solidification_params: dict | None = None,
 ) -> object:
     """Run the pipeline with the voxel memory checks patched out.
 
@@ -67,6 +68,7 @@ def _run_pipeline_with_patched_memory(
         show_progress=False,
         max_voxels_for_visualization=5_000,
         voxel_cut_cells=voxel_cut_cells,
+        solidification_params=solidification_params,
     )
 
     with ExitStack() as stack:

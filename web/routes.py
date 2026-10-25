@@ -257,6 +257,56 @@ def mesh_preview(project_id: str):
     )
 
 
+@api_bp.route("/sands")
+def sands():
+    """Mold and core sands for the Mold panel: code, label, uses and data notes."""
+    from core.mold_materials import SAND_MATERIALS, sand_choices
+
+    out = []
+    for code, label in sand_choices():
+        sand = SAND_MATERIALS.get(code)
+        out.append({
+            "code": code,
+            "label": label,
+            "uses": sand.uses if sand else "Constant sand from the Thermal tab of the solidification parameters.",
+            "notes": sand.notes if sand else "",
+            "bulk_density": sand.bulk_density if sand else None,
+        })
+    return jsonify(out)
+
+
+@api_bp.route("/projects/<project_id>/mold-preview", methods=["POST"])
+def mold_preview(project_id: str):
+    """The automatic mold box and cores for the project's parts, as display meshes.
+
+    Body: ``{"mold": {...MoldParams...}, "voxel_size": in}``. Mold parts in the
+    project are used instead of the automatic box.
+    """
+    from core.mold_setup import MoldSetupError, auto_cores_apply, mesh_to_payload, preview
+    from core.solidification_params import SolidificationParameters
+
+    parts = repo.get_parts(database_path(), project_id)
+    if not parts:
+        return jsonify({"mold": [], "cores": [], "summary": None})
+    body = request.json or {}
+    mold = SolidificationParameters.from_dict({"mold": body.get("mold") or {}}).mold
+    manager = build_part_manager(parts)
+    setup_parts = manager.get_mold_setup_parts()
+    mold_meshes = manager.get_mold_meshes()
+    if not setup_parts or not ((mold.auto_mold and not mold_meshes) or auto_cores_apply(mold, setup_parts)):
+        return jsonify({"mold": [], "cores": [], "summary": None})
+    try:
+        voxel_size = float(body.get("voxel_size") or 0.0) or None
+        layout, meshes = preview(setup_parts, mold_meshes, mold, voxel_size=voxel_size)
+    except (MoldSetupError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({
+        "mold": [mesh_to_payload(m) for m in meshes["mold"]],
+        "cores": [mesh_to_payload(m) for m in meshes["cores"]],
+        "summary": layout.summary(),
+    })
+
+
 @api_bp.route("/projects/<project_id>/ml-mesh", methods=["POST"])
 def ml_mesh(project_id: str):
     if repo.get_project(database_path(), project_id) is None:

@@ -272,7 +272,7 @@ function PartRow({
               />
               <span className="check-body">
                 <span>Open top</span>
-                <span className="check-note">Riser is open to atmosphere and can vent during filling.</span>
+                <span className="check-note">Open to the air at the top of the mold and vents during filling. A blind riser gets the Mold panel's sand cover.</span>
               </span>
             </label>
           </td>

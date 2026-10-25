@@ -659,7 +659,15 @@ class _MeshSettingsWithoutCutCellFlag:
 def _output_arrays(engine) -> dict:
     """Every ndarray the engine, its mesh and its heat model hold (dict values one level down)."""
     out = {}
-    sources = {"engine": engine, "mesh": engine.mesh, "heat": getattr(engine, "_thermal_heat_model", None)}
+    heat = getattr(engine, "_thermal_heat_model", None)
+    # An explicit sand mold wraps the casting model and a mold model
+    # (physics/mold_coupling.py); compare both.
+    sources = {
+        "engine": engine,
+        "mesh": engine.mesh,
+        "heat": getattr(heat, "casting", heat),
+        "mold": getattr(heat, "mold", None),
+    }
     for prefix, obj in sources.items():
         if obj is None:
             continue
@@ -910,7 +918,7 @@ class SurrogateRecordCutCellsTest(unittest.TestCase):
             capture_run(on.engine, voxel_size=0.2, resolution=16, out_dir=tmp)
             with open(os.path.join(tmp, INDEX_FILENAME), newline="") as fh:
                 header = next(csv.reader(fh))
-            self.assertEqual(header[-2:], ["mesh_type", "cut_cells"])
+            self.assertEqual(header[-3:], ["mesh_type", "cut_cells", "explicit_mold"])
 
 
 if __name__ == "__main__":

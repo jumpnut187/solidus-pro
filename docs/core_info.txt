@@ -15,9 +15,12 @@ used to delete core tets was removed.
    - core_density              = 1600 kg/m³
    - core_specific_heat        = 1140 J/(kg·K)  (mean over 20-1500 °C)
      -> alpha = 3.3e-7 m²/s, the same sand as mold_thermal_diffusivity
-   Constant properties; no latent heat. Temperature-dependent sand curves
-   (quartz inversion at 573 °C, radiation above ~1000 °C, binder/moisture
-   endotherms) are not modelled yet.
+   These constants are the "custom" core sand (MoldParams.core_material_code
+   0, the default). Any other code takes a core.mold_materials sand with
+   temperature-dependent k and rho*cp (quartz inversion, moisture) as a
+   TabulatedBody moved by enthalpy; see docs/mold_info.txt.
+   Cores can also be found automatically (MoldParams.auto_cores), and the
+   mold itself can be explicit sand cells instead of a boundary.
 
 2. How a core enters the solve (core/solidification.py)
    - _initialize_thermal_models: core voxels get diffusivity and rho*cp

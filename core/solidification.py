@@ -25,6 +25,8 @@ from typing import Any, Callable, Tuple, Dict, Optional, List
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from core.solidification_params import (
+    RISER_SLEEVE_EXPONENT,
+    SAND_MATERIAL_CUSTOM,
     SHRINK_SCALAR_DEFAULT,
     SHRINK_SCALAR_MAX,
     SHRINK_SCALAR_MIN,
@@ -39,6 +41,7 @@ from core.part_manager import (
     PART_TYPE_CORE,
     PART_TYPE_RISER,
     PART_TYPE_RISER_POST,
+    SAND_PART_CODES,
     is_feeder,
     is_flow_path,
     is_gating_metal,
@@ -157,6 +160,32 @@ def _has_cut_cells(mesh) -> bool:
 CHILL_THERMAL_DIFFUSIVITY_M2_S = 1.17e-4
 CHILL_RHO_CP_J_M3_K = 1800.0 * 710.0
 
+#: Stretch of the Chvorinov time horizon for a run with an explicit sand mold
+#: (see ``SolidificationEngine._calculate_max_simulation_time``).
+EXPLICIT_MOLD_TIME_FACTOR = 4.0
+
+
+def is_database_core_sand(code: int) -> bool:
+    """True when ``code`` names a core.mold_materials sand (cores then follow its tables)."""
+    if int(code) == SAND_MATERIAL_CUSTOM:
+        return False
+    from core.mold_materials import is_database_sand
+
+    return is_database_sand(code)
+
+
+#: Steel-sand interface coefficient below the solidus as a fraction of its
+#: value above it, against (metal surface temperature - solidus) in K. Read
+#: from the inverse-fitted WCB / PUNB silica curve that Williams, Hardin and
+#: Beckermann used in MAGMASOFT (SFSA 2015, Fig. 3): 1000 W/m^2K above the
+#: solidus, ~800 just below, ~380 at 900 C, ~250 at 800 C, ~50 at 600 C,
+#: ~5 at room temperature. The drop is the air gap opening as the skin
+#: contracts away from the sand.
+STEEL_SAND_AIR_GAP_CURVE = (
+    np.array([-1500.0, -730.0, -530.0, -430.0, -30.0, 0.0]),
+    np.array([0.005, 0.05, 0.25, 0.38, 0.8, 1.0]),
+)
+
 
 # Niyama critical thresholds by alloy (values below indicate defect risk)
 # Based on literature and foundry experience
@@ -259,6 +288,9 @@ class SolidificationEngine:
         self._air_gap_slowdown: Optional[np.ndarray] = None
         self._thermal_heat_model: Optional[HeatTransferModel] = None
         self._thermal_solidification_model: Optional[ThermalSolidificationModel] = None
+        # Mold sand appended to the thermal field after the mesh's cells
+        # (core.mold_setup.ThermalExtension); None without an explicit mold.
+        self._mold_extension = None
         # Optional non-uniform initial state, supplied by an upstream stage.
         # None means "no pour model": every metal voxel starts at
         # alloy.pouring_temp. See set_initial_temperature_field.
@@ -575,25 +607,46 @@ class SolidificationEngine:
         # params), joined to the metal through the htc_core_contact
         # conductance, so a core heats up, saturates and then insulates.
         boundary_params = self.analysis_options.solidification_params.thermal_boundary
+        mold_params = self.analysis_options.solidification_params.mold
         core_indices = self._get_core_voxel_indices()
         core_rho_cp = float(boundary_params.core_density) * float(boundary_params.core_specific_heat)
         core_alpha = float(boundary_params.core_thermal_conductivity) / core_rho_cp
+        # A database core sand is a tabulated body (k(T), rho*cp(T) with its
+        # transitions); the custom core keeps the constant core_* values.
+        tabulated_bodies = []
+        constant_core_indices = core_indices
+        if is_database_core_sand(mold_params.core_material_code) and len(core_indices) > 0:
+            from core.mold_materials import tabulated_body
+
+            tabulated_bodies.append(tabulated_body(core_indices, mold_params.core_material_code))
+            constant_core_indices = core_indices[:0]
+
+        # Explicit mold: the sand is its own model, coupled to this one through
+        # contact pairs (physics/mold_coupling.py).
+        layout = getattr(self.mesh, "mold_layout", None)
+        extension = None
+        if layout is not None and layout.mold_cell_count > 0:
+            from core.mold_setup import build_thermal_extension
+
+            extension = build_thermal_extension(self.mesh, layout)
+        self._mold_extension = extension
+
         diffusivity_overrides = None
         rho_cp_overrides = None
-        if len(chill_indices) > 0 or len(core_indices) > 0:
-            override_idx = np.concatenate([chill_indices, core_indices]).astype(np.int64)
+        if len(chill_indices) > 0 or len(constant_core_indices) > 0:
+            override_idx = np.concatenate([chill_indices, constant_core_indices]).astype(np.int64)
             diffusivity_overrides = (
                 override_idx,
                 np.concatenate([
                     np.full(len(chill_indices), chill_alpha, dtype=np.float64),
-                    np.full(len(core_indices), core_alpha, dtype=np.float64),
+                    np.full(len(constant_core_indices), core_alpha, dtype=np.float64),
                 ]),
             )
             rho_cp_overrides = (
                 override_idx,
                 np.concatenate([
                     np.full(len(chill_indices), chill_rho_cp, dtype=np.float64),
-                    np.full(len(core_indices), core_rho_cp, dtype=np.float64),
+                    np.full(len(constant_core_indices), core_rho_cp, dtype=np.float64),
                 ]),
             )
         contact_conductance = (
@@ -605,9 +658,16 @@ class SolidificationEngine:
         # B6: temperature-dependent material property curves (k, cp, rho) with
         # reference points spanning room temperature through above-liquidus.
         property_curves = self._alloy_property_curves()
-        neighbors = np.asarray(self.mesh.voxel_neighbors, dtype=np.int32)
+        mesh_neighbors = np.asarray(self.mesh.voxel_neighbors, dtype=np.int32)
+        cut_cell_inputs = self._cut_cell_solver_inputs(mesh_neighbors)
+        if extension is not None:
+            neighbors = extension.mesh_neighbors
+            air_boundaries = self._mesh_air_boundaries(extension, cut_cell_inputs)
+        else:
+            neighbors = mesh_neighbors
+            air_boundaries = []
 
-        self._thermal_heat_model = HeatTransferModel(
+        casting_model = HeatTransferModel(
             n_voxels=n_voxels,
             voxel_size=voxel_size_m,
             neighbors=neighbors,
@@ -618,8 +678,10 @@ class SolidificationEngine:
             property_curves=property_curves,
             rho_cp_overrides=rho_cp_overrides,
             contact_conductance=contact_conductance,
-            **self._cut_cell_solver_inputs(neighbors),
+            tabulated_bodies=tabulated_bodies or None,
+            **cut_cell_inputs,
         )
+        self._thermal_heat_model = casting_model
         self._thermal_solidification_model = ThermalSolidificationModel(
             n_voxels=n_voxels,
             alloy=self.alloy,
@@ -631,12 +693,16 @@ class SolidificationEngine:
         initial_temperatures = self._initial_thermal_temperatures(
             n_voxels, chill_indices, chill_temperature, core_indices, mold_temperature
         )
-
-        self._thermal_heat_model.set_initial_temperature(initial_temperatures)
-        self._thermal_heat_model.set_heat_source(np.zeros(n_voxels, dtype=np.float64))
-        self._configure_thermal_boundaries(
-            mold_temperature=mold_temperature, chill_temperature=chill_temperature
-        )
+        casting_model.set_initial_temperature(initial_temperatures)
+        casting_model.set_heat_source(np.zeros(n_voxels, dtype=np.float64))
+        if extension is None:
+            self._configure_thermal_boundaries(
+                mold_temperature=mold_temperature, chill_temperature=chill_temperature
+            )
+        else:
+            for kwargs in air_boundaries:
+                casting_model.add_boundary(**kwargs)
+            self._thermal_heat_model = self._build_coupled_mold(extension, casting_model, mold_temperature)
 
         self._preset_mold_solid_state(np.concatenate([chill_indices, core_indices]).astype(np.int64))
 
@@ -654,7 +720,20 @@ class SolidificationEngine:
             print(f"    Thermal solver backend: {backend_label}")
             print("    Temperature-dependent properties: enabled")
             print("    Chill model: finite heat sink (graphite, ambient HTC)")
-            print("    Air-gap HTC decay: enabled (floor factor)")
+            if extension is None:
+                print("    Mold: semi-infinite sand boundary, air-gap HTC decay (floor factor)")
+            else:
+                from core.mold_materials import sand_label
+
+                print(
+                    f"    Mold: {extension.n_mold:,} sand cells ({sand_label(mold_params.mold_material_code)}), "
+                    f"{len(extension.pair_first):,} metal-sand contacts, "
+                    f"{len(extension.air_mesh_cells) + len(extension.air_mold_cells):,} cells open to the air"
+                )
+            if is_database_core_sand(mold_params.core_material_code) and len(core_indices) > 0:
+                from core.mold_materials import sand_label
+
+                print(f"    Core sand: {sand_label(mold_params.core_material_code)}")
 
         # Adaptive CFL timestep: the thermal loop advances by engine.time_step
         # but the explicit scheme is only stable up to get_stable_timestep().
@@ -679,6 +758,195 @@ class SolidificationEngine:
                     self.time_step = float(f"{dt_cfl:.4g}")
                     if show_progress:
                         print(f"    Adaptive thermal timestep: {self.time_step:.4f}s (CFL)")
+
+    def _mesh_master_of(self) -> np.ndarray:
+        """Mesh cell -> the cell carrying its capacity (a slaved cut cell's master, else itself)."""
+        n_mesh = len(self.mesh.voxel_centers)
+        master_of = np.arange(n_mesh, dtype=np.int64)
+        merge = getattr(self, "_cut_cell_merge", None)
+        if merge is not None and len(merge.slaves) > 0:
+            master_of[np.asarray(merge.slaves, dtype=np.int64)] = np.asarray(merge.masters, dtype=np.int64)
+        return master_of
+
+    def _mesh_part_types(self) -> np.ndarray:
+        raw_types = getattr(self.mesh, "voxel_part_types", None)
+        n_mesh = len(self.mesh.voxel_centers)
+        if raw_types is None:
+            return np.full(n_mesh, PART_TYPE_CAST, dtype=np.int32)
+        return np.asarray(raw_types, dtype=np.int32)
+
+    def _mesh_air_boundaries(self, extension, cut_cell_inputs: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Air faces of the casting model's cells; adjusts the cut-cell boundary areas.
+
+        Metal faces radiate at the metal emissivity, sand (cores) at the sand
+        emissivity, both plus convection to the air.
+        """
+        mold = self.analysis_options.solidification_params.mold
+        n_mesh = extension.n_mesh
+        part_types = self._mesh_part_types()
+        master_of = self._mesh_master_of()
+        area_in2 = np.bincount(master_of[extension.air_mesh_cells], weights=extension.air_mesh_area, minlength=n_mesh)
+        air_cells = np.flatnonzero(area_in2 > 0.0)
+        air_in2 = area_in2[air_cells]
+        sand = np.isin(part_types, SAND_PART_CODES)
+        if cut_cell_inputs:
+            areas = np.asarray(cut_cell_inputs["boundary_areas"], dtype=np.float64).copy()
+            air_m2 = inches_to_meters(inches_to_meters(air_in2))
+            sand_air = sand[air_cells]
+            # Sand cells keep only their air area; a metal cell's air share
+            # is a weight on its whole exterior area.
+            areas[air_cells[sand_air]] = air_m2[sand_air]
+            weights = np.ones(len(air_cells), dtype=np.float64)
+            metal_air = ~sand_air
+            weights[metal_air] = np.divide(
+                air_m2[metal_air], areas[air_cells[metal_air]],
+                out=np.zeros(int(metal_air.sum())), where=areas[air_cells[metal_air]] > 0.0,
+            )
+            cut_cell_inputs["boundary_areas"] = areas
+            weights = np.minimum(weights, 1.0)
+        else:
+            pitch_in = float(self.mesh.base_voxel_size)
+            weights = air_in2 / (pitch_in * pitch_in)
+        boundaries: List[Dict[str, Any]] = []
+        for is_sand, emissivity in ((False, mold.metal_emissivity), (True, mold.sand_emissivity)):
+            sel = sand[air_cells] == is_sand
+            if np.any(sel):
+                boundaries.append({
+                    "indices": air_cells[sel].astype(np.int32),
+                    "boundary_type": BoundaryType.RADIATION,
+                    "value": float(emissivity),
+                    "htc": float(mold.air_htc),
+                    "T_infinity": float(mold.ambient_temperature),
+                    "weights": weights[sel],
+                })
+        if extension.unassigned_area > 0.0:
+            logger.warning(
+                f"Mold coupling: {extension.unassigned_area:.3g} in^2 of metal surface faces neither "
+                f"mold sand nor air and carries no boundary"
+            )
+        return boundaries
+
+    def _build_coupled_mold(self, extension, casting_model: HeatTransferModel, mold_temperature: float):
+        """The mold sand model and its coupling to ``casting_model`` (physics/mold_coupling.py).
+
+        Contact pairs: metal (casting, gating, filters) to sand on the
+        steel-sand air-gap curve; riser posts at htc_riser_post; chills at
+        htc_chill_mold; each riser at its own insulating-sleeve coefficient
+        riser_sleeve_htc * M^-0.68 from its modulus. Pairs on a slaved cut cell
+        move to its master, which carries the slave's capacity. Stencil pairs
+        join cores to the mold with the 27-point link weights and the core
+        contact (htc_core_contact).
+        """
+        from core.mold_materials import mold_tabulated_body
+        from physics.heat_transfer import _stencil_slot_weights
+        from physics.mold_coupling import CoupledMoldSolver, MoldPairs
+
+        tb = self.analysis_options.solidification_params.thermal_boundary
+        mold = self.analysis_options.solidification_params.mold
+        layout = self.mesh.mold_layout
+        part_types = self._mesh_part_types()
+        master_of = self._mesh_master_of()
+        pitch_m = inches_to_meters(float(layout.lattice.pitch))
+
+        mold_model = HeatTransferModel(
+            n_voxels=extension.n_mold,
+            voxel_size=pitch_m,
+            neighbors=np.asarray(extension.mold_neighbors, dtype=np.int32),
+            alloy=self.alloy,
+            tabulated_bodies=[mold_tabulated_body(np.arange(extension.n_mold), mold.mold_material_code, tb)],
+        )
+        mold_model.set_initial_temperature(float(mold_temperature))
+        if len(extension.air_mold_cells):
+            pitch_in = float(layout.lattice.pitch)
+            mold_model.add_boundary(
+                extension.air_mold_cells.astype(np.int32),
+                BoundaryType.RADIATION,
+                value=float(mold.sand_emissivity),
+                htc=float(mold.air_htc),
+                T_infinity=float(mold.ambient_temperature),
+                weights=extension.air_mold_area / (pitch_in * pitch_in),
+            )
+
+        first = master_of[extension.pair_first]
+        codes = part_types[first]
+        group = np.zeros(len(first), dtype=np.int64)
+        group[codes == PART_TYPE_RISER_POST] = 1
+        group[codes == PART_TYPE_CHILL] = 2
+        curve = None
+        if mold.interface_htc_curve:
+            solidus = float(self.alloy.solidus_temp)
+            curve = (STEEL_SAND_AIR_GAP_CURVE[0] + solidus, STEEL_SAND_AIR_GAP_CURVE[1])
+        htc = [mold.htc_cast_mold, tb.htc_riser_post, mold.htc_chill_mold]
+        factors: List[Any] = [curve, None, None]
+        riser_label, riser_moduli = self._riser_moduli_for_sleeves(extension, master_of, part_types)
+        for n, modulus in enumerate(riser_moduli):
+            sel = (codes == PART_TYPE_RISER) & (riser_label[first] == n)
+            group[sel] = len(htc)
+            htc.append(float(mold.riser_sleeve_htc) * max(modulus, 0.05) ** -RISER_SLEEVE_EXPONENT)
+            factors.append(None)
+
+        core_first = master_of[extension.stencil_first]
+        slot_weight = _stencil_slot_weights(26)[extension.stencil_slot]
+        sizes = casting_model._voxel_sizes
+        dx = sizes[core_first] if sizes is not None else np.full(len(core_first), casting_model.voxel_size)
+        scale = np.ones(len(core_first))
+        if casting_model._conductance_factors is not None:
+            # A cut core cell's links carry min(f_i, f_j) * (a_i + a_j) / 2; a
+            # mold cell is a full cell (f = a = 1).
+            f = casting_model._conductance_factors[core_first]
+            a = casting_model._link_apertures[core_first]
+            scale = np.minimum(f, 1.0) * 0.5 * (a + 1.0)
+        keep = slot_weight > 0.0
+        n_contact = len(first)
+        pairs = MoldPairs(
+            first=np.concatenate([first, core_first[keep]]),
+            second=np.concatenate([extension.pair_second, extension.stencil_second[keep]]),
+            area=np.concatenate([inches_to_meters(inches_to_meters(extension.pair_area)), np.zeros(int(keep.sum()))]),
+            group=np.concatenate([group, np.full(int(keep.sum()), -1, dtype=np.int64)]),
+            stencil_factor=np.concatenate([np.zeros(n_contact), (slot_weight * scale * dx)[keep]]),
+            htc=htc,
+            temperature_factors=factors,
+            stencil_contact_htc=float(tb.htc_core_contact),
+        )
+        return CoupledMoldSolver(casting_model, mold_model, pairs)
+
+    def _riser_moduli_for_sleeves(
+        self, extension, master_of: np.ndarray, part_types: np.ndarray
+    ) -> Tuple[np.ndarray, List[float]]:
+        """(label per mesh cell, modulus per riser): risers as connected riser voxels.
+
+        A riser's modulus is its volume over the area it shows the mold and the
+        air (the contact with its neck or the casting does not cool it), in
+        inches. Labels are -1 off the risers.
+        """
+        from scipy.sparse import coo_matrix
+        from scipy.sparse.csgraph import connected_components
+
+        n_mesh = extension.n_mesh
+        label = np.full(n_mesh, -1, dtype=np.int64)
+        risers = np.flatnonzero(part_types == PART_TYPE_RISER)
+        if len(risers) == 0:
+            return label, []
+        neighbors = np.asarray(self.mesh.voxel_neighbors)[risers]
+        local = np.full(n_mesh, -1, dtype=np.int64)
+        local[risers] = np.arange(len(risers))
+        rows, slots = np.nonzero(neighbors >= 0)
+        cols = local[neighbors[rows, slots]]
+        keep = cols >= 0
+        graph = coo_matrix(
+            (np.ones(int(keep.sum())), (rows[keep], cols[keep])), shape=(len(risers), len(risers))
+        )
+        n_components, component = connected_components(graph, directed=False)
+        label[risers] = component
+        volumes = np.bincount(
+            component, weights=np.asarray(self.mesh.voxel_volumes, dtype=np.float64)[risers], minlength=n_components
+        )
+        area = np.zeros(n_mesh, dtype=np.float64)
+        np.add.at(area, master_of[extension.pair_first], extension.pair_area)
+        np.add.at(area, master_of[extension.air_mesh_cells], extension.air_mesh_area)
+        areas = np.bincount(component, weights=area[risers], minlength=n_components)
+        moduli = [float(v / a) if a > 0.0 else 0.0 for v, a in zip(volumes, areas)]
+        return label, moduli
 
     def _cut_cell_solver_inputs(self, neighbors: np.ndarray) -> Dict[str, Any]:
         """HeatTransferModel cut-cell arguments, empty for a mesh without cut cells.
@@ -860,13 +1128,23 @@ class SolidificationEngine:
         # Calculate max time with bounds
         calculated_time = base_solidification_time * safety_factor
 
+        # The constants above were set against the semi-infinite sand
+        # boundary. An explicit sand mold saturates and freezes castings
+        # 1.6-2.5x more slowly (a 2 in WCB cube: ~140 s -> ~225 s; a bronze
+        # L-bracket: 285 s -> over 600 s), so the horizon stretches by
+        # EXPLICIT_MOLD_TIME_FACTOR and its floor doubles. The loop still stops
+        # as soon as every voxel is solid.
+        explicit_mold = getattr(getattr(self.mesh, "mold_layout", None), "mold_cell_count", 0) > 0
+        if explicit_mold:
+            calculated_time = max(calculated_time * EXPLICIT_MOLD_TIME_FACTOR, 2.0 * tp.min_simulation_time)
+
         # Enforce reasonable bounds for thermal_coupled; schedule_legacy uses
         # uncapped Chvorinov horizon so large risers stay visibly liquid through
         # their full feed path before snapping solid at the actual endpoint.
         min_time = tp.min_simulation_time    # At least 2 minutes for any casting
         solver_mode = self._get_solver_mode()
         if solver_mode == SOLVER_MODE_THERMAL_COUPLED:
-            max_time = tp.max_simulation_time  # Cap thermal solver at 4 hours
+            max_time = tp.max_simulation_time  # Hard cap (DEFAULT_MAX_SIMULATION_TIME_S, 16 h)
             self.max_time = np.clip(calculated_time, min_time, max_time)
         else:
             self.max_time = max(calculated_time, min_time)

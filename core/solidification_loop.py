@@ -980,8 +980,11 @@ def _run_thermal_coupled_integration(
     )
 
     # Per-iteration scratch, allocated once: the enthalpy correction's output
-    # field and the pre-step fraction-solid snapshot it reads.
-    n_voxels = int(np.asarray(heat_model.temperatures).size)
+    # field and the pre-step fraction-solid snapshot it reads. The thermal
+    # field may carry mold sand after the mesh's cells (core.mold_setup); the
+    # solidification state covers the mesh only, so everything below works
+    # on the leading n_voxels cells.
+    n_voxels = int(np.asarray(solidification_model.fraction_solid).size)
     T_final = np.empty(n_voxels, dtype=np.float64)
     fs_prev = np.empty(n_voxels, dtype=np.float64)
     # Voxel cut cells (core/cut_cells.py) take the exact enthalpy inversion.
@@ -992,7 +995,7 @@ def _run_thermal_coupled_integration(
         if np.all(previous_states >= 0.99):
             break
 
-        previous_temperatures = np.asarray(heat_model.temperatures, dtype=np.float64).copy()
+        previous_temperatures = np.array(heat_model.temperatures[:n_voxels], dtype=np.float64)
         heat_model.step(engine.time_step)  # pure diffusion only
 
         # Implicit (enthalpy) latent-heat release on the SAME step.
@@ -1012,7 +1015,7 @@ def _run_thermal_coupled_integration(
         # the classic apparent-heat-capacity formulation: oscillation-free,
         # energy-conserving, and the plateau proceeds at the physical rate.
         np.copyto(fs_prev, np.asarray(solidification_model.fraction_solid, dtype=np.float64))
-        T_post = np.asarray(heat_model.temperatures, dtype=np.float64)
+        T_post = heat_model.temperatures[:n_voxels]
         T_liq = float(engine.alloy.liquidus_temp)
         T_sol = float(engine.alloy.solidus_temp)
         dT = max(T_liq - T_sol, 1e-6)
@@ -1030,7 +1033,7 @@ def _run_thermal_coupled_integration(
             # pre-step temperature; the lag is O(dt) (tests/test_cut_cells.py
             # LatentHeatTest). phi scales latent and sensible capacity alike,
             # so it cancels.
-            beta_cells = l_vol / heat_model.volumetric_heat_capacity(T_post)
+            beta_cells = l_vol / heat_model.volumetric_heat_capacity()[:n_voxels]
             if NUMBA_THREADING_AVAILABLE:
                 _invert_enthalpy_kernel(T_post, fs_prev, T_final, T_liq, T_sol, beta_cells)
             else:
@@ -1043,7 +1046,7 @@ def _run_thermal_coupled_integration(
             _apply_enthalpy_correction_numpy(
                 T_post, fs_prev, T_final, T_liq, T_sol, dT, beta
             )
-        heat_model.temperatures[:] = T_final
+        heat_model.temperatures[:n_voxels] = T_final
 
         # Fraction solid and solidification-time tracking from the corrected
         # field; update() keeps fs monotone (irreversible).
@@ -1051,8 +1054,8 @@ def _run_thermal_coupled_integration(
 
         # Re-read AFTER the correction so cooling rate, Niyama capture,
         # gradients, and progress all use the corrected field.
-        temperatures = np.asarray(heat_model.temperatures, dtype=np.float64)
-        cooling_rate_step = np.maximum(heat_model.get_cooling_rate(previous_temperatures, engine.time_step), 0.0)
+        temperatures = np.array(heat_model.temperatures[:n_voxels], dtype=np.float64)
+        cooling_rate_step = np.maximum((previous_temperatures - temperatures) / engine.time_step, 0.0)
 
         current_states = np.asarray(solidification_model.fraction_solid, dtype=np.float32)
         engine.mesh.voxel_states[:] = current_states

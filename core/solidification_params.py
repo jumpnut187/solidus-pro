@@ -17,6 +17,8 @@ The parameters are organized into subgroups:
   - TimingParams        : Chvorinov mold constant and simulation time bounds
   - HotTearParams       : Hot tear risk analysis parameters
   - FillingParams       : Mold-filling stage parameters (nests FilterParams)
+  - MoldParams          : Explicit sand mold, automatic mold box and cores, sands
+  - MoldParams          : Explicit sand mold, automatic mold box and cores, sands
 
 Usage:
     from core.solidification_params import SolidificationParameters
@@ -44,6 +46,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Union
 
+
+#: Hard cap on simulated time, seconds (16 h). Runs stop when the casting is
+#: solid; the cap only bounds a run that would not finish. 4 h was enough on
+#: the semi-infinite sand boundary, but in an explicit sand mold heavy
+#: sections take longer: a bronze 13.5 in box under a 10.5 x 15.8 in sleeved
+#: riser was still freezing at 4 h (2678 s on the boundary), as Chvorinov
+#: with real sand predicts (~13 000 s).
+DEFAULT_MAX_SIMULATION_TIME_S = 57600.0
 
 SHRINK_SCALAR_MIN = 0.25
 SHRINK_SCALAR_MAX = 4.0
@@ -211,6 +221,118 @@ class ThermalBoundaryParams:
         self.core_print_htc_floor_fraction = _clamp_float(self.core_print_htc_floor_fraction, 0.0, 1.0, 0.1)
 
 
+#: Automatic core rules (``MoldParams.core_rule_code``).
+#:
+#: 0, ``draw`` (foundry rule, default): a pattern is drawn straight up out of
+#: the drag and straight down out of the cope, so sand that has the assembly
+#: both above and below it cannot be formed by the mold and needs a core --
+#: enclosed cavities, horizontal holes and undercuts.
+#: 1, ``enclosed`` (MAGMASOFT's automatic core): sand the outside of the mold
+#: cannot reach (a flood fill from the mold's outer faces) is core.
+CORE_RULE_DRAW = 0
+CORE_RULE_ENCLOSED = 1
+
+#: Sand material code 0: the constant sand of ThermalBoundaryParams instead
+#: of a core.mold_materials database sand -- core_thermal_conductivity,
+#: core_density and core_specific_heat for cores, mold_thermal_conductivity
+#: and mold_thermal_diffusivity for the mold.
+SAND_MATERIAL_CUSTOM = 0
+
+#: Exponent of the riser modulus in MoldParams.riser_sleeve_htc.
+RISER_SLEEVE_EXPONENT = 0.68
+
+
+@dataclass
+class MoldParams:
+    """The sand mold and cores (see core/mold_setup.py, docs/mold_info.txt).
+
+    By default the mold is generated (``auto_mold``) and cores are found
+    (``auto_cores``) automatically. Supplied geometry overrides both: a
+    loaded mold part replaces the automatic box, and loaded core parts
+    replace the automatic cores. With ``auto_mold`` off and no mold part the
+    mold is the semi-infinite sand boundary of ThermalBoundaryParams. An
+    explicit mold puts the mold in the thermal solve as sand cells around
+    the assembly, MAGMASOFT style: metal and chills exchange heat with them
+    through interface coefficients, and the outer mold faces and open riser
+    tops radiate and convect to the air.
+
+    Coefficients follow the MAGMASOFT practice used in steel validation work
+    (Beckermann group, SFSA): ``htc_cast_mold`` above the solidus falling
+    along the measured steel-sand air-gap curve (``interface_htc_curve``),
+    sand to chill ``htc_chill_mold``. Risers keep
+    ThermalBoundaryParams.htc_riser (the insulating-sleeve contact), and a
+    sand core meets the mold through htc_core_contact.
+
+    Flags and choices are ints (0/1 flags, documented codes), like the other
+    groups: both settings UIs render numeric leaves only.
+    """
+    # 0/1: explicit sand mold box generated around the assembly when no mold
+    # part is loaded.
+    auto_mold: int = 1
+    # 0/1: core sand added where the mold cannot form the cavity, when no
+    # core part is loaded.
+    auto_cores: int = 1
+    core_rule_code: int = CORE_RULE_DRAW
+    # Sand between the assembly and the outer mold faces (sides, bottom, and
+    # top when no riser is open). 0 = automatic: three heat-penetration
+    # depths at the freeze time, which by Chvorinov is 3 x the half-thickness
+    # of the heaviest section, between 0.75 and 8 in
+    # (core.mold_setup.auto_wall_thickness). Sand beyond that never warms
+    # before the casting is solid, and on a uniform grid it only costs time.
+    # MAGMASOFT steel validation molds carry about 4 in.
+    wall_thickness_in: float = 0.0
+    # Sand over a blind (closed) riser. Open risers and pour cups stay open
+    # to the air at the top of the mold.
+    closed_riser_cover_in: float = 2.0
+    # core.mold_materials.SAND_MATERIALS codes (0: the constant custom sand).
+    mold_material_code: int = 2
+    core_material_code: int = SAND_MATERIAL_CUSTOM
+    # W/(m^2 K) metal (casting, gating) to mold sand while the metal surface
+    # is above its solidus; below it the air-gap curve scales it down.
+    htc_cast_mold: float = 1000.0
+    # 0/1: follow the steel-sand air-gap curve below the solidus, or hold
+    # htc_cast_mold constant (MAGMASOFT "C1000" style).
+    interface_htc_curve: int = 1
+    # W/(m^2 K) chill to mold sand.
+    htc_chill_mold: float = 1500.0
+    # Insulating riser sleeve against the mold, per riser: h = riser_sleeve_htc
+    # * M^-RISER_SLEEVE_EXPONENT, M the riser's modulus in inches. A sleeve wall
+    # thickens with the riser, so its resistance grows with size; a constant
+    # contact coefficient gave modulus extension factors of 1.31 on a 2 x 3 in
+    # riser but 1.15 at 6 x 9 in. 61.7 holds MEF at 1.30-1.31 from M = 0.375 to
+    # 1.125 in (the 1.3 core/surrogate/design_rules.py sizes risers for;
+    # measured insulating sleeves 1.07-1.28, Williams et al. 2016).
+    riser_sleeve_htc: float = 61.7
+    # Air side: convective h (W/(m^2 K)), the air temperature, and the
+    # emissivities of the mold sand and of an open metal surface (oxidized
+    # steel under slag).
+    ambient_temperature: float = 21.0
+    air_htc: float = 10.0
+    sand_emissivity: float = 0.9
+    metal_emissivity: float = 0.8
+    # Cap on lattice cells in the mold box, so a fine voxel size with a large
+    # mold fails with a message instead of exhausting memory.
+    max_mold_cells: int = 40_000_000
+
+    def __post_init__(self) -> None:
+        self.auto_mold = _clamp_int(self.auto_mold, 0, 1, 1)
+        self.auto_cores = _clamp_int(self.auto_cores, 0, 1, 1)
+        self.core_rule_code = _clamp_int(self.core_rule_code, 0, 1, CORE_RULE_DRAW)
+        self.wall_thickness_in = _clamp_float(self.wall_thickness_in, 0.0, 48.0, 0.0)
+        self.closed_riser_cover_in = _clamp_float(self.closed_riser_cover_in, 0.0, 24.0, 2.0)
+        self.mold_material_code = _clamp_int(self.mold_material_code, 0, 255, 2)
+        self.core_material_code = _clamp_int(self.core_material_code, 0, 255, SAND_MATERIAL_CUSTOM)
+        self.htc_cast_mold = _clamp_float(self.htc_cast_mold, 1.0, 1e5, 1000.0)
+        self.interface_htc_curve = _clamp_int(self.interface_htc_curve, 0, 1, 1)
+        self.htc_chill_mold = _clamp_float(self.htc_chill_mold, 1.0, 1e5, 1500.0)
+        self.riser_sleeve_htc = _clamp_float(self.riser_sleeve_htc, 1.0, 1e5, 61.7)
+        self.ambient_temperature = _clamp_float(self.ambient_temperature, -40.0, 400.0, 21.0)
+        self.air_htc = _clamp_float(self.air_htc, 0.0, 1000.0, 10.0)
+        self.sand_emissivity = _clamp_float(self.sand_emissivity, 0.0, 1.0, 0.9)
+        self.metal_emissivity = _clamp_float(self.metal_emissivity, 0.0, 1.0, 0.8)
+        self.max_mold_cells = _clamp_int(self.max_mold_cells, 1_000, 500_000_000, 40_000_000)
+
+
 @dataclass
 class TimingParams:
     """Parameters for Chvorinov simulation time and safety factors."""
@@ -218,7 +340,7 @@ class TimingParams:
     safety_factor_with_risers: float = 2.5
     safety_factor_no_risers: float = 1.5
     min_simulation_time: float = 600.0
-    max_simulation_time: float = 14400.0
+    max_simulation_time: float = DEFAULT_MAX_SIMULATION_TIME_S
     sand_saturation_time: float = 30.0
     max_hot_sand_slowdown: float = 0.6
 
@@ -381,6 +503,8 @@ class SolidificationParameters:
         hot_tear: Hot tear risk analysis parameters.
         filling: Mold-filling stage parameters (pour rate/time/head, LBM
             solver knobs, and the nested filter media parameters).
+        mold: Sand mold and core setup (explicit mold, automatic mold box and
+            cores, mold and core sands).
     """
     feeding: FeedingParams = field(default_factory=FeedingParams)
     chill: ChillParams = field(default_factory=ChillParams)
@@ -390,6 +514,7 @@ class SolidificationParameters:
     timing: TimingParams = field(default_factory=TimingParams)
     hot_tear: HotTearParams = field(default_factory=HotTearParams)
     filling: FillingParams = field(default_factory=FillingParams)
+    mold: MoldParams = field(default_factory=MoldParams)
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]]) -> SolidificationParameters:
@@ -515,6 +640,7 @@ class SolidificationParameters:
         self.filling.filter.window_fraction = _clamp_float(
             self.filling.filter.window_fraction, 0.2, 0.8, 0.45,
         )
+        self.mold.__post_init__()
 
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -621,5 +747,23 @@ class SolidificationParameters:
                     'priming_enabled': self.filling.filter.priming_enabled,
                     'drag_enabled': self.filling.filter.drag_enabled,
                 },
+            },
+            'mold': {
+                'auto_mold': self.mold.auto_mold,
+                'auto_cores': self.mold.auto_cores,
+                'core_rule_code': self.mold.core_rule_code,
+                'wall_thickness_in': self.mold.wall_thickness_in,
+                'closed_riser_cover_in': self.mold.closed_riser_cover_in,
+                'mold_material_code': self.mold.mold_material_code,
+                'core_material_code': self.mold.core_material_code,
+                'htc_cast_mold': self.mold.htc_cast_mold,
+                'interface_htc_curve': self.mold.interface_htc_curve,
+                'htc_chill_mold': self.mold.htc_chill_mold,
+                'riser_sleeve_htc': self.mold.riser_sleeve_htc,
+                'ambient_temperature': self.mold.ambient_temperature,
+                'air_htc': self.mold.air_htc,
+                'sand_emissivity': self.mold.sand_emissivity,
+                'metal_emissivity': self.mold.metal_emissivity,
+                'max_mold_cells': self.mold.max_mold_cells,
             },
         }

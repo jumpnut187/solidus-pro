@@ -6,8 +6,10 @@ trainer aggregates these records to fit a surrogate model.
 
 Records and index rows carry ``mesh_type`` (always "voxel" now; older
 records may say "tet") and ``cut_cells`` (True for a run with
-``settings.mesh.voxel_cut_cells``, ``core/cut_cells.py``). Records and rows
-written before a field existed read as "voxel" and False. Both are metadata
+``settings.mesh.voxel_cut_cells``, ``core/cut_cells.py``) and
+``explicit_mold`` (True when the mold was sand cells, ``core/mold_setup.py``,
+rather than the sand boundary). Records and rows written before a field
+existed read as "voxel" and False. All three are metadata
 only: they are not part of the conditioning vector, so model input shapes do
 not change.
 """
@@ -23,7 +25,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+try:
+    from core.error_logger import logger
+except ImportError:  # pragma: no cover - headless/dummy fallback
+    from core.error_logger_dummy import logger  # type: ignore
+
 from core.part_manager import PART_TYPE_CHILL
+from core.solidification_params import DEFAULT_MAX_SIMULATION_TIME_S
 from core.surrogate.conditioning import Conditioning, build_conditioning_vector
 from core.surrogate.fields import (
     CHANNELS,
@@ -63,6 +71,11 @@ def _has_cut_cells(mesh: Any) -> bool:
     return bool(getattr(mesh, "cut_cells", False))
 
 
+def _has_explicit_mold(engine: Any) -> bool:
+    """True for a run whose mold was sand cells (core/mold_setup.py), not the sand boundary."""
+    return getattr(engine, "_mold_extension", None) is not None
+
+
 def _config_for_engine(engine: Any, voxel_size: float) -> Dict[str, float]:
     """Extract the conditioning config scalars from an engine + mesh."""
     mesh = getattr(engine, "mesh", None)
@@ -90,7 +103,7 @@ def _config_for_engine(engine: Any, voxel_size: float) -> Dict[str, float]:
         "safety_factor_no_risers": _g(timing, "safety_factor_no_risers", 1.5),
         "safety_factor_with_risers": _g(timing, "safety_factor_with_risers", 1.8),
         "min_simulation_time": _g(timing, "min_simulation_time", 120.0),
-        "max_simulation_time": _g(timing, "max_simulation_time", 14400.0),
+        "max_simulation_time": _g(timing, "max_simulation_time", DEFAULT_MAX_SIMULATION_TIME_S),
     }
 
 
@@ -132,6 +145,7 @@ def capture_run(
 
         mesh_type = DEFAULT_MESH_TYPE
         cut_cells = _has_cut_cells(engine.mesh)
+        explicit_mold = _has_explicit_mold(engine)
         points = encoding_points(engine.mesh, resolution)
         channels, meta = encode_channels(
             engine, chill_boost, riser_slowdown, resolution=resolution, points=points
@@ -164,6 +178,7 @@ def capture_run(
             grid_meta=json.dumps(meta.to_dict()),
             mesh_type=mesh_type,
             cut_cells=cut_cells,
+            explicit_mold=explicit_mold,
         )
         _append_index(out_dir, {
             "sample_id": sample_id,
@@ -174,6 +189,7 @@ def capture_run(
             "path": path,
             "mesh_type": mesh_type,
             "cut_cells": int(cut_cells),
+            "explicit_mold": int(explicit_mold),
         })
         return path
     except Exception:
@@ -183,7 +199,7 @@ def capture_run(
 def _append_index(out_dir: str, row: Dict[str, Any]) -> None:
     """Append one row. An existing index is never rewritten.
 
-    ``mesh_type`` and ``cut_cells`` are the last columns. A legacy index whose
+    ``mesh_type``, ``cut_cells`` and ``explicit_mold`` are the last columns. A legacy index whose
     header predates them gets the values as unnamed trailing fields, which
     :func:`dataset_summary` reads back in that order.
     """
@@ -210,6 +226,8 @@ def dataset_summary(out_dir: str = DEFAULT_DATASET_DIR) -> Dict[str, Any]:
                     row["mesh_type"] = trailing.pop(0) if trailing else DEFAULT_MESH_TYPE
                 if not row.get("cut_cells"):
                     row["cut_cells"] = trailing.pop(0) if trailing else "0"
+                if not row.get("explicit_mold"):
+                    row["explicit_mold"] = trailing.pop(0) if trailing else "0"
                 runs.append(row)
     alloys = sorted({r.get("alloy", "?") for r in runs})
     return {"count": len(runs), "alloys": alloys, "runs": runs}
@@ -304,11 +322,13 @@ def load_record(path: str) -> Dict[str, Any]:
             raise ValueError("grid_size_mismatch")
         mesh_type = str(npz["mesh_type"]) if "mesh_type" in npz.files else DEFAULT_MESH_TYPE
         cut_cells = bool(npz["cut_cells"]) if "cut_cells" in npz.files else False
+        explicit_mold = bool(npz["explicit_mold"]) if "explicit_mold" in npz.files else False
         return {
             "path": path,
             "alloy_name": str(npz["alloy_name"]),
             "mesh_type": mesh_type,
             "cut_cells": cut_cells,
+            "explicit_mold": explicit_mold,
             "meta": meta,
             "channels": channels,
             "start": np.asarray(npz["solidification_start_times"], dtype=np.float32),

@@ -1267,6 +1267,7 @@ export const ResultsViewport = forwardRef<ViewportHandle, ViewportProps>(functio
       showModel: view.showModel,
       assemblySize: boundsRef.current?.size ?? 1,
       neutralGhost: resultsShowing && style === 'envelope',
+      resultsShowing,
       // A ghost shell must not claim the depth buffer ahead of the envelope
       // it is supposed to be showing.
       depthPrePass: !wantsEnvelope(style)

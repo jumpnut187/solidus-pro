@@ -69,6 +69,12 @@ class InferPartTypeFromNameTests(unittest.TestCase):
             PartType.RISER,
         )
 
+    def test_a_dot_that_is_not_an_extension_is_kept(self) -> None:
+        # A revision like "Rev 1.0" is not an extension: cutting at its dot
+        # dropped the keyword, so every body of such an upload came in as cast.
+        self.assertEqual(infer_part_type_from_name("C06345_Rigging_Rev_1.0_-_Chill_12"), PartType.CHILL)
+        self.assertEqual(infer_part_type_from_name("C06345_Rigging_Rev 1.0 - Riser03.step"), PartType.RISER)
+
     def test_case_insensitive_matching(self) -> None:
         self.assertEqual(infer_part_type_from_name("Riser_Sleeve"), PartType.RISER)
         self.assertEqual(infer_part_type_from_name("RISER_SLEEVE"), PartType.RISER)

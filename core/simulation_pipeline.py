@@ -573,6 +573,41 @@ def _optional_int(value: Any) -> Optional[int]:
         return None
 
 
+def _prepare_mold_stage(
+    inputs: PipelineInputs,
+    voxel_mesh: AdaptiveVoxelMesh,
+    part_manager: Optional[PartManager],
+    mesh_to_use: Any,
+    progress_message_callback: Optional[ProgressMessageCallback],
+) -> None:
+    """Sand mold and automatic cores (core/mold_setup.py), before filling and solidification."""
+    from core.mold_setup import MoldSetupError, auto_cores_apply, mold_requested, prepare_mold
+    from core.part_manager import PART_TYPE_CAST
+    from core.solidification_params import SolidificationParameters
+
+    mold_params = SolidificationParameters.from_dict(inputs.solidification_params).mold
+    if part_manager is not None and part_manager.get_part_count() > 0:
+        setup_parts = part_manager.get_mold_setup_parts()
+        mold_meshes = part_manager.get_mold_meshes()
+    else:
+        setup_parts = [(mesh_to_use, PART_TYPE_CAST, False)]
+        mold_meshes = []
+    voxel_mesh.mold_layout = None
+    if not (mold_requested(mold_params, mold_meshes) or auto_cores_apply(mold_params, setup_parts)):
+        return
+    _emit_message(progress_message_callback, "Building the sand mold and cores...")
+    try:
+        layout = prepare_mold(voxel_mesh, setup_parts, mold_meshes, mold_params)
+    except MoldSetupError as exc:
+        raise ValidationError(str(exc), parameter="mold", expected="A mold that fits the voxel budget") from exc
+    if layout is not None:
+        _emit_message(
+            progress_message_callback,
+            f"Mold: {layout.mold_cell_count:,} mold sand cells, "
+            f"{layout.added_core_voxels:,} auto-core voxels",
+        )
+
+
 def prepare_mesh_and_geometry(
     inputs: PipelineInputs,
     *,
@@ -669,6 +704,9 @@ def prepare_mesh_and_geometry(
         _emit_message(progress_message_callback, "Assigning part types (Cast/Riser/Chill)...")
         _apply_thread_budget(inputs.thread_budget_provider)
         voxel_mesh.assign_part_types(parts_with_types)
+
+    _check_cancel(cancel_callback)
+    _prepare_mold_stage(inputs, voxel_mesh, part_manager, mesh_to_use, progress_message_callback)
 
     mem_stats = voxel_mesh.get_memory_stats()
     _emit_message(

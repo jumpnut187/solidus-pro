@@ -38,8 +38,9 @@ from core.deep_model.model import (
 )
 from core.surrogate.conditioning import Conditioning, raw_from_conditioning
 from core.surrogate.model import ModelLoadResult, ModelManifest, SurrogateModel
+from core.solidification_params import DEFAULT_MAX_SIMULATION_TIME_S
 
-DEFAULT_MAX_SIMULATION_TIME = 14400.0
+DEFAULT_MAX_SIMULATION_TIME = DEFAULT_MAX_SIMULATION_TIME_S
 
 #: The ONNX output must match PyTorch on active cells within
 #: ``atol + rtol * |torch|`` seconds before ONNX Runtime is used.  The

@@ -99,6 +99,7 @@ from .dialogs import (
     AnalysisOptionsDialog,
     ComponentVisibilityDialog,
     DraggableDialog,
+    MoldDialog,
     OrientationDialog,
     PartsDialog,
 )
@@ -2207,8 +2208,8 @@ class SolidificationParamsDialog(DraggableDialog):
          "Time safety factor when no risers are present."),
         ("timing", "min_simulation_time", "Min Simulation Time", 120.0, 10.0, 600.0, 10.0, 0, "seconds",
          "Minimum simulation time for any casting."),
-        ("timing", "max_simulation_time", "Max Simulation Time", 14400.0, 600.0, 86400.0, 600.0, 0, "seconds",
-         "Maximum simulation time cap (thermal_coupled mode). 14400s = 4 hours."),
+        ("timing", "max_simulation_time", "Max Simulation Time", 57600.0, 600.0, 86400.0, 600.0, 0, "seconds",
+         "Maximum simulation time cap (thermal_coupled mode). 57600 s = 16 hours; runs stop when solid."),
         ("timing", "sand_saturation_time", "Sand Saturation Time", 30.0, 5.0, 300.0, 5.0, 0, "seconds",
          "Time constant for sand heat saturation around riser posts."),
         ("timing", "max_hot_sand_slowdown", "Max Hot Sand Slowdown", 0.6, 0.1, 0.95, 0.01, 2, "fraction",
@@ -2785,6 +2786,12 @@ class MainWindow(QMainWindow):
         solidification_action.triggered.connect(self._open_solidification_params_dialog)
         sim_menu.addAction(solidification_action)
 
+        # Mold & Cores
+        mold_action = QAction("🧱 Mold && Cores...", self)
+        mold_action.setStatusTip("Sand mold, automatic mold box and cores, open and closed risers, sands")
+        mold_action.triggered.connect(self._open_mold_dialog)
+        sim_menu.addAction(mold_action)
+
         # ==================== Surrogate Menu ====================
         surrogate_menu = menubar.addMenu("&Surrogate")
 
@@ -3046,6 +3053,16 @@ class MainWindow(QMainWindow):
         # Solidification parameters dialog
         self.solidification_dialog = SolidificationParamsDialog(self)
         self.solidification_dialog.params_changed.connect(self._on_solidification_params_confirmed)
+
+        # Mold & Cores dialog; edits redraw the automatic mold and core preview.
+        self.mold_dialog = MoldDialog(self)
+        self.mold_dialog.params_changed.connect(self._on_mold_params_confirmed)
+        self.mold_dialog.preview_requested.connect(self._schedule_mold_preview)
+        self._mold_preview_timer = QTimer(self)
+        self._mold_preview_timer.setSingleShot(True)
+        self._mold_preview_timer.setInterval(400)
+        self._mold_preview_timer.timeout.connect(self._refresh_mold_preview)
+        self._mold_preview_params: Optional[dict] = None
 
         # Console window
         self.console_window = ConsoleWindow(self)
@@ -3520,7 +3537,63 @@ class MainWindow(QMainWindow):
 
     def _on_solidification_params_confirmed(self, options):
         """Handle solidification params confirmation from dialog"""
-        self._solidification_params = options
+        # The dialog edits the numeric groups; the mold group belongs to the
+        # Mold & Cores dialog and is carried over.
+        mold = (self._solidification_params or {}).get("mold")
+        self._solidification_params = dict(options)
+        if mold is not None:
+            self._solidification_params["mold"] = mold
+
+    def _mold_options(self) -> dict:
+        return SolidificationParameters.from_dict(self._solidification_params).to_dict()["mold"]
+
+    def _open_mold_dialog(self):
+        """Open the Mold & Cores dialog."""
+        self.mold_dialog.set_options(self._mold_options())
+        self.mold_dialog.center_on_parent()
+        self.mold_dialog.show()
+        self.mold_dialog.raise_()
+
+    def _on_mold_params_confirmed(self, options: dict) -> None:
+        params = dict(self._solidification_params or {})
+        params["mold"] = dict(options)
+        self._solidification_params = params
+        self._schedule_mold_preview(options)
+        mold = SolidificationParameters.from_dict({"mold": options}).mold
+        bits = []
+        if mold.auto_mold:
+            bits.append(
+                f"auto mold, {mold.wall_thickness_in:g} in walls" if mold.wall_thickness_in > 0 else "auto mold, auto walls"
+            )
+        if mold.auto_cores:
+            bits.append("auto cores")
+        self.status_label.setText("Mold: " + (", ".join(bits) if bits else "sand boundary (no explicit mold)"))
+
+    def _schedule_mold_preview(self, options: Optional[dict] = None) -> None:
+        """Redraw the automatic mold and core preview shortly (edits are debounced)."""
+        self._mold_preview_params = dict(options) if options is not None else None
+        self._mold_preview_timer.start()
+
+    def _refresh_mold_preview(self) -> None:
+        """Draw the automatic mold box and cores for the current parts (translucent; hidden in results)."""
+        from core.mold_setup import MoldSetupError, auto_cores_apply, preview
+
+        options = self._mold_preview_params if self._mold_preview_params is not None else self._mold_options()
+        mold = SolidificationParameters.from_dict({"mold": options}).mold
+        setup_parts = self.part_manager.get_mold_setup_parts() if self.part_manager.get_all_parts() else []
+        mold_meshes = self.part_manager.get_mold_meshes() if setup_parts else []
+        if not setup_parts or not ((mold.auto_mold and not mold_meshes) or auto_cores_apply(mold, setup_parts)):
+            self.visualizer.set_mold_preview(None)
+            return
+        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+        try:
+            _layout, meshes = preview(setup_parts, mold_meshes, mold, voxel_size=self._current_voxel_size)
+        except (MoldSetupError, ValueError) as exc:
+            self.status_label.setText(f"Mold preview: {exc}")
+            meshes = None
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.visualizer.set_mold_preview(meshes)
 
     @staticmethod
     def _load_solidification_params_with_user_override() -> dict:
@@ -5091,6 +5164,8 @@ class MainWindow(QMainWindow):
             self.visualizer.load_parts_from_manager(self.part_manager, reset_camera=reset_camera)
             if hasattr(self, "orientation_controller"):
                 self._refresh_parting_plane()
+            if hasattr(self, "_mold_preview_timer"):
+                self._schedule_mold_preview()
         except Exception as exc:
             logger.exception(f"Failed to update 3D visualization: {exc}")
             self.status_label.setText("Failed to update 3D view. See error log.")

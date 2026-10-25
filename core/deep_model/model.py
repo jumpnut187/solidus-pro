@@ -54,8 +54,8 @@ DEFAULT_TRAINING_RESOLUTION = 64
 #: split mean / std stored on the model.
 TARGET_NAMES = ("log1p_start", "log1p_local")
 #: Upper clamp on the denormalized log1p heads before ``expm1``.  e^11 - 1 is
-#: 5.99e4 s, above the largest ``max_simulation_time`` the conditioning range
-#: admits (21600 s), and keeps the fp16 ONNX export finite (fp16 max 65504).
+#: 5.99e4 s, above the default ``max_simulation_time`` (57 600 s), and keeps
+#: the fp16 ONNX export finite (fp16 max 65504).
 LOG_TARGET_CEILING = 11.0
 
 

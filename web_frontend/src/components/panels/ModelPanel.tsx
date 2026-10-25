@@ -52,7 +52,7 @@ export type ModelPanelProps = {
 };
 
 /** Body types offered for a modeled body, most used first. */
-const BODY_TYPES: PartType[] = ['riser', 'chill', 'riser_post', 'core', 'cast', 'pour_cup', 'sprue', 'runner', 'gate', 'filter'];
+const BODY_TYPES: PartType[] = ['riser', 'chill', 'riser_post', 'core', 'cast', 'pour_cup', 'sprue', 'runner', 'gate', 'filter', 'mold'];
 
 export function ModelPanel(props: ModelPanelProps) {
   const { modeling } = props;
@@ -1048,7 +1048,7 @@ function ExtrudeManager({ modeling, parts }: ModelPanelProps) {
             />
             <span className="check-body">
               Open top
-              <span className="check-note">Riser is open to atmosphere and can vent during filling.</span>
+              <span className="check-note">Open to the air at the top of the mold and vents during filling. A blind riser gets the Mold panel's sand cover.</span>
             </span>
           </label>
         ) : null}

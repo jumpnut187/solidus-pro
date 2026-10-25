@@ -23,6 +23,7 @@ from core.part_manager import (
     build_part_manager as _core_build_part_manager,
     infer_part_type_from_filename,
     infer_part_type_from_name,
+    strip_cad_extension,
     tessellation_tolerance_mm,
 )
 from core.simulation_pipeline import PipelineResult
@@ -121,10 +122,10 @@ def simulated_parts_snapshot(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]
 def _sanitize_body_name(name: str) -> str:
     """Sanitize a CAD body name for safe use in a filename.
 
-    Strips any file extension, replaces runs of unsafe characters with
+    Strips a CAD file extension, replaces runs of unsafe characters with
     a single underscore, and falls back to ``"body"`` for empty input.
     """
-    name = os.path.splitext(name)[0]
+    name = strip_cad_extension(name)
     sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_")
     return sanitized or "body"
 

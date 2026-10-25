@@ -50,7 +50,7 @@ CONFIG_FEATURE_RANGES: Dict[str, tuple] = {
     "safety_factor_no_risers": (1.0, 3.0),
     "safety_factor_with_risers": (1.0, 3.0),
     "min_simulation_time": (60.0, 600.0),
-    "max_simulation_time": (3600.0, 21600.0),
+    "max_simulation_time": (3600.0, 86400.0),
 }
 
 ALLOY_FEATURES: List[str] = list(ALLOY_FEATURE_RANGES.keys())

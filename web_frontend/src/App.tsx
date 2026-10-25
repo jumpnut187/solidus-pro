@@ -9,6 +9,7 @@ import { TransportBar } from './components/TransportBar';
 import { AnalysisPanel } from './components/panels/AnalysisPanel';
 import { MaterialPanel } from './components/panels/MaterialPanel';
 import { MeshPanel, type MeshStatus } from './components/panels/MeshPanel';
+import { MoldPanel } from './components/panels/MoldPanel';
 import { ModelPanel } from './components/panels/ModelPanel';
 import { OrientPanel } from './components/panels/OrientPanel';
 import { PartsPanel } from './components/panels/PartsPanel';
@@ -37,14 +38,18 @@ import {
   type AlloyGuideRow,
   type HardwareInfo,
   type MaterialInfo,
+  type MoldPreview,
   type PartingLine,
   type ProjectPart,
   type ProjectRecord,
   type ProjectSettings,
   type ProjectSummary,
   type ReportFormat,
-  type ReportSectionToggles
+  type ReportSectionToggles,
+  type SandInfo
 } from './lib/api';
+import { FALLBACK_SANDS, MOLD_DEFAULTS, moldPreviewWanted, readMold, writeMold } from './lib/mold';
+import { AUTO_SAND_PREFIX } from './viewport/partMeshes';
 import { arrangeGrid, arrangeLine, DUPLICATE_OFFSET, type Axis } from './lib/arrange';
 import {
   analysisDefaults,
@@ -129,6 +134,10 @@ export function App() {
   /** The project whose "orient this casting" prompt was dismissed this session. */
   const [orientPromptDismissed, setOrientPromptDismissed] = useState<string | null>(null);
   const [materials, setMaterials] = useState<MaterialInfo[]>([]);
+  const [sands, setSands] = useState<SandInfo[]>(FALLBACK_SANDS);
+  /** The automatic mold box and cores for the current parts and mold settings. */
+  const [moldPreview, setMoldPreview] = useState<MoldPreview | null>(null);
+  const [moldPreviewError, setMoldPreviewError] = useState<string | null>(null);
   const [hardware, setHardware] = useState<HardwareInfo | null>(null);
   const [alloyGuide, setAlloyGuide] = useState<AlloyGuideRow[]>([]);
   /** Set when the API cannot be reached at all, so panels can say why. */
@@ -189,6 +198,19 @@ export function App() {
   // The alloy list is the canary: if it cannot be fetched the API is not
   // reachable, and every panel should say so rather than sitting on a
   // "Loading..." that will never resolve.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .sands()
+      .then((payload) => {
+        if (!cancelled && payload.length) setSands(payload);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     api
@@ -1079,6 +1101,103 @@ export function App() {
   const closePanel = useCallback(() => patchShell({ activePanel: null }), [patchShell]);
   const setPanel = useCallback((panel: PanelId | null) => patchShell({ activePanel: panel }), [patchShell]);
 
+  // --- Mold and cores preview -------------------------------------------------
+  // The server builds the automatic mold box and cores on the run's lattice
+  // from the saved parts; edits are debounced so dragging a part or a field
+  // does not queue a rasterisation per frame.
+  const mold = readMold(settings.solidification_params);
+  const moldKey = JSON.stringify(mold);
+  const partsKey = JSON.stringify(
+    parts.map((part) => [
+      part.id,
+      part.filepath,
+      part.part_type,
+      part.is_open_top,
+      part.visible,
+      part.position_x,
+      part.position_y,
+      part.position_z,
+      part.rotation_x,
+      part.rotation_y,
+      part.rotation_z,
+      part.scale
+    ])
+  );
+  useEffect(() => {
+    if (!projectId || parts.length === 0 || !moldPreviewWanted(mold)) {
+      setMoldPreview(null);
+      setMoldPreviewError(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      api
+        .moldPreview(projectId, mold as unknown as Record<string, number>, settings.voxel_size)
+        .then((payload) => {
+          if (cancelled) return;
+          setMoldPreview(payload);
+          setMoldPreviewError(null);
+        })
+        .catch((error: unknown) => {
+          if (cancelled) return;
+          setMoldPreview(null);
+          setMoldPreviewError(error instanceof Error ? error.message : String(error));
+        });
+    }, 700);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+    // `moldKey` and `partsKey` stand in for `mold` and `parts`: they change
+    // exactly when something the preview depends on does.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, moldKey, partsKey, settings.voxel_size]);
+
+  /** Parts as drawn: the project's own plus the automatic mold and core preview bodies. */
+  const displayParts = useMemo(() => {
+    if (!moldPreview) return parts;
+    const preview: ProjectPart[] = [];
+    const add = (kind: 'mold' | 'core', meshes: MoldPreview['mold']) =>
+      meshes.forEach((mesh, index) => {
+        const xs: number[] = [];
+        const ys: number[] = [];
+        const zs: number[] = [];
+        for (let i = 0; i < mesh.vertices.length; i += 3) {
+          xs.push(mesh.vertices[i]);
+          ys.push(mesh.vertices[i + 1]);
+          zs.push(mesh.vertices[i + 2]);
+        }
+        const span = (values: number[]): [number, number] => [Math.min(...values), Math.max(...values)];
+        preview.push({
+          id: `${AUTO_SAND_PREFIX}${kind}_${index}`,
+          name: kind === 'mold' ? 'Mold (automatic)' : `Core ${index + 1} (automatic)`,
+          part_type: kind,
+          filepath: `${AUTO_SAND_PREFIX}${kind}_${index}_${mesh.vertex_count}`,
+          position_x: 0,
+          position_y: 0,
+          position_z: 0,
+          rotation_x: 0,
+          rotation_y: 0,
+          rotation_z: 0,
+          scale: 1,
+          visible: true,
+          is_open_top: false,
+          meshData: {
+            vertices: mesh.vertices,
+            faces: mesh.faces,
+            bounds: { x: span(xs), y: span(ys), z: span(zs) },
+            volume: 0,
+            surface_area: 0,
+            vertex_count: mesh.vertex_count,
+            face_count: mesh.face_count
+          }
+        });
+      });
+    add('mold', moldPreview.mold);
+    add('core', moldPreview.cores);
+    return preview.length ? [...parts, ...preview] : parts;
+  }, [parts, moldPreview]);
+
   const panel = useMemo(() => {
     switch (shell.activePanel) {
       case 'parts':
@@ -1206,7 +1325,37 @@ export function App() {
             params={settings.solidification_params}
             onOpenModal={() => setModal('solidification')}
             onReset={() =>
-              setSettings((current) => ({ ...current, solidification_params: buildSolidificationDefaults() }))
+              // The mold group has its own panel and its own reset.
+              setSettings((current) => ({
+                ...current,
+                solidification_params: {
+                  ...buildSolidificationDefaults(),
+                  ...(current.solidification_params.mold ? { mold: current.solidification_params.mold } : {})
+                }
+              }))
+            }
+            onClose={closePanel}
+          />
+        );
+      case 'mold':
+        return (
+          <MoldPanel
+            mold={readMold(settings.solidification_params)}
+            sands={sands}
+            preview={moldPreview}
+            previewError={moldPreviewError}
+            hasParts={parts.length > 0}
+            onChange={(mold) =>
+              setSettings((current) => ({
+                ...current,
+                solidification_params: writeMold(current.solidification_params, mold)
+              }))
+            }
+            onReset={() =>
+              setSettings((current) => ({
+                ...current,
+                solidification_params: writeMold(current.solidification_params, MOLD_DEFAULTS)
+              }))
             }
             onClose={closePanel}
           />
@@ -1260,7 +1409,10 @@ export function App() {
     openProject,
     refreshProjects,
     newProject,
-    offline
+    offline,
+    sands,
+    moldPreview,
+    moldPreviewError
   ]);
 
   return (
@@ -1321,7 +1473,7 @@ export function App() {
         <CanvasStage
           viewportRef={viewportRef}
           projectId={projectId}
-          parts={parts}
+          parts={displayParts}
           selectedPartId={selectedPartId}
           onSelectPart={setSelectedPartId}
           resultsAvailable={resultsAvailable}

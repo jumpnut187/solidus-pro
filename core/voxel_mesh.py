@@ -738,6 +738,8 @@ class AdaptiveVoxelMesh:
         self._cut_cell_part_counts = None
         self._cut_cell_part_meshes = None
         self.cut_cell_stats = None
+        # Sand mold layout from core/mold_setup.py (None: no explicit mold).
+        self.mold_layout = None
 
         # Spatial index for fast queries
         self._spatial_index = None

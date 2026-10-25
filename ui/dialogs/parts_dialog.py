@@ -398,7 +398,9 @@ class PartsDialog(DraggableDialog):
             open_top_cb.setEnabled(part_type_value == "riser")
             open_top_cb.setToolTip(
                 "Open Top Riser: Atmospheric pressure pushes metal down for better feeding.\n"
-                "Blind Riser (unchecked): Enclosed, may form vacuum reducing feeding by ~20%."
+                "Blind Riser (unchecked): Enclosed, may form vacuum reducing feeding by ~20%.\n"
+                "With a sand mold (Simulation > Mold && Cores) an open riser stays open to the air\n"
+                "at the top of the mold; a blind riser gets the closed-riser sand cover."
             )
             open_top_cb.setProperty("part_id", part_id)
             open_top_cb.stateChanged.connect(

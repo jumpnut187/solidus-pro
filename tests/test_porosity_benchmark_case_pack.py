@@ -70,8 +70,14 @@ class PorosityBenchmarkCasePackTests(unittest.TestCase):
         for case in case_pack["cases"]:
             builder_name = case["builder"]
             self.assertIn(builder_name, CASE_BUILDERS)
-            # Plain voxels: the case-pack thresholds and reference targets were calibrated on old-voxel results.
-            engine = _run_pipeline_with_patched_memory(CASE_BUILDERS[builder_name](), voxel_cut_cells=False)
+            # Plain voxels on the sand boundary: the case-pack thresholds and
+            # reference targets were calibrated on old-voxel results without
+            # the explicit sand mold.
+            engine = _run_pipeline_with_patched_memory(
+                CASE_BUILDERS[builder_name](),
+                voxel_cut_cells=False,
+                solidification_params={"mold": {"auto_mold": 0, "auto_cores": 0}},
+            )
             metrics[case["id"]] = _collect_case_metrics(engine)
         return metrics
 

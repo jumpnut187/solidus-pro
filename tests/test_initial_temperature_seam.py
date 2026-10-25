@@ -168,7 +168,8 @@ class ChillOverrideTests(unittest.TestCase):
         # Build the thermal models without running the solve, so the field
         # observed is exactly what the override produced.
         engine._initialize_thermal_models(show_progress=False)
-        return engine, np.asarray(engine._thermal_heat_model.temperatures, dtype=np.float64)
+        # The field carries the mold sand after the mesh's own cells.
+        return engine, np.asarray(engine._thermal_heat_model.temperatures[:n], dtype=np.float64)
 
     def test_chills_are_forced_to_mold_temperature(self) -> None:
         """Even seeded as molten, chills must start at chill temperature."""

@@ -52,6 +52,7 @@ try:
 except ImportError:
     from core.error_logger_dummy import logger
 
+from core.part_manager import PART_TYPE_COLORS, PartType
 from core.pour_location import PourLocation
 from ui.result_surface import (
     ResultSurfaceRenderer,
@@ -67,10 +68,15 @@ from ui.result_surface import (
 
 #: Marker color for the picked pour (metal-entry) location -- magenta, chosen
 #: to be distinct from every entry in ``core.part_manager.PART_TYPE_COLORS``
-#: (grey-blue casting, orange risers, dark blue-grey chills, brown cores, and
-#: the teal/yellow gating system) so it reads unambiguously as a UI marker
-#: rather than a part.
+#: (grey-blue casting, orange risers, dark blue-grey chills, green cores,
+#: purple mold, and the teal/yellow gating system) so it reads unambiguously
+#: as a UI marker rather than a part.
 POUR_LOCATION_MARKER_COLOR = (1.0, 0.0, 1.0)
+
+#: Sand bodies (mold, cores, and the automatic mold and core preview) draw
+#: translucent while setting up and are hidden while a result is on screen:
+#: the engineer reviews the casting, its riser posts and its risers.
+SAND_PART_OPACITY = 0.28
 
 #: Parting-plane overlay colors: plane fill/outline and label, the section
 #: line where it cuts the casting, and the cope (above) / drag (below) tags.
@@ -974,6 +980,9 @@ class CastingVisualizer(QWidget):
         # builder so a hidden component's voxels drop out of the analysis
         # overlays too. ``_model_visible`` is the master "Show Model" flag.
         self._hidden_part_ids: set = set()
+        # Actor ids of sand bodies (mold and core parts, preview actors).
+        self._sand_part_ids: set = set()
+        self._mold_preview_ids: list = []
         self._voxel_display_mask: Optional[np.ndarray] = None
         self._model_visible: bool = True
         
@@ -2378,11 +2387,17 @@ class CastingVisualizer(QWidget):
         """AND the review-time voxel display mask into a builder's selection mask."""
         return apply_display_mask(self, mask)
 
+    def _results_on_screen(self) -> bool:
+        surface = getattr(self, "result_surface", None)
+        return bool(surface is not None and surface.view is not None and getattr(surface, "visible", True))
+
     def _part_actor_should_show(self, part_id: str) -> bool:
         model_visible = getattr(self, "_model_visible", True)
         hidden = getattr(self, "_hidden_part_ids", None)
         if not isinstance(hidden, set):
             hidden = set()
+        if part_id in getattr(self, "_sand_part_ids", set()) and self._results_on_screen():
+            return False
         return bool(model_visible is not False) and part_id not in hidden
 
     def set_voxel_display_mask(self, mask: Optional[np.ndarray]) -> None:
@@ -2780,6 +2795,8 @@ class CastingVisualizer(QWidget):
         for actor in self.part_actors.values():
             self.renderer.RemoveActor(actor)
         self.part_actors.clear()
+        self._sand_part_ids = set()
+        self._mold_preview_ids = []
 
         if self.result_surface is not None:
             self.result_surface.clear()
@@ -2974,19 +2991,25 @@ class CastingVisualizer(QWidget):
                 Line tool passes False so the view holds still while the
                 user turns the part.
         """
-        # Clear existing parts
-        for actor in self.part_actors.values():
-            self.renderer.RemoveActor(actor)
-        self.part_actors.clear()
-        
+        # Clear existing parts; the automatic mold and core preview stays.
+        for part_id in [pid for pid in self.part_actors if pid not in self._mold_preview_ids]:
+            self.renderer.RemoveActor(self.part_actors.pop(part_id))
+
         # Load each part
         skins = []
+        self._sand_part_ids = set(self._mold_preview_ids)
         for i, part in enumerate(part_manager.get_all_parts()):
             if part.visible:
                 color = part.color if part.color else self.PART_COLORS[i % len(self.PART_COLORS)]
                 vertices = part.get_vertices()
                 faces = part.get_faces()
-                self.load_part(part.id, vertices, faces, color=color)
+                if part.part_type in (PartType.MOLD, PartType.CORE):
+                    self._sand_part_ids.add(part.id)
+                    self.load_part(
+                        part.id, vertices, faces, color=PART_TYPE_COLORS[part.part_type], opacity=SAND_PART_OPACITY
+                    )
+                else:
+                    self.load_part(part.id, vertices, faces, color=color)
                 skins.append((part.id, vertices, faces, part.part_type))
         # The result renderer paints on its own subdivided copy of the metal skins.
         if self.result_surface is not None:
@@ -3007,6 +3030,30 @@ class CastingVisualizer(QWidget):
             )
         self.render_window.Render()
     
+    def set_mold_preview(self, meshes: Optional[Dict[str, list]]) -> None:
+        """Draw the automatic mold box and cores (``core.mold_setup.preview_meshes``), or clear them.
+
+        Preview actors are sand bodies: translucent purple (mold) and green
+        (cores) while setting up, hidden in results.
+        """
+        for part_id in self._mold_preview_ids:
+            actor = self.part_actors.pop(part_id, None)
+            if actor is not None:
+                self.renderer.RemoveActor(actor)
+            self._sand_part_ids.discard(part_id)
+        self._mold_preview_ids = []
+        for kind, part_type in (("mold", PartType.MOLD), ("cores", PartType.CORE)):
+            for n, mesh in enumerate((meshes or {}).get(kind, [])):
+                part_id = f"__auto_{kind}_{n}"
+                self._mold_preview_ids.append(part_id)
+                self._sand_part_ids.add(part_id)
+                self.load_part(
+                    part_id, np.asarray(mesh.vertices), np.asarray(mesh.faces),
+                    color=PART_TYPE_COLORS[part_type], opacity=SAND_PART_OPACITY,
+                )
+        self._apply_part_actor_visibility()
+        self.render_window.Render()
+
     def toggle_mesh_visibility(self, visible: bool):
         """Master model toggle: the legacy combined mesh and every part skin."""
         self._model_visible = bool(visible)
