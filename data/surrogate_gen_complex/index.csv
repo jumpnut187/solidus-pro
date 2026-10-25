@@ -1,0 +1,253 @@
+sample_id,timestamp,alloy,voxel_count,resolution,path,mesh_type,cut_cells,explicit_mold
+00f3df55a2b0,2026-10-25 00:18:33,C958 (Aluminum Bronze),28309,64,data/surrogate_gen_complex/run_00f3df55a2b0.npz,voxel,1,1
+b3ee5438772e,2026-10-25 00:18:51,C964 (CuNi),28309,64,data/surrogate_gen_complex/run_b3ee5438772e.npz,voxel,1,1
+92a1a23c2c76,2026-10-25 00:22:03,WCB (Carbon Steel Casting),97862,64,data/surrogate_gen_complex/run_92a1a23c2c76.npz,voxel,1,1
+702330341183,2026-10-25 00:26:24,IN625 (Inconel 625),97862,64,data/surrogate_gen_complex/run_702330341183.npz,voxel,1,1
+1a57b49321e4,2026-10-25 00:28:10,MONEL400 (Monel 400 Nickel-Copper),62811,64,data/surrogate_gen_complex/run_1a57b49321e4.npz,voxel,1,1
+f7c1efc86ff3,2026-10-25 00:30:10,IN625 (Inconel 625),62811,64,data/surrogate_gen_complex/run_f7c1efc86ff3.npz,voxel,1,1
+08d860736afd,2026-10-25 00:31:57,WCB (Carbon Steel Casting),31770,64,data/surrogate_gen_complex/run_08d860736afd.npz,voxel,1,1
+7a10cbfca565,2026-10-25 00:34:31,IN625 (Inconel 625),31770,64,data/surrogate_gen_complex/run_7a10cbfca565.npz,voxel,1,1
+fc2d66b783a9,2026-10-25 00:34:40,C964 (CuNi),25007,64,data/surrogate_gen_complex/run_fc2d66b783a9.npz,voxel,1,1
+b616a523cc8e,2026-10-25 00:34:50,MONEL400 (Monel 400 Nickel-Copper),25007,64,data/surrogate_gen_complex/run_b616a523cc8e.npz,voxel,1,1
+f18020b6868d,2026-10-25 00:36:06,CF8 (Stainless Steel 304),106558,64,data/surrogate_gen_complex/run_f18020b6868d.npz,voxel,1,1
+5d1e29180b0c,2026-10-25 00:37:31,C964 (CuNi),106558,64,data/surrogate_gen_complex/run_5d1e29180b0c.npz,voxel,1,1
+bbc760f98ad0,2026-10-25 00:39:09,MONEL400 (Monel 400 Nickel-Copper),71895,64,data/surrogate_gen_complex/run_bbc760f98ad0.npz,voxel,1,1
+54504ecdc0fa,2026-10-25 00:40:43,C964 (CuNi),42063,64,data/surrogate_gen_complex/run_54504ecdc0fa.npz,voxel,1,1
+f6a5b8197331,2026-10-25 00:42:51,IN625 (Inconel 625),42063,64,data/surrogate_gen_complex/run_f6a5b8197331.npz,voxel,1,1
+785d4c59abc9,2026-10-25 00:44:02,C964 (CuNi),40811,64,data/surrogate_gen_complex/run_785d4c59abc9.npz,voxel,1,1
+944d8ef33c54,2026-10-25 00:45:08,CA6NM (Cast Steel),40811,64,data/surrogate_gen_complex/run_944d8ef33c54.npz,voxel,1,1
+4e2cf1b12514,2026-10-25 00:46:33,C958 (Aluminum Bronze),71582,64,data/surrogate_gen_complex/run_4e2cf1b12514.npz,voxel,1,1
+6a9e4ed8f5ac,2026-10-25 00:47:36,C964 (CuNi),71582,64,data/surrogate_gen_complex/run_6a9e4ed8f5ac.npz,voxel,1,1
+6d8eedad35ce,2026-10-25 00:48:01,CF8 (Stainless Steel 304),15027,64,data/surrogate_gen_complex/run_6d8eedad35ce.npz,voxel,1,1
+d2e7b9f33cee,2026-10-25 00:48:26,MONEL400 (Monel 400 Nickel-Copper),15027,64,data/surrogate_gen_complex/run_d2e7b9f33cee.npz,voxel,1,1
+8a2c872e63e2,2026-10-25 00:53:21,CA6NM (Cast Steel),102966,64,data/surrogate_gen_complex/run_8a2c872e63e2.npz,voxel,1,1
+429c78c5200a,2026-10-25 00:58:10,MONEL400 (Monel 400 Nickel-Copper),102966,64,data/surrogate_gen_complex/run_429c78c5200a.npz,voxel,1,1
+4c5417ed8fd7,2026-10-25 00:58:31,WCB (Carbon Steel Casting),24176,64,data/surrogate_gen_complex/run_4c5417ed8fd7.npz,voxel,1,1
+9f2f13963121,2026-10-25 00:58:53,IN625 (Inconel 625),24176,64,data/surrogate_gen_complex/run_9f2f13963121.npz,voxel,1,1
+4b01796fe975,2026-10-25 00:59:13,WCB (Carbon Steel Casting),48355,64,data/surrogate_gen_complex/run_4b01796fe975.npz,voxel,1,1
+b26338425d86,2026-10-25 00:59:36,C958 (Aluminum Bronze),48355,64,data/surrogate_gen_complex/run_b26338425d86.npz,voxel,1,1
+c4006502af35,2026-10-25 01:06:25,C958 (Aluminum Bronze),179944,64,data/surrogate_gen_complex/run_c4006502af35.npz,voxel,1,1
+ec85f04a077a,2026-10-25 01:11:44,CA6NM (Cast Steel),179944,64,data/surrogate_gen_complex/run_ec85f04a077a.npz,voxel,1,1
+ad08a0ecfd3d,2026-10-25 01:13:42,WCB (Carbon Steel Casting),76485,64,data/surrogate_gen_complex/run_ad08a0ecfd3d.npz,voxel,1,1
+c8bffd032671,2026-10-25 01:16:41,IN625 (Inconel 625),76485,64,data/surrogate_gen_complex/run_c8bffd032671.npz,voxel,1,1
+defd24f6f8df,2026-10-25 01:17:43,CF8 (Stainless Steel 304),27197,64,data/surrogate_gen_complex/run_defd24f6f8df.npz,voxel,1,1
+ffa82b1b17c7,2026-10-25 01:18:52,C958 (Aluminum Bronze),27197,64,data/surrogate_gen_complex/run_ffa82b1b17c7.npz,voxel,1,1
+9c31166f0d93,2026-10-25 01:19:53,C958 (Aluminum Bronze),32115,64,data/surrogate_gen_complex/run_9c31166f0d93.npz,voxel,1,1
+373928fa4a56,2026-10-25 01:20:56,MONEL400 (Monel 400 Nickel-Copper),32115,64,data/surrogate_gen_complex/run_373928fa4a56.npz,voxel,1,1
+95f1e6aebd92,2026-10-25 01:26:32,C958 (Aluminum Bronze),111056,64,data/surrogate_gen_complex/run_95f1e6aebd92.npz,voxel,1,1
+eef1b995f4ba,2026-10-25 01:32:15,MONEL400 (Monel 400 Nickel-Copper),111056,64,data/surrogate_gen_complex/run_eef1b995f4ba.npz,voxel,1,1
+39ddd1b6da0b,2026-10-25 01:32:34,WCB (Carbon Steel Casting),42431,64,data/surrogate_gen_complex/run_39ddd1b6da0b.npz,voxel,1,1
+1eba0899dec2,2026-10-25 01:32:54,IN625 (Inconel 625),42431,64,data/surrogate_gen_complex/run_1eba0899dec2.npz,voxel,1,1
+52041952ee03,2026-10-25 01:35:03,C958 (Aluminum Bronze),39953,64,data/surrogate_gen_complex/run_52041952ee03.npz,voxel,1,1
+147b659d2b79,2026-10-25 01:37:42,IN625 (Inconel 625),39953,64,data/surrogate_gen_complex/run_147b659d2b79.npz,voxel,1,1
+5011044b1848,2026-10-25 01:38:52,CA6NM (Cast Steel),21202,64,data/surrogate_gen_complex/run_5011044b1848.npz,voxel,1,1
+f3bbd1b53b4f,2026-10-25 01:40:38,IN625 (Inconel 625),21202,64,data/surrogate_gen_complex/run_f3bbd1b53b4f.npz,voxel,1,1
+6eb5c8cd1ca6,2026-10-25 01:45:02,CA6NM (Cast Steel),134230,64,data/surrogate_gen_complex/run_6eb5c8cd1ca6.npz,voxel,1,1
+451b0e2fb76d,2026-10-25 01:51:32,IN625 (Inconel 625),134230,64,data/surrogate_gen_complex/run_451b0e2fb76d.npz,voxel,1,1
+d3a0bed215a3,2026-10-25 01:55:30,CF8 (Stainless Steel 304),27660,64,data/surrogate_gen_complex/run_d3a0bed215a3.npz,voxel,1,1
+c57204532d25,2026-10-25 01:55:56,CA6NM (Cast Steel),27660,64,data/surrogate_gen_complex/run_c57204532d25.npz,voxel,1,1
+67ff198a34a2,2026-10-25 01:56:12,WCB (Carbon Steel Casting),25697,64,data/surrogate_gen_complex/run_67ff198a34a2.npz,voxel,1,1
+5b17b43798c5,2026-10-25 01:56:33,C958 (Aluminum Bronze),25697,64,data/surrogate_gen_complex/run_5b17b43798c5.npz,voxel,1,1
+af3d2698bb3d,2026-10-25 02:02:19,C958 (Aluminum Bronze),119311,64,data/surrogate_gen_complex/run_af3d2698bb3d.npz,voxel,1,1
+b9c7ae61120c,2026-10-25 02:07:07,CA6NM (Cast Steel),119311,64,data/surrogate_gen_complex/run_b9c7ae61120c.npz,voxel,1,1
+135cf773bcd0,2026-10-25 02:08:06,C964 (CuNi),98204,64,data/surrogate_gen_complex/run_135cf773bcd0.npz,voxel,1,1
+ea4d30d859bd,2026-10-25 02:09:10,MONEL400 (Monel 400 Nickel-Copper),98204,64,data/surrogate_gen_complex/run_ea4d30d859bd.npz,voxel,1,1
+d733a5c0ae24,2026-10-25 02:09:58,C964 (CuNi),25634,64,data/surrogate_gen_complex/run_d733a5c0ae24.npz,voxel,1,1
+ca652b23ba73,2026-10-25 02:10:55,MONEL400 (Monel 400 Nickel-Copper),25634,64,data/surrogate_gen_complex/run_ca652b23ba73.npz,voxel,1,1
+f73ad470740d,2026-10-25 02:17:57,C964 (CuNi),132570,64,data/surrogate_gen_complex/run_f73ad470740d.npz,voxel,1,1
+b2e4a1d74fe2,2026-10-25 02:24:39,MONEL400 (Monel 400 Nickel-Copper),132570,64,data/surrogate_gen_complex/run_b2e4a1d74fe2.npz,voxel,1,1
+b91cea14145a,2026-10-25 02:25:58,C958 (Aluminum Bronze),91904,64,data/surrogate_gen_complex/run_b91cea14145a.npz,voxel,1,1
+30894d65e1db,2026-10-25 02:26:44,CA6NM (Cast Steel),91904,64,data/surrogate_gen_complex/run_30894d65e1db.npz,voxel,1,1
+962a12258d0c,2026-10-25 02:27:12,CA6NM (Cast Steel),25492,64,data/surrogate_gen_complex/run_962a12258d0c.npz,voxel,1,1
+9ceab0898128,2026-10-25 02:27:47,MONEL400 (Monel 400 Nickel-Copper),25492,64,data/surrogate_gen_complex/run_9ceab0898128.npz,voxel,1,1
+a52195c4582c,2026-10-25 02:28:24,CF8 (Stainless Steel 304),46496,64,data/surrogate_gen_complex/run_a52195c4582c.npz,voxel,1,1
+d9a2985460bf,2026-10-25 02:28:52,CA6NM (Cast Steel),46496,64,data/surrogate_gen_complex/run_d9a2985460bf.npz,voxel,1,1
+7fc839ef25e7,2026-10-25 02:30:12,C958 (Aluminum Bronze),102103,64,data/surrogate_gen_complex/run_7fc839ef25e7.npz,voxel,1,1
+e3e18ec3cb49,2026-10-25 02:31:42,C964 (CuNi),102103,64,data/surrogate_gen_complex/run_e3e18ec3cb49.npz,voxel,1,1
+0291daad8b45,2026-10-25 02:37:35,CF8 (Stainless Steel 304),72980,64,data/surrogate_gen_complex/run_0291daad8b45.npz,voxel,1,1
+19f91e717bb3,2026-10-25 02:43:17,MONEL400 (Monel 400 Nickel-Copper),72980,64,data/surrogate_gen_complex/run_19f91e717bb3.npz,voxel,1,1
+33d865f57275,2026-10-25 02:44:13,CA6NM (Cast Steel),30251,64,data/surrogate_gen_complex/run_33d865f57275.npz,voxel,1,1
+087646c7c5de,2026-10-25 02:45:25,MONEL400 (Monel 400 Nickel-Copper),30251,64,data/surrogate_gen_complex/run_087646c7c5de.npz,voxel,1,1
+f2ffda9d0d43,2026-10-25 02:46:12,WCB (Carbon Steel Casting),35777,64,data/surrogate_gen_complex/run_f2ffda9d0d43.npz,voxel,1,1
+75e411941732,2026-10-25 02:47:11,CF8 (Stainless Steel 304),35777,64,data/surrogate_gen_complex/run_75e411941732.npz,voxel,1,1
+e751264eff22,2026-10-25 02:48:43,CF8 (Stainless Steel 304),128257,64,data/surrogate_gen_complex/run_e751264eff22.npz,voxel,1,1
+5808402bbca0,2026-10-25 02:50:14,MONEL400 (Monel 400 Nickel-Copper),128257,64,data/surrogate_gen_complex/run_5808402bbca0.npz,voxel,1,1
+7b28f6e195a8,2026-10-25 02:59:39,CA6NM (Cast Steel),39214,64,data/surrogate_gen_complex/run_7b28f6e195a8.npz,voxel,1,1
+06b5a76c3f12,2026-10-25 03:03:52,IN625 (Inconel 625),39214,64,data/surrogate_gen_complex/run_06b5a76c3f12.npz,voxel,1,1
+e7ae0de23c77,2026-10-25 03:10:16,CA6NM (Cast Steel),127423,64,data/surrogate_gen_complex/run_e7ae0de23c77.npz,voxel,1,1
+65c017e116eb,2026-10-25 03:17:44,MONEL400 (Monel 400 Nickel-Copper),127423,64,data/surrogate_gen_complex/run_65c017e116eb.npz,voxel,1,1
+2a320cc347d1,2026-10-25 03:18:19,MONEL400 (Monel 400 Nickel-Copper),53533,64,data/surrogate_gen_complex/run_2a320cc347d1.npz,voxel,1,1
+553f553e8a5c,2026-10-25 03:18:57,IN625 (Inconel 625),53533,64,data/surrogate_gen_complex/run_553f553e8a5c.npz,voxel,1,1
+a85245b619f8,2026-10-25 03:19:40,C958 (Aluminum Bronze),21070,64,data/surrogate_gen_complex/run_a85245b619f8.npz,voxel,1,1
+05e6f14fe4f5,2026-10-25 03:20:17,C964 (CuNi),21070,64,data/surrogate_gen_complex/run_05e6f14fe4f5.npz,voxel,1,1
+7f0afd8910f4,2026-10-25 03:20:26,WCB (Carbon Steel Casting),23986,64,data/surrogate_gen_complex/run_7f0afd8910f4.npz,voxel,1,1
+fb8034359cd7,2026-10-25 03:20:36,MONEL400 (Monel 400 Nickel-Copper),23986,64,data/surrogate_gen_complex/run_fb8034359cd7.npz,voxel,1,1
+30d2c92a319a,2026-10-25 03:27:23,C964 (CuNi),151969,64,data/surrogate_gen_complex/run_30d2c92a319a.npz,voxel,1,1
+2a4624896f60,2026-10-25 03:33:11,CA6NM (Cast Steel),151969,64,data/surrogate_gen_complex/run_2a4624896f60.npz,voxel,1,1
+37ad3b6b0870,2026-10-25 03:35:13,CA6NM (Cast Steel),34201,64,data/surrogate_gen_complex/run_37ad3b6b0870.npz,voxel,1,1
+b9a1f0680d31,2026-10-25 03:36:23,IN625 (Inconel 625),34201,64,data/surrogate_gen_complex/run_b9a1f0680d31.npz,voxel,1,1
+6ddc8c2c9992,2026-10-25 03:41:59,WCB (Carbon Steel Casting),127905,64,data/surrogate_gen_complex/run_6ddc8c2c9992.npz,voxel,1,1
+2ab2ce44b16a,2026-10-25 03:46:21,C958 (Aluminum Bronze),127905,64,data/surrogate_gen_complex/run_2ab2ce44b16a.npz,voxel,1,1
+bcbb88fa7300,2026-10-25 03:47:51,C958 (Aluminum Bronze),14031,64,data/surrogate_gen_complex/run_bcbb88fa7300.npz,voxel,1,1
+9ace445585b6,2026-10-25 03:47:59,C964 (CuNi),14031,64,data/surrogate_gen_complex/run_9ace445585b6.npz,voxel,1,1
+a03450fecc38,2026-10-25 03:48:30,C964 (CuNi),40637,64,data/surrogate_gen_complex/run_a03450fecc38.npz,voxel,1,1
+e47ab2291523,2026-10-25 03:49:06,MONEL400 (Monel 400 Nickel-Copper),40637,64,data/surrogate_gen_complex/run_e47ab2291523.npz,voxel,1,1
+e52ece9c89a7,2026-10-25 03:51:39,C958 (Aluminum Bronze),60565,64,data/surrogate_gen_complex/run_e52ece9c89a7.npz,voxel,1,1
+07b6d234b310,2026-10-25 03:53:52,CA6NM (Cast Steel),60565,64,data/surrogate_gen_complex/run_07b6d234b310.npz,voxel,1,1
+be69c6f8cc37,2026-10-25 03:55:45,CF8 (Stainless Steel 304),40274,64,data/surrogate_gen_complex/run_be69c6f8cc37.npz,voxel,1,1
+38aed7393a2f,2026-10-25 03:57:11,CA6NM (Cast Steel),40274,64,data/surrogate_gen_complex/run_38aed7393a2f.npz,voxel,1,1
+68d45af6a7fe,2026-10-25 03:58:37,C958 (Aluminum Bronze),44257,64,data/surrogate_gen_complex/run_68d45af6a7fe.npz,voxel,1,1
+1bab10fa3825,2026-10-25 04:00:05,MONEL400 (Monel 400 Nickel-Copper),44257,64,data/surrogate_gen_complex/run_1bab10fa3825.npz,voxel,1,1
+4cb15a5fe69f,2026-10-25 04:05:24,CF8 (Stainless Steel 304),136167,64,data/surrogate_gen_complex/run_4cb15a5fe69f.npz,voxel,1,1
+7708857850b1,2026-10-25 04:10:23,C958 (Aluminum Bronze),136167,64,data/surrogate_gen_complex/run_7708857850b1.npz,voxel,1,1
+a312c5e5c4ca,2026-10-25 04:17:08,C958 (Aluminum Bronze),156537,64,data/surrogate_gen_complex/run_a312c5e5c4ca.npz,voxel,1,1
+b8fd7f2be817,2026-10-25 04:24:25,MONEL400 (Monel 400 Nickel-Copper),156537,64,data/surrogate_gen_complex/run_b8fd7f2be817.npz,voxel,1,1
+4e74fffb5c53,2026-10-25 04:25:23,C964 (CuNi),45381,64,data/surrogate_gen_complex/run_4e74fffb5c53.npz,voxel,1,1
+906859ad8317,2026-10-25 04:26:37,IN625 (Inconel 625),45381,64,data/surrogate_gen_complex/run_906859ad8317.npz,voxel,1,1
+dbe6dfcaad42,2026-10-25 04:26:50,CF8 (Stainless Steel 304),16795,64,data/surrogate_gen_complex/run_dbe6dfcaad42.npz,voxel,1,1
+1cb6e44d646d,2026-10-25 04:27:02,MONEL400 (Monel 400 Nickel-Copper),16795,64,data/surrogate_gen_complex/run_1cb6e44d646d.npz,voxel,1,1
+0977f1d6b98e,2026-10-25 04:30:44,WCB (Carbon Steel Casting),33020,64,data/surrogate_gen_complex/run_0977f1d6b98e.npz,voxel,1,1
+7cf58052a9a2,2026-10-25 04:31:58,CF8 (Stainless Steel 304),33020,64,data/surrogate_gen_complex/run_7cf58052a9a2.npz,voxel,1,1
+3774a20970db,2026-10-25 04:32:11,WCB (Carbon Steel Casting),25218,64,data/surrogate_gen_complex/run_3774a20970db.npz,voxel,1,1
+ef19ab67b4c7,2026-10-25 04:32:23,C964 (CuNi),25218,64,data/surrogate_gen_complex/run_ef19ab67b4c7.npz,voxel,1,1
+2930386f4683,2026-10-25 04:36:13,WCB (Carbon Steel Casting),99033,64,data/surrogate_gen_complex/run_2930386f4683.npz,voxel,1,1
+44f4001d2b81,2026-10-25 04:41:37,IN625 (Inconel 625),99033,64,data/surrogate_gen_complex/run_44f4001d2b81.npz,voxel,1,1
+cc0ca27b5bd5,2026-10-25 04:44:06,C958 (Aluminum Bronze),47954,64,data/surrogate_gen_complex/run_cc0ca27b5bd5.npz,voxel,1,1
+ae877660beb3,2026-10-25 04:46:43,MONEL400 (Monel 400 Nickel-Copper),47954,64,data/surrogate_gen_complex/run_ae877660beb3.npz,voxel,1,1
+012702ebab90,2026-10-25 04:48:26,WCB (Carbon Steel Casting),34801,64,data/surrogate_gen_complex/run_012702ebab90.npz,voxel,1,1
+14374d02d699,2026-10-25 04:50:33,CF8 (Stainless Steel 304),34801,64,data/surrogate_gen_complex/run_14374d02d699.npz,voxel,1,1
+6bc5f2147185,2026-10-25 04:51:00,C964 (CuNi),26202,64,data/surrogate_gen_complex/run_6bc5f2147185.npz,voxel,1,1
+d91610a31597,2026-10-25 04:51:37,IN625 (Inconel 625),26202,64,data/surrogate_gen_complex/run_d91610a31597.npz,voxel,1,1
+df43a1aeb33a,2026-10-25 04:54:30,WCB (Carbon Steel Casting),78994,64,data/surrogate_gen_complex/run_df43a1aeb33a.npz,voxel,1,1
+4a875b60c495,2026-10-25 04:58:04,C958 (Aluminum Bronze),78994,64,data/surrogate_gen_complex/run_4a875b60c495.npz,voxel,1,1
+85f130b202e2,2026-10-25 04:59:12,C958 (Aluminum Bronze),37995,64,data/surrogate_gen_complex/run_85f130b202e2.npz,voxel,1,1
+488801912f5c,2026-10-25 05:00:18,MONEL400 (Monel 400 Nickel-Copper),37995,64,data/surrogate_gen_complex/run_488801912f5c.npz,voxel,1,1
+d79e06e7fc4b,2026-10-25 05:13:29,WCB (Carbon Steel Casting),282381,64,data/surrogate_gen_complex/run_d79e06e7fc4b.npz,voxel,1,1
+0a34e8a53efc,2026-10-25 05:24:05,CF8 (Stainless Steel 304),282381,64,data/surrogate_gen_complex/run_0a34e8a53efc.npz,voxel,1,1
+3ac651889fa0,2026-10-25 05:24:40,CF8 (Stainless Steel 304),42524,64,data/surrogate_gen_complex/run_3ac651889fa0.npz,voxel,1,1
+15f8320198a8,2026-10-25 05:25:20,C958 (Aluminum Bronze),42524,64,data/surrogate_gen_complex/run_15f8320198a8.npz,voxel,1,1
+111757e924ba,2026-10-25 05:28:27,CF8 (Stainless Steel 304),23743,64,data/surrogate_gen_complex/run_111757e924ba.npz,voxel,1,1
+ffe6cfa3eedc,2026-10-25 05:31:08,C964 (CuNi),23743,64,data/surrogate_gen_complex/run_ffe6cfa3eedc.npz,voxel,1,1
+6ad896e40ec0,2026-10-25 05:31:22,WCB (Carbon Steel Casting),39633,64,data/surrogate_gen_complex/run_6ad896e40ec0.npz,voxel,1,1
+7db4b4ecd26f,2026-10-25 05:31:41,C958 (Aluminum Bronze),39633,64,data/surrogate_gen_complex/run_7db4b4ecd26f.npz,voxel,1,1
+22df6c6cafbd,2026-10-25 05:38:50,CA6NM (Cast Steel),20085,64,data/surrogate_gen_complex/run_22df6c6cafbd.npz,voxel,1,1
+14443ecff81f,2026-10-25 05:39:01,MONEL400 (Monel 400 Nickel-Copper),20085,64,data/surrogate_gen_complex/run_14443ecff81f.npz,voxel,1,1
+65e841980630,2026-10-25 05:39:20,C958 (Aluminum Bronze),16596,64,data/surrogate_gen_complex/run_65e841980630.npz,voxel,1,1
+e40c9cfea962,2026-10-25 05:39:41,IN625 (Inconel 625),16596,64,data/surrogate_gen_complex/run_e40c9cfea962.npz,voxel,1,1
+904efafe3545,2026-10-25 05:40:34,C964 (CuNi),110584,64,data/surrogate_gen_complex/run_904efafe3545.npz,voxel,1,1
+1dd1c2c618f3,2026-10-25 05:41:30,MONEL400 (Monel 400 Nickel-Copper),110584,64,data/surrogate_gen_complex/run_1dd1c2c618f3.npz,voxel,1,1
+bbef46a76d64,2026-10-25 05:41:46,CF8 (Stainless Steel 304),18404,64,data/surrogate_gen_complex/run_bbef46a76d64.npz,voxel,1,1
+9ad1c1939f68,2026-10-25 05:42:03,IN625 (Inconel 625),18404,64,data/surrogate_gen_complex/run_9ad1c1939f68.npz,voxel,1,1
+cd946a7ab68c,2026-10-25 05:42:21,C964 (CuNi),46048,64,data/surrogate_gen_complex/run_cd946a7ab68c.npz,voxel,1,1
+d39d7adce835,2026-10-25 05:42:35,CA6NM (Cast Steel),46048,64,data/surrogate_gen_complex/run_d39d7adce835.npz,voxel,1,1
+5b18b0320b77,2026-10-25 05:47:08,WCB (Carbon Steel Casting),144905,64,data/surrogate_gen_complex/run_5b18b0320b77.npz,voxel,1,1
+a93b5e0014d9,2026-10-25 05:52:07,C964 (CuNi),144905,64,data/surrogate_gen_complex/run_a93b5e0014d9.npz,voxel,1,1
+4fc75d026112,2026-10-25 05:58:40,CF8 (Stainless Steel 304),26587,64,data/surrogate_gen_complex/run_4fc75d026112.npz,voxel,1,1
+d643143466fe,2026-10-25 06:02:59,C964 (CuNi),26587,64,data/surrogate_gen_complex/run_d643143466fe.npz,voxel,1,1
+42bd25638224,2026-10-25 06:04:50,CF8 (Stainless Steel 304),29172,64,data/surrogate_gen_complex/run_42bd25638224.npz,voxel,1,1
+d63cf83d8669,2026-10-25 06:06:40,C958 (Aluminum Bronze),29172,64,data/surrogate_gen_complex/run_d63cf83d8669.npz,voxel,1,1
+9fe0f73bd0ed,2026-10-25 06:07:56,WCB (Carbon Steel Casting),96744,64,data/surrogate_gen_complex/run_9fe0f73bd0ed.npz,voxel,1,1
+26e5ffb39e78,2026-10-25 06:09:15,C964 (CuNi),96744,64,data/surrogate_gen_complex/run_26e5ffb39e78.npz,voxel,1,1
+d5a80b1f1ba4,2026-10-25 06:11:46,WCB (Carbon Steel Casting),182121,64,data/surrogate_gen_complex/run_d5a80b1f1ba4.npz,voxel,1,1
+42749744a595,2026-10-25 06:14:10,C964 (CuNi),182121,64,data/surrogate_gen_complex/run_42749744a595.npz,voxel,1,1
+059425e29ef4,2026-10-25 06:15:07,CF8 (Stainless Steel 304),27199,64,data/surrogate_gen_complex/run_059425e29ef4.npz,voxel,1,1
+4b56b43a60a6,2026-10-25 06:16:01,C958 (Aluminum Bronze),27199,64,data/surrogate_gen_complex/run_4b56b43a60a6.npz,voxel,1,1
+64e2dc664623,2026-10-25 06:16:16,C958 (Aluminum Bronze),27190,64,data/surrogate_gen_complex/run_64e2dc664623.npz,voxel,1,1
+0b467069ed90,2026-10-25 06:16:26,CA6NM (Cast Steel),27190,64,data/surrogate_gen_complex/run_0b467069ed90.npz,voxel,1,1
+59aebcb2f262,2026-10-25 06:16:47,WCB (Carbon Steel Casting),38351,64,data/surrogate_gen_complex/run_59aebcb2f262.npz,voxel,1,1
+32b3563e1188,2026-10-25 06:17:08,C964 (CuNi),38351,64,data/surrogate_gen_complex/run_32b3563e1188.npz,voxel,1,1
+4aa2e01dd7d3,2026-10-25 06:17:32,C964 (CuNi),21510,64,data/surrogate_gen_complex/run_4aa2e01dd7d3.npz,voxel,1,1
+c43489048245,2026-10-25 06:17:50,CA6NM (Cast Steel),21510,64,data/surrogate_gen_complex/run_c43489048245.npz,voxel,1,1
+cfc66671a1fa,2026-10-25 06:18:38,WCB (Carbon Steel Casting),21531,64,data/surrogate_gen_complex/run_cfc66671a1fa.npz,voxel,1,1
+3be20a0c6279,2026-10-25 06:19:21,CA6NM (Cast Steel),21531,64,data/surrogate_gen_complex/run_3be20a0c6279.npz,voxel,1,1
+0cbed5bd7a23,2026-10-25 06:25:03,CF8 (Stainless Steel 304),125584,64,data/surrogate_gen_complex/run_0cbed5bd7a23.npz,voxel,1,1
+f9aee3adf836,2026-10-25 06:29:45,C964 (CuNi),125584,64,data/surrogate_gen_complex/run_f9aee3adf836.npz,voxel,1,1
+85069ed3388a,2026-10-25 06:30:31,C964 (CuNi),42546,64,data/surrogate_gen_complex/run_85069ed3388a.npz,voxel,1,1
+67a28cc1cd03,2026-10-25 06:31:12,CA6NM (Cast Steel),42546,64,data/surrogate_gen_complex/run_67a28cc1cd03.npz,voxel,1,1
+d96c8918d155,2026-10-25 06:31:37,WCB (Carbon Steel Casting),20085,64,data/surrogate_gen_complex/run_d96c8918d155.npz,voxel,1,1
+0e057e8f3912,2026-10-25 06:31:56,MONEL400 (Monel 400 Nickel-Copper),20085,64,data/surrogate_gen_complex/run_0e057e8f3912.npz,voxel,1,1
+13fbb1c54473,2026-10-25 06:32:04,WCB (Carbon Steel Casting),23362,64,data/surrogate_gen_complex/run_13fbb1c54473.npz,voxel,1,1
+229fcc29490a,2026-10-25 06:32:13,C958 (Aluminum Bronze),23362,64,data/surrogate_gen_complex/run_229fcc29490a.npz,voxel,1,1
+28a303f394a8,2026-10-25 06:32:49,C964 (CuNi),79601,64,data/surrogate_gen_complex/run_28a303f394a8.npz,voxel,1,1
+4b02b049d593,2026-10-25 06:33:29,CA6NM (Cast Steel),79601,64,data/surrogate_gen_complex/run_4b02b049d593.npz,voxel,1,1
+9d753dd6b42a,2026-10-25 06:36:21,C958 (Aluminum Bronze),90698,64,data/surrogate_gen_complex/run_9d753dd6b42a.npz,voxel,1,1
+e533b6acb5cd,2026-10-25 06:38:42,CA6NM (Cast Steel),90698,64,data/surrogate_gen_complex/run_e533b6acb5cd.npz,voxel,1,1
+46e92c9bfe4b,2026-10-25 06:40:39,WCB (Carbon Steel Casting),19066,64,data/surrogate_gen_complex/run_46e92c9bfe4b.npz,voxel,1,1
+8262bfbd44f6,2026-10-25 06:42:56,C958 (Aluminum Bronze),19066,64,data/surrogate_gen_complex/run_8262bfbd44f6.npz,voxel,1,1
+a671f4e737b2,2026-10-25 06:43:21,CA6NM (Cast Steel),44414,64,data/surrogate_gen_complex/run_a671f4e737b2.npz,voxel,1,1
+cc359526d16b,2026-10-25 06:43:53,MONEL400 (Monel 400 Nickel-Copper),44414,64,data/surrogate_gen_complex/run_cc359526d16b.npz,voxel,1,1
+c6a8c1693e1a,2026-10-25 06:48:07,WCB (Carbon Steel Casting),140011,64,data/surrogate_gen_complex/run_c6a8c1693e1a.npz,voxel,1,1
+9fd61a86982f,2026-10-25 06:53:25,MONEL400 (Monel 400 Nickel-Copper),140011,64,data/surrogate_gen_complex/run_9fd61a86982f.npz,voxel,1,1
+2578cd28e5c7,2026-10-25 06:54:19,C964 (CuNi),77155,64,data/surrogate_gen_complex/run_2578cd28e5c7.npz,voxel,1,1
+e2f0775dc234,2026-10-25 06:55:23,MONEL400 (Monel 400 Nickel-Copper),77155,64,data/surrogate_gen_complex/run_e2f0775dc234.npz,voxel,1,1
+7f6ad85655d4,2026-10-25 06:56:22,CA6NM (Cast Steel),25121,64,data/surrogate_gen_complex/run_7f6ad85655d4.npz,voxel,1,1
+c70e32b22431,2026-10-25 06:57:46,IN625 (Inconel 625),25121,64,data/surrogate_gen_complex/run_c70e32b22431.npz,voxel,1,1
+5e0fe59bb236,2026-10-25 07:47:35,C958 (Aluminum Bronze),96786,64,data/surrogate_gen_complex/run_5e0fe59bb236.npz,voxel,1,1
+b3e324c5e933,2026-10-25 07:53:37,MONEL400 (Monel 400 Nickel-Copper),96786,64,data/surrogate_gen_complex/run_b3e324c5e933.npz,voxel,1,1
+fc303bde9d5c,2026-10-25 07:54:20,CF8 (Stainless Steel 304),146189,64,data/surrogate_gen_complex/run_fc303bde9d5c.npz,voxel,1,1
+dcb014990097,2026-10-25 07:55:17,IN625 (Inconel 625),146189,64,data/surrogate_gen_complex/run_dcb014990097.npz,voxel,1,1
+23c3ff19e270,2026-10-25 07:56:03,C958 (Aluminum Bronze),36669,64,data/surrogate_gen_complex/run_23c3ff19e270.npz,voxel,1,1
+8ec3e4c3c3a4,2026-10-25 07:56:37,CA6NM (Cast Steel),36669,64,data/surrogate_gen_complex/run_8ec3e4c3c3a4.npz,voxel,1,1
+271c6655e7d5,2026-10-25 07:56:48,C964 (CuNi),25492,64,data/surrogate_gen_complex/run_271c6655e7d5.npz,voxel,1,1
+57947ff152bb,2026-10-25 07:57:00,IN625 (Inconel 625),25492,64,data/surrogate_gen_complex/run_57947ff152bb.npz,voxel,1,1
+8354aa52cce0,2026-10-25 08:03:09,MONEL400 (Monel 400 Nickel-Copper),102008,64,data/surrogate_gen_complex/run_8354aa52cce0.npz,voxel,1,1
+5f291296ef33,2026-10-25 08:13:18,WCB (Carbon Steel Casting),94332,64,data/surrogate_gen_complex/run_5f291296ef33.npz,voxel,1,1
+ef9059f0785c,2026-10-25 08:15:56,C958 (Aluminum Bronze),94332,64,data/surrogate_gen_complex/run_ef9059f0785c.npz,voxel,1,1
+8dbcdafedb00,2026-10-25 08:16:25,CF8 (Stainless Steel 304),37802,64,data/surrogate_gen_complex/run_8dbcdafedb00.npz,voxel,1,1
+b346226eb5c7,2026-10-25 08:16:59,C958 (Aluminum Bronze),37802,64,data/surrogate_gen_complex/run_b346226eb5c7.npz,voxel,1,1
+3c83aeeaffd9,2026-10-25 08:17:51,C958 (Aluminum Bronze),30592,64,data/surrogate_gen_complex/run_3c83aeeaffd9.npz,voxel,1,1
+a8c4e4b4e71f,2026-10-25 08:18:45,MONEL400 (Monel 400 Nickel-Copper),30592,64,data/surrogate_gen_complex/run_a8c4e4b4e71f.npz,voxel,1,1
+feed939d447d,2026-10-25 08:26:12,C958 (Aluminum Bronze),212772,64,data/surrogate_gen_complex/run_feed939d447d.npz,voxel,1,1
+92068b49bc13,2026-10-25 08:33:35,C964 (CuNi),212772,64,data/surrogate_gen_complex/run_92068b49bc13.npz,voxel,1,1
+ee9dfa1ed09a,2026-10-25 08:34:28,WCB (Carbon Steel Casting),96550,64,data/surrogate_gen_complex/run_ee9dfa1ed09a.npz,voxel,1,1
+5e926bca6aa2,2026-10-25 08:35:37,C958 (Aluminum Bronze),96550,64,data/surrogate_gen_complex/run_5e926bca6aa2.npz,voxel,1,1
+ecf90a8182a9,2026-10-25 08:36:27,C964 (CuNi),39819,64,data/surrogate_gen_complex/run_ecf90a8182a9.npz,voxel,1,1
+3c6f13d1144d,2026-10-25 08:37:09,CA6NM (Cast Steel),39819,64,data/surrogate_gen_complex/run_3c6f13d1144d.npz,voxel,1,1
+0bd64703d8d9,2026-10-25 08:37:58,CF8 (Stainless Steel 304),33279,64,data/surrogate_gen_complex/run_0bd64703d8d9.npz,voxel,1,1
+59591d6c74ce,2026-10-25 08:38:44,MONEL400 (Monel 400 Nickel-Copper),33279,64,data/surrogate_gen_complex/run_59591d6c74ce.npz,voxel,1,1
+8155ade6d6e9,2026-10-25 08:43:25,CA6NM (Cast Steel),166747,64,data/surrogate_gen_complex/run_8155ade6d6e9.npz,voxel,1,1
+c85b3cd194d5,2026-10-25 08:49:53,IN625 (Inconel 625),166747,64,data/surrogate_gen_complex/run_c85b3cd194d5.npz,voxel,1,1
+2781248709c8,2026-10-25 08:53:01,WCB (Carbon Steel Casting),27916,64,data/surrogate_gen_complex/run_2781248709c8.npz,voxel,1,1
+944b9d07cab4,2026-10-25 08:54:44,CA6NM (Cast Steel),27916,64,data/surrogate_gen_complex/run_944b9d07cab4.npz,voxel,1,1
+d813dac70a04,2026-10-25 08:55:00,CF8 (Stainless Steel 304),40613,64,data/surrogate_gen_complex/run_d813dac70a04.npz,voxel,1,1
+ac7b7f32f261,2026-10-25 08:55:15,MONEL400 (Monel 400 Nickel-Copper),40613,64,data/surrogate_gen_complex/run_ac7b7f32f261.npz,voxel,1,1
+9748b29fb016,2026-10-25 08:58:48,C958 (Aluminum Bronze),106328,64,data/surrogate_gen_complex/run_9748b29fb016.npz,voxel,1,1
+4c1721ce8e7a,2026-10-25 09:01:40,CA6NM (Cast Steel),106328,64,data/surrogate_gen_complex/run_4c1721ce8e7a.npz,voxel,1,1
+f5d2731222a7,2026-10-25 09:04:24,CF8 (Stainless Steel 304),54805,64,data/surrogate_gen_complex/run_f5d2731222a7.npz,voxel,1,1
+41fb41af6d47,2026-10-25 09:05:35,C958 (Aluminum Bronze),54805,64,data/surrogate_gen_complex/run_41fb41af6d47.npz,voxel,1,1
+e266a9061949,2026-10-25 09:05:44,MONEL400 (Monel 400 Nickel-Copper),19892,64,data/surrogate_gen_complex/run_e266a9061949.npz,voxel,1,1
+6769c77eea91,2026-10-25 09:05:55,IN625 (Inconel 625),19892,64,data/surrogate_gen_complex/run_6769c77eea91.npz,voxel,1,1
+3a2fb51b76c2,2026-10-25 09:13:01,CF8 (Stainless Steel 304),116901,64,data/surrogate_gen_complex/run_3a2fb51b76c2.npz,voxel,1,1
+8e8eabca6eb6,2026-10-25 10:08:35,CA6NM (Cast Steel),76626,64,data/surrogate_gen_complex/run_8e8eabca6eb6.npz,voxel,1,1
+482cd27baf07,2026-10-25 10:09:08,MONEL400 (Monel 400 Nickel-Copper),76626,64,data/surrogate_gen_complex/run_482cd27baf07.npz,voxel,1,1
+2f4cf896de1c,2026-10-25 10:09:49,CA6NM (Cast Steel),39318,64,data/surrogate_gen_complex/run_2f4cf896de1c.npz,voxel,1,1
+5e06605cf15a,2026-10-25 10:10:54,IN625 (Inconel 625),39318,64,data/surrogate_gen_complex/run_5e06605cf15a.npz,voxel,1,1
+671b5edaf0e3,2026-10-25 10:11:20,CA6NM (Cast Steel),33404,64,data/surrogate_gen_complex/run_671b5edaf0e3.npz,voxel,1,1
+ae256fb01db8,2026-10-25 10:11:53,MONEL400 (Monel 400 Nickel-Copper),33404,64,data/surrogate_gen_complex/run_ae256fb01db8.npz,voxel,1,1
+b307bc550103,2026-10-25 10:13:03,WCB (Carbon Steel Casting),148128,64,data/surrogate_gen_complex/run_b307bc550103.npz,voxel,1,1
+6ca530bef0b1,2026-10-25 10:14:18,IN625 (Inconel 625),148128,64,data/surrogate_gen_complex/run_6ca530bef0b1.npz,voxel,1,1
+c80b103231c9,2026-10-25 10:16:23,CF8 (Stainless Steel 304),76453,64,data/surrogate_gen_complex/run_c80b103231c9.npz,voxel,1,1
+719ae57bf98d,2026-10-25 10:18:34,C958 (Aluminum Bronze),76453,64,data/surrogate_gen_complex/run_719ae57bf98d.npz,voxel,1,1
+9f11627c8808,2026-10-25 10:19:25,WCB (Carbon Steel Casting),29590,64,data/surrogate_gen_complex/run_9f11627c8808.npz,voxel,1,1
+15643488d1d7,2026-10-25 10:20:37,IN625 (Inconel 625),29590,64,data/surrogate_gen_complex/run_15643488d1d7.npz,voxel,1,1
+32d72af9fe71,2026-10-25 10:20:51,WCB (Carbon Steel Casting),29885,64,data/surrogate_gen_complex/run_32d72af9fe71.npz,voxel,1,1
+a9c27f0c3208,2026-10-25 10:21:04,IN625 (Inconel 625),29885,64,data/surrogate_gen_complex/run_a9c27f0c3208.npz,voxel,1,1
+2d1d5b5a23e6,2026-10-25 10:22:23,MONEL400 (Monel 400 Nickel-Copper),108143,64,data/surrogate_gen_complex/run_2d1d5b5a23e6.npz,voxel,1,1
+cb35e0080faa,2026-10-25 10:23:38,IN625 (Inconel 625),108143,64,data/surrogate_gen_complex/run_cb35e0080faa.npz,voxel,1,1
+d8db84f02abe,2026-10-25 10:24:28,CF8 (Stainless Steel 304),75982,64,data/surrogate_gen_complex/run_d8db84f02abe.npz,voxel,1,1
+3525d90530dc,2026-10-25 10:25:21,C964 (CuNi),75982,64,data/surrogate_gen_complex/run_3525d90530dc.npz,voxel,1,1
+e2ff7f399f39,2026-10-25 10:25:42,MONEL400 (Monel 400 Nickel-Copper),25395,64,data/surrogate_gen_complex/run_e2ff7f399f39.npz,voxel,1,1
+9773ba93599b,2026-10-25 10:26:10,IN625 (Inconel 625),25395,64,data/surrogate_gen_complex/run_9773ba93599b.npz,voxel,1,1
+e19f20a29d8b,2026-10-25 10:26:29,CF8 (Stainless Steel 304),27087,64,data/surrogate_gen_complex/run_e19f20a29d8b.npz,voxel,1,1
+f6fd38bca11e,2026-10-25 10:26:43,CA6NM (Cast Steel),27087,64,data/surrogate_gen_complex/run_f6fd38bca11e.npz,voxel,1,1
+2c2b4300bc88,2026-10-25 10:29:14,C964 (CuNi),67056,64,data/surrogate_gen_complex/run_2c2b4300bc88.npz,voxel,1,1
+2d8202638cb6,2026-10-25 10:30:07,MONEL400 (Monel 400 Nickel-Copper),27220,64,data/surrogate_gen_complex/run_2d8202638cb6.npz,voxel,1,1
+38416569d045,2026-10-25 10:31:06,IN625 (Inconel 625),27220,64,data/surrogate_gen_complex/run_38416569d045.npz,voxel,1,1
+d9cf981cff95,2026-10-25 10:31:18,C958 (Aluminum Bronze),36084,64,data/surrogate_gen_complex/run_d9cf981cff95.npz,voxel,1,1
+280e44d05b71,2026-10-25 10:31:28,C964 (CuNi),36084,64,data/surrogate_gen_complex/run_280e44d05b71.npz,voxel,1,1
+b3e95c96557a,2026-10-25 10:33:16,WCB (Carbon Steel Casting),223004,64,data/surrogate_gen_complex/run_b3e95c96557a.npz,voxel,1,1
+f884f621cdbd,2026-10-25 10:35:06,IN625 (Inconel 625),223004,64,data/surrogate_gen_complex/run_f884f621cdbd.npz,voxel,1,1
+f236ca59cfc8,2026-10-25 10:36:49,CF8 (Stainless Steel 304),35337,64,data/surrogate_gen_complex/run_f236ca59cfc8.npz,voxel,1,1
+48aee00e2a9e,2026-10-25 10:38:17,C964 (CuNi),35337,64,data/surrogate_gen_complex/run_48aee00e2a9e.npz,voxel,1,1
+ba5d8d25f8fc,2026-10-25 10:39:23,WCB (Carbon Steel Casting),51840,64,data/surrogate_gen_complex/run_ba5d8d25f8fc.npz,voxel,1,1
+e4012ea65828,2026-10-25 10:40:27,CA6NM (Cast Steel),51840,64,data/surrogate_gen_complex/run_e4012ea65828.npz,voxel,1,1

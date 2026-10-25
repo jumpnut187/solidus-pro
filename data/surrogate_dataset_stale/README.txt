@@ -1,0 +1,1 @@
+run_4b32b5acc560.npz: UI capture (2026-10-22, WCB) containing a sand core, simulated before cores became a sand body (commit 4ab9a8f). Moved out of data/surrogate_dataset so retraining does not learn the old core physics.
