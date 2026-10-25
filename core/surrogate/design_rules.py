@@ -19,10 +19,17 @@ Rules (steel; ``core/riser_design.py`` uses the same constants):
   core saturates (heats through) well before the metal around it freezes,
   so it stops extracting heat; counting core faces at half cooling left the
   metal around cores freezing after the risers in most solved housings and
-  hubs. A cylinder riser with H = 1.5 D standing on the casting has
-  M = 0.214 D.
+  hubs. M_zone is at least the modulus of the zone's heaviest section
+  (Wlodawer): the metal within ``HEAVY_SECTION_FRACTION`` of the zone's
+  largest inscribed radius of its thickest cells, whose faces to the rest of
+  the casting do not cool. Averaged with a thin flange, a heavy hub's own
+  modulus was diluted and its riser froze before it. A cylinder riser with
+  H = 1.5 D standing on the casting has M = 0.214 D.
 - Riser placement: each riser stands on a flat, clear patch of the top
-  surface over the heaviest unfed section (largest inscribed radius).
+  surface over the heaviest unfed section (largest inscribed radius). The
+  print of a cored bore inside the top surface counts as part of the patch
+  (the core runs up into the riser), as long as metal is under at least
+  ``MIN_SEATED_FRACTION`` of the riser's base.
 - Feeding distance (SFSA plate/bar rules): metal is fed when it lies within
   ``min(4.5 T, 6 sqrt(T))`` of a riser's edge, T the zone's section
   thickness (twice its largest inscribed radius), or within
@@ -53,6 +60,8 @@ from core.cut_cells import winding_number_contains
 from core.part_manager import PART_TYPE_CAST, PART_TYPE_CHILL, PART_TYPE_CORE, PART_TYPE_RISER
 
 SAND, METAL, CORE, CHILL, RISER = 0, 1, 2, 3, 4
+#: Column label only (``_columns``): the print of a cored bore a riser may stand over.
+BORE = 5
 _LABEL_OF_CODE = {PART_TYPE_CAST: METAL, PART_TYPE_RISER: RISER, PART_TYPE_CHILL: CHILL, PART_TYPE_CORE: CORE}
 #: Rasterisation order: later labels overwrite earlier ones (the higher part code wins).
 _RASTER_ORDER = (PART_TYPE_CAST, PART_TYPE_RISER, PART_TYPE_CHILL, PART_TYPE_CORE)
@@ -75,6 +84,8 @@ CHILL_EXTENSION_MAX_IN = 2.0
 MIN_CORE_DIAMETER_IN = 0.5
 CORE_FACE_WEIGHT = 0.0
 MAX_RASTER_CELLS = 1_200_000
+HEAVY_SECTION_FRACTION = 0.5
+MIN_SEATED_FRACTION = 0.8
 
 Part = Tuple[trimesh.Trimesh, int]
 
@@ -179,18 +190,35 @@ def _neighbour(labels: np.ndarray, axis: int, step: int) -> np.ndarray:
 
 
 def _zone_moduli(raster: Raster, zones: np.ndarray, n_zones: int) -> np.ndarray:
-    """V / A per zone (inches); see the module docstring for which faces cool."""
+    """Modulus per zone (inches): the larger of its V / A and its heaviest section's; see the module docstring."""
     labels = raster.labels
+    pitch = raster.pitch
     metal = labels == METAL
-    volume = np.bincount(zones[metal], minlength=n_zones).astype(float) * raster.pitch ** 3
-    area = np.zeros(n_zones)
+    cooling = np.zeros(labels.shape)
     for axis in range(3):
         for step in (-1, 1):
             nb = _neighbour(labels, axis, step)
-            weight = np.where(nb == SAND, 1.0, 0.0) + np.where(nb == CHILL, 1.0, 0.0) + np.where(nb == CORE, CORE_FACE_WEIGHT, 0.0)
-            area += np.bincount(zones[metal], weights=weight[metal], minlength=n_zones)
-    area *= raster.pitch ** 2
-    return volume / np.maximum(area, 1e-9)
+            cooling += np.where(nb == SAND, 1.0, 0.0) + np.where(nb == CHILL, 1.0, 0.0) + np.where(nb == CORE, CORE_FACE_WEIGHT, 0.0)
+    volume = np.bincount(zones[metal], minlength=n_zones).astype(float) * pitch ** 3
+    area = np.bincount(zones[metal], weights=cooling[metal], minlength=n_zones) * pitch ** 2
+    moduli = volume / np.maximum(area, 1e-9)
+    radius = ndimage.distance_transform_edt(metal) * pitch
+    for k in range(n_zones):
+        zone = metal & (zones == k)
+        if not zone.any():
+            continue
+        # The heaviest section: the thickest cells grown back out to the
+        # faces they sit behind. Its faces to the rest of the zone count
+        # nothing in ``cooling`` (metal never does).
+        depth = HEAVY_SECTION_FRACTION * float(radius[zone].max())
+        heavy = zone & (radius >= depth)
+        box = tuple(slice(max(int(a) - 2, 0), int(b) + 3) for a, b in zip(np.argwhere(zone).min(axis=0), np.argwhere(zone).max(axis=0)))
+        section = np.zeros(labels.shape, dtype=bool)
+        section[box] = zone[box] & (ndimage.distance_transform_edt(~heavy[box]) * pitch <= depth + 0.5 * pitch)
+        section_area = float(cooling[section].sum())
+        if section_area > 0.0:
+            moduli[k] = max(moduli[k], float(section.sum()) * pitch / section_area)
+    return moduli
 
 
 @dataclass
@@ -203,25 +231,51 @@ class _Riser:
 
 
 def _columns(raster: Raster) -> Tuple[np.ndarray, np.ndarray]:
-    """Per (x, y) column: index of the topmost non-sand cell (-1 if empty) and its label."""
+    """Per (x, y) column: index of the topmost non-sand cell (-1 if empty) and its label.
+
+    The print of a cored bore (core-topped columns enclosed by metal-topped
+    ones) reads as ``BORE`` at the level of the metal around it, so a riser
+    can stand over the bore with the core running up into it.
+    """
     occupied = raster.labels != SAND
     nz = raster.labels.shape[2]
     top = np.where(occupied.any(axis=2), nz - 1 - np.argmax(occupied[:, :, ::-1], axis=2), -1)
     top_label = np.where(top >= 0, np.take_along_axis(raster.labels, np.maximum(top, 0)[..., None], axis=2)[..., 0], SAND)
+    metal_top = top_label == METAL
+    bores, n_bores = ndimage.label((top_label == CORE) & ndimage.binary_fill_holes(metal_top))
+    for b in range(1, n_bores + 1):
+        bore = bores == b
+        rim = ndimage.binary_dilation(bore) & metal_top
+        if rim.any():
+            top[bore] = int(np.median(top[rim]))
+            top_label[bore] = BORE
     return top, top_label
 
 
 def _site_limit(raster: Raster, top: np.ndarray, top_label: np.ndarray, ix: int, iy: int) -> float:
-    """Largest riser diameter centred on column (ix, iy): the patch must be flat, clear metal top."""
-    if top_label[ix, iy] != METAL:
+    """Largest riser diameter centred on column (ix, iy): the patch must be flat, clear metal top.
+
+    A bore in the patch is bridged only while metal stays under
+    ``MIN_SEATED_FRACTION`` of the base (sampled out to 0.45 D, as ``check`` does).
+    """
+    if top_label[ix, iy] not in (METAL, BORE):
         return 0.0
     tol = max(1, int(round(0.2 / raster.pitch)))
-    bad = (top_label != METAL) | (np.abs(top - top[ix, iy]) > tol)
-    pts = np.argwhere(bad)
-    if len(pts) == 0:
-        return float(min(raster.labels.shape[:2]) * raster.pitch)
-    d = np.min(np.hypot(pts[:, 0] - ix, pts[:, 1] - iy)) * raster.pitch
-    return float(2.0 * max(d - 0.5 * raster.pitch, 0.0))
+    uneven = np.abs(top - top[ix, iy]) > tol
+    rho = np.hypot(*np.indices(top.shape) - np.array([ix, iy])[:, None, None]) * raster.pitch
+
+    def clear(bad: np.ndarray) -> float:
+        if not bad.any():
+            return float(min(raster.labels.shape[:2]) * raster.pitch)
+        return float(2.0 * max(float(rho[bad].min()) - 0.5 * raster.pitch, 0.0))
+
+    bore = top_label == BORE
+    limit = clear(((top_label != METAL) & ~bore) | uneven)
+    if bore.any():
+        disk = rho <= 0.45 * limit
+        if bore[disk].mean() > 1.0 - MIN_SEATED_FRACTION:
+            limit = 0.0 if bore[ix, iy] else clear((top_label != METAL) | uneven)
+    return limit
 
 
 def _distance_to_risers(raster: Raster, centres: np.ndarray, risers: List[_Riser]) -> np.ndarray:
@@ -461,10 +515,14 @@ def rig(
 
 
 def _resite(raster: Raster, top, top_label, riser: _Riser, need: float, others: List[_Riser]) -> bool:
-    """Move ``riser`` to the nearest top-surface site (within 6 in) that takes diameter ``need``."""
+    """Move ``riser`` to the nearest top-surface site that takes diameter ``need``.
+
+    Within 6 in, or half of ``need``: a riser that size still covers the spot
+    it was put on.
+    """
     pitch = raster.pitch
     ci, cj = np.round((np.array([riser.x, riser.y]) - raster.origin[:2]) / pitch).astype(int)
-    span = int(np.ceil(6.0 / pitch))
+    span = int(np.ceil(max(6.0, 0.5 * need) / pitch))
     stride = max(1, span // 20)
     best = None
     for di in range(-span, span + 1, stride):
@@ -546,15 +604,14 @@ def check(parts: Sequence[Part]) -> DesignReport:
         r = _Riser(x=float(0.5 * (lo[0] + hi[0])), y=float(0.5 * (lo[1] + hi[1])), z_base=float(lo[2] + RISER_SINK_IN),
                    diameter=float(hi[0] - lo[0]), limit=np.inf)
         riser_specs.append(r)
-        ring = np.linspace(0, 2 * np.pi, 24, endpoint=False)
-        pts = np.column_stack([
-            np.concatenate([[r.x], r.x + 0.45 * r.diameter * np.cos(ring)]),
-            np.concatenate([[r.y], r.y + 0.45 * r.diameter * np.sin(ring)]),
-            np.full(25, r.z_base - RISER_SINK_IN - 0.5 * pitch),
-        ])
+        # Sampled over the whole base: a cored bore under the riser is not metal.
+        g = np.linspace(-0.45, 0.45, 11) * r.diameter
+        gx, gy = np.meshgrid(g, g)
+        disk = np.hypot(gx, gy) <= 0.45 * r.diameter + 1e-9
+        pts = np.column_stack([r.x + gx[disk], r.y + gy[disk], np.full(int(disk.sum()), r.z_base - RISER_SINK_IN - 0.5 * pitch)])
         idx = np.clip(np.round((pts - raster.origin) / pitch).astype(int), 0, np.array(labels.shape) - 1)
         seated = np.mean(labels[idx[:, 0], idx[:, 1], idx[:, 2]] == METAL)
-        if seated < 0.8:
+        if seated < MIN_SEATED_FRACTION:
             report.violations.append(f"riser {k} only {seated:.0%} seated on metal")
     for k, mesh in enumerate(m for m, c in parts if c == PART_TYPE_CHILL):
         lo, hi = mesh.bounds

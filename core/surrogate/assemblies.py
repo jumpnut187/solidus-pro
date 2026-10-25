@@ -250,17 +250,21 @@ def _complex_flanged_hub(
     """Large flanged hub: cored bore and cored bolt bosses on the flange.
 
     ``hub_wall`` draws the hub wall (hub radius minus bore radius) from that
-    range instead of ``bore_frac``, widening the hub up to 0.85 of the
-    flange radius to fit it around a bore at least 2 in across.
+    range instead of ``bore_frac``, around a bore at least as wide as the
+    wall: a core much thinner than the steel around it heats through, burns
+    in and cannot vent, so a foundry casts such a hub solid and machines the
+    bore. The hub widens (and the flange with it) to fit, the hub at most
+    0.85 of the flange radius.
     """
     rf = _log_uniform(rng, *dims) / 2
-    tf = float(max(rf * rng.uniform(*flange_frac), min_flange))
+    flange = rng.uniform(*flange_frac)
     r = rf * rng.uniform(0.4, 0.6)
     wall = None
     if hub_wall is not None:
-        wall = rng.uniform(*hub_wall)
-        r = min(max(r, wall + 1.0), 0.85 * rf)
-        wall = min(wall, r - 1.0)
+        wall = min(rng.uniform(*hub_wall), 0.85 * dims[1] / 2 / 1.5)
+        rf = max(rf, 1.5 * wall / 0.85)
+        r = min(max(r, 1.5 * wall), 0.85 * rf)
+    tf = float(max(rf * flange, min_flange))
     h = rf * rng.uniform(0.5, 1.1)
     overlap = JUNCTION_OVERLAP_FRACTION * min(tf, h)
     shells = [_cylinder(rf, tf, (0.0, 0.0, tf / 2)), _cylinder(r, h, (0.0, 0.0, tf - overlap + h / 2))]
