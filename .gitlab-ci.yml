@@ -105,17 +105,39 @@ frontend-lint:
 # test
 # ---------------------------------------------------------------------------
 
-# Full regression suite (about 2,000 tests, about 5 minutes locally).
+# Full regression suite (about 2,000 tests). Same install and command as the
+# GitHub workflow: pinned constraints-ci.txt, no torch (the deep-model tests
+# skip here and run in python-deep-model), and --durations lists the slowest.
 python-unittest:
+  extends: .python-base
+  stage: test
+  needs: []
+  cache:
+    key:
+      files:
+        - requirements-ci.txt
+        - constraints-ci.txt
+    paths:
+      - .cache/pip
+  variables:
+    # check.sh aborts the run (with stack dumps) before the job timeout.
+    CI_TEST_TIMEOUT: 50m
+  script:
+    - scripts/ci/install.sh
+    - scripts/ci/check.sh tests
+  timeout: 1h
+
+# Deep-model tests need torch, which python-unittest leaves out. Runs in
+# parallel so the torch install and training epochs stay off the main job.
+python-deep-model:
   extends: .python-deps
   stage: test
   needs: []
   variables:
-    # Qt widgets under test need the offscreen platform plugin (no display).
     QT_QPA_PLATFORM: offscreen
   script:
-    - python -m unittest discover tests
-  timeout: 1h
+    - python -m unittest discover tests -p "test_deep_model.py"
+  timeout: 30m
 
 # Standalone TypeScript kernel/orientation checks (esbuild + node).
 frontend-checks:

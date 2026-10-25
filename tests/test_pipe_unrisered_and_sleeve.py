@@ -1,7 +1,9 @@
 """Pipe in metal no riser feeds, and the per-riser sleeve choice.
 
 Uses the CI model plate (tests/ci_models/cast.stl, 15.25 x 6 x 2.5 in) with
-the 4 in diameter, 6 in tall cylinder on top (z 2.5 to 8.5), WCB, voxel_size=0.30 in.
+the 4 in diameter, 6 in tall cylinder on top (z 2.5 to 8.5), WCB. The pipe
+cases run at voxel_size=0.30 in; the sleeve comparisons only need the sign of
+the difference and run at 0.50 in to keep CI fast.
 
 - The cylinder typed CAST: nothing is a riser, but the liquid still drains by
   gravity, so a funnel forms at the top of the last-to-freeze region (deeper on
@@ -45,6 +47,9 @@ OLD_RISER_REPORT = {
 
 BOUNDARY_ONLY = {"mold": {"auto_mold": 0, "auto_cores": 0}}
 
+PIPE_VOXEL_SIZE = 0.30
+SLEEVE_VOXEL_SIZE = 0.50
+
 
 _RUNS: Dict[str, Dict[str, Any]] = {}
 
@@ -53,11 +58,12 @@ def _run(
     cylinder_type: str,
     riser_sleeve: Optional[str] = None,
     solidification_params: Optional[Dict[str, Any]] = None,
+    voxel_size: float = PIPE_VOXEL_SIZE,
 ) -> Dict[str, Any]:
     """One pipeline run, kept for the module so each case is simulated once."""
-    key = repr((cylinder_type, riser_sleeve, solidification_params))
+    key = repr((cylinder_type, riser_sleeve, solidification_params, voxel_size))
     if key not in _RUNS:
-        _RUNS[key] = _simulate(cylinder_type, riser_sleeve, solidification_params)
+        _RUNS[key] = _simulate(cylinder_type, riser_sleeve, solidification_params, voxel_size)
     return _RUNS[key]
 
 
@@ -65,6 +71,7 @@ def _simulate(
     cylinder_type: str,
     riser_sleeve: Optional[str],
     solidification_params: Optional[Dict[str, Any]],
+    voxel_size: float,
 ) -> Dict[str, Any]:
     if not os.path.isfile(CAST_PATH) or not os.path.isfile(RISER_PATH):
         raise unittest.SkipTest(f"CI model STL files not present at {TEST_MODEL_DIR}")
@@ -78,7 +85,7 @@ def _simulate(
     pm = build_part_manager([{"filepath": CAST_PATH, "part_type": "cast"}, cylinder])
     inputs = PipelineInputs(
         alloy_name="WCB",
-        voxel_size=0.30,
+        voxel_size=voxel_size,
         refinement_level=0,
         solidification_params=solidification_params or {},
         analysis_options={
@@ -168,10 +175,13 @@ class RiserDefaultUnchangedTests(unittest.TestCase):
 
 
 class RiserSleeveTests(unittest.TestCase):
+    """No sleeve given means insulating (tests/test_riser_sleeve.py), so the
+    default run stands in for the insulated riser."""
+
     @classmethod
     def setUpClass(cls) -> None:
-        cls.insulating = _run("riser", "insulating")
-        cls.bare = _run("riser", "none")
+        cls.insulating = _run("riser", voxel_size=SLEEVE_VOXEL_SIZE)
+        cls.bare = _run("riser", "none", voxel_size=SLEEVE_VOXEL_SIZE)
 
     def _riser_freeze_time(self, run: Dict[str, Any]) -> float:
         return float(run["times"][run["part_types"] == 1].max())
@@ -187,18 +197,13 @@ class RiserSleeveTests(unittest.TestCase):
             _lowest_piped_z(self.bare, everything), _lowest_piped_z(self.insulating, everything)
         )
 
-    def test_default_sleeve_is_insulating(self) -> None:
-        default = _run("riser")
-        np.testing.assert_array_equal(default["times"], self.insulating["times"])
-        self.assertEqual(default["riser_report"], self.insulating["riser_report"])
-
 
 class RiserSleeveBoundaryPathTests(unittest.TestCase):
     """Without an explicit mold the bare riser takes the casting's interface HTC."""
 
     def test_bare_riser_freezes_sooner_on_the_sand_boundary(self) -> None:
-        insulating = _run("riser", "insulating", BOUNDARY_ONLY)
-        bare = _run("riser", "none", BOUNDARY_ONLY)
+        insulating = _run("riser", None, BOUNDARY_ONLY, SLEEVE_VOXEL_SIZE)
+        bare = _run("riser", "none", BOUNDARY_ONLY, SLEEVE_VOXEL_SIZE)
         riser = insulating["part_types"] == 1
         self.assertLess(float(bare["times"][riser].max()), 0.97 * float(insulating["times"][riser].max()))
 
