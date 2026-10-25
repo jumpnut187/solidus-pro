@@ -34,6 +34,7 @@ class ProjectStateTests(unittest.TestCase):
             part.set_scale(1.1)
             part.visible = False
             part.is_open_top = True
+            part.riser_sleeve = "none"
             part.color = (0.1, 0.2, 0.3)
 
             payload = build_project_state(
@@ -67,6 +68,33 @@ class ProjectStateTests(unittest.TestCase):
             self.assertEqual(loaded_part["color"], [0.1, 0.2, 0.3])
             self.assertFalse(loaded_part["visible"])
             self.assertTrue(loaded_part["is_open_top"])
+            self.assertEqual(loaded_part["riser_sleeve"], "none")
+
+    def test_project_saved_before_the_sleeve_choice_loads_as_insulating(self) -> None:
+        manager = PartManager()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mesh_path = os.path.join(temp_dir, "riser.stl")
+            trimesh.creation.box(extents=(1.0, 1.0, 1.0)).export(mesh_path)
+            self.assertIsNotNone(manager.load_part(mesh_path, name="Riser"))
+            payload = build_project_state(
+                manager,
+                alloy_name="WCB",
+                voxel_size=0.15,
+                refinement_level=4,
+                memory_mode="auto",
+                analysis_options={},
+                performance_options={},
+                mesh_setting_origin="manual",
+                current_vis_mode="shrinkage",
+                ui_state={},
+            ).to_dict()
+            for part in payload["parts"]:
+                del part["riser_sleeve"]
+            loaded = load_project_state(payload).to_dict()
+            self.assertEqual(loaded["parts"][0]["riser_sleeve"], "insulating")
+
+            payload["parts"][0]["riser_sleeve"] = "exothermic"  # not an option: default
+            self.assertEqual(load_project_state(payload).to_dict()["parts"][0]["riser_sleeve"], "insulating")
 
     def test_round_trip_preserves_pour_location(self) -> None:
         manager = PartManager()

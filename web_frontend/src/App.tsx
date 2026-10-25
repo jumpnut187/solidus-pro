@@ -585,6 +585,7 @@ export function App() {
             scale: 1,
             visible: true,
             is_open_top: false,
+            riser_sleeve: 'insulating',
             meshData: file.mesh_data
           });
           added.push({ ...response.part, meshData: file.mesh_data });
@@ -616,7 +617,10 @@ export function App() {
           const merged = { ...part, ...patch };
           // Open-top only means anything on a riser; changing the type away
           // from riser has to clear the flag, not leave it set and invisible.
-          if (patch.part_type && patch.part_type !== 'riser') merged.is_open_top = false;
+          if (patch.part_type && patch.part_type !== 'riser') {
+            merged.is_open_top = false;
+            merged.riser_sleeve = 'insulating';
+          }
           next = merged;
           return merged;
         })
@@ -659,6 +663,7 @@ export function App() {
             scale: part.scale,
             visible: part.visible,
             is_open_top: part.is_open_top,
+            riser_sleeve: part.riser_sleeve,
             meshData: part.meshData
           });
           setParts((current) => [...current, { ...response.part, meshData: part.meshData }]);
@@ -1182,6 +1187,7 @@ export function App() {
           scale: 1,
           visible: true,
           is_open_top: false,
+          riser_sleeve: 'insulating',
           meshData: {
             vertices: mesh.vertices,
             faces: mesh.faces,

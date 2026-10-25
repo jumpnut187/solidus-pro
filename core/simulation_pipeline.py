@@ -546,6 +546,13 @@ def _add_summary_statistics(result_data: Dict[str, Any], engine: SolidificationE
         if clearances:
             put("riser_pipe_min_clearance_in", float(min(clearances)))
 
+    # Casting metal no riser reaches drains by gravity too: its own pools, kept
+    # apart from the riser numbers above.
+    casting_pipe = getattr(engine, "casting_pipe_report", None)
+    if isinstance(casting_pipe, list) and casting_pipe:
+        put("casting_pipe_volume_in3", float(sum(r["pipe_in3"] for r in casting_pipe)))
+        put("casting_pipe_pool_count", len(casting_pipe))
+
     put("max_stress_mpa", _optional_float(getattr(engine, "max_stress_mpa", None)))
     put("avg_sdas_um", _optional_float(getattr(engine, "avg_sdas_um", None)))
 
@@ -606,6 +613,23 @@ def _prepare_mold_stage(
             f"Mold: {layout.mold_cell_count:,} mold sand cells, "
             f"{layout.added_core_voxels:,} auto-core voxels",
         )
+
+
+def _prepare_riser_sleeves(voxel_mesh: AdaptiveVoxelMesh, part_manager: Optional[PartManager]) -> None:
+    """Mark the voxels of risers set to no sleeve (``Part.riser_sleeve``), for the thermal setup."""
+    from core.riser_sleeve import bare_riser_mask
+
+    voxel_mesh.voxel_riser_bare = None
+    if part_manager is None or part_manager.get_part_count() == 0:
+        return
+    if voxel_mesh.voxel_part_types is None or voxel_mesh.voxel_neighbors is None:
+        return
+    voxel_mesh.voxel_riser_bare = bare_riser_mask(
+        np.asarray(voxel_mesh.voxel_centers),
+        np.asarray(voxel_mesh.voxel_part_types),
+        np.asarray(voxel_mesh.voxel_neighbors),
+        part_manager.get_riser_sleeve_parts(),
+    )
 
 
 def prepare_mesh_and_geometry(
@@ -707,6 +731,7 @@ def prepare_mesh_and_geometry(
 
     _check_cancel(cancel_callback)
     _prepare_mold_stage(inputs, voxel_mesh, part_manager, mesh_to_use, progress_message_callback)
+    _prepare_riser_sleeves(voxel_mesh, part_manager)
 
     mem_stats = voxel_mesh.get_memory_stats()
     _emit_message(

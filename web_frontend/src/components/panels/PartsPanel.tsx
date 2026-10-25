@@ -3,7 +3,7 @@ import { Copy, Crosshair, Eye, EyeOff, Trash2, Upload } from 'lucide-react';
 
 import { Group, SetupPanel } from '../SetupPanel';
 import { PART_TYPES, partTypeColor, supportsOpenTop } from '../../lib/partTypes';
-import type { PartType, PourLocationPayload, ProjectPart } from '../../lib/api';
+import type { PartType, PourLocationPayload, ProjectPart, RiserSleeve } from '../../lib/api';
 import type { ViewportTool } from '../../lib/viewState';
 
 export type PartsPanelProps = {
@@ -274,6 +274,19 @@ function PartRow({
                 <span>Open top</span>
                 <span className="check-note">Open to the air at the top of the mold and vents during filling. A blind riser gets the Mold panel's sand cover.</span>
               </span>
+            </label>
+            <label className="field">
+              <span className="field-label">Sleeve</span>
+              <select
+                className="select"
+                value={part.riser_sleeve}
+                aria-label={`Sleeve of ${part.name}`}
+                onChange={(event) => onUpdate({ riser_sleeve: event.target.value as RiserSleeve })}
+              >
+                <option value="insulating">Insulating</option>
+                <option value="none">None (bare sand)</option>
+              </select>
+              <span className="field-hint">An insulating sleeve slows the riser's cooling. A bare sand riser cools through the same sand contact as the casting.</span>
             </label>
           </td>
         </tr>

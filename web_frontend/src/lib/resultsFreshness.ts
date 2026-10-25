@@ -19,6 +19,7 @@ type PartFields = Pick<
   | 'part_type'
   | 'visible'
   | 'is_open_top'
+  | 'riser_sleeve'
   | 'position_x'
   | 'position_y'
   | 'position_z'
@@ -44,6 +45,8 @@ export function simulatedPartsKey(parts: SimulatedPart[]): string {
         String(part.part_type ?? ''),
         part.visible === false ? 0 : 1,
         part.is_open_top ? 1 : 0,
+        // Runs recorded before the sleeve choice are insulating.
+        part.riser_sleeve === 'none' ? 'none' : 'insulating',
         round(part.position_x, 0),
         round(part.position_y, 0),
         round(part.position_z, 0),

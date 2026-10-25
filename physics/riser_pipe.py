@@ -14,7 +14,9 @@ arrays and imports nothing from ``core/`` or ``config/``.
 
 Assumptions:
 - The liquid in one feed pool is hydraulically connected (the caller builds
-  the pool from the feeding-path tracer's ``feeding_source``).
+  the pool from the feeding-path tracer's ``feeding_source``, or, for metal
+  no feeder reaches, from :func:`label_unfed_pools`: a liquid region drains by
+  gravity whether or not anything is labelled a feeder).
 - Volume demand is booked when a voxel reaches its solidification time.
 - The free surface is the highest liquid voxel. Ties go to the voxel that
   freezes last, the thermal centre.
@@ -28,6 +30,8 @@ from dataclasses import dataclass
 
 import numpy as np
 from numba import njit
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
 
 
 @njit(cache=True)
@@ -124,6 +128,49 @@ def _drain_pool(
     return drained, unfed
 
 
+def label_unfed_pools(
+    neighbors: np.ndarray,
+    metal_mask: np.ndarray,
+    feeder_mask: np.ndarray,
+) -> tuple[np.ndarray, int]:
+    """Label the connected metal regions that contain no feeder voxel.
+
+    Args:
+        neighbors: (N, K) int neighbor indices, -1 where there is none.
+        metal_mask: (N,) bool. Voxels that hold metal and may join a pool.
+        feeder_mask: (N,) bool. Feeder voxels. A connected region holding any
+            of them is left out: the feeder's own pool (and the feeding-path
+            tracer) already covers it.
+
+    Returns:
+        ``(labels, n_pools)``. ``labels`` is (N,) int64, 0..n_pools-1 for the
+        voxels of each feeder-free region and -1 everywhere else.
+    """
+    metal = np.asarray(metal_mask, dtype=bool)
+    feeder = np.asarray(feeder_mask, dtype=bool) & metal
+    nbr = np.asarray(neighbors)
+    n = metal.shape[0]
+    labels = np.full(n, -1, dtype=np.int64)
+    if n == 0 or not np.any(metal):
+        return labels, 0
+
+    rows = np.repeat(np.arange(n), nbr.shape[1])
+    cols = nbr.ravel()
+    valid = cols >= 0
+    valid[valid] = metal[rows[valid]] & metal[cols[valid]]
+    graph = coo_matrix(
+        (np.ones(int(valid.sum()), dtype=np.int8), (rows[valid], cols[valid])),
+        shape=(n, n),
+    )
+    _, component = connected_components(graph, directed=False)
+
+    keep = metal & ~np.isin(component, np.unique(component[feeder]))
+    if not np.any(keep):
+        return labels, 0
+    _, labels[keep] = np.unique(component[keep], return_inverse=True)
+    return labels, int(labels.max()) + 1
+
+
 @dataclass(frozen=True)
 class PoolPipe:
     """Pipe summary for one feed pool."""
@@ -174,8 +221,12 @@ def gravity_drain_pipe(
     fraction = np.zeros(times.shape[0], dtype=np.float32)
     pools: list[PoolPipe] = []
     n_pools = int(pool_ids.max()) + 1 if pool_ids.size and pool_ids.max() >= 0 else 0
+    # One stable sort instead of a full-array scan per pool: each pool's voxels
+    # stay in ascending index order, as flatnonzero would give them.
+    order = np.argsort(pool_ids, kind="stable")
+    starts = np.searchsorted(pool_ids[order], np.arange(n_pools + 1))
     for pool in range(n_pools):
-        idx = np.flatnonzero(pool_ids == pool)
+        idx = order[starts[pool]:starts[pool + 1]]
         if idx.size == 0:
             pools.append(PoolPipe(0.0, 0.0, 0.0, 0.0, 0.0))
             continue

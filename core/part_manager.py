@@ -662,6 +662,20 @@ def part_type_from_display_name(
     return _PART_TYPE_BY_DISPLAY_NAME.get(str(text).strip(), default)
 
 
+#: Riser sleeve choices (``Part.riser_sleeve``). ``insulating`` is the sleeved
+#: riser every riser has always been; ``none`` is a bare sand riser that cools
+#: through the same metal-to-sand contact as the casting.
+RISER_SLEEVE_INSULATING = "insulating"
+RISER_SLEEVE_NONE = "none"
+RISER_SLEEVE_CHOICES = (RISER_SLEEVE_INSULATING, RISER_SLEEVE_NONE)
+
+
+def riser_sleeve_from_value(value: Any) -> str:
+    """A saved or posted riser sleeve, ``insulating`` when missing or unknown."""
+    text = str(value).strip().lower() if value is not None else ""
+    return text if text in RISER_SLEEVE_CHOICES else RISER_SLEEVE_INSULATING
+
+
 def part_type_from_value(value: Any) -> PartType:
     """
     Map a serialized ``PartType.value`` (e.g. ``"sprue"``) back to its type.
@@ -873,6 +887,11 @@ class Part:
     # Blind risers can form vacuum as metal shrinks, reducing feeding effectiveness.
     # This property only has effect when part_type == RISER.
     is_open_top: bool = False
+
+    # Riser-specific property: insulating sleeve or bare sand (RISER_SLEEVE_*).
+    # Read by the thermal setup of both the explicit-mold and the boundary
+    # path; only has effect when part_type == RISER.
+    riser_sleeve: str = RISER_SLEEVE_INSULATING
     
     def set_part_type(self, part_type: PartType):
         """Set part type and update color accordingly"""
@@ -1539,7 +1558,7 @@ class PartManager:
         grouped by file and loaded once per file through
         :meth:`load_step_bodies`; other formats go through :meth:`load_part`
         exactly as before. Saved name, part type, position, rotation, scale,
-        color, visibility and ``is_open_top`` are then applied.
+        color, visibility, ``is_open_top`` and ``riser_sleeve`` are then applied.
 
         Returns:
             Part IDs aligned with ``entries``; None where an entry failed.
@@ -1583,6 +1602,7 @@ class PartManager:
                 part.color = tuple(entry["color"])
             part.visible = bool(entry.get("visible", True))
             part.is_open_top = bool(entry.get("is_open_top", False))
+            part.riser_sleeve = riser_sleeve_from_value(entry.get("riser_sleeve"))
         return part_ids
 
     def remove_part(self, part_id: str) -> bool:
@@ -1667,6 +1687,14 @@ class PartManager:
                 bool(p.is_open_top),
             )
             for p in self._voxel_parts()
+        ]
+
+    def get_riser_sleeve_parts(self) -> List[Tuple[trimesh.Trimesh, str]]:
+        """``(mesh, riser_sleeve)`` of every visible riser part."""
+        return [
+            (p.get_transformed_mesh(), riser_sleeve_from_value(p.riser_sleeve))
+            for p in self._voxel_parts()
+            if p.part_type is PartType.RISER
         ]
 
     def get_combined_mesh(self) -> Optional[trimesh.Trimesh]:
@@ -1831,6 +1859,7 @@ class PartManager:
             body_index=original.body_index,
             tessellation_tolerance_mm=original.tessellation_tolerance_mm,
             is_open_top=original.is_open_top,
+            riser_sleeve=original.riser_sleeve,
         )
         self.parts[new_id] = new_part
         self._part_order.append(new_id)
@@ -1988,8 +2017,8 @@ def build_part_manager(
 
     The ``parts_data`` entries should be dictionaries with at least a
     ``filepath`` field and may carry optional ``name``, ``part_type``,
-    ``position_x/y/z``, ``rotation_x/y/z``, ``scale``, ``visible`` and
-    ``is_open_top`` overrides. Unknown ``part_type`` values fall back to
+    ``position_x/y/z``, ``rotation_x/y/z``, ``scale``, ``visible``,
+    ``is_open_top`` and ``riser_sleeve`` overrides. Unknown ``part_type`` values fall back to
     ``PartType.CAST`` unless filename heuristics suggest a riser post.
 
     Args:
@@ -2048,5 +2077,6 @@ def build_part_manager(
         part.set_part_type(part_type)
         part.visible = bool(part_data.get("visible", default_visible))
         part.is_open_top = bool(part_data.get("is_open_top", default_is_open_top))
+        part.riser_sleeve = riser_sleeve_from_value(part_data.get("riser_sleeve"))
 
     return manager

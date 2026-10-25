@@ -138,6 +138,7 @@ def init_db(database_path: Path) -> None:
                 scale REAL DEFAULT 1,
                 visible INTEGER DEFAULT 1,
                 is_open_top INTEGER DEFAULT 0,
+                riser_sleeve TEXT DEFAULT 'insulating',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 feature_json TEXT,
                 base_filepath TEXT,
@@ -145,9 +146,20 @@ def init_db(database_path: Path) -> None:
             )
             """
         )
+        _ensure_column(db, "parts", "riser_sleeve", "TEXT DEFAULT 'insulating'")
         _ensure_column(db, "parts", "feature_json", "TEXT")
         _ensure_column(db, "parts", "base_filepath", "TEXT")
         _backfill_part_names(db)
+
+
+#: Mirrors core.part_manager.RISER_SLEEVE_CHOICES; this module stays free of core imports.
+RISER_SLEEVES = ("insulating", "none")
+
+
+def _riser_sleeve(value: Any) -> str:
+    """A stored or posted riser sleeve, ``insulating`` when missing or unknown."""
+    text = str(value).strip().lower() if value is not None else ""
+    return text if text in RISER_SLEEVES else "insulating"
 
 
 def _ensure_column(db: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
@@ -401,9 +413,9 @@ def duplicate_project(
                     id, project_id, name, part_type, filepath,
                     position_x, position_y, position_z,
                     rotation_x, rotation_y, rotation_z,
-                    scale, visible, is_open_top, feature_json, base_filepath
+                    scale, visible, is_open_top, riser_sleeve, feature_json, base_filepath
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     id_map[str(part["id"])],
@@ -420,6 +432,7 @@ def duplicate_project(
                     part["scale"],
                     part["visible"],
                     part["is_open_top"],
+                    part.get("riser_sleeve") or "insulating",
                     _dumps_feature(remap_feature_part_ids(feature, id_map)),
                     (base_filepaths or {}).get(str(part["id"]), part.get("base_filepath")),
                 ),
@@ -457,6 +470,7 @@ PART_WRITABLE_FIELDS = frozenset(
         "scale",
         "visible",
         "is_open_top",
+        "riser_sleeve",
     }
 )
 
@@ -500,9 +514,9 @@ def add_part(
                 id, project_id, name, part_type, filepath,
                 position_x, position_y, position_z,
                 rotation_x, rotation_y, rotation_z,
-                scale, visible, is_open_top, feature_json
+                scale, visible, is_open_top, riser_sleeve, feature_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 part_id,
@@ -519,6 +533,7 @@ def add_part(
                 float(data.get("scale", 1.0)),
                 1 if data.get("visible", True) else 0,
                 1 if data.get("is_open_top", False) else 0,
+                _riser_sleeve(data.get("riser_sleeve")),
                 _dumps_feature(feature),
             ),
         )
@@ -645,7 +660,7 @@ def update_part(
             SET name = ?, part_type = ?, filepath = ?,
                 position_x = ?, position_y = ?, position_z = ?,
                 rotation_x = ?, rotation_y = ?, rotation_z = ?,
-                scale = ?, visible = ?, is_open_top = ?
+                scale = ?, visible = ?, is_open_top = ?, riser_sleeve = ?
             WHERE id = ? AND project_id = ?
             """,
             (
@@ -661,6 +676,7 @@ def update_part(
                 float(data.get("scale", current["scale"])),
                 1 if data.get("visible", bool(current["visible"])) else 0,
                 1 if data.get("is_open_top", bool(current["is_open_top"])) else 0,
+                _riser_sleeve(data.get("riser_sleeve", current.get("riser_sleeve"))),
                 part_id,
                 project_id,
             ),
@@ -775,6 +791,7 @@ def _loads(value: Any, default: Dict[str, Any]) -> Dict[str, Any]:
 def _normalize_part(row: Dict[str, Any]) -> Dict[str, Any]:
     row["visible"] = bool(row.get("visible", 1))
     row["is_open_top"] = bool(row.get("is_open_top", 0))
+    row["riser_sleeve"] = _riser_sleeve(row.get("riser_sleeve"))
     # The parametric definition of a body modeled in the browser, or None for
     # an uploaded CAD body. Returned parsed, under the name the client reads.
     row["feature"] = _loads_feature(row.pop("feature_json", None))

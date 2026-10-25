@@ -8,7 +8,7 @@ import math
 import os
 from typing import Any, Dict, List, Optional
 
-from core.part_manager import PartManager
+from core.part_manager import PartManager, riser_sleeve_from_value
 from core.solidification_params import migrate_legacy_pour_rate
 from ui.result_types import canonical_result_type
 
@@ -67,6 +67,7 @@ def build_project_state(
                 "color": [float(value) for value in part.color],
                 "visible": bool(part.visible),
                 "is_open_top": bool(part.is_open_top),
+                "riser_sleeve": riser_sleeve_from_value(part.riser_sleeve),
                 # Which CAD body of a multi-body STEP file this part is.
                 # None for STL parts and for STEP parts loaded via load_part.
                 "body_name": part.body_name,
@@ -139,6 +140,8 @@ def load_project_state(payload: Dict[str, Any]) -> ProjectState:
                 "color": _normalize_vector(part.get("color"), 3, default=0.7),
                 "visible": bool(part.get("visible", True)),
                 "is_open_top": bool(part.get("is_open_top", False)),
+                # Absent on projects saved before the sleeve choice: insulating.
+                "riser_sleeve": riser_sleeve_from_value(part.get("riser_sleeve")),
                 # Absent on projects saved before bodies were recorded; the
                 # loader then matches STEP bodies by saved order.
                 "body_name": _normalize_optional_str(part.get("body_name")),

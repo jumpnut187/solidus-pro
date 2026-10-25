@@ -84,6 +84,12 @@ automatic cores.
          insulating sleeves 1.07-1.28, Williams et al. 2016). The sand
          boundary's htc_riser 220 gives 1.39 there, but only 1.17 against
          explicit sand, where the sand resistance dominates.
+         A riser part set to riser_sleeve "none" (bare sand riser) gets no
+         sleeve: its contact is the casting's (htc_cast_mold with the
+         air-gap curve). Without an explicit mold it takes htc_cast_interface
+         and the casting's decay instead of htc_riser. "exothermic" is not an
+         option: the exothermic model (ExothermicParams) only runs in
+         schedule_legacy, not in thermal_coupled.
        riser posts: htc_riser_post (350).
        chills: htc_chill_mold (1500).
    - Air: faces with no cell beyond them (outer mold faces, shafts, open

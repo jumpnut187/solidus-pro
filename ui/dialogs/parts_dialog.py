@@ -24,7 +24,12 @@ from ui.qt import (
     Signal,
 )
 
-from core.part_manager import PART_TYPE_DISPLAY_NAMES
+from core.part_manager import (
+    PART_TYPE_DISPLAY_NAMES,
+    RISER_SLEEVE_INSULATING,
+    RISER_SLEEVE_NONE,
+    riser_sleeve_from_value,
+)
 from .base import DraggableDialog
 
 
@@ -42,9 +47,16 @@ class PartsDialog(DraggableDialog):
     arrange_line_requested = Signal()
     duplicate_requested = Signal()
     open_top_changed = Signal(str, bool)
+    riser_sleeve_changed = Signal(str, str)
 
     #: Dropdown entries, derived so a new PartType is selectable automatically.
     PART_TYPE_OPTIONS = list(PART_TYPE_DISPLAY_NAMES.values())
+
+    #: Riser sleeve dropdown entries: (label, Part.riser_sleeve value).
+    RISER_SLEEVE_OPTIONS = (
+        ("Insulating", RISER_SLEEVE_INSULATING),
+        ("None (sand)", RISER_SLEEVE_NONE),
+    )
 
     def __init__(self, parent=None):
         super().__init__(parent, "Parts Manager")
@@ -81,13 +93,15 @@ class PartsDialog(DraggableDialog):
         self.content_layout.addLayout(btn_layout)
 
         self.parts_table = QTableWidget()
-        self.parts_table.setColumnCount(3)
-        self.parts_table.setHorizontalHeaderLabels(["Part Name", "Part Type", "Open Top"])
+        self.parts_table.setColumnCount(4)
+        self.parts_table.setHorizontalHeaderLabels(["Part Name", "Part Type", "Open Top", "Sleeve"])
         self.parts_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.parts_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
         self.parts_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
+        self.parts_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Fixed)
         self.parts_table.setColumnWidth(1, 110)
         self.parts_table.setColumnWidth(2, 65)
+        self.parts_table.setColumnWidth(3, 105)
         self.parts_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.parts_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.parts_table.setMinimumHeight(150)
@@ -332,16 +346,26 @@ class PartsDialog(DraggableDialog):
         if not self._updating:
             self.open_top_changed.emit(part_id, is_open)
 
+    def _on_riser_sleeve_changed(self, part_id: str, combo: QComboBox):
+        """Handle Sleeve dropdown change"""
+        if not self._updating:
+            self.riser_sleeve_changed.emit(part_id, combo.currentData())
+
     def _update_open_top_checkbox_state(self, row: int, new_type_text: str):
-        """Enable/disable Open Top checkbox based on part type"""
+        """Enable/disable Open Top checkbox and Sleeve dropdown based on part type"""
+        is_riser = new_type_text == "Riser"
         container_widget = self.parts_table.cellWidget(row, 2)
         if container_widget:
             cb = container_widget.findChild(QCheckBox)
             if cb:
-                is_riser = new_type_text == "Riser"
                 cb.setEnabled(is_riser)
                 if not is_riser:
                     cb.setChecked(False)
+        sleeve_combo = self.parts_table.cellWidget(row, 3)
+        if isinstance(sleeve_combo, QComboBox):
+            sleeve_combo.setEnabled(is_riser)
+            if not is_riser:
+                sleeve_combo.setCurrentIndex(0)
 
     def populate_parts(self, parts_data):
         """Populate the table with parts data."""
@@ -356,11 +380,9 @@ class PartsDialog(DraggableDialog):
         }
 
         for part_data in parts_data:
-            if len(part_data) == 4:
-                part_id, name, part_type_value, is_open_top = part_data
-            else:
-                part_id, name, part_type_value = part_data
-                is_open_top = False
+            part_id, name, part_type_value, *extra = part_data
+            is_open_top = bool(extra[0]) if len(extra) > 0 else False
+            riser_sleeve = extra[1] if len(extra) > 1 else RISER_SLEEVE_INSULATING
 
             row = self.parts_table.rowCount()
             self.parts_table.insertRow(row)
@@ -413,6 +435,23 @@ class PartsDialog(DraggableDialog):
             cb_layout.setAlignment(Qt.AlignCenter)
             cb_layout.setContentsMargins(0, 0, 0, 0)
             self.parts_table.setCellWidget(row, 2, cb_container)
+
+            sleeve_combo = QComboBox()
+            for label, value in self.RISER_SLEEVE_OPTIONS:
+                sleeve_combo.addItem(label, value)
+            sleeve_combo.setCurrentIndex(
+                max(0, sleeve_combo.findData(riser_sleeve_from_value(riser_sleeve)))
+            )
+            sleeve_combo.setEnabled(part_type_value == "riser")
+            sleeve_combo.setToolTip(
+                "Insulating: the riser sits in an insulating sleeve (slower cooling, the default).\n"
+                "None (sand): a bare sand riser; its sides cool through the same metal-to-sand\n"
+                "contact as the casting."
+            )
+            sleeve_combo.currentIndexChanged.connect(
+                lambda _index, pid=part_id, cb=sleeve_combo: self._on_riser_sleeve_changed(pid, cb)
+            )
+            self.parts_table.setCellWidget(row, 3, sleeve_combo)
 
             type_combo.currentTextChanged.connect(
                 lambda text, r=row: self._update_open_top_checkbox_state(r, text)

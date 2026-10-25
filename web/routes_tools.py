@@ -363,6 +363,7 @@ def export_project_file(project_id: str):
                 "color": [0.7, 0.7, 0.7],
                 "visible": bool(part["visible"]),
                 "is_open_top": bool(part["is_open_top"]),
+                "riser_sleeve": part.get("riser_sleeve", "insulating"),
                 # A body modeled in the browser carries the sketch and extrude
                 # that made it, so it stays editable after a round trip. The
                 # desktop loader ignores keys it does not know.
@@ -523,6 +524,7 @@ def import_project_file():
                 "scale": part.get("scale", 1.0),
                 "visible": part.get("visible", True),
                 "is_open_top": part.get("is_open_top", False),
+                "riser_sleeve": part.get("riser_sleeve", "insulating"),
             },
             upload_root=_upload_folder(),
             feature=feature,

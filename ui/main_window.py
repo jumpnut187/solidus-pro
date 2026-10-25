@@ -80,6 +80,7 @@ from core.part_manager import (
     PART_TYPE_COLORS,
     PART_TYPE_TO_CODE,
     part_type_from_display_name,
+    riser_sleeve_from_value,
 )
 from config.exceptions import MeshGenerationError
 from core.materials import get_all_alloy_names, get_alloy
@@ -3012,6 +3013,7 @@ class MainWindow(QMainWindow):
         self.parts_dialog.arrange_line_requested.connect(self._arrange_parts_line)
         self.parts_dialog.duplicate_requested.connect(self._duplicate_selected_part)
         self.parts_dialog.open_top_changed.connect(self._on_part_open_top_changed)
+        self.parts_dialog.riser_sleeve_changed.connect(self._on_part_riser_sleeve_changed)
 
         # Orient & Parting Line tool (non-modal). The controller holds the
         # parting line; the dialog only forwards clicks to it.
@@ -3805,10 +3807,12 @@ class MainWindow(QMainWindow):
     
     def _sync_parts_to_dialog(self):
         """Sync current parts to the parts dialog using the new table format"""
-        # Build parts data list: (part_id, name, part_type_value, is_open_top)
+        # Build parts data list: (part_id, name, part_type_value, is_open_top, riser_sleeve)
         parts_data = []
         for part_id, part in self.part_manager.parts.items():
-            parts_data.append((part_id, part.name, part.part_type.value, part.is_open_top))
+            parts_data.append(
+                (part_id, part.name, part.part_type.value, part.is_open_top, part.riser_sleeve)
+            )
         
         # Populate the table (this handles all UI updates internally)
         self.parts_dialog.populate_parts(parts_data)
@@ -3885,6 +3889,13 @@ class MainWindow(QMainWindow):
             status = "OPEN" if is_open_top else "BLIND"
             print(f"Riser '{part.name}' set to {status} top")
     
+    def _on_part_riser_sleeve_changed(self, part_id: str, riser_sleeve: str):
+        """Handle Sleeve dropdown change from Parts dialog"""
+        part = self.part_manager.get_part(part_id)
+        if part:
+            part.riser_sleeve = riser_sleeve_from_value(riser_sleeve)
+            print(f"Riser '{part.name}' sleeve set to {part.riser_sleeve.upper()}")
+
     def _on_alloy_confirmed(self, alloy_name):
         """Handle alloy confirmation from dialog"""
         self._current_alloy = alloy_name

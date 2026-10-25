@@ -47,9 +47,10 @@ from core.part_manager import (
     is_gating_metal,
     is_metal,
     is_mold,
+    is_scored_metal,
 )
 from physics.solidification_physics import SolidificationModel as ThermalSolidificationModel
-from physics.riser_pipe import gravity_drain_pipe
+from physics.riser_pipe import gravity_drain_pipe, label_unfed_pools
 from core.acceleration import (
     update_solidification_with_part_types_parallel,
     update_solidification_with_feeding_connectivity,
@@ -832,7 +833,8 @@ class SolidificationEngine:
         Contact pairs: metal (casting, gating, filters) to sand on the
         steel-sand air-gap curve; riser posts at htc_riser_post; chills at
         htc_chill_mold; each riser at its own insulating-sleeve coefficient
-        riser_sleeve_htc * M^-0.68 from its modulus. Pairs on a slaved cut cell
+        riser_sleeve_htc * M^-0.68 from its modulus (a riser set to no sleeve,
+        ``Part.riser_sleeve``, stays on the casting's curve). Pairs on a slaved cut cell
         move to its master, which carries the slave's capacity. Stencil pairs
         join cores to the mold with the 27-point link weights and the core
         contact (htc_core_contact).
@@ -879,7 +881,11 @@ class SolidificationEngine:
         htc = [mold.htc_cast_mold, tb.htc_riser_post, mold.htc_chill_mold]
         factors: List[Any] = [curve, None, None]
         riser_label, riser_moduli = self._riser_moduli_for_sleeves(extension, master_of, part_types)
+        bare = self._bare_riser_cells(extension.n_mesh)
+        bare_risers = set(np.unique(riser_label[bare & (riser_label >= 0)]).tolist())
         for n, modulus in enumerate(riser_moduli):
+            if n in bare_risers:
+                continue  # no sleeve: group 0, the casting's metal-to-sand contact
             sel = (codes == PART_TYPE_RISER) & (riser_label[first] == n)
             group[sel] = len(htc)
             htc.append(float(mold.riser_sleeve_htc) * max(modulus, 0.05) ** -RISER_SLEEVE_EXPONENT)
@@ -909,6 +915,13 @@ class SolidificationEngine:
             stencil_contact_htc=float(tb.htc_core_contact),
         )
         return CoupledMoldSolver(casting_model, mold_model, pairs)
+
+    def _bare_riser_cells(self, n_mesh: int) -> np.ndarray:
+        """Mesh cells of risers set to no sleeve (``voxel_mesh.voxel_riser_bare``), False when unset."""
+        bare = getattr(self.mesh, "voxel_riser_bare", None)
+        if bare is None or len(bare) != n_mesh:
+            return np.zeros(n_mesh, dtype=bool)
+        return np.asarray(bare, dtype=bool)
 
     def _riser_moduli_for_sleeves(
         self, extension, master_of: np.ndarray, part_types: np.ndarray
@@ -1024,6 +1037,19 @@ class SolidificationEngine:
                 htc=tb.htc_riser_post,
                 T_infinity=mold_temperature,
                 time_function=_mold_interface_decay(tb.htc_riser_post),
+            )
+        # A riser set to no sleeve (Part.riser_sleeve) takes the casting's
+        # contact in place of the sleeve's.
+        bare_riser = self._bare_riser_cells(len(part_types))
+        if riser_surface.size > 0 and np.any(bare_riser[riser_surface]):
+            bare_surface = riser_surface[bare_riser[riser_surface]]
+            riser_surface = riser_surface[~bare_riser[riser_surface]]
+            self._thermal_heat_model.add_boundary(
+                bare_surface,
+                BoundaryType.INTERFACE,
+                htc=tb.htc_cast_interface,
+                T_infinity=mold_temperature,
+                time_function=_mold_interface_decay(tb.htc_cast_interface),
             )
         if riser_surface.size > 0:
             self._thermal_heat_model.add_boundary(
@@ -3459,16 +3485,23 @@ class SolidificationEngine:
         solidification times and the feed demand. If the riser freezes before
         the section it feeds, the pipe continues into the casting. Sets
         ``self.riser_pipe_report`` (one dict per riser, volumes in in^3).
+
+        Liquid drains by gravity whether or not a riser is typed. Every
+        connected region of casting metal that holds no riser voxel is one more
+        pool (its top sinks as it freezes). Those are reported separately in
+        ``self.casting_pipe_report`` (one dict per pool) and never mix into the
+        riser report. A region that does hold a riser stays on the riser pool
+        above, unchanged.
         """
         n_voxels = len(self.mesh.voxel_centers)
         fraction = np.zeros(n_voxels, dtype=np.float32)
         self.riser_pipe_report = []
-        if self.mesh.voxel_part_types is None or self.solidification_times is None:
+        self.casting_pipe_report = []
+        if self.solidification_times is None:
             return fraction
-        part_types = np.asarray(self.mesh.voxel_part_types, dtype=np.int32)
+        # No part types (a bare STL run): everything is casting.
+        part_types = self._mesh_part_types()
         groups = self._group_risers_by_component()
-        if not groups:
-            return fraction
 
         riser_comp = np.full(n_voxels, -1, dtype=np.int64)
         for comp_id, group in enumerate(groups):
@@ -3477,7 +3510,7 @@ class SolidificationEngine:
         pool_ids = riser_comp.copy()
         feeding_result = getattr(self, "feeding_path_result", None)
         feeding_source = getattr(feeding_result, "feeding_source", None)
-        if feeding_source is not None and len(feeding_source) == n_voxels:
+        if groups and feeding_source is not None and len(feeding_source) == n_voxels:
             source = np.asarray(feeding_source, dtype=np.int64)
             fed = (source >= 0) & (source < n_voxels)
             fed &= part_types != PART_TYPE_CHILL
@@ -3487,6 +3520,28 @@ class SolidificationEngine:
             pool_ids[fed] = riser_comp[source[fed]]
             pool_ids[riser_comp >= 0] = riser_comp[riser_comp >= 0]
 
+        # Metal no riser reaches: a pool per connected region. Phantom
+        # gap-fill voxels are not metal here, as everywhere else in the scoring.
+        scored = is_scored_metal(part_types)
+        get_orphans = getattr(self, "_get_orphan_metal_mask", None)
+        orphan = get_orphans() if callable(get_orphans) else None
+        if orphan is not None and len(orphan) == n_voxels:
+            scored &= ~np.asarray(orphan, dtype=bool)
+        neighbors = getattr(self.mesh, "voxel_neighbors", None)
+        n_riser_pools = len(groups)
+        unrisered = np.full(n_voxels, -1, dtype=np.int64)
+        n_unrisered = 0
+        if neighbors is not None:
+            unrisered, n_unrisered = label_unfed_pools(
+                neighbors, scored, part_types == PART_TYPE_RISER
+            )
+            # A voxel a riser pool already took (a feed path through gating
+            # metal) keeps it.
+            take = (unrisered >= 0) & (pool_ids < 0)
+            pool_ids[take] = n_riser_pools + unrisered[take]
+        if n_riser_pools + n_unrisered == 0:
+            return fraction
+
         volumes = getattr(self.mesh, "voxel_volumes", None)
         if volumes is None or len(volumes) != n_voxels:
             sizes = np.asarray(self.mesh.voxel_sizes, dtype=np.float64).reshape(-1)
@@ -3494,15 +3549,17 @@ class SolidificationEngine:
         # Feed demand, not total density change: solid-state contraction is
         # patternmaker's shrink and never drains a riser.
         beta = float(self.alloy.feeding_shrinkage) / 100.0
+        heights = np.asarray(self.mesh.voxel_centers, dtype=np.float64)[:, 2]
         fraction, pools = gravity_drain_pipe(
             np.asarray(self.solidification_times, dtype=np.float64),
-            np.asarray(self.mesh.voxel_centers, dtype=np.float64)[:, 2],
+            heights,
             np.asarray(volumes, dtype=np.float64),
             pool_ids,
             riser_comp >= 0,
             beta,
         )
-        for comp_id, pool in enumerate(pools):
+        for comp_id in range(n_riser_pools):
+            pool = pools[comp_id]
             group = np.asarray(groups[comp_id], dtype=np.int64)
             piped = group[fraction[group] > 0.5]
             riser_bottom = float(np.min(self.mesh.voxel_centers[group, 2]))
@@ -3523,6 +3580,30 @@ class SolidificationEngine:
                 f"  Riser {comp_id} pipe: demand {pool.demand_volume:.2f} in^3, "
                 f"in riser {pool.feeder_pipe_volume:.2f}, in casting {pool.section_pipe_volume:.2f}, "
                 f"bottom {pipe_bottom - riser_bottom:.2f} in above riser base"
+            )
+        by_pool = np.argsort(pool_ids, kind="stable")
+        starts = np.searchsorted(pool_ids[by_pool], np.arange(n_riser_pools + n_unrisered + 1))
+        for k in range(n_unrisered):
+            pool = pools[n_riser_pools + k]
+            members = by_pool[starts[n_riser_pools + k]:starts[n_riser_pools + k + 1]]
+            if len(members) == 0:
+                continue
+            piped = members[fraction[members] > 0.5]
+            top = float(np.max(heights[members]))
+            depth = top - float(np.min(heights[piped])) if len(piped) else 0.0
+            self.casting_pipe_report.append(
+                {
+                    "pool": k,
+                    "voxels": int(len(members)),
+                    "demand_in3": pool.demand_volume,
+                    "pipe_in3": pool.pipe_volume,
+                    "pipe_depth_in": depth,
+                }
+            )
+            print(
+                f"  Unrisered pool {k} pipe: {len(members):,} voxels, "
+                f"demand {pool.demand_volume:.2f} in^3, pipe {pool.pipe_volume:.2f} in^3, "
+                f"depth {depth:.2f} in below the top"
             )
         return fraction
 

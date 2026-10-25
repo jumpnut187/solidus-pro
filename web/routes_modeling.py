@@ -28,7 +28,7 @@ import numpy as np
 import trimesh
 from flask import Blueprint, current_app, jsonify, request
 
-from core.part_manager import PartType
+from core.part_manager import PartType, riser_sleeve_from_value
 from web import repository as repo
 from web.payloads import _build_mesh_data, _sanitize_body_name, load_part_mesh_data
 
@@ -117,13 +117,21 @@ def _checked_body_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
     if part_type not in PART_TYPE_VALUES:
         raise ModelingRequestError(f"Unknown body type {part_type!r}.")
     name = str(payload.get("name") or "").strip()[:120] or "Extrude"
-    return {
+    fields = {
         "name": name,
         "part_type": part_type,
         # Open-top is a riser property; see lib/partTypes.ts supportsOpenTop.
         "is_open_top": bool(payload.get("is_open_top")) and part_type == "riser",
         "visible": bool(payload.get("visible", True)),
     }
+    # The sleeve is set in the Parts panel, not the model panel: a rebuild that
+    # does not send it keeps the stored choice, and a body that is no longer a
+    # riser drops back to the default.
+    if part_type != "riser":
+        fields["riser_sleeve"] = "insulating"
+    elif "riser_sleeve" in payload:
+        fields["riser_sleeve"] = riser_sleeve_from_value(payload["riser_sleeve"])
+    return fields
 
 
 def _write_body(mesh: trimesh.Trimesh, name: str) -> Path:

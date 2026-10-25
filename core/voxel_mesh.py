@@ -740,6 +740,9 @@ class AdaptiveVoxelMesh:
         self.cut_cell_stats = None
         # Sand mold layout from core/mold_setup.py (None: no explicit mold).
         self.mold_layout = None
+        # Voxels of risers set to no sleeve (core/riser_sleeve.py); None when
+        # every riser keeps its insulating sleeve.
+        self.voxel_riser_bare = None
 
         # Spatial index for fast queries
         self._spatial_index = None

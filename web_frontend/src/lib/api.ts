@@ -77,6 +77,8 @@ export type PourLocationPayload = {
   part_id: string | null;
 };
 
+export type RiserSleeve = 'insulating' | 'none';
+
 export type ProjectPart = {
   id: string;
   name: string;
@@ -91,6 +93,8 @@ export type ProjectPart = {
   scale: number;
   visible: boolean;
   is_open_top: boolean;
+  /** Riser only: an insulating sleeve (default) or none, a bare sand riser. */
+  riser_sleeve: RiserSleeve;
   meshData?: MeshData;
   /** The sketch and extrude that made this body, for a body modeled in the browser. */
   feature?: ExtrudeFeature | null;

@@ -23,6 +23,7 @@ from core.part_manager import (
     build_part_manager as _core_build_part_manager,
     infer_part_type_from_filename,
     infer_part_type_from_name,
+    riser_sleeve_from_value,
     strip_cad_extension,
     tessellation_tolerance_mm,
 )
@@ -87,6 +88,7 @@ SIMULATED_PART_FIELDS = (
     "part_type",
     "visible",
     "is_open_top",
+    "riser_sleeve",
     "position_x",
     "position_y",
     "position_z",
@@ -110,6 +112,8 @@ def simulated_parts_snapshot(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]
             value = part.get(field)
             if field in ("visible", "is_open_top"):
                 value = bool(value if value is not None else field == "visible")
+            elif field == "riser_sleeve":
+                value = riser_sleeve_from_value(value)
             elif field.startswith(("position_", "rotation_")) or field == "scale":
                 value = float(value if value is not None else (1.0 if field == "scale" else 0.0))
             else:
@@ -348,7 +352,7 @@ def build_part_manager(parts_data: list[Dict[str, Any]]) -> PartManager:
 
     Re-export of :func:`core.part_manager.build_part_manager` so existing
     web callers keep their import path. The canonical helper honours the
-    ``visible`` and ``is_open_top`` per-part overrides that web payloads
+    ``visible``, ``is_open_top`` and ``riser_sleeve`` per-part overrides that web payloads
     send.
     """
     return build_part_manager_from_core(parts_data, preserve_origin=True)
