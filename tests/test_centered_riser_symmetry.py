@@ -1,7 +1,7 @@
 """Regression test: centered plate+riser assembly must produce a symmetric
 last-to-solidify pattern in the riser.
 
-The Test_Model folder contains a 15.25 x 6.0 x 2.5 in plate (cast) with a
+The CI models (tests/ci_models/) hold a 15.25 x 6.0 x 2.5 in plate (cast) with a
 4 x 4 x 6 in cylindrical riser centred on top. This is geometrically
 symmetric about (X=0, Y=0). Until the canonical neighbour-ordering fix,
 the late-stage surviving liquid riser voxels drifted toward the (+X, +Y)
@@ -19,14 +19,12 @@ from typing import Tuple
 
 import numpy as np
 
+from tests.helpers.ci_models import CI_MODELS_DIR
 from core.part_manager import build_part_manager
 from core.simulation_pipeline import PipelineInputs, run_pipeline
 
 
-REPO_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), os.pardir)
-)
-TEST_MODEL_DIR = os.path.join(REPO_ROOT, "Test_Model")
+TEST_MODEL_DIR = CI_MODELS_DIR
 CAST_PATH = os.path.join(TEST_MODEL_DIR, "cast.stl")
 RISER_PATH = os.path.join(TEST_MODEL_DIR, "riser.stl")
 
@@ -49,7 +47,7 @@ def _build_pipeline_inputs() -> PipelineInputs:
 def _run_simulation() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     if not os.path.isfile(CAST_PATH) or not os.path.isfile(RISER_PATH):
         raise unittest.SkipTest(
-            f"Test_Model STL files not present at {TEST_MODEL_DIR}"
+            f"CI model STL files not present at {TEST_MODEL_DIR}"
         )
 
     pm = build_part_manager([

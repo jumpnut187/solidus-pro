@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
+from tests.helpers.ci_models import ci_model
 from core.memory_limits import MemorySeverity, MemoryValidationResult
 from core.part_manager import PartManager, PartType
 from core.simulation_pipeline import PipelineInputs, run_pipeline
@@ -95,19 +96,19 @@ class FractionLiquidTimingConsistencyTests(unittest.TestCase):
         pass
 
     def test_default_now_uses_thermal_coupled_solver(self) -> None:
-        engine = _run_pipeline_with_patched_memory("sample_stl_files/block_2inch.stl", env={})
+        engine = _run_pipeline_with_patched_memory(ci_model("block_2inch.stl"), env={})
         self.assertEqual(engine._get_solver_mode(), SOLVER_MODE_THERMAL_COUPLED)
 
     def test_env_override_can_force_thermal_solver_default(self) -> None:
         engine = _run_pipeline_with_patched_memory(
-            "sample_stl_files/block_2inch.stl",
+            ci_model("block_2inch.stl"),
             env={"CASTSIM_DEFAULT_SOLVER_MODE": "thermal_coupled"},
         )
         self.assertEqual(engine._get_solver_mode(), SOLVER_MODE_THERMAL_COUPLED)
 
     def test_niyama_enabled_uses_thermal_solver_default(self) -> None:
         engine = _run_pipeline_with_patched_memory(
-            "sample_stl_files/block_2inch.stl",
+            ci_model("block_2inch.stl"),
             analysis_options={"niyama": True},
             env={},
         )
@@ -117,7 +118,7 @@ class FractionLiquidTimingConsistencyTests(unittest.TestCase):
 
 class LargeModulusScheduleRegressionTests(unittest.TestCase):
     def test_fraction_liquid_final_snapshot_no_artificial_append(self) -> None:
-        engine = _run_pipeline_with_patched_memory("sample_stl_files/block_2inch.stl")
+        engine = _run_pipeline_with_patched_memory(ci_model("block_2inch.stl"))
         self.assertGreaterEqual(len(engine.fraction_liquid_history), 2)
         last_history = engine.fraction_liquid_history[-1]
         last_time = engine.fraction_liquid_times[-1]
@@ -139,7 +140,7 @@ class LargeModulusScheduleRegressionTests(unittest.TestCase):
         )
 
     def test_4hour_point_has_residual_liquid_when_schedule_extends_past_it(self) -> None:
-        engine = _run_pipeline_with_patched_memory("sample_stl_files/block_2inch.stl")
+        engine = _run_pipeline_with_patched_memory(ci_model("block_2inch.stl"))
         _, final_time = engine.get_fraction_liquid_time_range()
         self.assertGreater(final_time, 0.0)
         if final_time > 14400.0:
@@ -156,7 +157,7 @@ class LargeModulusScheduleRegressionTests(unittest.TestCase):
             )
 
     def test_exact_final_schedule_time_returns_all_solid(self) -> None:
-        engine = _run_pipeline_with_patched_memory("sample_stl_files/block_2inch.stl")
+        engine = _run_pipeline_with_patched_memory(ci_model("block_2inch.stl"))
         _, final_time = engine.get_fraction_liquid_time_range()
         self.assertGreater(final_time, 0.0)
         fraction_liquid = engine.get_fraction_liquid_at_time(final_time)
@@ -192,7 +193,7 @@ class LargeModulusScheduleRegressionTests(unittest.TestCase):
 
 class FeederTimingSpreadTests(unittest.TestCase):
     def test_riser_and_riser_post_have_meaningful_spread(self) -> None:
-        engine = _run_pipeline_with_patched_memory("sample_stl_files/block_2inch.stl")
+        engine = _run_pipeline_with_patched_memory(ci_model("block_2inch.stl"))
         part_types = engine.mesh.voxel_part_types
         self.assertIsNotNone(part_types)
         assert part_types is not None
@@ -231,7 +232,7 @@ class FeederTimingSpreadTests(unittest.TestCase):
 
     def test_fraction_liquid_has_partial_visibility_frame_for_post_and_riser(self) -> None:
         engine = _run_pipeline_with_patched_memory(
-            "sample_stl_files/block_2inch.stl",
+            ci_model("block_2inch.stl"),
             analysis_options={"fraction_liquid": True, "shrinkage": True, "hotspot": True},
         )
         part_types = engine.mesh.voxel_part_types

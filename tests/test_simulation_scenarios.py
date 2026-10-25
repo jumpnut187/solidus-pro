@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import numpy as np
 
+from tests.helpers.ci_models import ci_model
 from core.memory_limits import MemorySeverity, MemoryValidationResult
 from core.materials import get_alloy
 from core.part_manager import PartManager, PartType
@@ -98,8 +99,8 @@ def _single_cast_manager(filepath: str) -> PartManager:
 
 def _cast_with_riser_manager() -> PartManager:
     manager = PartManager()
-    cast_id = manager.load_part("sample_stl_files/small_block.stl", name="cast")
-    riser_id = manager.load_part("sample_stl_files/cylinder.stl", name="riser")
+    cast_id = manager.load_part(ci_model("small_block.stl"), name="cast")
+    riser_id = manager.load_part(ci_model("cylinder.stl"), name="riser")
     assert cast_id is not None and riser_id is not None
 
     cast = manager.get_part(cast_id)
@@ -115,8 +116,8 @@ def _cast_with_riser_manager() -> PartManager:
 
 def _cast_with_chill_manager() -> PartManager:
     manager = PartManager()
-    cast_id = manager.load_part("sample_stl_files/block_2inch.stl", name="cast")
-    chill_id = manager.load_part("sample_stl_files/small_block.stl", name="chill")
+    cast_id = manager.load_part(ci_model("block_2inch.stl"), name="cast")
+    chill_id = manager.load_part(ci_model("small_block.stl"), name="chill")
     assert cast_id is not None and chill_id is not None
 
     cast = manager.get_part(cast_id)
@@ -137,9 +138,9 @@ def _cast_with_chill_and_riser_manager() -> PartManager:
     feeding-history mis-scoring of the fast-freezing metal against the chill.
     """
     manager = PartManager()
-    cast_id = manager.load_part("sample_stl_files/block_2inch.stl", name="cast")
-    chill_id = manager.load_part("sample_stl_files/small_block.stl", name="chill")
-    riser_id = manager.load_part("sample_stl_files/cylinder.stl", name="riser")
+    cast_id = manager.load_part(ci_model("block_2inch.stl"), name="cast")
+    chill_id = manager.load_part(ci_model("small_block.stl"), name="chill")
+    riser_id = manager.load_part(ci_model("cylinder.stl"), name="riser")
     assert cast_id is not None and chill_id is not None and riser_id is not None
 
     cast = manager.get_part(cast_id)
@@ -158,9 +159,9 @@ def _cast_with_chill_and_riser_manager() -> PartManager:
 
 def _cast_with_two_risers_manager() -> PartManager:
     manager = PartManager()
-    cast_id = manager.load_part("sample_stl_files/block_2inch.stl", name="cast")
-    riser_a_id = manager.load_part("sample_stl_files/small_block.stl", name="riser_a")
-    riser_b_id = manager.load_part("sample_stl_files/small_block.stl", name="riser_b")
+    cast_id = manager.load_part(ci_model("block_2inch.stl"), name="cast")
+    riser_a_id = manager.load_part(ci_model("small_block.stl"), name="riser_a")
+    riser_b_id = manager.load_part(ci_model("small_block.stl"), name="riser_b")
     assert cast_id is not None and riser_a_id is not None and riser_b_id is not None
 
     cast = manager.get_part(cast_id)
@@ -179,9 +180,9 @@ def _cast_with_two_risers_manager() -> PartManager:
 
 def _cast_with_riser_post_manager() -> PartManager:
     manager = PartManager()
-    cast_id = manager.load_part("sample_stl_files/block_2inch.stl", name="cast")
-    post_id = manager.load_part("sample_stl_files/small_block.stl", name="riser_post")
-    riser_id = manager.load_part("sample_stl_files/cylinder.stl", name="riser")
+    cast_id = manager.load_part(ci_model("block_2inch.stl"), name="cast")
+    post_id = manager.load_part(ci_model("small_block.stl"), name="riser_post")
+    riser_id = manager.load_part(ci_model("cylinder.stl"), name="riser")
     assert cast_id is not None and post_id is not None and riser_id is not None
 
     cast = manager.get_part(cast_id)
@@ -204,7 +205,7 @@ class ScenarioRegressionTests(unittest.TestCase):
             {
                 "name": "Riser Post 1",
                 "part_type": "riser",
-                "filepath": "sample_stl_files/small_block.stl",
+                "filepath": ci_model("small_block.stl"),
             }
         ])
 
@@ -214,7 +215,7 @@ class ScenarioRegressionTests(unittest.TestCase):
 
     def test_surface_cast_voxels_start_liquid_in_fraction_history(self) -> None:
         engine = _run_pipeline_with_patched_memory(
-            _single_cast_manager("sample_stl_files/small_block.stl")
+            _single_cast_manager(ci_model("small_block.stl"))
         )
 
         self.assertTrue(engine.fraction_liquid_history)
@@ -324,10 +325,10 @@ class ScenarioRegressionTests(unittest.TestCase):
 
     def test_thicker_sections_solidify_slower_than_thin_sections(self) -> None:
         thin_engine = _run_pipeline_with_patched_memory(
-            _single_cast_manager("sample_stl_files/small_block.stl")
+            _single_cast_manager(ci_model("small_block.stl"))
         )
         thick_engine = _run_pipeline_with_patched_memory(
-            _single_cast_manager("sample_stl_files/block_2inch.stl")
+            _single_cast_manager(ci_model("block_2inch.stl"))
         )
 
         self.assertGreater(
@@ -338,7 +339,7 @@ class ScenarioRegressionTests(unittest.TestCase):
     def test_riser_reduces_cast_shrinkage_and_keeps_pipe_behavior_in_riser(self) -> None:
         # Plain voxels: the shrinkage thresholds (> 0.15 counts) were calibrated on old-voxel geometry at 0.5 in.
         baseline_engine = _run_pipeline_with_patched_memory(
-            _single_cast_manager("sample_stl_files/small_block.stl"), voxel_cut_cells=False
+            _single_cast_manager(ci_model("small_block.stl")), voxel_cut_cells=False
         )
         riser_engine = _run_pipeline_with_patched_memory(_cast_with_riser_manager(), voxel_cut_cells=False)
 
@@ -385,7 +386,7 @@ class ScenarioRegressionTests(unittest.TestCase):
     def test_riser_post_behaves_like_feeder_neck_not_primary_defect_sink(self) -> None:
         # Plain voxels: the fixture post stops 0.5 in below the riser; only 0.5 in voxels close that gap.
         baseline_engine = _run_pipeline_with_patched_memory(
-            _single_cast_manager("sample_stl_files/block_2inch.stl"), voxel_cut_cells=False
+            _single_cast_manager(ci_model("block_2inch.stl")), voxel_cut_cells=False
         )
         feeder_engine = _run_pipeline_with_patched_memory(_cast_with_riser_post_manager(), voxel_cut_cells=False)
 
@@ -422,7 +423,7 @@ class ScenarioRegressionTests(unittest.TestCase):
     def test_two_risers_reduce_cast_shrinkage_more_than_single_riser(self) -> None:
         # Plain voxels: at CAD size the 1 in risers freeze before the 2 in casting (cut cells: 130 s vs 166 s).
         baseline_engine = _run_pipeline_with_patched_memory(
-            _single_cast_manager("sample_stl_files/block_2inch.stl"), voxel_cut_cells=False
+            _single_cast_manager(ci_model("block_2inch.stl")), voxel_cut_cells=False
         )
         two_riser_engine = _run_pipeline_with_patched_memory(_cast_with_two_risers_manager(), voxel_cut_cells=False)
 
@@ -443,7 +444,7 @@ class ScenarioRegressionTests(unittest.TestCase):
 
     def test_chill_reduces_nearby_shrinkage_and_solidification_time(self) -> None:
         baseline_engine = _run_pipeline_with_patched_memory(
-            _single_cast_manager("sample_stl_files/block_2inch.stl")
+            _single_cast_manager(ci_model("block_2inch.stl"))
         )
         chill_engine = _run_pipeline_with_patched_memory(_cast_with_chill_manager())
 
@@ -483,7 +484,7 @@ class ScenarioRegressionTests(unittest.TestCase):
 
     def test_directional_solidification_improves_niyama_near_chill(self) -> None:
         baseline_engine = _run_pipeline_with_patched_memory(
-            _single_cast_manager("sample_stl_files/block_2inch.stl")
+            _single_cast_manager(ci_model("block_2inch.stl"))
         )
         chill_engine = _run_pipeline_with_patched_memory(_cast_with_chill_manager())
 
@@ -500,7 +501,7 @@ class ScenarioRegressionTests(unittest.TestCase):
         )
 
     def test_nominal_run_output_sanity(self) -> None:
-        engine = _run_pipeline_with_patched_memory(_single_cast_manager("sample_stl_files/block_2inch.stl"))
+        engine = _run_pipeline_with_patched_memory(_single_cast_manager(ci_model("block_2inch.stl")))
 
         self.assertTrue(np.all(engine.shrinkage_probability >= 0.0))
         self.assertTrue(np.all(engine.shrinkage_probability <= 1.0))
@@ -519,7 +520,7 @@ class ScenarioRegressionTests(unittest.TestCase):
 
     def test_small_block_has_single_interior_hotspot(self) -> None:
         engine = _run_pipeline_with_patched_memory(
-            _single_cast_manager("sample_stl_files/small_block.stl")
+            _single_cast_manager(ci_model("small_block.stl"))
         )
 
         hotspot_mask = engine.hotspot_intensity > 0.95
@@ -531,12 +532,12 @@ class ScenarioRegressionTests(unittest.TestCase):
 
     def test_higher_sand_restraint_increases_hot_tear_risk(self) -> None:
         low_restraint_engine = _run_pipeline_with_patched_memory(
-            _single_cast_manager("sample_stl_files/thick_thin_test.stl"),
+            _single_cast_manager(ci_model("thick_thin_test.stl")),
             hot_tear=True,
             sand_restraint_index=0.1,
         )
         high_restraint_engine = _run_pipeline_with_patched_memory(
-            _single_cast_manager("sample_stl_files/thick_thin_test.stl"),
+            _single_cast_manager(ci_model("thick_thin_test.stl")),
             hot_tear=True,
             sand_restraint_index=0.9,
         )
@@ -552,11 +553,11 @@ class ScenarioRegressionTests(unittest.TestCase):
 
     def test_default_sand_restraint_matches_explicit_neutral(self) -> None:
         default_engine = _run_pipeline_with_patched_memory(
-            _single_cast_manager("sample_stl_files/thick_thin_test.stl"),
+            _single_cast_manager(ci_model("thick_thin_test.stl")),
             hot_tear=True,
         )
         explicit_neutral_engine = _run_pipeline_with_patched_memory(
-            _single_cast_manager("sample_stl_files/thick_thin_test.stl"),
+            _single_cast_manager(ci_model("thick_thin_test.stl")),
             hot_tear=True,
             sand_restraint_index=0.5,
         )

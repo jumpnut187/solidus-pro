@@ -2,6 +2,7 @@
 # CI checks, one subcommand per CI step so each shows up separately.
 # CI-provider neutral; also runs locally from the repo root:
 #
+#   scripts/ci/check.sh models   no CAD file is tracked outside tests/ci_models/
 #   scripts/ci/check.sh pins     every installed package is pinned in constraints-ci.txt
 #   scripts/ci/check.sh syntax   byte-compile all first-party packages
 #   scripts/ci/check.sh types    mypy over the mypy.ini allowlist
@@ -12,6 +13,21 @@ cd "$(dirname "$0")/../.."
 PY="${PYTHON:-python}"
 
 case "${1:-}" in
+models)
+    # CAD is ignored everywhere except the CI test models, but `git add -f`
+    # gets past .gitignore. Fail on any tracked STL/STEP outside
+    # tests/ci_models/, and on anything but .stl inside it.
+    bad=$(git ls-files -z | tr '\0' '\n' \
+        | grep -iE '\.(stl|step|stp)$' \
+        | grep -vE '^tests/ci_models/[^/]+\.stl$' || true)
+    if [ -n "$bad" ]; then
+        echo "CAD files are only allowed as CI test models in tests/ci_models/*.stl:"
+        echo "$bad" | sed 's/^/  /'
+        echo "Untrack them: git rm --cached <file>"
+        exit 1
+    fi
+    echo "CAD files tracked: only tests/ci_models/*.stl."
+    ;;
 pins)
     # A requirement added without regenerating constraints-ci.txt installs at
     # whatever version is newest that day. Fail instead, so the pins stay the
@@ -72,7 +88,7 @@ tests)
     fi
     ;;
 *)
-    echo "usage: $0 {pins|syntax|types|tests}" >&2
+    echo "usage: $0 {models|pins|syntax|types|tests}" >&2
     exit 2
     ;;
 esac

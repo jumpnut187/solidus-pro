@@ -75,6 +75,14 @@ python-compile:
   script:
     - python -m compileall -q config core physics ui web
 
+# CAD files may only be committed as CI test models (tests/ci_models/*.stl).
+cad-files:
+  extends: .python-base
+  stage: lint
+  needs: []
+  script:
+    - scripts/ci/check.sh models
+
 # Type check limited to the files= allowlist in mypy.ini.
 python-mypy:
   extends: .python-deps

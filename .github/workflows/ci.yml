@@ -51,6 +51,9 @@ jobs:
             requirements-core.txt
             constraints-ci.txt
 
+      - name: CAD files only in tests/ci_models
+        run: scripts/ci/check.sh models
+
       - name: Install
         run: scripts/ci/install.sh
 

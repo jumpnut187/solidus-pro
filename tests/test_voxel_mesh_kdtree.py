@@ -36,6 +36,7 @@ import numpy as np
 import trimesh
 from scipy.spatial import cKDTree
 
+from tests.helpers.ci_models import ci_model
 from core.voxel_mesh import (
     AdaptiveVoxelMesh,
     _build_kdtree,
@@ -108,7 +109,7 @@ class RegressionTests(unittest.TestCase):
     CRASHING_SIZES = (0.30, 0.17)
 
     def test_previously_crashing_sizes_now_generate(self) -> None:
-        mesh_source = trimesh.load("sample_stl_files/thick_thin_test.stl")
+        mesh_source = trimesh.load(ci_model("thick_thin_test.stl"))
         bounds = np.asarray(mesh_source.bounds).T
         for dx in self.CRASHING_SIZES:
             with self.subTest(base_voxel_size=dx):
@@ -120,7 +121,7 @@ class RegressionTests(unittest.TestCase):
 
     def test_a_size_that_always_worked_still_works(self) -> None:
         """Guard against fixing the crash by breaking the working path."""
-        mesh_source = trimesh.load("sample_stl_files/thick_thin_test.stl")
+        mesh_source = trimesh.load(ci_model("thick_thin_test.stl"))
         mesh = AdaptiveVoxelMesh(base_voxel_size=0.25)
         with contextlib.redirect_stdout(io.StringIO()):
             ok = mesh.generate(mesh_source, np.asarray(mesh_source.bounds).T,
@@ -133,7 +134,7 @@ class RegressionTests(unittest.TestCase):
         The crash was inside the geometric-modulus pass, so confirm that pass
         still produces sane output rather than merely not dying.
         """
-        mesh_source = trimesh.load("sample_stl_files/thick_thin_test.stl")
+        mesh_source = trimesh.load(ci_model("thick_thin_test.stl"))
         mesh = AdaptiveVoxelMesh(base_voxel_size=0.30)
         with contextlib.redirect_stdout(io.StringIO()):
             mesh.generate(mesh_source, np.asarray(mesh_source.bounds).T,

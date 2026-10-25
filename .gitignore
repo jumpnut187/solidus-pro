@@ -73,5 +73,8 @@ __tracked_surface.stl
 *.step
 *.stp
 *.stl
+# Except the CI test models (tests/ci_models/README.md). STL only, and
+# scripts/ci/check.sh models fails if CAD is tracked anywhere else.
+!tests/ci_models/*.stl
 # Third-party tool clone (colbymchenry/codegraph) with its own .git -- not project source
 codegraph/

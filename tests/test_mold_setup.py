@@ -22,6 +22,7 @@ from unittest.mock import patch
 import numpy as np
 import trimesh
 
+from tests.helpers.ci_models import ci_model
 from core.materials import get_alloy
 from core.mold_materials import (
     SAND_MATERIALS,
@@ -187,8 +188,8 @@ class PartTypeTests(unittest.TestCase):
 
     def test_mold_parts_are_not_voxelised_with_the_metal(self) -> None:
         manager = PartManager()
-        cast_id = manager.load_part("sample_stl_files/block_2inch.stl", name="cast")
-        mold_id = manager.load_part("sample_stl_files/block_2inch.stl", name="mold")
+        cast_id = manager.load_part(ci_model("block_2inch.stl"), name="cast")
+        mold_id = manager.load_part(ci_model("block_2inch.stl"), name="mold")
         assert cast_id is not None and mold_id is not None
         manager.get_part(mold_id).set_part_type(PartType.MOLD)
         manager.get_part(mold_id).set_scale(4.0)
@@ -375,11 +376,11 @@ def _run(manager: PartManager, mold: dict | None, voxel_size: float = 0.2):
 
 def _cube(with_riser: bool = False, open_top: bool = False) -> PartManager:
     manager = PartManager()
-    cast = manager.get_part(manager.load_part("sample_stl_files/block_2inch.stl", name="cast"))
+    cast = manager.get_part(manager.load_part(ci_model("block_2inch.stl"), name="cast"))
     cast.set_part_type(PartType.CAST)
     cast.set_position(0.0, 0.0, 0.0)
     if with_riser:
-        riser = manager.get_part(manager.load_part("sample_stl_files/cylinder.stl", name="riser"))
+        riser = manager.get_part(manager.load_part(ci_model("cylinder.stl"), name="riser"))
         riser.set_part_type(PartType.RISER)
         riser.set_position(0.0, 0.0, cast.get_bounds()[2][1] - riser.get_bounds()[2][0])
         riser.is_open_top = open_top
@@ -450,7 +451,7 @@ class RiserSleeveTests(unittest.TestCase):
 
         def freeze(part_type):
             manager = PartManager()
-            part = manager.get_part(manager.load_part("sample_stl_files/cylinder.stl", name="c"))
+            part = manager.get_part(manager.load_part(ci_model("cylinder.stl"), name="c"))
             part.set_part_type(part_type)
             return float(np.nanmax(_run(manager, {}).solidification_end_times))
 
@@ -526,7 +527,7 @@ class WebMoldRouteTests(unittest.TestCase):
         self.project_id = self.client.post("/api/projects", json={"name": "Mold", "alloy": "WCB"}).get_json()["id"]
         import shutil
 
-        shutil.copy("sample_stl_files/block_2inch.stl", root / "block_2inch.stl")
+        shutil.copy(ci_model("block_2inch.stl"), root / "block_2inch.stl")
         repo.add_part(database, self.project_id, {
             "name": "cast",
             "part_type": "cast",

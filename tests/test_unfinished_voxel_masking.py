@@ -4,6 +4,7 @@ import unittest
 
 import numpy as np
 
+from tests.helpers.ci_models import ci_model
 from core.acceleration import compute_isolation_score_parallel
 from tests.test_simulation_scenarios import (
     _run_pipeline_with_patched_memory,
@@ -18,7 +19,7 @@ def _build_engine_with_nan_voxels() -> object:
     loop's representation of "still liquid when the max_time cap was hit").
     """
     engine = _run_pipeline_with_patched_memory(
-        _single_cast_manager("sample_stl_files/small_block.stl")
+        _single_cast_manager(ci_model("small_block.stl"))
     )
     times = np.asarray(engine.solidification_times, dtype=np.float32).copy()
     part_types = np.asarray(engine.mesh.voxel_part_types, dtype=np.int32)

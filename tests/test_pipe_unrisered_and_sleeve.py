@@ -1,7 +1,7 @@
 """Pipe in metal no riser feeds, and the per-riser sleeve choice.
 
-Uses the Test_Model plate (15.25 x 6 x 2.5 in) with the 4 in diameter, 6 in
-tall cylinder on top (z 2.5 to 8.5), WCB, voxel_size=0.30 in.
+Uses the CI model plate (tests/ci_models/cast.stl, 15.25 x 6 x 2.5 in) with
+the 4 in diameter, 6 in tall cylinder on top (z 2.5 to 8.5), WCB, voxel_size=0.30 in.
 
 - The cylinder typed CAST: nothing is a riser, but the liquid still drains by
   gravity, so a funnel forms at the top of the last-to-freeze region (deeper on
@@ -20,12 +20,12 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
+from tests.helpers.ci_models import CI_MODELS_DIR
 from core.part_manager import build_part_manager
 from core.simulation_pipeline import PipelineInputs, run_pipeline
 
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-TEST_MODEL_DIR = os.path.join(REPO_ROOT, "Test_Model")
+TEST_MODEL_DIR = CI_MODELS_DIR
 CAST_PATH = os.path.join(TEST_MODEL_DIR, "cast.stl")
 RISER_PATH = os.path.join(TEST_MODEL_DIR, "riser.stl")
 
@@ -67,7 +67,7 @@ def _simulate(
     solidification_params: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     if not os.path.isfile(CAST_PATH) or not os.path.isfile(RISER_PATH):
-        raise unittest.SkipTest(f"Test_Model STL files not present at {TEST_MODEL_DIR}")
+        raise unittest.SkipTest(f"CI model STL files not present at {TEST_MODEL_DIR}")
     cylinder: Dict[str, Any] = {
         "filepath": RISER_PATH,
         "part_type": cylinder_type,

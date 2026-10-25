@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import numpy as np
 
+from tests.helpers.ci_models import ci_model
 import tests.test_simulation_scenarios as scenarios
 from core.materials import get_alloy
 from core.part_manager import is_chill
@@ -67,13 +68,13 @@ class ValidationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.engine = _build_engine(
-            scenarios._single_cast_manager("sample_stl_files/block_2inch.stl")
+            scenarios._single_cast_manager(ci_model("block_2inch.stl"))
         )
         cls.n_voxels = cls.engine.mesh.get_voxel_count()
 
     def test_defaults_to_no_override(self) -> None:
         engine = _build_engine(
-            scenarios._single_cast_manager("sample_stl_files/block_2inch.stl")
+            scenarios._single_cast_manager(ci_model("block_2inch.stl"))
         )
         self.assertIsNone(engine._initial_temperature_field)
         self.assertIsNone(engine._fill_arrival_times)
@@ -117,7 +118,7 @@ class SeededSolveTests(unittest.TestCase):
     @staticmethod
     def _run(seed_offset):
         engine = _build_engine(
-            scenarios._single_cast_manager("sample_stl_files/block_2inch.stl")
+            scenarios._single_cast_manager(ci_model("block_2inch.stl"))
         )
         if seed_offset is not None:
             n = engine.mesh.get_voxel_count()

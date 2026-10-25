@@ -7,6 +7,7 @@ from typing import Callable, Dict
 
 import numpy as np
 
+from tests.helpers.ci_models import ci_model
 from tests.test_simulation_scenarios import (
     _cast_with_chill_manager,
     _cast_with_riser_post_manager,
@@ -17,7 +18,7 @@ from tests.test_simulation_scenarios import (
 
 
 def _build_single_block_2in():
-    return _single_cast_manager("sample_stl_files/block_2inch.stl")
+    return _single_cast_manager(ci_model("block_2inch.stl"))
 
 
 CASE_BUILDERS: Dict[str, Callable[[], object]] = {

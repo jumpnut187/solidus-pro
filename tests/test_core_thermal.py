@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import numpy as np
 
+from tests.helpers.ci_models import ci_model
 import physics.heat_transfer as heat_transfer
 from core.materials import get_alloy
 from core.part_manager import PART_TYPE_CAST, PART_TYPE_CHILL, PART_TYPE_CORE, PartManager, PartType
@@ -239,8 +240,8 @@ class SandSlabHeatingTests(unittest.TestCase):
 def _cored_block_manager() -> PartManager:
     """2 in cube casting with a 1 in sand core fully enclosed at its centre."""
     manager = PartManager()
-    cast_id = manager.load_part("sample_stl_files/block_2inch.stl", name="cast")
-    core_id = manager.load_part("sample_stl_files/small_block.stl", name="core")
+    cast_id = manager.load_part(ci_model("block_2inch.stl"), name="cast")
+    core_id = manager.load_part(ci_model("small_block.stl"), name="core")
     assert cast_id is not None and core_id is not None
     cast = manager.get_part(cast_id)
     core = manager.get_part(core_id)

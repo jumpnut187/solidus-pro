@@ -29,6 +29,8 @@ from web.services.simulation_queue import SimulationQueueManager
 FILLING_TEST_DIR = Path(__file__).resolve().parent.parent / "Test_Model" / "Filling_Test"
 RISER_STEP = FILLING_TEST_DIR / "Feeding Distance Test - Riser.step"
 CASTING_STEP = FILLING_TEST_DIR / "Feeding Distance Test - Casting.step"
+# Local-only CAD (not tracked, see tests/ci_models/README.md): skip without it.
+HAVE_STEP_FIXTURES = RISER_STEP.exists() and CASTING_STEP.exists()
 
 DEFAULT_TOL_MM = tessellation_tolerance_mm(repo.DEFAULT_VOXEL_SIZE_IN)
 
@@ -164,6 +166,7 @@ class UploadFilesOnDiskTests(unittest.TestCase):
         np.testing.assert_allclose(_extents(entries[0]), [1.0, 2.0, 3.0], atol=1e-6)
 
     @unittest.skipUnless(STEP_SUPPORTED, "cascadio not installed")
+    @unittest.skipUnless(HAVE_STEP_FIXTURES, "STEP fixture not available")
     def test_single_body_step_original_is_removed(self) -> None:
         entries = _upload(self.folder, RISER_STEP.read_bytes(), RISER_STEP.name)
         self.assertEqual(len(entries), 1)
@@ -173,6 +176,7 @@ class UploadFilesOnDiskTests(unittest.TestCase):
 
 
 @unittest.skipUnless(STEP_SUPPORTED, "cascadio not installed")
+@unittest.skipUnless(HAVE_STEP_FIXTURES, "STEP fixture not available")
 class InchStepUploadTests(unittest.TestCase):
     """Inch-authored Test_Model STEP files, uploaded for real."""
 

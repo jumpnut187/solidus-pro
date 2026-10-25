@@ -15,8 +15,10 @@ import subprocess
 import sys
 import unittest
 
+from tests.helpers.ci_models import ci_model
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SAMPLE_STL = os.path.join(REPO_ROOT, "sample_stl_files", "l_bracket.stl")
+SAMPLE_STL = ci_model("l_bracket.stl")
 
 
 def run_smoke() -> None:
