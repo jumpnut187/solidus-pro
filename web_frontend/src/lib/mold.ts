@@ -25,7 +25,12 @@ export type MoldParams = {
   air_htc: number;
   sand_emissivity: number;
   metal_emissivity: number;
+  /** Cap on mold lattice cells (voxel size, before grading). */
   max_mold_cells: number;
+  /** Graded mold: sand cells up to 2^levels voxels per side away from the assembly; 0 = uniform. */
+  mold_grading_levels: number;
+  /** Layers of voxel-size sand kept around the assembly (at least 2). */
+  mold_fine_band_cells: number;
 };
 
 export const MOLD_DEFAULTS: MoldParams = {
@@ -45,7 +50,9 @@ export const MOLD_DEFAULTS: MoldParams = {
   air_htc: 10.0,
   sand_emissivity: 0.9,
   metal_emissivity: 0.8,
-  max_mold_cells: 40_000_000
+  max_mold_cells: 40_000_000,
+  mold_grading_levels: 3,
+  mold_fine_band_cells: 4
 };
 
 /** Shown until `/api/sands` answers (or when offline): the codes the server knows. */

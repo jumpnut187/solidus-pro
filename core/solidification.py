@@ -33,7 +33,7 @@ from core.solidification_params import (
     SolidificationParameters,
 )
 from dataclasses import dataclass, field
-from physics.heat_transfer import BoundaryType, HeatTransferModel
+from physics.heat_transfer import BoundaryType, HeatTransferModel, InterfaceLinks
 from physics.units import GRAVITY_M_S2, inches_to_meters, inches_to_mm
 from core.part_manager import (
     PART_TYPE_CAST,
@@ -164,6 +164,11 @@ CHILL_RHO_CP_J_M3_K = 1800.0 * 710.0
 #: Stretch of the Chvorinov time horizon for a run with an explicit sand mold
 #: (see ``SolidificationEngine._calculate_max_simulation_time``).
 EXPLICIT_MOLD_TIME_FACTOR = 4.0
+
+#: Contact coefficient of the links between mold cells of different size in a
+#: graded mold: infinite, so 1/h drops out and a link is plain two-point
+#: conduction, A / (dx_i / (2 k_i) + dx_j / (2 k_j)), over the shared faces.
+MOLD_GRADING_LINK_HTC = float("inf")
 
 
 def is_database_core_sand(code: int) -> bool:
@@ -629,7 +634,12 @@ class SolidificationEngine:
         if layout is not None and layout.mold_cell_count > 0:
             from core.mold_setup import build_thermal_extension
 
-            extension = build_thermal_extension(self.mesh, layout)
+            extension = build_thermal_extension(
+                self.mesh,
+                layout,
+                grading_levels=mold_params.mold_grading_levels,
+                fine_band_cells=mold_params.mold_fine_band_cells,
+            )
         self._mold_extension = extension
 
         diffusivity_overrides = None
@@ -729,8 +739,13 @@ class SolidificationEngine:
             else:
                 from core.mold_materials import sand_label
 
+                graded = (
+                    f", graded from {extension.lattice_mold_cells:,} lattice cells, up to {extension.max_span}x"
+                    if extension.graded
+                    else ""
+                )
                 print(
-                    f"    Mold: {extension.n_mold:,} sand cells ({sand_label(mold_params.mold_material_code)}), "
+                    f"    Mold: {extension.n_mold:,} sand cells{graded} ({sand_label(mold_params.mold_material_code)}), "
                     f"{len(extension.pair_first):,} metal-sand contacts, "
                     f"{len(extension.air_mesh_cells) + len(extension.air_mold_cells):,} cells open to the air"
                 )
@@ -858,23 +873,45 @@ class SolidificationEngine:
         master_of = self._mesh_master_of()
         pitch_m = inches_to_meters(float(layout.lattice.pitch))
 
+        # A graded mold is one model with mixed cell sizes: same-size
+        # neighbours on the stencil, cells of different size through perfect-
+        # contact links (two-point conduction over the shared faces). The
+        # uniform mold builds the model exactly as before.
+        graded_inputs: Dict[str, Any] = {}
+        if extension.graded:
+            graded_inputs["voxel_sizes"] = pitch_m * np.asarray(extension.mold_span, dtype=np.float64)
+            if len(extension.link_first):
+                graded_inputs["interface_links"] = InterfaceLinks(
+                    first=np.asarray(extension.link_first, dtype=np.int64),
+                    second=np.asarray(extension.link_second, dtype=np.int64),
+                    area=inches_to_meters(inches_to_meters(np.asarray(extension.link_area, dtype=np.float64))),
+                    group=np.zeros(len(extension.link_first), dtype=np.int64),
+                    htc=[MOLD_GRADING_LINK_HTC],
+                    time_functions=[None],
+                )
         mold_model = HeatTransferModel(
             n_voxels=extension.n_mold,
             voxel_size=pitch_m,
             neighbors=np.asarray(extension.mold_neighbors, dtype=np.int32),
             alloy=self.alloy,
             tabulated_bodies=[mold_tabulated_body(np.arange(extension.n_mold), mold.mold_material_code, tb)],
+            **graded_inputs,
         )
         mold_model.set_initial_temperature(float(mold_temperature))
         if len(extension.air_mold_cells):
             pitch_in = float(layout.lattice.pitch)
+            if extension.graded:
+                cell_in = pitch_in * np.asarray(extension.mold_span, dtype=np.float64)[extension.air_mold_cells]
+                air_weights = extension.air_mold_area / (cell_in * cell_in)
+            else:
+                air_weights = extension.air_mold_area / (pitch_in * pitch_in)
             mold_model.add_boundary(
                 extension.air_mold_cells.astype(np.int32),
                 BoundaryType.RADIATION,
                 value=float(mold.sand_emissivity),
                 htc=float(mold.air_htc),
                 T_infinity=float(mold.ambient_temperature),
-                weights=extension.air_mold_area / (pitch_in * pitch_in),
+                weights=air_weights,
             )
 
         first = master_of[extension.pair_first]

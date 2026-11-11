@@ -35,6 +35,10 @@ from core.mold_materials import (
 from core.mold_setup import (
     NEIGHBOR_SLOT_OFFSETS,
     Lattice,
+    _mirror_shift,
+    build_thermal_extension,
+    grade_mold,
+    grading_thresholds,
     mask_surface,
     mold_box,
     plan_layout,
@@ -593,6 +597,206 @@ class SuppliedGeometryOverrideTests(unittest.TestCase):
         self.assertEqual(meshes["mold"], [])  # the loaded flask is drawn as itself
         lo, hi = layout.lattice.bounds()
         self.assertAlmostEqual(float(hi[2] - lo[2]), 10.0, delta=0.3)
+
+
+#: Graded mold (levels 3, band 4) against the uniform mold, 2 in WCB cube with 4 in walls at
+#: 0.2 in: measured max per-voxel end-time difference 0.39 % of the freeze time, 131,320 ->
+#: 20,433 sand cells (6.4x). tests/verify_graded_mold.py has the wider study (all cases <= 0.70 %).
+GRADED_FREEZE_TOLERANCE = 0.01
+GRADED_CUBE_CELL_CUT = 6.0
+
+
+class GradedMoldTests(unittest.TestCase):
+    """The graded mold (MoldParams.mold_grading_levels): partition, faces, solver and pipeline."""
+
+    alloy = get_alloy("WCB")
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.mold = {"auto_mold": 1, "wall_thickness_in": 4.0}
+        cls.uniform_engine = _run(_cube(), {**cls.mold, "mold_grading_levels": 0})
+        cls.graded_engine = _run(_cube(), cls.mold)
+        cls.mesh = cls.graded_engine.mesh
+        cls.layout = cls.mesh.mold_layout
+        cls.uniform = build_thermal_extension(cls.mesh, cls.layout)
+        cls.graded = build_thermal_extension(cls.mesh, cls.layout, grading_levels=3, fine_band_cells=4)
+
+    def test_levels_0_is_the_uniform_lattice(self) -> None:
+        ext = self.uniform_engine._mold_extension
+        self.assertFalse(ext.graded)
+        np.testing.assert_array_equal(ext.mold_span, 1)
+        self.assertEqual(len(ext.link_first), 0)
+        np.testing.assert_array_equal(ext.mold_ijk, np.argwhere(self.uniform_engine.mesh.mold_layout.mold))
+        self.assertEqual(ext.n_mold, ext.lattice_mold_cells)
+        self.assertIsNone(self.uniform_engine._thermal_heat_model.mold._voxel_sizes)
+        self.assertIsNone(self.uniform_engine._thermal_heat_model.mold._interface_links)
+
+    def test_graded_path_with_nothing_coarsened_is_the_uniform_mold(self) -> None:
+        """A band wider than the wall: the graded code builds the uniform mold's arrays."""
+        layout = dataclasses.replace(self.layout, grading=None)
+        ext = build_thermal_extension(self.mesh, layout, grading_levels=2, fine_band_cells=1000)
+        self.assertFalse(ext.graded)
+        for name in ("mold_ijk", "mold_neighbors", "pair_first", "pair_second", "pair_area", "stencil_first",
+                     "stencil_second", "stencil_slot", "air_mold_cells", "air_mold_area", "air_mesh_cells"):
+            np.testing.assert_array_equal(getattr(ext, name), getattr(self.uniform, name), err_msg=name)
+
+    def test_partition_covers_the_lattice_sand_once(self) -> None:
+        grading = grade_mold(self.layout, 3, 4)
+        np.testing.assert_array_equal(grading.owner >= 0, self.layout.mold)
+        held = np.bincount(grading.owner[self.layout.mold], minlength=grading.n_cells)
+        np.testing.assert_array_equal(held, grading.span ** 3)
+        self.assertEqual(int(np.sum(grading.span ** 3)), self.layout.mold_cell_count)
+        # Each cell owns the block at its low corner.
+        for c in np.flatnonzero(grading.span > 1)[::50]:
+            (i, j, k), s = grading.ijk[c], grading.span[c]
+            np.testing.assert_array_equal(grading.owner[i:i + s, j:j + s, k:k + s], c)
+        self.assertEqual(grading.max_span, 4)  # 4 in of sand at 0.2 in: no aligned 8-block clears t_3
+        self.assertGreater(self.layout.mold_cell_count / grading.n_cells, 5.0)
+
+    def test_cells_near_the_assembly_are_voxel_size(self) -> None:
+        from scipy import ndimage
+
+        grading = grade_mold(self.layout, 3, 4)
+        seeds = (self.layout.cell_index >= 0) | self.layout.gap
+        dist = ndimage.distance_transform_cdt(~seeds, metric="chessboard")
+        near = self.layout.mold & (dist <= 4)
+        self.assertTrue(near.any())
+        np.testing.assert_array_equal(grading.span[grading.owner[near]], 1)
+        ext = self.graded
+        for targets in (ext.pair_second, ext.stencil_second):
+            np.testing.assert_array_equal(ext.mold_span[targets], 1)
+
+    def test_air_area_and_contacts_match_the_uniform_mold(self) -> None:
+        self.assertAlmostEqual(float(self.graded.air_mold_area.sum()), float(self.uniform.air_mold_area.sum()), places=9)
+        self.assertAlmostEqual(float(self.graded.pair_area.sum()), float(self.uniform.pair_area.sum()), places=9)
+        np.testing.assert_array_equal(self.graded.pair_first, self.uniform.pair_first)
+
+    def test_every_coarse_cell_face_is_accounted_for(self) -> None:
+        """Same-size stencil faces + cross-size links + air faces = 6 span^2 lattice faces."""
+        ext = self.graded
+        span = ext.mold_span
+        pitch2 = self.layout.lattice.pitch ** 2
+        faces = np.count_nonzero(ext.mold_neighbors[:, :6] >= 0, axis=1) * span ** 2
+        link_faces = np.rint(ext.link_area / pitch2).astype(np.int64)
+        faces += np.bincount(ext.link_first, weights=link_faces, minlength=ext.n_mold).astype(np.int64)
+        faces += np.bincount(ext.link_second, weights=link_faces, minlength=ext.n_mold).astype(np.int64)
+        air = np.zeros(ext.n_mold, dtype=np.int64)
+        air[ext.air_mold_cells] = np.rint(ext.air_mold_area / pitch2).astype(np.int64)
+        coarse = span > 1
+        self.assertGreater(int(coarse.sum()), 100)
+        np.testing.assert_array_equal((faces + air)[coarse], 6 * span[coarse] ** 2)
+        # Links join cells of different size, finer first.
+        self.assertTrue(np.all(span[ext.link_first] < span[ext.link_second]))
+
+    def test_graded_mold_model_conserves_energy(self) -> None:
+        """The engine's graded mold model, no air: heat in a hot patch spreads without loss."""
+        engine = self.graded_engine
+        solver = engine._build_coupled_mold(self.graded, engine._thermal_heat_model.casting, 20.0)
+        mold = solver.mold
+        mold.clear_boundaries()
+        self.assertIsNotNone(mold._interface_links)
+        start = np.full(self.graded.n_mold, 20.0)
+        start[self.graded.mold_span == 1] = 900.0  # the fine band hot, the coarse sand cold
+        mold.set_initial_temperature(start)
+        volume = mold._cell_volumes(np.arange(self.graded.n_mold))
+
+        def energy() -> float:
+            return float(np.sum(mold.tabulated_enthalpy(0, mold.temperatures) * volume))
+
+        before = energy()
+        for _ in range(20):
+            mold.step(2.0)
+        self.assertGreater(float(mold.temperatures[self.graded.mold_span == 2].max()), 20.5)
+        # Round-off of the tabulated enthalpy inversion only (measured 8e-10).
+        self.assertAlmostEqual(energy() / before, 1.0, places=8)
+
+    def test_graded_column_conducts_like_the_uniform_column(self) -> None:
+        """1-D: 2x2 periodic voxel cells then a column of 2x cells, against the voxel column."""
+        dx, k, rho_cp = 0.0025, 0.8, 1.6e6
+        n_fine, n_coarse = 8, 12
+        body = lambda idx: TabulatedBody(idx, np.array([0.0, 2000.0]), np.array([k, k]), np.array([rho_cp, rho_cp]))
+
+        def periodic(side: int, layers: int, first: int):
+            nb = np.full((side * side * layers, 26), -1, dtype=np.int32)
+            for z in range(layers):
+                for y in range(side):
+                    for x in range(side):
+                        for slot, (ox, oy, oz) in enumerate(NEIGHBOR_SLOT_OFFSETS):
+                            if 0 <= z + oz < layers:
+                                nb[(z * side + y) * side + x, slot] = first + ((z + oz) * side + (y + oy) % side) * side + (x + ox) % side
+            return nb
+
+        n_uniform_layers = n_fine + 2 * n_coarse
+        uniform_nb = periodic(2, n_uniform_layers, 0)
+        uniform = HeatTransferModel(len(uniform_nb), dx, uniform_nb, self.alloy,
+                                    tabulated_bodies=[body(np.arange(len(uniform_nb)))])
+        z_uniform = np.repeat(np.arange(n_uniform_layers), 4)
+        uniform.set_initial_temperature(np.where(z_uniform < 3, 1000.0, 20.0))
+
+        n_f = 4 * n_fine
+        graded_nb = np.concatenate([periodic(2, n_fine, 0), periodic(1, n_coarse, n_f)])
+        n = len(graded_nb)
+        sizes = np.concatenate([np.full(n_f, dx), np.full(n_coarse, 2 * dx)])
+        top = np.arange(n_f - 4, n_f)
+        links = InterfaceLinks(top, np.full(4, n_f), np.full(4, dx * dx), np.zeros(4, dtype=int), [np.inf], [None])
+        graded = HeatTransferModel(n, dx, graded_nb, self.alloy, voxel_sizes=sizes,
+                                   tabulated_bodies=[body(np.arange(n))], interface_links=links)
+        graded.set_initial_temperature(np.where(np.arange(n) < 12, 1000.0, 20.0))
+
+        for _ in range(300):
+            uniform.step(1.0)
+            graded.step(1.0)
+        layers_u = uniform.temperatures.reshape(n_uniform_layers, 4).mean(axis=1)
+        fine_g = graded.temperatures[:n_f].reshape(n_fine, 4).mean(axis=1)
+        coarse_u = layers_u[n_fine:].reshape(n_coarse, 2).mean(axis=1)
+        coarse_g = graded.temperatures[n_f:]
+        # Measured: 0.8 K (fine) and 0.95 K (coarse) apart, 168 K at the first coarse cell.
+        self.assertLess(float(np.max(np.abs(fine_g - layers_u[:n_fine]))), 2.0)
+        self.assertLess(float(np.max(np.abs(coarse_g - coarse_u))), 2.0)
+        self.assertGreater(float(coarse_g[0]), 100.0)
+        energy_u = float(np.sum(uniform.temperatures)) * dx ** 3
+        energy_g = float(np.sum(graded.temperatures * sizes ** 3))
+        self.assertAlmostEqual(energy_g / energy_u, 1.0, places=9)
+
+    def test_freeze_time_and_cell_count(self) -> None:
+        uniform_end = np.asarray(self.uniform_engine.solidification_end_times, dtype=np.float64)
+        graded_end = np.asarray(self.graded_engine.solidification_end_times, dtype=np.float64)
+        total = float(np.nanmax(uniform_end))
+        self.assertLess(abs(float(np.nanmax(graded_end)) - total) / total, GRADED_FREEZE_TOLERANCE)
+        self.assertLess(float(np.nanmax(np.abs(graded_end - uniform_end))) / total, GRADED_FREEZE_TOLERANCE)
+        ext = self.graded_engine._mold_extension
+        self.assertTrue(ext.graded)
+        self.assertGreaterEqual(ext.lattice_mold_cells / ext.n_mold, GRADED_CUBE_CELL_CUT)
+
+    def test_mesh_sized_arrays_are_unchanged(self) -> None:
+        n_mesh = len(self.uniform_engine.mesh.voxel_centers)
+        self.assertEqual(len(self.mesh.voxel_centers), n_mesh)
+        for engine in (self.uniform_engine, self.graded_engine):
+            self.assertEqual(len(engine.solidification_end_times), n_mesh)
+            self.assertEqual(len(engine._thermal_latest_temperatures), n_mesh)
+            self.assertEqual(len(engine._thermal_heat_model.temperatures), n_mesh)
+        self.assertEqual(len(self.graded_engine._thermal_heat_model.mold_temperatures),
+                         self.graded_engine._mold_extension.n_mold)
+
+    def test_params_round_trip_and_clamp(self) -> None:
+        defaults = MoldParams()
+        self.assertEqual(defaults.mold_grading_levels, 3)
+        self.assertEqual(defaults.mold_fine_band_cells, 4)
+        params = SolidificationParameters.from_dict({"mold": {"mold_grading_levels": 9, "mold_fine_band_cells": 1}})
+        self.assertEqual(params.mold.mold_grading_levels, 5)
+        self.assertEqual(params.mold.mold_fine_band_cells, 2)
+        data = params.to_dict()["mold"]
+        self.assertEqual((data["mold_grading_levels"], data["mold_fine_band_cells"]), (5, 2))
+        self.assertEqual(SolidificationParameters.from_dict(params.to_dict()).mold, params.mold)
+
+    def test_thresholds_and_mirror_shift(self) -> None:
+        self.assertEqual(grading_thresholds(4, 4), [4, 8, 16, 32])
+        self.assertEqual(grading_thresholds(3, 2), [2, 6, 14])
+        for n in (10, 37, 64, 66):
+            s = _mirror_shift(n, 8)
+            edges = {i for i in range(n + 1) if (i + s) % 8 == 0}
+            if n % 2 == 0:
+                self.assertEqual(edges, {n - i for i in edges})
 
 
 class WebMoldRouteTests(unittest.TestCase):

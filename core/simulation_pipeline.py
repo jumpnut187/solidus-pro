@@ -608,10 +608,14 @@ def _prepare_mold_stage(
     except MoldSetupError as exc:
         raise ValidationError(str(exc), parameter="mold", expected="A mold that fits the voxel budget") from exc
     if layout is not None:
+        sand = (
+            layout.grading.describe(layout.mold_cell_count)
+            if layout.grading is not None
+            else f"{layout.mold_cell_count:,} mold sand cells"
+        )
         _emit_message(
             progress_message_callback,
-            f"Mold: {layout.mold_cell_count:,} mold sand cells, "
-            f"{layout.added_core_voxels:,} auto-core voxels",
+            f"Mold: {sand}, {layout.added_core_voxels:,} auto-core voxels",
         )
 
 

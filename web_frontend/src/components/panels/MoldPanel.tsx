@@ -1,6 +1,6 @@
 import { Group, SetupPanel } from '../SetupPanel';
 import type { MoldPreview, SandInfo } from '../../lib/api';
-import type { MoldParams } from '../../lib/mold';
+import { MOLD_DEFAULTS, type MoldParams } from '../../lib/mold';
 
 export type MoldPanelProps = {
   mold: MoldParams;
@@ -148,6 +148,23 @@ export function MoldPanel({ mold, sands, preview, previewError, hasParts, onChan
           sands={sands}
           onChange={(code) => set({ mold_material_code: code })}
         />
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={mold.mold_grading_levels > 0}
+            onChange={(event) =>
+              set({ mold_grading_levels: event.target.checked ? MOLD_DEFAULTS.mold_grading_levels : 0 })
+            }
+          />
+          <span className="check-body">
+            <span>Coarser sand away from the casting</span>
+            <span className="check-note">
+              Sand cells grow up to 8 voxels per side away from the assembly and stay voxel size next to the casting,
+              risers, gating, chills and cores: far fewer sand cells for about the same result. Off: every sand cell
+              is voxel size.
+            </span>
+          </span>
+        </label>
       </Group>
 
       <Group title="Cores">

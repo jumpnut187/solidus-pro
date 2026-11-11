@@ -241,6 +241,9 @@ SAND_MATERIAL_CUSTOM = 0
 #: Exponent of the riser modulus in MoldParams.riser_sleeve_htc.
 RISER_SLEEVE_EXPONENT = 0.68
 
+#: Largest MoldParams.mold_grading_levels (cells up to 32 voxels per side).
+MOLD_GRADING_MAX_LEVELS = 5
+
 
 @dataclass
 class MoldParams:
@@ -278,7 +281,8 @@ class MoldParams:
     # depths at the freeze time, which by Chvorinov is 3 x the half-thickness
     # of the heaviest section, between 0.75 and 8 in
     # (core.mold_setup.auto_wall_thickness). Sand beyond that never warms
-    # before the casting is solid, and on a uniform grid it only costs time.
+    # before the casting is solid; on the graded mold (mold_grading_levels)
+    # it is solved on coarse cells and costs little.
     # MAGMASOFT steel validation molds carry about 4 in.
     wall_thickness_in: float = 0.0
     # Sand over a blind (closed) riser. Open risers and pour cups stay open
@@ -321,9 +325,20 @@ class MoldParams:
     air_htc: float = 10.0
     sand_emissivity: float = 0.9
     metal_emissivity: float = 0.8
-    # Cap on lattice cells in the mold box, so a fine voxel size with a large
-    # mold fails with a message instead of exhausting memory.
+    # Cap on lattice cells in the mold box (voxel-size cells, before grading:
+    # the dense layout arrays are lattice sized), so a fine voxel size with a
+    # large mold fails with a message instead of exhausting memory.
     max_mold_cells: int = 40_000_000
+    # Graded mold (core.mold_setup.grade_mold): sand away from the assembly is
+    # solved on cells up to 2^mold_grading_levels voxels per side, block by
+    # block, stepping 2:1. 0 = the uniform lattice at the voxel size, as
+    # before (bit for bit). The heat penetrates only a few cm of sand before
+    # the casting is solid, so the outer mold needs no voxel-size cells.
+    mold_grading_levels: int = 3
+    # Layers of voxel-size sand kept around every mesh cell (metal, chills,
+    # cores) and gap; at least 2 so every metal-sand and core-sand pair
+    # meets a voxel-size cell.
+    mold_fine_band_cells: int = 4
 
     def __post_init__(self) -> None:
         self.auto_mold = _clamp_int(self.auto_mold, 0, 1, 1)
@@ -343,6 +358,8 @@ class MoldParams:
         self.sand_emissivity = _clamp_float(self.sand_emissivity, 0.0, 1.0, 0.9)
         self.metal_emissivity = _clamp_float(self.metal_emissivity, 0.0, 1.0, 0.8)
         self.max_mold_cells = _clamp_int(self.max_mold_cells, 1_000, 500_000_000, 40_000_000)
+        self.mold_grading_levels = _clamp_int(self.mold_grading_levels, 0, MOLD_GRADING_MAX_LEVELS, 3)
+        self.mold_fine_band_cells = _clamp_int(self.mold_fine_band_cells, 2, 64, 4)
 
 
 @dataclass
@@ -778,5 +795,7 @@ class SolidificationParameters:
                 'sand_emissivity': self.mold.sand_emissivity,
                 'metal_emissivity': self.mold.metal_emissivity,
                 'max_mold_cells': self.mold.max_mold_cells,
+                'mold_grading_levels': self.mold.mold_grading_levels,
+                'mold_fine_band_cells': self.mold.mold_fine_band_cells,
             },
         }

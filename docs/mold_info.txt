@@ -29,7 +29,7 @@ automatic cores.
      0.75-8 in (auto_wall_thickness) -- three heat-penetration depths at the
      freeze time, since by Chvorinov sqrt(alpha t_f) is about the modulus
      for steel in silica. A 2 in WCB cube froze at 248 s with 2 in and with
-     4 in walls; sand further out only costs time on a uniform grid.
+     4 in walls; sand further out costs little on the graded mold (2b).
      MAGMASOFT's steel validation molds carry about 4 in.
    - Top of the box (mold_box): with open risers or pour cups, the cope is
      flush with the highest open top, raised where needed so blind risers
@@ -107,6 +107,53 @@ automatic cores.
      radiation plus convection to ~20 °C air; it has no flask.
    - Sand cells start at ThermalBoundaryParams.mold_temperature.
 
+2b. Graded mold (MoldParams.mold_grading_levels, mold_fine_band_cells;
+   core/mold_setup.py::grade_mold)
+   The mold sand is solved on cells of 1, 2, 4, ... up to 2^levels voxels
+   per side (default 3: up to 8x), coarse away from the casting and voxel
+   size where it touches the casting, risers, gating, chills, cores and
+   gaps, as MAGMASOFT grades its mold mesh. 0 is the uniform lattice at the
+   voxel size, bit for bit the mold before 2026-11-11.
+   - Rule, on the solver lattice: dist = Chebyshev distance (cells) from each
+     mold cell to the nearest mesh voxel or gap. A 2^l block aligned to the
+     block grid becomes one cell when all its cells are mold sand with
+     dist > t_l; t_1 = mold_fine_band_cells (default 4, at least 2), then
+     GRADING_TRANSITION_CELLS (2) cells of each level before the next:
+     t_l = t_(l-1) + 2 * 2^(l-1) (4, 8, 16 with the defaults). Blocks cut by
+     the lattice edge, a shaft, a core or a loaded mold part's boundary stay
+     finer. The block grid is anchored so the partition is mirror-symmetric
+     about the lattice centre on axes with an even cell count.
+   - Every metal, chill and core pair lands on a voxel-size cell (checked),
+     so the casting side sees exactly the uniform mold's contacts.
+   - Solver: one mold HeatTransferModel with per-cell sizes. Same-size
+     neighbours use the 27-point stencil; cells of different size that share
+     faces are joined by InterfaceLinks with infinite contact coefficient
+     (MOLD_GRADING_LINK_HTC), i.e. two-point conduction
+     A / (dx_i/2k_i + dx_j/2k_j) over the shared faces. Conservative; the
+     stable step is still set by the voxel-size cells. Corner links across a
+     size step are dropped (the link carries the whole normal flux), which
+     lowers the tangential conductance in the one layer at each step.
+   - Air faces are summed over each cell's lattice faces (same total area).
+   - max_mold_cells still caps lattice cells: the dense layout arrays are
+     lattice sized.
+   - Accuracy (tests/verify_graded_mold.py, WCB, levels 3, band 4, against
+     the uniform mold, 2026-11-11). Max |per-voxel end-time difference| as
+     % of the freeze time, sand cells uniform -> graded:
+       2 in cube, 2 in walls, 0.2 in     0.39 %    28 k ->  12 k (2.4x)
+       2 in cube, 4 in walls, 0.2 in     0.39 %   131 k ->  20 k (6.4x)
+       2 in cube, 2 in walls, 0.1 in     0.43 %   218 k ->  40 k (5.4x)
+       2 in cube, 4 in walls, 0.1 in     0.43 %   1.02 M -> 71 k (14.3x)
+       plate + sleeved riser, auto, 0.2  0.70 %   1.04 M -> 110 k (9.5x)
+       L bracket, auto wall, 0.1 in      0.22 %   156 k ->  47 k (3.3x)
+       thick-thin, auto wall, 0.1 in     0.69 %   1.08 M -> 85 k (12.6x)
+     Mean differences 0.03-0.27 %. The graded mold runs slightly slow (the
+     plate +0.7 %, 5437 -> 5475 s): coarse cells and the dropped corner links
+     draw heat a little less well where heat reaches them. Band 2 broke 1 %
+     (L bracket 1.75 %, plate 1.04-1.39 %); band 8 held 0.14 % at 5.5x on the
+     plate. Levels above 3 changed nothing on these molds (walls up to 8 in).
+     Mold solve time fell with the cell count (plate 27 s -> 10 s), but the
+     casting model then dominates (whole run 50 s -> 32 s).
+
 3. Sands (core/mold_materials.py)
    Codes are saved in projects; append only. 0 = custom constant sand
    (core_* params for cores; mold_thermal_conductivity / diffusivity for
@@ -142,8 +189,9 @@ automatic cores.
      longer than the boundary's (bronze L-bracket 285 s -> 694 s), and the
      old horizon cut runs off with liquid left.
    - Mold cells cost solver time like any cell: a 2 in cube with 4 in walls
-     is 1.3 k metal and 131 k sand cells. The ratio falls with casting size.
-     max_mold_cells (40 M) stops a run before memory runs out. Sand cells
+     is 1.3 k metal and 131 k lattice sand cells at 0.2 in, 20 k graded
+     (6.4x fewer; 14x at 0.1 in). The ratio falls with casting size.
+     max_mold_cells (40 M lattice cells) stops a run before memory runs out. Sand cells
      update their properties only after moving 0.01 K and skip the enthalpy
      correction below 1e-3 K (Numba kernels), so sand that never warms costs
      only the conduction stencil. A small rigged training box (22 k metal,
@@ -153,9 +201,10 @@ automatic cores.
      data/surrogate_dataset was regenerated on the explicit mold on
      2026-10-24 (the boundary-mold set is kept in
      data/surrogate_dataset_boundary_mold_2026-10-24).
-   - The lattice is uniform; MAGMASOFT grades its mesh coarser in the mold.
-     Convergence of the explicit cube: 248 s (0.2 in), 228 s (0.1 in),
-     224 s (0.067 in).
+   - The mold is graded (2b); mold_grading_levels = 0 is the uniform
+     lattice. Convergence of the explicit cube on the uniform mold, as first
+     recorded: 248 s (0.2 in), 228 s (0.1 in), 224 s (0.067 in); measured
+     2026-11-11: 240.9 s (0.2 in), 220.6 s (0.1 in), graded 240.9 / 221.1 s.
    - Moisture migration in green sand (the condensation zone) and binder
      burn-off gas are not modelled thermally; only the evaporation heat.
    - Auto cores of the draw rule assume a vertical draw (z up) and an

@@ -78,6 +78,13 @@ class MoldDialog(DraggableDialog):
         mold_layout.addRow("Closed riser cover", self.cover_spin)
         self.mold_sand_combo = self._sand_combo()
         mold_layout.addRow("Mold sand", self.mold_sand_combo)
+        self.grading_check = QCheckBox("Coarser sand away from the casting")
+        self.grading_check.setToolTip(
+            "Solves the mold sand on cells up to 8 voxels per side away from the assembly,\n"
+            "voxel-size next to the casting, risers, gating, chills and cores. Far fewer\n"
+            "sand cells for about the same result. Off: every sand cell is voxel size."
+        )
+        mold_layout.addRow(self.grading_check)
         mold_group.setLayout(mold_layout)
         self.content_layout.addWidget(mold_group)
 
@@ -131,7 +138,7 @@ class MoldDialog(DraggableDialog):
         self.content_layout.addWidget(note)
         self.content_layout.addStretch()
 
-        for widget in (self.auto_mold_check, self.auto_cores_check, self.air_gap_check):
+        for widget in (self.auto_mold_check, self.auto_cores_check, self.air_gap_check, self.grading_check):
             widget.toggled.connect(self._changed)
         for widget in (self.wall_spin, self.cover_spin, self.htc_cast_spin, self.htc_chill_spin, self.ambient_spin):
             widget.valueChanged.connect(self._changed)
@@ -172,7 +179,7 @@ class MoldDialog(DraggableDialog):
         widgets = (
             self.auto_mold_check, self.auto_cores_check, self.air_gap_check, self.wall_spin, self.cover_spin,
             self.htc_cast_spin, self.htc_chill_spin, self.ambient_spin, self.mold_sand_combo,
-            self.core_sand_combo, self.core_rule_combo,
+            self.core_sand_combo, self.core_rule_combo, self.grading_check,
         )
         for widget in widgets:
             widget.blockSignals(True)
@@ -187,9 +194,15 @@ class MoldDialog(DraggableDialog):
         self._select(self.mold_sand_combo, params.mold_material_code)
         self._select(self.core_sand_combo, params.core_material_code)
         self._select(self.core_rule_combo, params.core_rule_code)
+        self.grading_check.setChecked(params.mold_grading_levels > 0)
+        # Levels the checkbox turns on: the loaded value, else the default.
+        self._grading_levels = params.mold_grading_levels or MoldParams().mold_grading_levels
         self._extra = {
             k: getattr(params, k)
-            for k in ("air_htc", "sand_emissivity", "metal_emissivity", "max_mold_cells", "riser_sleeve_htc")
+            for k in (
+                "air_htc", "sand_emissivity", "metal_emissivity", "max_mold_cells", "riser_sleeve_htc",
+                "mold_fine_band_cells",
+            )
         }
         for widget in widgets:
             widget.blockSignals(False)
@@ -210,6 +223,7 @@ class MoldDialog(DraggableDialog):
             "interface_htc_curve": int(self.air_gap_check.isChecked()),
             "htc_chill_mold": float(self.htc_chill_spin.value()),
             "ambient_temperature": float(self.ambient_spin.value()),
+            "mold_grading_levels": int(self._grading_levels if self.grading_check.isChecked() else 0),
             **self._extra,
         }
 
