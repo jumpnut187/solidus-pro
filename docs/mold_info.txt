@@ -75,7 +75,15 @@ automatic cores.
          interface_htc_curve = 1 (STEEL_SAND_AIR_GAP_CURVE, read from
          Williams/Hardin/Beckermann SFSA 2015 Fig. 3: 1000 above solidus,
          ~380 at 900 °C, ~50 at 600 °C), else constant ("C1000").
-       risers: an insulating sleeve per riser, h = riser_sleeve_htc (61.7)
+       risers: a riser in an insulating sleeve has no contact pair and no
+         link to a core (riser_sleeve_adiabatic = 1, default since
+         2026-11-11): the sleeve cuts it off from the sand, so the mold and
+         the cores do not change how fast it freezes. It cools through the
+         metal it feeds and through an open top. On a production rigging
+         (six sleeved risers on riser posts) the leaking sleeve below froze
+         every riser before the post under it; cut off, they freeze last.
+         riser_sleeve_adiabatic = 0 brings the leaking sleeve back:
+         h = riser_sleeve_htc (61.7)
          * M^-0.68, M the riser's modulus (in) over the area it shows the
          mold and air. A sleeve wall thickens with the riser; a constant
          coefficient gave MEF 1.31 on a 2 x 3 in riser but 1.15 at 6 x 9 in.

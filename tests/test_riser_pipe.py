@@ -50,6 +50,18 @@ class GravityDrainPipeTests(unittest.TestCase):
         depth = lambda f: float(np.arange(10.0)[f > 0].min())
         self.assertGreaterEqual(depth(f_hot), depth(f_cold))
 
+    def test_riser_still_liquid_at_the_end_feeds_itself_from_the_top(self) -> None:
+        # The casting froze; the riser (z >= 3) has no times: the run stopped with it liquid.
+        nan = float("nan")
+        t, z, v, pools, feeder = _stack([10, 12, 14, nan, nan, nan, nan, nan, nan, nan])
+        fraction, (pool,) = gravity_drain_pipe(t, z, v, pools, feeder, 0.05)
+        # Every voxel's shrinkage is drained but the last one's, which has no liquid left above it.
+        self.assertAlmostEqual(pool.unfed_volume, 0.05 * (1.0 - float(fraction[9])), places=6)
+        self.assertAlmostEqual(pool.pipe_volume + pool.unfed_volume, pool.demand_volume, places=9)
+        self.assertEqual(pool.section_pipe_volume, 0.0)
+        self.assertEqual(int(np.argmax(fraction)), 9)  # the level falls from the top
+        np.testing.assert_array_equal(fraction[:9], 0.0)
+
     def test_voxels_outside_pools_are_untouched(self) -> None:
         t, z, v, pools, feeder = _stack([10, 12, 14, 30, 40, 50, 60, 70, 80, 5])
         pools = np.full(10, -1, dtype=np.int64)

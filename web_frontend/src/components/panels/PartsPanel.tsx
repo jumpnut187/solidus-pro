@@ -286,7 +286,7 @@ function PartRow({
                 <option value="insulating">Insulating</option>
                 <option value="none">None (bare sand)</option>
               </select>
-              <span className="field-hint">An insulating sleeve slows the riser's cooling. A bare sand riser cools through the same sand contact as the casting.</span>
+              <span className="field-hint">An insulating sleeve cuts the riser off from the mold and core sand: it cools only through the metal it feeds, and through an open top. A bare sand riser cools through the same sand contact as the casting.</span>
             </label>
           </td>
         </tr>

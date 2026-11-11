@@ -370,8 +370,11 @@ class ScenarioRegressionTests(unittest.TestCase):
             float(np.max(riser_engine.feeding_path_lengths[valid_cast_paths])),
             0.0,
         )
+        # A sleeved riser passes no heat to the sand, so this 2 x 3 in riser on a 1 in block is still
+        # partly liquid when the run stops: no time (NaN) means it froze after everything else.
+        riser_times = np.asarray(riser_engine.solidification_times, dtype=np.float64)[riser_mask]
         self.assertGreaterEqual(
-            float(np.max(riser_engine.solidification_times[riser_mask])),
+            float(np.max(np.where(np.isnan(riser_times), np.inf, riser_times))),
             float(np.max(riser_engine.solidification_times[cast_mask])),
         )
         self.assertGreaterEqual(

@@ -18,6 +18,8 @@ Assumptions:
   no feeder reaches, from :func:`label_unfed_pools`: a liquid region drains by
   gravity whether or not anything is labelled a feeder).
 - Volume demand is booked when a voxel reaches its solidification time.
+  A voxel with no time (still liquid when the run stopped) freezes after all
+  the others, lowest first.
 - The free surface is the highest liquid voxel. Ties go to the voxel that
   freezes last, the thermal centre.
 - Liquid contraction above the liquidus is not counted. That underestimates
@@ -209,10 +211,19 @@ def gravity_drain_pipe(
         pool id.
     """
     times = np.asarray(solidification_times, dtype=np.float64)
-    finite = np.isfinite(times)
-    latest = float(times[finite].max()) if np.any(finite) else 0.0
-    times = np.where(finite, times, latest)
     heights = np.asarray(heights, dtype=np.float64)
+    finite = np.isfinite(times)
+    if not np.all(finite):
+        # Still liquid when the run stopped (a riser that outlasts the time
+        # horizon): these freeze after everything else, lowest first, one after
+        # the other, so the liquid left above goes on feeding what freezes
+        # under it. Given one shared instant they would all be solid at once
+        # and their own shrinkage would find no liquid to draw on. Only the
+        # order is used, so the spacing is arbitrary.
+        latest = float(times[finite].max()) if np.any(finite) else 0.0
+        late = np.flatnonzero(~finite)
+        times = times.copy()
+        times[late[np.argsort(heights[late], kind="stable")]] = latest + 1.0 + np.arange(len(late))
     volumes = np.asarray(volumes, dtype=np.float64)
     pool_ids = np.asarray(pool_ids, dtype=np.int64)
     feeder_mask = np.asarray(feeder_mask, dtype=bool)

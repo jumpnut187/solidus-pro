@@ -11,8 +11,11 @@ the difference and run at 0.50 in to keep CI fast.
 - The cylinder typed RISER with ``riser_sleeve`` "none" (bare sand) against the
   default "insulating": the bare riser freezes sooner and its pipe reaches
   further down, into the casting.
-- A riser run with default settings reproduces the numbers the code gave before
+- A riser run on the leaking sleeve (``riser_sleeve_adiabatic`` 0, the default
+  when those numbers were taken) reproduces the numbers the code gave before
   unrisered pools existed.
+- With the default sleeve, which passes no heat to the sand, the riser freezes
+  after the plate and holds the whole pipe.
 """
 from __future__ import annotations
 
@@ -35,7 +38,7 @@ CYLINDER_BOTTOM_Z = 2.5
 CYLINDER_TOP_Z = 8.5
 CYLINDER_RADIUS = 2.0
 
-#: ``riser_pipe_report[0]`` of the riser run with default settings, taken on the
+#: ``riser_pipe_report[0]`` of the riser run on the leaking sleeve, taken on the
 #: code before unrisered pools were added (voxel_size 0.30, auto mold on).
 OLD_RISER_REPORT = {
     "demand_in3": 14.216858530080579,
@@ -46,6 +49,8 @@ OLD_RISER_REPORT = {
 }
 
 BOUNDARY_ONLY = {"mold": {"auto_mold": 0, "auto_cores": 0}}
+#: The sleeve as it was before 2026-11-11: it leaks into the mold at riser_sleeve_htc.
+LEAKING_SLEEVE = {"mold": {"riser_sleeve_adiabatic": 0}}
 
 PIPE_VOXEL_SIZE = 0.30
 SLEEVE_VOXEL_SIZE = 0.50
@@ -161,7 +166,7 @@ class UnriseredPipeTests(unittest.TestCase):
 class RiserDefaultUnchangedTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.sim = _run("riser")
+        cls.sim = _run("riser", None, LEAKING_SLEEVE)
 
     def test_riser_pipe_report_matches_the_code_before_unrisered_pools(self) -> None:
         self.assertEqual(len(self.sim["riser_report"]), 1)
@@ -196,6 +201,15 @@ class RiserSleeveTests(unittest.TestCase):
         self.assertLess(
             _lowest_piped_z(self.bare, everything), _lowest_piped_z(self.insulating, everything)
         )
+
+    def test_sleeved_riser_freezes_after_the_plate_and_holds_the_pipe(self) -> None:
+        run = self.insulating
+        riser = run["part_types"] == 1
+        self.assertGreater(float(run["times"][riser].max()), float(run["times"][~riser].max()))
+        self.assertLess(run["riser_report"][0]["pipe_in_casting_in3"], 0.01)
+        # The leaking sleeve let the same riser freeze sooner.
+        leaking = _run("riser", None, LEAKING_SLEEVE, SLEEVE_VOXEL_SIZE)
+        self.assertLess(float(leaking["times"][riser].max()), float(run["times"][riser].max()))
 
 
 class RiserSleeveBoundaryPathTests(unittest.TestCase):

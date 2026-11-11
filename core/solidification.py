@@ -667,6 +667,9 @@ class SolidificationEngine:
         else:
             neighbors = mesh_neighbors
             air_boundaries = []
+        # An insulating sleeve stands between its riser and a core: the solver's
+        # stencil loses those links (the mesh keeps them for the analyses).
+        neighbors = self._without_sleeved_riser_sand_links(neighbors)
 
         casting_model = HeatTransferModel(
             n_voxels=n_voxels,
@@ -735,6 +738,9 @@ class SolidificationEngine:
                 from core.mold_materials import sand_label
 
                 print(f"    Core sand: {sand_label(mold_params.core_material_code)}")
+            sleeved_cells = int(np.count_nonzero(self._sleeved_riser_cells(n_voxels)))
+            if sleeved_cells > 0:
+                print(f"    Riser sleeves: {sleeved_cells:,} riser cells exchange no heat with mold or core sand")
 
         # Adaptive CFL timestep: the thermal loop advances by engine.time_step
         # but the explicit scheme is only stable up to get_stable_timestep().
@@ -832,12 +838,14 @@ class SolidificationEngine:
 
         Contact pairs: metal (casting, gating, filters) to sand on the
         steel-sand air-gap curve; riser posts at htc_riser_post; chills at
-        htc_chill_mold; each riser at its own insulating-sleeve coefficient
-        riser_sleeve_htc * M^-0.68 from its modulus (a riser set to no sleeve,
-        ``Part.riser_sleeve``, stays on the casting's curve). Pairs on a slaved cut cell
-        move to its master, which carries the slave's capacity. Stencil pairs
-        join cores to the mold with the 27-point link weights and the core
-        contact (htc_core_contact).
+        htc_chill_mold. A riser in a sleeve has no pair at all: the sleeve cuts
+        it off from the sand (``MoldParams.riser_sleeve_adiabatic``). With that
+        switch off each sleeved riser leaks at its own coefficient
+        riser_sleeve_htc * M^-0.68 from its modulus. A riser set to no sleeve
+        (``Part.riser_sleeve``) stays on the casting's curve either way. Pairs
+        on a slaved cut cell move to its master, which carries the slave's
+        capacity. Stencil pairs join cores to the mold with the 27-point link
+        weights and the core contact (htc_core_contact).
         """
         from core.mold_materials import mold_tabulated_body
         from physics.heat_transfer import _stencil_slot_weights
@@ -870,6 +878,11 @@ class SolidificationEngine:
             )
 
         first = master_of[extension.pair_first]
+        second = extension.pair_second
+        area = extension.pair_area
+        sleeved = self._sleeved_riser_cells(extension.n_mesh)[first]
+        if np.any(sleeved):
+            first, second, area = first[~sleeved], second[~sleeved], area[~sleeved]
         codes = part_types[first]
         group = np.zeros(len(first), dtype=np.int64)
         group[codes == PART_TYPE_RISER_POST] = 1
@@ -880,16 +893,19 @@ class SolidificationEngine:
             curve = (STEEL_SAND_AIR_GAP_CURVE[0] + solidus, STEEL_SAND_AIR_GAP_CURVE[1])
         htc = [mold.htc_cast_mold, tb.htc_riser_post, mold.htc_chill_mold]
         factors: List[Any] = [curve, None, None]
-        riser_label, riser_moduli = self._riser_moduli_for_sleeves(extension, master_of, part_types)
-        bare = self._bare_riser_cells(extension.n_mesh)
-        bare_risers = set(np.unique(riser_label[bare & (riser_label >= 0)]).tolist())
-        for n, modulus in enumerate(riser_moduli):
-            if n in bare_risers:
-                continue  # no sleeve: group 0, the casting's metal-to-sand contact
-            sel = (codes == PART_TYPE_RISER) & (riser_label[first] == n)
-            group[sel] = len(htc)
-            htc.append(float(mold.riser_sleeve_htc) * max(modulus, 0.05) ** -RISER_SLEEVE_EXPONENT)
-            factors.append(None)
+        # Riser pairs left here are bare sand risers (group 0, the casting's
+        # metal-to-sand contact) unless the sleeves leak.
+        if not mold.riser_sleeve_adiabatic:
+            riser_label, riser_moduli = self._riser_moduli_for_sleeves(extension, master_of, part_types)
+            bare = self._bare_riser_cells(extension.n_mesh)
+            bare_risers = set(np.unique(riser_label[bare & (riser_label >= 0)]).tolist())
+            for n, modulus in enumerate(riser_moduli):
+                if n in bare_risers:
+                    continue  # no sleeve: group 0
+                sel = (codes == PART_TYPE_RISER) & (riser_label[first] == n)
+                group[sel] = len(htc)
+                htc.append(float(mold.riser_sleeve_htc) * max(modulus, 0.05) ** -RISER_SLEEVE_EXPONENT)
+                factors.append(None)
 
         core_first = master_of[extension.stencil_first]
         slot_weight = _stencil_slot_weights(26)[extension.stencil_slot]
@@ -906,8 +922,8 @@ class SolidificationEngine:
         n_contact = len(first)
         pairs = MoldPairs(
             first=np.concatenate([first, core_first[keep]]),
-            second=np.concatenate([extension.pair_second, extension.stencil_second[keep]]),
-            area=np.concatenate([inches_to_meters(inches_to_meters(extension.pair_area)), np.zeros(int(keep.sum()))]),
+            second=np.concatenate([second, extension.stencil_second[keep]]),
+            area=np.concatenate([inches_to_meters(inches_to_meters(area)), np.zeros(int(keep.sum()))]),
             group=np.concatenate([group, np.full(int(keep.sum()), -1, dtype=np.int64)]),
             stencil_factor=np.concatenate([np.zeros(n_contact), (slot_weight * scale * dx)[keep]]),
             htc=htc,
@@ -922,6 +938,37 @@ class SolidificationEngine:
         if bare is None or len(bare) != n_mesh:
             return np.zeros(n_mesh, dtype=bool)
         return np.asarray(bare, dtype=bool)
+
+    def _sleeved_riser_cells(self, n_mesh: int) -> np.ndarray:
+        """Mesh cells of risers whose insulating sleeve cuts them off from the sand.
+
+        All False with ``MoldParams.riser_sleeve_adiabatic`` off. A riser set
+        to no sleeve (``voxel_mesh.voxel_riser_bare``) is never among them.
+        """
+        mold = self.analysis_options.solidification_params.mold
+        if not mold.riser_sleeve_adiabatic:
+            return np.zeros(n_mesh, dtype=bool)
+        return (self._mesh_part_types() == PART_TYPE_RISER) & ~self._bare_riser_cells(n_mesh)
+
+    def _without_sleeved_riser_sand_links(self, neighbors: np.ndarray) -> np.ndarray:
+        """``neighbors`` without the links between a sleeved riser and the mesh's sand cells (cores).
+
+        Dropped both ways, so the stencil stays conservative. Returns
+        ``neighbors`` itself when nothing is cut, else a copy.
+        """
+        part_types = self._mesh_part_types()
+        sleeved = self._sleeved_riser_cells(len(part_types))
+        sand = np.isin(part_types, SAND_PART_CODES)
+        if not sleeved.any() or not sand.any():
+            return neighbors
+        rows, slots = np.nonzero(neighbors >= 0)
+        cols = neighbors[rows, slots]
+        cut = (sleeved[rows] & sand[cols]) | (sand[rows] & sleeved[cols])
+        if not cut.any():
+            return neighbors
+        out = np.array(neighbors, copy=True)
+        out[rows[cut], slots[cut]] = -1
+        return out
 
     def _riser_moduli_for_sleeves(
         self, extension, master_of: np.ndarray, part_types: np.ndarray
@@ -1051,6 +1098,9 @@ class SolidificationEngine:
                 T_infinity=mold_temperature,
                 time_function=_mold_interface_decay(tb.htc_cast_interface),
             )
+        # An insulating sleeve cuts its riser off from the sand
+        # (MoldParams.riser_sleeve_adiabatic): those cells carry no boundary.
+        riser_surface = riser_surface[~self._sleeved_riser_cells(len(part_types))[riser_surface]]
         if riser_surface.size > 0:
             self._thermal_heat_model.add_boundary(
                 riser_surface,
