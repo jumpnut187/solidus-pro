@@ -272,6 +272,83 @@ def _robust_contains_check_impl(mesh: trimesh.Trimesh, points: np.ndarray, toler
         return np.zeros(n_points, dtype=bool)
 
 
+#: Sub-faces one batch of :func:`voxelize_surface` may subdivide into (an upper
+#: bound per face, from its longest edge). Bounds the batch's subdivided
+#: vertices and faces, a few hundred MB at this size.
+VOXELIZE_BATCH_SUBFACES = 2_000_000
+
+
+def voxelize_surface(
+    mesh: trimesh.Trimesh,
+    pitch: float,
+    max_iter: int = 10,
+    edge_factor: float = 2.0,
+    batch_subfaces: int = VOXELIZE_BATCH_SUBFACES,
+):
+    """``mesh.voxelized(pitch)`` (trimesh's subdivide method), the faces taken in batches.
+
+    trimesh subdivides the whole mesh at once until every edge is shorter than
+    pitch / edge_factor and keeps every subdivided vertex before rounding them
+    to cells: for a dense CAD export (a 941,526-triangle casting STL) that
+    transient was gigabytes. Here the faces are subdivided in batches by the
+    same ``remesh.subdivide_to_size`` and each batch's vertices are rounded to
+    cells and marked at once. Each long edge is bisected at the mean of its
+    two end points, so every new vertex depends only on its own edge, and a
+    face's subdivision is the same alone as in the whole mesh; the cells are
+    the original vertices' (every one, referenced or not, as trimesh rounds
+    them all) and the batches' new ones. Midpoints never leave a face's
+    bounds, so the occupied cells lie in the box of the original vertices.
+    Returns the same ``VoxelGrid`` (matrix and transform) as ``mesh.voxelized(pitch)``.
+    """
+    from trimesh import remesh
+    from trimesh.voxel import base as voxel_base
+    from trimesh.voxel import encoding as voxel_encoding
+    from trimesh import transformations as voxel_transform
+
+    pitch = float(pitch)
+    max_edge = pitch / edge_factor
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    corners = np.round(vertices / pitch).astype(np.int64)
+    origin_index = corners.min(axis=0)
+    shape = tuple(int(n) for n in corners.max(axis=0) - origin_index + 1)
+    occupied = np.zeros(shape, dtype=bool)
+    local = corners - origin_index
+    occupied[local[:, 0], local[:, 1], local[:, 2]] = True
+    del corners, local
+
+    if len(faces):
+        tri = vertices[faces]
+        longest = np.max(np.linalg.norm(tri - np.roll(tri, 1, axis=1), axis=2), axis=1)
+        del tri
+        # Bisections a face's longest edge needs; each one at most quadruples its faces.
+        levels = np.ceil(np.log2(np.maximum(longest / max_edge, 1.0))).astype(np.int64)
+        weight = np.power(4.0, np.minimum(levels, max_iter))
+        cumulative = np.cumsum(weight)
+        start = 0
+        while start < len(faces):
+            budget = (cumulative[start - 1] if start else 0.0) + float(batch_subfaces)
+            stop = int(np.searchsorted(cumulative, budget, side="right"))
+            stop = max(stop, start + 1)
+            batch = faces[start:stop]
+            if np.any(levels[start:stop] > 0):
+                used, compact = np.unique(batch, return_inverse=True)
+                sub_vertices, _sub_faces = remesh.subdivide_to_size(
+                    vertices[used], compact.reshape(batch.shape), max_edge=max_edge, max_iter=max_iter
+                )
+                # The batch's own corners are already marked: only the new vertices.
+                cells = np.round(sub_vertices[len(used):] / pitch).astype(np.int64) - origin_index
+                occupied[cells[:, 0], cells[:, 1], cells[:, 2]] = True
+                del sub_vertices, _sub_faces, cells
+            start = stop
+
+    occupied_index = np.argwhere(occupied).astype(np.int64)
+    return voxel_base.VoxelGrid(
+        voxel_encoding.SparseBinaryEncoding(occupied_index),
+        transform=voxel_transform.scale_and_translate(scale=pitch, translate=origin_index * pitch),
+    )
+
+
 #: Cells tested per filled region by :func:`_unfill_sealed_pockets`.
 _POCKET_SAMPLES = 64
 
@@ -630,7 +707,7 @@ class AdaptiveVoxelMesh:
         # For more accuracy on small meshes, try quick voxelization
         try:
             if total_grid < 500_000:  # Only for reasonable sizes
-                quick_voxels = trimesh_obj.voxelized(pitch=voxel_size)
+                quick_voxels = voxelize_surface(trimesh_obj, voxel_size)
                 if quick_voxels is not None:
                     actual_count = len(quick_voxels.points) if hasattr(quick_voxels, 'points') else 0
                     if actual_count > 0:
@@ -1065,8 +1142,8 @@ class AdaptiveVoxelMesh:
         print(f"  Using optimized trimesh voxelization...")
         
         try:
-            # trimesh.voxelized uses efficient ray-casting internally
-            voxel_grid = trimesh_obj.voxelized(pitch=self.base_voxel_size)
+            # trimesh's voxelized(pitch), its faces subdivided in batches (same cells, a bounded transient)
+            voxel_grid = voxelize_surface(trimesh_obj, self.base_voxel_size)
             surface = np.array(voxel_grid.matrix, dtype=bool) if part_meshes else None
             
             # Fill hollow regions (important for castings)
