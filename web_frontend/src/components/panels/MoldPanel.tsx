@@ -125,7 +125,7 @@ export function MoldPanel({ mold, sands, preview, previewError, hasParts, onChan
           max={48}
           step={0.5}
           disabled={!mold.auto_mold}
-          hint="Sand between the assembly and the mold's outer faces. 0 = automatic: 3 x the half-thickness of the heaviest section (0.75-8 in), three heat-penetration depths at the freeze time."
+          hint="Sand between the assembly and the mold's outer faces. Default 2 in, the industry-standard wall. 0 = automatic: 3 x the half-thickness of the heaviest section (0.75-8 in), three heat-penetration depths at the freeze time; the wall it picked shows beside the value."
           onChange={(value) => set({ wall_thickness_in: value })}
         />
         <NumberField

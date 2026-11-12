@@ -24,8 +24,9 @@ automatic cores.
    on the solver's own voxel lattice:
    - Mold box: the interior of loaded mold parts (flask, cope, drag;
      PartType.MOLD, code 10, never voxelised with the metal), or with
-     auto_mold a box wall_thickness_in beyond the assembly. 0 (default)
-     is automatic: 3 x the half-thickness of the heaviest metal section,
+     auto_mold a box wall_thickness_in beyond the assembly. Default 2 in
+     since 2026-11-11, the industry-standard wall (owner's decision; was 0,
+     automatic). 0 is automatic: 3 x the half-thickness of the heaviest metal section,
      0.75-8 in (auto_wall_thickness) -- three heat-penetration depths at the
      freeze time, since by Chvorinov sqrt(alpha t_f) is about the modulus
      for steel in silica. A 2 in WCB cube froze at 248 s with 2 in and with

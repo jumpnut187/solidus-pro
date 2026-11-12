@@ -481,7 +481,8 @@ class RiserSleeveTests(unittest.TestCase):
             manager = PartManager()
             part = manager.get_part(manager.load_part(ci_model("cylinder.stl"), name="c"))
             part.set_part_type(part_type)
-            return float(np.nanmax(_run(manager, {"riser_sleeve_adiabatic": 0}).solidification_end_times))
+            # The leaking sleeve's coefficient was calibrated with the automatic wall: pinned (the default is 2 in).
+            return float(np.nanmax(_run(manager, {"riser_sleeve_adiabatic": 0, "wall_thickness_in": 0}).solidification_end_times))
 
         mef = np.sqrt(freeze(PartType.RISER) / freeze(PartType.CAST))
         self.assertGreater(mef, 1.25)

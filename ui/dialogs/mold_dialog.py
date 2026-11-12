@@ -62,6 +62,7 @@ class MoldDialog(DraggableDialog):
         self.wall_spin.setSuffix(" in")
         self.wall_spin.setToolTip(
             "Sand between the assembly and the mold's outer faces (sides and bottom).\n"
+            "Default 2 in, the industry-standard wall.\n"
             "Auto (0): 3 x the half-thickness of the heaviest section, 0.75-8 in -- three\n"
             "heat-penetration depths at the freeze time; sand further out never warms."
         )

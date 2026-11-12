@@ -277,14 +277,16 @@ class MoldParams:
     auto_cores: int = 1
     core_rule_code: int = CORE_RULE_DRAW
     # Sand between the assembly and the outer mold faces (sides, bottom, and
-    # top when no riser is open). 0 = automatic: three heat-penetration
+    # top when no riser is open). Default 2 in since 2026-11-11, the
+    # industry-standard wall (owner's decision; was 0, automatic). 0 is
+    # still automatic: three heat-penetration
     # depths at the freeze time, which by Chvorinov is 3 x the half-thickness
     # of the heaviest section, between 0.75 and 8 in
     # (core.mold_setup.auto_wall_thickness). Sand beyond that never warms
     # before the casting is solid; on the graded mold (mold_grading_levels)
     # it is solved on coarse cells and costs little.
     # MAGMASOFT steel validation molds carry about 4 in.
-    wall_thickness_in: float = 0.0
+    wall_thickness_in: float = 2.0
     # Sand over a blind (closed) riser. Open risers and pour cups stay open
     # to the air at the top of the mold.
     closed_riser_cover_in: float = 2.0
@@ -344,7 +346,7 @@ class MoldParams:
         self.auto_mold = _clamp_int(self.auto_mold, 0, 1, 1)
         self.auto_cores = _clamp_int(self.auto_cores, 0, 1, 1)
         self.core_rule_code = _clamp_int(self.core_rule_code, 0, 1, CORE_RULE_DRAW)
-        self.wall_thickness_in = _clamp_float(self.wall_thickness_in, 0.0, 48.0, 0.0)
+        self.wall_thickness_in = _clamp_float(self.wall_thickness_in, 0.0, 48.0, 2.0)
         self.closed_riser_cover_in = _clamp_float(self.closed_riser_cover_in, 0.0, 24.0, 2.0)
         self.mold_material_code = _clamp_int(self.mold_material_code, 0, 255, 2)
         self.core_material_code = _clamp_int(self.core_material_code, 0, 255, SAND_MATERIAL_CUSTOM)

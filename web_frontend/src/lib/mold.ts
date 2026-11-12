@@ -38,7 +38,7 @@ export const MOLD_DEFAULTS: MoldParams = {
   auto_mold: 1,
   auto_cores: 1,
   core_rule_code: 0,
-  wall_thickness_in: 0,
+  wall_thickness_in: 2,
   closed_riser_cover_in: 2.0,
   mold_material_code: 2,
   core_material_code: 0,
