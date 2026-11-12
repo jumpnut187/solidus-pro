@@ -5,6 +5,7 @@
  * codes from `core/mold_materials.py` (0 = the constant custom sand).
  */
 import type { SandInfo, SolidificationParams } from './api';
+import { formatCount } from './format';
 
 export type MoldParams = {
   auto_mold: number;
@@ -89,4 +90,25 @@ export function writeMold(params: SolidificationParams, mold: MoldParams): Solid
 /** True when the run (and the preview) build sand: the automatic mold or automatic cores. */
 export function moldPreviewWanted(mold: MoldParams): boolean {
   return Boolean(mold.auto_mold) || Boolean(mold.auto_cores);
+}
+
+/**
+ * The Mold panel's line under the preview: its sand cells, graded like the run's mold when grading is on
+ * ("N mold sand cells (graded from M)", the Mesh panel's wording), its auto-core cells, and the preview's own lattice
+ * pitch, which can be coarser than the run's voxel size.
+ */
+export function moldPreviewNote(
+  summary: { pitch_in: number; mold_cells: number; auto_core_cells: number; graded_mold_cells?: number },
+  autoCores: boolean
+): string {
+  const graded = summary.graded_mold_cells;
+  const sand =
+    graded !== undefined && graded < summary.mold_cells
+      ? `${formatCount(graded)} mold sand cells (graded from ${formatCount(summary.mold_cells)})`
+      : `${formatCount(summary.mold_cells)} mold sand cells`;
+  return (
+    sand +
+    (autoCores ? `, ${formatCount(summary.auto_core_cells)} auto-core cells` : '') +
+    ` at ${summary.pitch_in.toFixed(3)} in (preview).`
+  );
 }

@@ -284,6 +284,7 @@ def voxelize_surface(
     max_iter: int = 10,
     edge_factor: float = 2.0,
     batch_subfaces: int = VOXELIZE_BATCH_SUBFACES,
+    workers: int = 1,
 ):
     """``mesh.voxelized(pitch)`` (trimesh's subdivide method), the faces taken in batches.
 
@@ -298,7 +299,8 @@ def voxelize_surface(
     the original vertices' (every one, referenced or not, as trimesh rounds
     them all) and the batches' new ones. Midpoints never leave a face's
     bounds, so the occupied cells lie in the box of the original vertices.
-    Returns the same ``VoxelGrid`` (matrix and transform) as ``mesh.voxelized(pitch)``.
+    Returns the same ``VoxelGrid`` (matrix and transform) as ``mesh.voxelized(pitch)``. ``workers`` > 1 subdivides
+    that many batches at once on threads (NumPy's sorts release the GIL); the cells are the same.
     """
     from trimesh import remesh
     from trimesh.voxel import base as voxel_base
@@ -321,26 +323,46 @@ def voxelize_surface(
         tri = vertices[faces]
         longest = np.max(np.linalg.norm(tri - np.roll(tri, 1, axis=1), axis=2), axis=1)
         del tri
+        # Only faces with an edge longer than max_edge are subdivided. A face whose edges are all short is never split,
+        # and no neighbour splits one of its edges (an edge is split when it is long, the same on both of its faces), so
+        # its cells are its corners, marked above; leaving it out of the batches changes nothing for the others. The
+        # bound is a hair under max_edge, so a face at the threshold goes through trimesh's own test.
+        long_faces = np.flatnonzero(longest > max_edge * (1.0 - 1e-9))
+        faces = faces[long_faces]
         # Bisections a face's longest edge needs; each one at most quadruples its faces.
-        levels = np.ceil(np.log2(np.maximum(longest / max_edge, 1.0))).astype(np.int64)
-        weight = np.power(4.0, np.minimum(levels, max_iter))
+        levels = np.ceil(np.log2(np.maximum(longest[long_faces] / max_edge, 1.0))).astype(np.int64)
+        del longest, long_faces
+        weight = np.power(4.0, np.minimum(np.maximum(levels, 1), max_iter))
         cumulative = np.cumsum(weight)
+        bounds = []
         start = 0
         while start < len(faces):
             budget = (cumulative[start - 1] if start else 0.0) + float(batch_subfaces)
-            stop = int(np.searchsorted(cumulative, budget, side="right"))
-            stop = max(stop, start + 1)
-            batch = faces[start:stop]
-            if np.any(levels[start:stop] > 0):
-                used, compact = np.unique(batch, return_inverse=True)
-                sub_vertices, _sub_faces = remesh.subdivide_to_size(
-                    vertices[used], compact.reshape(batch.shape), max_edge=max_edge, max_iter=max_iter
-                )
-                # The batch's own corners are already marked: only the new vertices.
-                cells = np.round(sub_vertices[len(used):] / pitch).astype(np.int64) - origin_index
-                occupied[cells[:, 0], cells[:, 1], cells[:, 2]] = True
-                del sub_vertices, _sub_faces, cells
+            stop = max(int(np.searchsorted(cumulative, budget, side="right")), start + 1)
+            bounds.append((start, stop))
             start = stop
+
+        def new_cells(span):
+            batch = faces[span[0]:span[1]]
+            used, compact = np.unique(batch, return_inverse=True)
+            sub_vertices, _sub_faces = remesh.subdivide_to_size(
+                vertices[used], compact.reshape(batch.shape), max_edge=max_edge, max_iter=max_iter
+            )
+            # The batch's own corners are already marked: only the new vertices.
+            return np.round(sub_vertices[len(used):] / pitch).astype(np.int64) - origin_index
+
+        def mark(cells):
+            occupied[cells[:, 0], cells[:, 1], cells[:, 2]] = True
+
+        if workers > 1 and len(bounds) > 1:
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=int(workers)) as pool:
+                for cells in pool.map(new_cells, bounds):
+                    mark(cells)
+        else:
+            for span in bounds:
+                mark(new_cells(span))
 
     occupied_index = np.argwhere(occupied).astype(np.int64)
     return voxel_base.VoxelGrid(

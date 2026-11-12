@@ -524,6 +524,11 @@ def preview_layout(
     if not mold_meshes and not params.auto_mold:
         layout.mold[:] = False
     layout.wall_in = 0.0 if mold_meshes else float(params.wall_thickness_in)
+    if params.mold_grading_levels > 0 and layout.mold.any():
+        # Graded like the run's mold (grade_mold), on the preview's lattice: its seeds are the rasterised parts, the
+        # auto cores and the gaps. The summary then carries the graded count (graded_mold_cells) beside mold_cells.
+        layout.cell_index = np.where((labels >= 0) | layout.auto_core, 0, -1).astype(np.int32)
+        grade_mold(layout, params.mold_grading_levels, params.mold_fine_band_cells)
     return layout
 
 
@@ -608,6 +613,91 @@ def layout_for_voxel_mesh(
     layout.cell_index[local[:, 0], local[:, 1], local[:, 2]] = np.arange(len(centers), dtype=np.int32)
     layout.mesh_ijk = local.astype(np.int32)
     return layout
+
+
+@dataclass
+class OccupancyEstimate:
+    """The run's mold and metal sizes, estimated from the assembly's own occupancy (:func:`estimate_from_occupancy`)."""
+
+    #: Metal and core voxels the run will have: the filled occupancy plus the auto cores.
+    voxels: int
+    #: Mold sand cells the solver steps (graded when ``mold_grading_levels`` > 0, else the lattice's).
+    mold_cells: int
+    #: Mold sand cells of the lattice.
+    lattice_cells: int
+    layout: MoldLayout
+
+
+def estimate_from_occupancy(
+    parts: Sequence[SetupPart],
+    mold_meshes: Sequence[trimesh.Trimesh],
+    params: MoldParams,
+    occupied: np.ndarray,
+    origin_index: np.ndarray,
+    pitch: float,
+) -> OccupancyEstimate:
+    """The run's voxels and mold sand cells from the assembly's occupancy, before any voxel mesh exists.
+
+    ``occupied`` is the filled occupancy the mesher starts from (``voxel_mesh.voxelize_surface(mesh, pitch).fill()``),
+    its cell (i, j, k) centred at ``(origin_index + (i, j, k)) * pitch``. The mold lattice is then built as
+    :func:`layout_for_voxel_mesh` builds it on the run's mesh: the mold box (:func:`layout_box`) grown to hold every
+    occupied cell plus one of air, anchored on the occupancy's cells, the open shafts, the gaps, the auto cores and a
+    loaded mold part's interior (:func:`plan_layout`), and the grading (:func:`grade_mold`) with the occupied cells, the
+    auto cores and the gaps as its seeds. Part types are not known here (every occupied cell counts as casting); an
+    open-topped part's shaft is found from its own mesh. The mesher's removal of pockets sealed between parts but inside
+    none (``voxel_mesh._unfill_sealed_pockets``) is not done, so a sealed pocket counts as metal.
+    """
+    params = _effective(params, parts)
+    pitch = float(pitch)
+    occupied = np.asarray(occupied, dtype=bool)
+    ijk = np.argwhere(occupied).astype(np.int64)
+    if not len(ijk):
+        raise MoldSetupError("The assembly has no occupied cells at this voxel size")
+    anchor = np.asarray(origin_index, dtype=np.float64) * pitch
+    centers = anchor + ijk * pitch
+    if params.wall_thickness_in <= 0.0:
+        # The run takes the wall from its mesh (prepare_mold, _mesh_section_radius): the largest distance from a voxel
+        # to the nearest surface voxel, plus half a pitch. The occupancy's distance transform measures to the nearest
+        # empty cell, one cell beyond the surface voxel: (largest - 1 + 0.5) pitches is the same radius.
+        depth = ndimage.distance_transform_edt(np.pad(occupied, 1))
+        params = with_wall(params, (float(depth.max()) - 0.5) * pitch)
+    lo, hi = layout_box(parts, mold_meshes, params)
+    lo = np.minimum(lo, centers.min(axis=0) - pitch)
+    hi = np.maximum(hi, centers.max(axis=0) + pitch)
+    lattice, first = box_lattice(lo, hi, pitch, anchor)
+    _check_cell_budget(lattice, params)
+    local = ijk - first
+    del ijk, centers
+
+    labels = np.full(lattice.shape, -1, dtype=np.int16)
+    labels[local[:, 0], local[:, 1], local[:, 2]] = PART_TYPE_CAST
+    open_parts = [p for p in parts if _open_top(p[1], p[2])]
+    open_mask = np.zeros(lattice.shape, dtype=bool)
+    if open_parts:
+        _, open_mask = rasterize_parts(open_parts, lattice)
+        open_mask &= labels >= 0
+    mold_inside = None
+    if mold_meshes:
+        mold_inside = np.zeros(lattice.shape, dtype=bool)
+        for mesh in mold_meshes:
+            mold_inside |= rasterize_mesh(mesh, lattice)
+    elif not params.auto_mold:
+        mold_inside = np.zeros(lattice.shape, dtype=bool)
+    layout = plan_layout(labels, open_mask, lattice, params, mold_inside)
+    del labels, open_mask
+    if not mold_meshes and not params.auto_mold:
+        layout.mold[:] = False
+    layout.wall_in = 0.0 if mold_meshes else float(params.wall_thickness_in)
+    # The grading's seeds are the run's mesh voxels: the occupied cells and the auto cores the run appends.
+    layout.cell_index = np.full(lattice.shape, -1, dtype=np.int32)
+    layout.cell_index[local[:, 0], local[:, 1], local[:, 2]] = 0
+    layout.cell_index[layout.auto_core] = 0
+    voxels = int(len(local)) + layout.auto_core_cell_count
+    lattice_cells = layout.mold_cell_count
+    mold_cells = lattice_cells
+    if params.mold_grading_levels > 0 and lattice_cells:
+        mold_cells = grade_mold(layout, params.mold_grading_levels, params.mold_fine_band_cells).n_cells
+    return OccupancyEstimate(voxels=voxels, mold_cells=int(mold_cells), lattice_cells=int(lattice_cells), layout=layout)
 
 
 def _lookup(grid: np.ndarray, ijk: np.ndarray) -> np.ndarray:

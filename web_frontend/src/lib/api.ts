@@ -38,6 +38,9 @@ export type MoldPreview = {
   summary: {
     pitch_in: number;
     mold_cells: number;
+    /** The preview's mold graded like the run's (`mold_grading_levels` > 0); absent on a uniform mold. */
+    graded_mold_cells?: number;
+    max_cell_span?: number;
     auto_core_cells: number;
     shaft_cells: number;
     gap_cells: number;

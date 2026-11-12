@@ -37,6 +37,7 @@ from core.mold_setup import (
     Lattice,
     _mirror_shift,
     build_thermal_extension,
+    estimate_from_occupancy,
     grade_mold,
     grading_thresholds,
     mask_surface,
@@ -852,6 +853,55 @@ class WebMoldRouteTests(unittest.TestCase):
         self.assertGreater(on["summary"]["mold_cells"], 0)
         vertices = np.asarray(on["mold"][0]["vertices"]).reshape(-1, 3)
         self.assertGreater(float(np.ptp(vertices[:, 0])), 5.5)
+
+
+class OccupancyEstimateTests(unittest.TestCase):
+    """The run-size estimate from the assembly's own occupancy (mold_setup.estimate_from_occupancy, the Mesh panel's
+    preview), against what the run builds, and the Mold panel's graded preview."""
+
+    @staticmethod
+    def _two_bodies() -> PartManager:
+        """Two 1 in cubes at opposite corners of a 7 in box: one bounding box that is almost all sand, like a spread-out
+        rigging. Off the 0.2 in cell boundaries: a face exactly on one marks the cells on both sides, and the run's cut
+        cells then drop the empty ones."""
+        manager = PartManager()
+        for n, c in enumerate((-3.03, 3.03)):
+            part = manager.get_part(manager.load_part(ci_model("small_block.stl"), name=f"cast{n}"))
+            part.set_part_type(PartType.CAST)
+            part.set_position(c, c, c)
+        return manager
+
+    def test_two_bodies_far_apart_estimate_close_to_the_real_grading(self) -> None:
+        from core.voxel_mesh import voxelize_surface
+
+        manager = self._two_bodies()
+        engine = _run(manager, {"auto_mold": 1}, voxel_size=0.2)
+        real_voxels = len(engine.mesh.voxel_centers)
+        real_graded = engine._mold_extension.n_mold
+        real_lattice = engine._mold_extension.lattice_mold_cells
+
+        parts = manager.get_mold_setup_parts()
+        grid = voxelize_surface(manager.get_combined_mesh(), 0.2)
+        grid.fill()
+        origin = np.rint(np.asarray(grid.transform)[:3, 3] / 0.2).astype(np.int64)
+        estimate = estimate_from_occupancy(parts, [], MoldParams(), np.asarray(grid.matrix, bool), origin, 0.2)
+        self.assertAlmostEqual(estimate.voxels / real_voxels, 1.0, delta=0.02)  # the run's cut cells add or merge a few
+        self.assertAlmostEqual(estimate.lattice_cells / real_lattice, 1.0, delta=0.05)
+        self.assertAlmostEqual(estimate.mold_cells / real_graded, 1.0, delta=0.15)
+
+        # Most of the box is far-field sand that the grading coarsens.
+        self.assertLess(estimate.mold_cells, 0.6 * estimate.lattice_cells)
+
+    def test_the_mold_preview_is_graded_when_grading_is_on(self) -> None:
+        cast = _box((4, 3, 2), (0, 0, 1))
+        graded, _ = preview([(cast, PART_TYPE_CAST, False)], [], MoldParams(wall_thickness_in=3.0), voxel_size=0.1)
+        summary = graded.summary()
+        self.assertLess(summary["graded_mold_cells"], summary["mold_cells"])
+        self.assertGreater(summary["max_cell_span"], 1)
+        uniform, _ = preview([(cast, PART_TYPE_CAST, False)], [], MoldParams(wall_thickness_in=3.0, mold_grading_levels=0),
+                             voxel_size=0.1)
+        self.assertNotIn("graded_mold_cells", uniform.summary())
+        self.assertEqual(uniform.summary()["mold_cells"], summary["mold_cells"])
 
 
 if __name__ == "__main__":

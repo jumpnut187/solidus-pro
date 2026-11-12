@@ -1,6 +1,6 @@
 import { Group, SetupPanel } from '../SetupPanel';
 import type { MoldPreview, SandInfo } from '../../lib/api';
-import { MOLD_DEFAULTS, type MoldParams } from '../../lib/mold';
+import { MOLD_DEFAULTS, moldPreviewNote, type MoldParams } from '../../lib/mold';
 
 export type MoldPanelProps = {
   mold: MoldParams;
@@ -97,10 +97,7 @@ export function MoldPanel({ mold, sands, preview, previewError, hasParts, onChan
   let note = 'Without a mold, the mold is the semi-infinite sand boundary of the Thermal parameters.';
   if (previewError) note = previewError;
   else if (summary)
-    note =
-      `${summary.mold_cells.toLocaleString()} mold sand cells` +
-      (mold.auto_cores ? `, ${summary.auto_core_cells.toLocaleString()} auto-core cells` : '') +
-      ` at ${summary.pitch_in.toFixed(3)} in (preview).`;
+    note = moldPreviewNote(summary, Boolean(mold.auto_cores));
   else if (!hasParts) note = 'Add parts to see the mold and cores.';
 
   return (
