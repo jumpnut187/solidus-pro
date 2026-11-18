@@ -472,11 +472,11 @@ def create_state(
 
 def _dilate(mask: np.ndarray) -> np.ndarray:
     """Grow a boolean mask by one cell along every lattice direction."""
-    out = mask.copy()
+    out: np.ndarray = mask.copy()
     for i in range(1, Q):
         c = LATTICE_VELOCITIES[i]
         out |= np.roll(mask, shift=(int(c[0]), int(c[1]), int(c[2])), axis=(0, 1, 2))
-    return cast("np.ndarray", out)
+    return out
 
 
 # ---------------------------------------------------------------------------
