@@ -183,7 +183,7 @@ python -m compileall config core physics ui web   # syntax pass
 - **macOS**: multiprocessing must use `spawn` (already forced in `main.py`/`run_web.py`). gunicorn cannot run on Apple's Xcode system Python (workers segfault) — must use the project venv on a Homebrew Python.
 - Treat as generated/local (don't edit, don't commit): `data/`, `logs/`, `models/`, `web/static/uploads/` (large STL dump), `web/simulations.db`, `web_frontend/dist/`, `web_frontend/node_modules/`, `venv/`. Never delete/overwrite `.db` files without explicit approval.
 - Numba/thread tuning: `CASTSIM_NUMBA_THREADS` (default `all`), plus `CASTSIM_PART_ASSIGNMENT_*` and `CASTSIM_MAX_CONCURRENT_SIMULATIONS` / `CASTSIM_WEB_RESERVED_CORES` / `CASTSIM_WEB_RESERVE_MEMORY_MB` / `CASTSIM_WEB_MIN_SIM_MEMORY_MB` for the web fair-share queue.
-- GPU backends are optional extras (`mlx`/`taichi`, `cupy-cuda12x`, `pyopencl`); CPU Numba path is the universal fallback. `cascadio` is optional (STEP uploads only). gmsh and TetGen are banned (GPL/AGPL).
+- GPU backends are optional extras (`mlx`/`taichi`, `cupy-cuda12x`, `pyopencl`); CPU Numba path is the universal fallback. `cascadio` is optional (STEP uploads only). Every dependency must be license-compatible with AGPL-3.0-or-later (see `LICENSING_STRATEGY.md` §4); gmsh (GPL-2.0-or-later) and TetGen (AGPL-3.0) qualify.
 - **Taichi FP environment.** `ti.init` (Metal) leaves flush-to-zero set on the main thread, which makes scipy `cKDTree` recurse forever and segfault. `core/gpu_compute.py` restores the default FP environment after init (`tests/test_gpu_fp_environment.py`). If scipy segfaults, check `np.float64(5e-324) > 0` first.
 
 ## Other documentation, and how much to trust it

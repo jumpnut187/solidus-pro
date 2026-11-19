@@ -273,7 +273,18 @@ python -m compileall config core physics ui web   # syntax pass
 
 ## License
 
-Property of DW Clark & Brendon Jarrett
+Solidus Pro is free software licensed under the **GNU Affero General Public
+License, version 3 or later (AGPL-3.0-or-later)**. You may use, study, modify
+and redistribute it under those terms. Because the AGPL treats network use as
+distribution, anyone who runs a modified version as a network service must
+offer the corresponding source to its users.
+
+See [`LICENSE`](LICENSE) for the full text, or
+<https://www.gnu.org/licenses/agpl-3.0.html>. Copyright and third-party
+notices are in [`NOTICE`](NOTICE); contribution terms are in
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+Copyright (C) 2025-2026 Brendon Jarrett.
 
 
 ---
