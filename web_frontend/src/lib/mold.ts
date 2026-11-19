@@ -18,9 +18,7 @@ export type MoldParams = {
   htc_cast_mold: number;
   interface_htc_curve: number;
   htc_chill_mold: number;
-  /** 0/1: a sleeved riser exchanges no heat with the mold or core sand (1, default). */
-  riser_sleeve_adiabatic: number;
-  /** The leaking sleeve's coefficient, used only with `riser_sleeve_adiabatic` 0. */
+  /** Coefficient of an insulating riser sleeve against the sand (a riser set to Insulating in the Parts panel). */
   riser_sleeve_htc: number;
   ambient_temperature: number;
   air_htc: number;
@@ -45,7 +43,6 @@ export const MOLD_DEFAULTS: MoldParams = {
   htc_cast_mold: 1000.0,
   interface_htc_curve: 1,
   htc_chill_mold: 1500.0,
-  riser_sleeve_adiabatic: 1,
   riser_sleeve_htc: 61.7,
   ambient_temperature: 21.0,
   air_htc: 10.0,

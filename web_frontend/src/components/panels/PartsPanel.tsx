@@ -284,9 +284,10 @@ function PartRow({
                 onChange={(event) => onUpdate({ riser_sleeve: event.target.value as RiserSleeve })}
               >
                 <option value="insulating">Insulating</option>
+                <option value="adiabatic">No heat loss</option>
                 <option value="none">None (bare sand)</option>
               </select>
-              <span className="field-hint">An insulating sleeve cuts the riser off from the mold and core sand: it cools only through the metal it feeds, and through an open top. A bare sand riser cools through the same sand contact as the casting.</span>
+              <span className="field-hint">Insulating: the sleeve slows the riser's heat loss to the sand (modulus extension about 1.3), so a skin grows on the riser wall and the pipe is a funnel. No heat loss: the sleeve passes nothing to the mold or core sand, the riser cools only through the metal it feeds and through an open top, and the pipe is a level drop; use it for an exothermic or hot-topped riser. None: a bare sand riser cools through the same sand contact as the casting.</span>
             </label>
           </td>
         </tr>

@@ -76,14 +76,8 @@ automatic cores.
          interface_htc_curve = 1 (STEEL_SAND_AIR_GAP_CURVE, read from
          Williams/Hardin/Beckermann SFSA 2015 Fig. 3: 1000 above solidus,
          ~380 at 900 °C, ~50 at 600 °C), else constant ("C1000").
-       risers: a riser in an insulating sleeve has no contact pair and no
-         link to a core (riser_sleeve_adiabatic = 1, default since
-         2026-11-11): the sleeve cuts it off from the sand, so the mold and
-         the cores do not change how fast it freezes. It cools through the
-         metal it feeds and through an open top. On a production rigging
-         (six sleeved risers on riser posts) the leaking sleeve below froze
-         every riser before the post under it; cut off, they freeze last.
-         riser_sleeve_adiabatic = 0 brings the leaking sleeve back:
+       risers: each riser part carries its own sleeve (Part.riser_sleeve).
+         "insulating" (the default): the sleeve leaks into the mold at
          h = riser_sleeve_htc (61.7)
          * M^-0.68, M the riser's modulus (in) over the area it shows the
          mold and air. A sleeve wall thickens with the riser; a constant
@@ -92,7 +86,19 @@ automatic cores.
          the 1.3 core/surrogate/design_rules.py sizes risers for (measured
          insulating sleeves 1.07-1.28, Williams et al. 2016). The sand
          boundary's htc_riser 220 gives 1.39 there, but only 1.17 against
-         explicit sand, where the sand resistance dominates.
+         explicit sand, where the sand resistance dominates. Because the
+         riser loses heat sideways, a skin grows on its wall and the
+         shrinkage pipe is a funnel on the axis.
+         "adiabatic" (UI "No heat loss", for an exothermic or hot-topped
+         riser): no contact pair and no link to a core. The sleeve cuts the
+         riser off from the sand, so the mold and the cores do not change
+         how fast it freezes. It cools through the metal it feeds and
+         through an open top, and with a closed top its pipe is a level drop
+         across the bore. From 2026-11-11 to 2026-11-19 this was the model
+         of every sleeved riser (global switch riser_sleeve_adiabatic, now
+         removed in favour of the per-riser choice). On a production rigging
+         (six sleeved risers on riser posts) the insulating sleeve freezes
+         every riser before the post under it; cut off, they freeze last.
          A riser part set to riser_sleeve "none" (bare sand riser) gets no
          sleeve: its contact is the casting's (htc_cast_mold with the
          air-gap curve). Without an explicit mold it takes htc_cast_interface

@@ -381,7 +381,7 @@ def _run(manager: PartManager, mold: dict | None, voxel_size: float = 0.2, extra
         return run_pipeline(inputs, part_manager=manager).engine
 
 
-def _cube(with_riser: bool = False, open_top: bool = False) -> PartManager:
+def _cube(with_riser: bool = False, open_top: bool = False, sleeve: str = "insulating") -> PartManager:
     manager = PartManager()
     cast = manager.get_part(manager.load_part(ci_model("block_2inch.stl"), name="cast"))
     cast.set_part_type(PartType.CAST)
@@ -391,6 +391,7 @@ def _cube(with_riser: bool = False, open_top: bool = False) -> PartManager:
         riser.set_part_type(PartType.RISER)
         riser.set_position(0.0, 0.0, cast.get_bounds()[2][1] - riser.get_bounds()[2][0])
         riser.is_open_top = open_top
+        riser.riser_sleeve = sleeve
     return manager
 
 
@@ -472,24 +473,25 @@ SHORT_RUN = {"timing": {"min_simulation_time": 30.0, "max_simulation_time": 60.0
 
 
 class RiserSleeveTests(unittest.TestCase):
-    """An insulating sleeve cuts its riser off from the mold sand and from cores (riser_sleeve_adiabatic)."""
+    """Per riser (``Part.riser_sleeve``): an insulating sleeve leaks into the sand, the
+    no-heat-loss sleeve ("adiabatic") cuts its riser off from the mold sand and from cores."""
 
-    def test_leaking_sleeve_extends_the_modulus_by_about_1_3(self) -> None:
-        """Switch off: MEF = sqrt(t_riser / t_cast) of one 2 x 3 in cylinder, typed riser and then casting."""
+    def test_insulating_sleeve_extends_the_modulus_by_about_1_3(self) -> None:
+        """The default sleeve: MEF = sqrt(t_riser / t_cast) of one 2 x 3 in cylinder, typed riser and then casting."""
 
         def freeze(part_type):
             manager = PartManager()
             part = manager.get_part(manager.load_part(ci_model("cylinder.stl"), name="c"))
             part.set_part_type(part_type)
-            # The leaking sleeve's coefficient was calibrated with the automatic wall: pinned (the default is 2 in).
-            return float(np.nanmax(_run(manager, {"riser_sleeve_adiabatic": 0, "wall_thickness_in": 0}).solidification_end_times))
+            # The insulating sleeve's coefficient was calibrated with the automatic wall: pinned (the default is 2 in).
+            return float(np.nanmax(_run(manager, {"wall_thickness_in": 0}).solidification_end_times))
 
         mef = np.sqrt(freeze(PartType.RISER) / freeze(PartType.CAST))
         self.assertGreater(mef, 1.25)
         self.assertLess(mef, 1.36)
 
-    def test_a_sleeved_riser_has_no_contact_with_the_mold(self) -> None:
-        engine = _run(_cube(with_riser=True), {"auto_mold": 1, "wall_thickness_in": 2.0})
+    def test_a_no_heat_loss_riser_has_no_contact_with_the_mold(self) -> None:
+        engine = _run(_cube(with_riser=True, sleeve="adiabatic"), {"auto_mold": 1, "wall_thickness_in": 2.0})
         types = np.asarray(engine.mesh.voxel_part_types)
         solver = engine._thermal_heat_model
         contact_cells = solver._first[~solver._is_stencil]
@@ -499,35 +501,38 @@ class RiserSleeveTests(unittest.TestCase):
         extension = engine._mold_extension
         self.assertGreater(float(extension.pair_area[types[extension.pair_first] == PART_TYPE_RISER].sum()), 10.0)
 
-    def test_a_bare_or_leaking_riser_keeps_its_contact_with_the_mold(self) -> None:
+    def test_a_bare_or_insulated_riser_keeps_its_contact_with_the_mold(self) -> None:
         mold = {"auto_mold": 1, "wall_thickness_in": 2.0}
-        bare = _cube(with_riser=True)
-        next(p for p in bare.get_all_parts() if p.part_type is PartType.RISER).riser_sleeve = "none"
-        for engine in (_run(bare, mold), _run(_cube(with_riser=True), {**mold, "riser_sleeve_adiabatic": 0})):
+        for engine in (_run(_cube(with_riser=True, sleeve="none"), mold), _run(_cube(with_riser=True), mold)):
             types = np.asarray(engine.mesh.voxel_part_types)
             solver = engine._thermal_heat_model
             self.assertTrue(np.any(types[solver._first[~solver._is_stencil]] == PART_TYPE_RISER))
 
-    def test_a_sleeved_riser_outlasts_the_casting_it_feeds(self) -> None:
-        engine = _run(_cube(with_riser=True), {"auto_mold": 1, "wall_thickness_in": 2.0})
+    def test_a_no_heat_loss_riser_outlasts_the_casting_it_feeds(self) -> None:
+        engine = _run(_cube(with_riser=True, sleeve="adiabatic"), {"auto_mold": 1, "wall_thickness_in": 2.0})
         types = np.asarray(engine.mesh.voxel_part_types)
         end = np.asarray(engine.solidification_end_times)
         self.assertGreater(float(np.nanmax(end[types == PART_TYPE_RISER])), float(np.nanmax(end[types == PART_TYPE_CAST])))
 
-    def test_mold_sand_takes_no_heat_from_a_sleeved_riser(self) -> None:
-        """A closed sleeved riser with nothing to feed: no heat leaves it, on the mold and on the sand boundary."""
+    def test_mold_sand_takes_no_heat_from_a_no_heat_loss_riser(self) -> None:
+        """A closed no-heat-loss riser with nothing to feed: no heat leaves it, on the mold and on the sand boundary."""
         for mold in ({"auto_mold": 1, "wall_thickness_in": 2.0}, {"auto_mold": 0, "auto_cores": 0}):
-            engine = _run(_lone_riser(), mold, extra=SHORT_RUN)
+            engine = _run(_lone_riser(sleeve="adiabatic"), mold, extra=SHORT_RUN)
             pour = float(engine.alloy.pouring_temp)
             np.testing.assert_allclose(np.asarray(engine._thermal_latest_temperatures), pour, atol=1e-3)
             self.assertTrue(np.all(np.isnan(np.asarray(engine.solidification_end_times))))
-        # The same riser in bare sand cools.
+        # The same riser in bare sand cools, and so does one in an insulating sleeve, more slowly.
         bare = _run(_lone_riser(sleeve="none"), {"auto_mold": 1, "wall_thickness_in": 2.0}, extra=SHORT_RUN)
         self.assertLess(float(np.min(bare._thermal_latest_temperatures)), float(bare.alloy.pouring_temp) - 50.0)
+        insulated = _run(_lone_riser(), {"auto_mold": 1, "wall_thickness_in": 2.0}, extra=SHORT_RUN)
+        self.assertLess(float(np.min(insulated._thermal_latest_temperatures)), float(insulated.alloy.pouring_temp) - 1.0)
+        self.assertGreater(
+            float(np.min(insulated._thermal_latest_temperatures)), float(np.min(bare._thermal_latest_temperatures))
+        )
 
-    def test_a_core_takes_no_heat_from_a_sleeved_riser(self) -> None:
+    def test_a_core_takes_no_heat_from_a_no_heat_loss_riser(self) -> None:
         mold = {"auto_mold": 1, "wall_thickness_in": 2.0}
-        engine = _run(_lone_riser(core=True), mold, extra=SHORT_RUN)
+        engine = _run(_lone_riser(sleeve="adiabatic", core=True), mold, extra=SHORT_RUN)
         types = np.asarray(engine.mesh.voxel_part_types)
         riser, core = types == PART_TYPE_RISER, types == PART_TYPE_CORE
         self.assertGreater(int(core.sum()), 20)
@@ -547,15 +552,15 @@ class RiserSleeveTests(unittest.TestCase):
         bare = _run(_lone_riser(sleeve="none", core=True), mold, extra=SHORT_RUN)
         self.assertGreater(float(np.max(np.asarray(bare._thermal_latest_temperatures)[core])), 200.0)
 
-    def test_sand_boundary_puts_no_condition_on_a_sleeved_riser(self) -> None:
+    def test_sand_boundary_puts_no_condition_on_a_no_heat_loss_riser(self) -> None:
         mold = {"auto_mold": 0, "auto_cores": 0}
 
         def riser_boundary_cells(engine) -> int:
             types = np.asarray(engine.mesh.voxel_part_types)
             return sum(int(np.count_nonzero(types[bc.indices] == PART_TYPE_RISER)) for bc in engine._thermal_heat_model.boundaries)
 
-        self.assertEqual(riser_boundary_cells(_run(_cube(with_riser=True), mold)), 0)
-        self.assertGreater(riser_boundary_cells(_run(_cube(with_riser=True), {**mold, "riser_sleeve_adiabatic": 0})), 0)
+        self.assertEqual(riser_boundary_cells(_run(_cube(with_riser=True, sleeve="adiabatic"), mold)), 0)
+        self.assertGreater(riser_boundary_cells(_run(_cube(with_riser=True), mold)), 0)
 
 
 class AutoCorePipelineTests(unittest.TestCase):

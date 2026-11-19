@@ -80,7 +80,7 @@ export type PourLocationPayload = {
   part_id: string | null;
 };
 
-export type RiserSleeve = 'insulating' | 'none';
+export type RiserSleeve = 'insulating' | 'adiabatic' | 'none';
 
 export type ProjectPart = {
   id: string;

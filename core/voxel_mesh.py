@@ -842,6 +842,7 @@ class AdaptiveVoxelMesh:
         # Voxels of risers set to no sleeve (core/riser_sleeve.py); None when
         # every riser keeps its insulating sleeve.
         self.voxel_riser_bare = None
+        self.voxel_riser_adiabatic = None
 
         # Spatial index for fast queries
         self._spatial_index = None

@@ -26,6 +26,7 @@ from ui.qt import (
 
 from core.part_manager import (
     PART_TYPE_DISPLAY_NAMES,
+    RISER_SLEEVE_ADIABATIC,
     RISER_SLEEVE_INSULATING,
     RISER_SLEEVE_NONE,
     riser_sleeve_from_value,
@@ -55,6 +56,7 @@ class PartsDialog(DraggableDialog):
     #: Riser sleeve dropdown entries: (label, Part.riser_sleeve value).
     RISER_SLEEVE_OPTIONS = (
         ("Insulating", RISER_SLEEVE_INSULATING),
+        ("No heat loss", RISER_SLEEVE_ADIABATIC),
         ("None (sand)", RISER_SLEEVE_NONE),
     )
 
@@ -444,7 +446,11 @@ class PartsDialog(DraggableDialog):
             )
             sleeve_combo.setEnabled(part_type_value == "riser")
             sleeve_combo.setToolTip(
-                "Insulating: the riser sits in an insulating sleeve (slower cooling, the default).\n"
+                "Insulating: the sleeve slows the riser's heat loss to the sand (modulus extension\n"
+                "about 1.3, the default). A skin grows on the riser wall and the pipe is a funnel.\n"
+                "No heat loss: the sleeve passes nothing to the mold or core sand. The riser cools only\n"
+                "through the metal it feeds and through an open top, and its pipe is a level drop.\n"
+                "Use it for an exothermic or hot-topped riser.\n"
                 "None (sand): a bare sand riser; its sides cool through the same metal-to-sand\n"
                 "contact as the casting."
             )

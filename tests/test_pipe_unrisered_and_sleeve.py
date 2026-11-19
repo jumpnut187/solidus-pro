@@ -11,11 +11,12 @@ the difference and run at 0.50 in to keep CI fast.
 - The cylinder typed RISER with ``riser_sleeve`` "none" (bare sand) against the
   default "insulating": the bare riser freezes sooner and its pipe reaches
   further down, into the casting.
-- A riser run on the leaking sleeve (``riser_sleeve_adiabatic`` 0, the default
-  when those numbers were taken) reproduces the numbers the code gave before
-  unrisered pools existed.
-- With the default sleeve, which passes no heat to the sand, the riser freezes
-  after the plate and holds the whole pipe.
+- A riser run on the default insulating sleeve, which leaks into the sand,
+  reproduces the numbers the code gave before unrisered pools existed.
+- The pipe shape follows the sleeve. In the insulating sleeve a skin grows on
+  the riser wall and the pipe is a funnel on the axis. With ``riser_sleeve``
+  "adiabatic", which passes no heat to the sand, the riser freezes after the
+  plate, holds the whole pipe, and the pipe is a level drop across the bore.
 """
 from __future__ import annotations
 
@@ -38,8 +39,8 @@ CYLINDER_BOTTOM_Z = 2.5
 CYLINDER_TOP_Z = 8.5
 CYLINDER_RADIUS = 2.0
 
-#: ``riser_pipe_report[0]`` of the riser run on the leaking sleeve, taken on the
-#: code before unrisered pools were added (voxel_size 0.30, auto mold on).
+#: ``riser_pipe_report[0]`` of the riser run on the insulating (leaking) sleeve,
+#: taken on the code before unrisered pools were added (voxel_size 0.30, auto mold on).
 OLD_RISER_REPORT = {
     "demand_in3": 14.216858530080579,
     "pipe_in3": 14.215963226140072,
@@ -49,8 +50,6 @@ OLD_RISER_REPORT = {
 }
 
 BOUNDARY_ONLY = {"mold": {"auto_mold": 0, "auto_cores": 0}}
-#: The sleeve as it was before 2026-11-11: it leaks into the mold at riser_sleeve_htc.
-LEAKING_SLEEVE = {"mold": {"riser_sleeve_adiabatic": 0}}
 
 PIPE_VOXEL_SIZE = 0.30
 SLEEVE_VOXEL_SIZE = 0.50
@@ -64,11 +63,12 @@ def _run(
     riser_sleeve: Optional[str] = None,
     solidification_params: Optional[Dict[str, Any]] = None,
     voxel_size: float = PIPE_VOXEL_SIZE,
+    open_top: bool = True,
 ) -> Dict[str, Any]:
     """One pipeline run, kept for the module so each case is simulated once."""
-    key = repr((cylinder_type, riser_sleeve, solidification_params, voxel_size))
+    key = repr((cylinder_type, riser_sleeve, solidification_params, voxel_size, open_top))
     if key not in _RUNS:
-        _RUNS[key] = _simulate(cylinder_type, riser_sleeve, solidification_params, voxel_size)
+        _RUNS[key] = _simulate(cylinder_type, riser_sleeve, solidification_params, voxel_size, open_top)
     return _RUNS[key]
 
 
@@ -77,13 +77,14 @@ def _simulate(
     riser_sleeve: Optional[str],
     solidification_params: Optional[Dict[str, Any]],
     voxel_size: float,
+    open_top: bool = True,
 ) -> Dict[str, Any]:
     if not os.path.isfile(CAST_PATH) or not os.path.isfile(RISER_PATH):
         raise unittest.SkipTest(f"CI model STL files not present at {TEST_MODEL_DIR}")
     cylinder: Dict[str, Any] = {
         "filepath": RISER_PATH,
         "part_type": cylinder_type,
-        "is_open_top": True,
+        "is_open_top": open_top,
     }
     if riser_sleeve is not None:
         cylinder["riser_sleeve"] = riser_sleeve
@@ -166,7 +167,7 @@ class UnriseredPipeTests(unittest.TestCase):
 class RiserDefaultUnchangedTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.sim = _run("riser", None, LEAKING_SLEEVE)
+        cls.sim = _run("riser")
 
     def test_riser_pipe_report_matches_the_code_before_unrisered_pools(self) -> None:
         self.assertEqual(len(self.sim["riser_report"]), 1)
@@ -202,14 +203,62 @@ class RiserSleeveTests(unittest.TestCase):
             _lowest_piped_z(self.bare, everything), _lowest_piped_z(self.insulating, everything)
         )
 
-    def test_sleeved_riser_freezes_after_the_plate_and_holds_the_pipe(self) -> None:
-        run = self.insulating
+    def test_no_heat_loss_riser_freezes_after_the_plate_and_holds_the_pipe(self) -> None:
+        run = _run("riser", "adiabatic", voxel_size=SLEEVE_VOXEL_SIZE)
         riser = run["part_types"] == 1
         self.assertGreater(float(run["times"][riser].max()), float(run["times"][~riser].max()))
         self.assertLess(run["riser_report"][0]["pipe_in_casting_in3"], 0.01)
-        # The leaking sleeve let the same riser freeze sooner.
-        leaking = _run("riser", None, LEAKING_SLEEVE, SLEEVE_VOXEL_SIZE)
-        self.assertLess(float(leaking["times"][riser].max()), float(run["times"][riser].max()))
+        # The insulating sleeve leaks, so the same riser freezes sooner.
+        self.assertLess(float(self.insulating["times"][riser].max()), float(run["times"][riser].max()))
+
+
+def _drained_radius_by_layer(run: Dict[str, Any]) -> Dict[float, float]:
+    """Equivalent radius of the drained metal in each riser layer, top first (voxel-count weighted)."""
+    riser = run["part_types"] == 1
+    z = np.round(run["centers"][:, 2], 3)
+    out: Dict[float, float] = {}
+    for level in sorted(np.unique(z[riser]).tolist(), reverse=True):
+        layer = riser & (z == level)
+        out[level] = CYLINDER_RADIUS * float(np.sqrt(run["pipe"][layer].mean()))
+    return out
+
+
+class PipeShapeFollowsTheSleeveTests(unittest.TestCase):
+    """A funnel in the insulating sleeve, a level drop in the no-heat-loss sleeve.
+
+    Closed top, so no crust forms and the pipe opens at the top of the riser.
+    """
+
+    def test_insulating_sleeve_gives_a_funnel_on_the_axis(self) -> None:
+        run = _run("riser", voxel_size=SLEEVE_VOXEL_SIZE, open_top=False)
+        radii = [r for r in _drained_radius_by_layer(run).values() if r > 0.1]
+        self.assertGreaterEqual(len(radii), 5)
+        # The full bore at the top, narrowing with depth.
+        self.assertGreater(radii[0], 0.9 * CYLINDER_RADIUS)
+        self.assertLess(radii[3], 0.5 * radii[0])
+        self.assertLess(max(radii[3:]), 0.5 * radii[0])
+        # Below the mouth the drained metal sits on the axis inside a sound wall.
+        riser = run["part_types"] == 1
+        below_mouth = riser & (run["centers"][:, 2] < CYLINDER_TOP_Z - 1.5)
+        piped = below_mouth & (run["pipe"] > 0.5)
+        sound = below_mouth & (run["pipe"] <= 0.5)
+        self.assertGreater(int(piped.sum()), 5)
+        radius = _radius(run["centers"])
+        self.assertLess(float(radius[piped].mean()), 0.5 * float(radius[sound].mean()))
+        self.assertLess(float(radius[piped].max()), CYLINDER_RADIUS - 0.5)
+        self.assertLess(run["riser_report"][0]["pipe_in_casting_in3"], 0.01)
+
+    def test_no_heat_loss_sleeve_gives_a_level_drop(self) -> None:
+        run = _run("riser", "adiabatic", voxel_size=SLEEVE_VOXEL_SIZE, open_top=False)
+        radii = [r for r in _drained_radius_by_layer(run).values() if r > 0.0]
+        self.assertGreater(len(radii), 1)
+        # Every drained layer but the last is drained across the whole bore.
+        for r in radii[:-1]:
+            self.assertGreater(r, 0.95 * CYLINDER_RADIUS)
+        # Shallower than the funnel the insulating sleeve gives the same riser.
+        funnel = _run("riser", voxel_size=SLEEVE_VOXEL_SIZE, open_top=False)
+        everything = np.ones(len(run["pipe"]), dtype=bool)
+        self.assertGreater(_lowest_piped_z(run, everything), _lowest_piped_z(funnel, everything) + 1.0)
 
 
 class RiserSleeveBoundaryPathTests(unittest.TestCase):
