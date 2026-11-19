@@ -1,0 +1,493 @@
+sample_id,timestamp,alloy,voxel_count,resolution,path,mesh_type,cut_cells
+05aa6d13ee39,2026-10-13 13:48:33,WCB (Carbon Steel Casting),130218,16,/Users/brendonjarett/Desktop/solidus-pro/data/surrogate_dataset/run_05aa6d13ee39.npz,voxel,1
+30cf51e59632,2026-10-22 15:02:01,WCB (Carbon Steel Casting),140288,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_30cf51e59632.npz,voxel,0
+7298209f4959,2026-10-22 15:18:36,WCB (Carbon Steel Casting),950048,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_7298209f4959.npz,voxel,0
+b28ad0b55583,2026-10-22 15:23:11,WCB (Carbon Steel Casting),4913,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_b28ad0b55583.npz,voxel,1
+805bf1f6da4b,2026-10-22 15:23:11,CF8 (Stainless Steel 304),4913,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_805bf1f6da4b.npz,voxel,1
+6a2b3ab61d26,2026-10-22 15:23:12,C958 (Aluminum Bronze),4913,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_6a2b3ab61d26.npz,voxel,1
+720493962c3c,2026-10-22 15:23:13,C964 (CuNi),4913,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_720493962c3c.npz,voxel,1
+1e9b02d33e76,2026-10-22 15:23:14,CA6NM (Cast Steel),4913,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_1e9b02d33e76.npz,voxel,1
+d8fe7d8e1430,2026-10-22 15:23:14,MONEL400 (Monel 400 Nickel-Copper),4913,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_d8fe7d8e1430.npz,voxel,1
+a5bcf0da3bf1,2026-10-22 15:23:15,IN625 (Inconel 625),4913,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_a5bcf0da3bf1.npz,voxel,1
+36abf92da929,2026-10-22 15:23:16,WCB (Carbon Steel Casting),2329,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_36abf92da929.npz,voxel,1
+2a064cd15e6a,2026-10-22 15:23:16,CF8 (Stainless Steel 304),2329,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_2a064cd15e6a.npz,voxel,1
+12f7693e83ab,2026-10-22 15:23:17,C958 (Aluminum Bronze),2329,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_12f7693e83ab.npz,voxel,1
+0ac4f76ea7fc,2026-10-22 15:23:17,C964 (CuNi),2329,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_0ac4f76ea7fc.npz,voxel,1
+ee6a44b1af0f,2026-10-22 15:23:18,CA6NM (Cast Steel),2329,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_ee6a44b1af0f.npz,voxel,1
+8a0338842ad5,2026-10-22 15:23:18,MONEL400 (Monel 400 Nickel-Copper),2329,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_8a0338842ad5.npz,voxel,1
+f4e0592b0f7f,2026-10-22 15:23:19,IN625 (Inconel 625),2329,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_f4e0592b0f7f.npz,voxel,1
+53b806577075,2026-10-22 15:23:19,WCB (Carbon Steel Casting),974,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_53b806577075.npz,voxel,1
+6de8026a7f90,2026-10-22 15:23:20,CF8 (Stainless Steel 304),974,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_6de8026a7f90.npz,voxel,1
+c3d797977058,2026-10-22 15:23:20,C958 (Aluminum Bronze),974,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_c3d797977058.npz,voxel,1
+5647680113bb,2026-10-22 15:23:20,C964 (CuNi),974,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_5647680113bb.npz,voxel,1
+932667819478,2026-10-22 15:23:21,CA6NM (Cast Steel),974,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_932667819478.npz,voxel,1
+749d1066e755,2026-10-22 15:23:21,MONEL400 (Monel 400 Nickel-Copper),974,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_749d1066e755.npz,voxel,1
+576be29f9e19,2026-10-22 15:23:21,IN625 (Inconel 625),974,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_576be29f9e19.npz,voxel,1
+4c35a11fd88f,2026-10-22 15:23:22,WCB (Carbon Steel Casting),2175,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_4c35a11fd88f.npz,voxel,1
+f7cd05b51f41,2026-10-22 15:23:22,CF8 (Stainless Steel 304),2175,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_f7cd05b51f41.npz,voxel,1
+176215df1f54,2026-10-22 15:23:23,C958 (Aluminum Bronze),2175,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_176215df1f54.npz,voxel,1
+9d8bd71cfb30,2026-10-22 15:23:23,C964 (CuNi),2175,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_9d8bd71cfb30.npz,voxel,1
+10cc8abb94dd,2026-10-22 15:23:24,CA6NM (Cast Steel),2175,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_10cc8abb94dd.npz,voxel,1
+6a88d6a2a06c,2026-10-22 15:23:24,MONEL400 (Monel 400 Nickel-Copper),2175,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_6a88d6a2a06c.npz,voxel,1
+a9ea983cfc1a,2026-10-22 15:23:25,IN625 (Inconel 625),2175,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_a9ea983cfc1a.npz,voxel,1
+542664e36108,2026-10-22 15:23:25,WCB (Carbon Steel Casting),2475,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_542664e36108.npz,voxel,1
+f2f49da24956,2026-10-22 15:23:25,CF8 (Stainless Steel 304),2475,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_f2f49da24956.npz,voxel,1
+b88ee4191538,2026-10-22 15:23:26,C958 (Aluminum Bronze),2475,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_b88ee4191538.npz,voxel,1
+a2dfa67784eb,2026-10-22 15:23:26,C964 (CuNi),2475,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_a2dfa67784eb.npz,voxel,1
+ae7c2f5aaf25,2026-10-22 15:23:27,CA6NM (Cast Steel),2475,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_ae7c2f5aaf25.npz,voxel,1
+e0756d63b075,2026-10-22 15:23:27,MONEL400 (Monel 400 Nickel-Copper),2475,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_e0756d63b075.npz,voxel,1
+a59cb0b7c347,2026-10-22 15:23:27,IN625 (Inconel 625),2475,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_a59cb0b7c347.npz,voxel,1
+a2fa65265622,2026-10-22 15:23:28,WCB (Carbon Steel Casting),5890,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_a2fa65265622.npz,voxel,1
+598ce6caf50c,2026-10-22 15:23:29,CF8 (Stainless Steel 304),5890,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_598ce6caf50c.npz,voxel,1
+87b9b533bc24,2026-10-22 15:23:30,C958 (Aluminum Bronze),5890,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_87b9b533bc24.npz,voxel,1
+5cc8d6be05c2,2026-10-22 15:23:31,C964 (CuNi),5890,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_5cc8d6be05c2.npz,voxel,1
+3ef8d92f8d64,2026-10-22 15:23:32,CA6NM (Cast Steel),5890,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_3ef8d92f8d64.npz,voxel,1
+1d49729b140b,2026-10-22 15:23:32,MONEL400 (Monel 400 Nickel-Copper),5890,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_1d49729b140b.npz,voxel,1
+e77227a80f30,2026-10-22 15:23:33,IN625 (Inconel 625),5890,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_e77227a80f30.npz,voxel,1
+b9417687bc36,2026-10-22 15:23:34,WCB (Carbon Steel Casting),2878,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_b9417687bc36.npz,voxel,1
+5a5fc4c681f4,2026-10-22 15:23:34,CF8 (Stainless Steel 304),2878,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_5a5fc4c681f4.npz,voxel,1
+b43ec1fe2c88,2026-10-22 15:23:35,C958 (Aluminum Bronze),2878,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_b43ec1fe2c88.npz,voxel,1
+326cc93d1c4c,2026-10-22 15:23:35,C964 (CuNi),2878,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_326cc93d1c4c.npz,voxel,1
+aca0f434fa04,2026-10-22 15:23:36,CA6NM (Cast Steel),2878,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_aca0f434fa04.npz,voxel,1
+2cca7c6ddd91,2026-10-22 15:23:36,MONEL400 (Monel 400 Nickel-Copper),2878,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_2cca7c6ddd91.npz,voxel,1
+4442f6a61441,2026-10-22 15:23:37,IN625 (Inconel 625),2878,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_4442f6a61441.npz,voxel,1
+5b9f1c63ec34,2026-10-22 15:23:38,WCB (Carbon Steel Casting),2869,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_5b9f1c63ec34.npz,voxel,1
+7bfe445d1d7b,2026-10-22 15:23:38,CF8 (Stainless Steel 304),2869,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_7bfe445d1d7b.npz,voxel,1
+08a11b790398,2026-10-22 15:23:39,C958 (Aluminum Bronze),2869,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_08a11b790398.npz,voxel,1
+a395d729835d,2026-10-22 15:23:39,C964 (CuNi),2869,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_a395d729835d.npz,voxel,1
+23404f50ba3d,2026-10-22 15:23:40,CA6NM (Cast Steel),2869,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_23404f50ba3d.npz,voxel,1
+357ba5f0ffda,2026-10-22 15:23:41,MONEL400 (Monel 400 Nickel-Copper),2869,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_357ba5f0ffda.npz,voxel,1
+eef10dc010cb,2026-10-22 15:23:41,IN625 (Inconel 625),2869,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_eef10dc010cb.npz,voxel,1
+b2685c718ee7,2026-10-22 15:23:42,WCB (Carbon Steel Casting),1099,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_b2685c718ee7.npz,voxel,1
+d5103ba7f021,2026-10-22 15:23:42,CF8 (Stainless Steel 304),1099,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_d5103ba7f021.npz,voxel,1
+1677143be44f,2026-10-22 15:23:42,C958 (Aluminum Bronze),1099,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_1677143be44f.npz,voxel,1
+e4db0acdef55,2026-10-22 15:23:43,C964 (CuNi),1099,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_e4db0acdef55.npz,voxel,1
+5228059e73b3,2026-10-22 15:23:43,CA6NM (Cast Steel),1099,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_5228059e73b3.npz,voxel,1
+08e8602aa9ac,2026-10-22 15:23:43,MONEL400 (Monel 400 Nickel-Copper),1099,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_08e8602aa9ac.npz,voxel,1
+4201df4fcf4c,2026-10-22 15:23:43,IN625 (Inconel 625),1099,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_4201df4fcf4c.npz,voxel,1
+9bcea77866aa,2026-10-22 15:23:44,WCB (Carbon Steel Casting),1512,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_9bcea77866aa.npz,voxel,1
+7bbc3c961672,2026-10-22 15:23:44,CF8 (Stainless Steel 304),1512,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_7bbc3c961672.npz,voxel,1
+9f6bf3eff956,2026-10-22 15:23:45,C958 (Aluminum Bronze),1512,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_9f6bf3eff956.npz,voxel,1
+4d21a402ed59,2026-10-22 15:23:45,C964 (CuNi),1512,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_4d21a402ed59.npz,voxel,1
+55e6d5a5fcb3,2026-10-22 15:23:46,CA6NM (Cast Steel),1512,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_55e6d5a5fcb3.npz,voxel,1
+02b8fe451f5b,2026-10-22 15:23:46,MONEL400 (Monel 400 Nickel-Copper),1512,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_02b8fe451f5b.npz,voxel,1
+f7df0bd9fac5,2026-10-22 15:23:46,IN625 (Inconel 625),1512,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_f7df0bd9fac5.npz,voxel,1
+cdaa2cee2d61,2026-10-22 15:23:48,WCB (Carbon Steel Casting),12945,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_cdaa2cee2d61.npz,voxel,1
+73b23008a5f1,2026-10-22 15:23:49,CF8 (Stainless Steel 304),12945,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_73b23008a5f1.npz,voxel,1
+f300139756b1,2026-10-22 15:23:51,C958 (Aluminum Bronze),12945,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_f300139756b1.npz,voxel,1
+7d7e1bd99989,2026-10-22 15:23:53,C964 (CuNi),12945,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_7d7e1bd99989.npz,voxel,1
+8aed234c0259,2026-10-22 15:23:54,CA6NM (Cast Steel),12945,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_8aed234c0259.npz,voxel,1
+b15367bdb33c,2026-10-22 15:23:56,MONEL400 (Monel 400 Nickel-Copper),12945,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_b15367bdb33c.npz,voxel,1
+55ef9cbef54c,2026-10-22 15:23:57,IN625 (Inconel 625),12945,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_55ef9cbef54c.npz,voxel,1
+23f530430408,2026-10-22 15:27:52,WCB (Carbon Steel Casting),140288,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_23f530430408.npz,voxel,0
+541f2e9dc535,2026-10-22 15:37:42,WCB (Carbon Steel Casting),140288,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_541f2e9dc535.npz,voxel,0
+42991c621db8,2026-10-22 15:47:31,WCB (Carbon Steel Casting),140288,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_42991c621db8.npz,voxel,0
+079765c20ecd,2026-10-22 15:50:12,WCB (Carbon Steel Casting),140288,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_079765c20ecd.npz,voxel,0
+4b32b5acc560,2026-10-22 15:57:56,WCB (Carbon Steel Casting),244203,16,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_4b32b5acc560.npz,voxel,0
+fae768100cb9,2026-10-23 16:40:38,C964 (CuNi),21496,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_fae768100cb9.npz,voxel,1
+83521951ab80,2026-10-23 16:41:00,IN625 (Inconel 625),21496,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_83521951ab80.npz,voxel,1
+13880c051944,2026-10-23 16:41:03,CF8 (Stainless Steel 304),22242,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_13880c051944.npz,voxel,1
+4bb25c3c8a81,2026-10-23 16:41:07,C958 (Aluminum Bronze),22242,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_4bb25c3c8a81.npz,voxel,1
+0ac997d116f7,2026-10-23 16:41:11,WCB (Carbon Steel Casting),21878,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_0ac997d116f7.npz,voxel,1
+c65629096272,2026-10-23 16:41:13,IN625 (Inconel 625),21878,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_c65629096272.npz,voxel,1
+b91190506842,2026-10-23 16:41:16,CA6NM (Cast Steel),24315,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_b91190506842.npz,voxel,1
+2fe2d70b8288,2026-10-23 16:41:18,IN625 (Inconel 625),24315,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_2fe2d70b8288.npz,voxel,1
+43759921c065,2026-10-23 16:41:20,CF8 (Stainless Steel 304),25461,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_43759921c065.npz,voxel,1
+80473816e698,2026-10-23 16:41:23,MONEL400 (Monel 400 Nickel-Copper),25461,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_80473816e698.npz,voxel,1
+beeb83e30823,2026-10-23 16:41:29,C958 (Aluminum Bronze),23506,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_beeb83e30823.npz,voxel,1
+e483fd8a321d,2026-10-23 16:41:36,IN625 (Inconel 625),23506,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_e483fd8a321d.npz,voxel,1
+d6e47da2c436,2026-10-23 16:41:38,C958 (Aluminum Bronze),21213,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_d6e47da2c436.npz,voxel,1
+5bb4e0a3fa63,2026-10-23 16:41:40,IN625 (Inconel 625),21213,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_5bb4e0a3fa63.npz,voxel,1
+7cd14966a26e,2026-10-23 16:41:43,WCB (Carbon Steel Casting),22127,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_7cd14966a26e.npz,voxel,1
+2fb8c1109a3d,2026-10-23 16:41:46,CF8 (Stainless Steel 304),22127,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_2fb8c1109a3d.npz,voxel,1
+9b166868133a,2026-10-23 16:41:48,WCB (Carbon Steel Casting),12554,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_9b166868133a.npz,voxel,1
+54e969f3830d,2026-10-23 16:41:51,C958 (Aluminum Bronze),12554,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_54e969f3830d.npz,voxel,1
+8ac22f5dbd22,2026-10-23 16:42:08,WCB (Carbon Steel Casting),20864,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_8ac22f5dbd22.npz,voxel,1
+87b17c0edde1,2026-10-23 16:42:29,CF8 (Stainless Steel 304),20864,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_87b17c0edde1.npz,voxel,1
+860111c0b4c6,2026-10-23 16:42:31,CF8 (Stainless Steel 304),19397,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_860111c0b4c6.npz,voxel,1
+3468d51a641a,2026-10-23 16:42:33,CA6NM (Cast Steel),19397,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_3468d51a641a.npz,voxel,1
+c3e17e590013,2026-10-23 16:42:36,C964 (CuNi),22954,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_c3e17e590013.npz,voxel,1
+128050028f38,2026-10-23 16:42:40,CA6NM (Cast Steel),22954,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_128050028f38.npz,voxel,1
+ca5095286cf4,2026-10-23 16:42:44,C964 (CuNi),18895,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_ca5095286cf4.npz,voxel,1
+dd106eab2c5c,2026-10-23 16:42:50,MONEL400 (Monel 400 Nickel-Copper),18895,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_dd106eab2c5c.npz,voxel,1
+724d6eeda323,2026-10-23 16:42:52,C964 (CuNi),24176,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_724d6eeda323.npz,voxel,1
+af1bbd45ac6e,2026-10-23 16:42:54,IN625 (Inconel 625),24176,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_af1bbd45ac6e.npz,voxel,1
+b0d410e61ca4,2026-10-23 16:43:02,CF8 (Stainless Steel 304),21001,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_b0d410e61ca4.npz,voxel,1
+3d0d221cd15b,2026-10-23 16:43:09,CA6NM (Cast Steel),21001,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_3d0d221cd15b.npz,voxel,1
+c0c8cce7043b,2026-10-23 16:43:17,CA6NM (Cast Steel),21871,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_c0c8cce7043b.npz,voxel,1
+5564ce813f5d,2026-10-23 16:43:26,IN625 (Inconel 625),21871,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_5564ce813f5d.npz,voxel,1
+9ba6c20b06b8,2026-10-23 16:43:29,WCB (Carbon Steel Casting),21938,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_9ba6c20b06b8.npz,voxel,1
+c081f1169902,2026-10-23 16:43:31,IN625 (Inconel 625),21938,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_c081f1169902.npz,voxel,1
+c68408702e14,2026-10-23 16:43:37,C958 (Aluminum Bronze),59207,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_c68408702e14.npz,voxel,1
+0528308de45c,2026-10-23 16:43:41,IN625 (Inconel 625),59207,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_0528308de45c.npz,voxel,1
+6cabb9f8d57f,2026-10-23 16:44:00,WCB (Carbon Steel Casting),19113,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_6cabb9f8d57f.npz,voxel,1
+f3e1a5f54c77,2026-10-23 16:44:23,MONEL400 (Monel 400 Nickel-Copper),19113,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_f3e1a5f54c77.npz,voxel,1
+11204a217a53,2026-10-23 16:44:25,CF8 (Stainless Steel 304),23910,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_11204a217a53.npz,voxel,1
+817cd8a4bab5,2026-10-23 16:44:27,IN625 (Inconel 625),23910,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_817cd8a4bab5.npz,voxel,1
+b94032f15dbe,2026-10-23 16:44:29,CF8 (Stainless Steel 304),22078,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_b94032f15dbe.npz,voxel,1
+9d711facc139,2026-10-23 16:44:32,IN625 (Inconel 625),22078,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_9d711facc139.npz,voxel,1
+7a6816289bf1,2026-10-23 16:44:36,WCB (Carbon Steel Casting),13191,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_7a6816289bf1.npz,voxel,1
+3bc5cc66e156,2026-10-23 16:44:40,CA6NM (Cast Steel),13191,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_3bc5cc66e156.npz,voxel,1
+3bf60cdf0ccf,2026-10-23 16:44:46,WCB (Carbon Steel Casting),21891,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_3bf60cdf0ccf.npz,voxel,1
+4348c7a5bd5b,2026-10-23 16:44:53,IN625 (Inconel 625),21891,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_4348c7a5bd5b.npz,voxel,1
+4ba45b391ea9,2026-10-23 16:44:54,CF8 (Stainless Steel 304),22562,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_4ba45b391ea9.npz,voxel,1
+8718ee02421e,2026-10-23 16:44:56,MONEL400 (Monel 400 Nickel-Copper),22562,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_8718ee02421e.npz,voxel,1
+7b25cc5fa253,2026-10-23 16:44:58,WCB (Carbon Steel Casting),21389,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_7b25cc5fa253.npz,voxel,1
+42dd2acc21cc,2026-10-23 16:45:00,C958 (Aluminum Bronze),21389,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_42dd2acc21cc.npz,voxel,1
+059e9583f61a,2026-10-23 16:45:03,CA6NM (Cast Steel),23659,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_059e9583f61a.npz,voxel,1
+854ed898515e,2026-10-23 16:45:05,IN625 (Inconel 625),23659,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_854ed898515e.npz,voxel,1
+04c223cb1e56,2026-10-23 16:45:07,WCB (Carbon Steel Casting),23340,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_04c223cb1e56.npz,voxel,1
+4aa19b481c64,2026-10-23 16:45:10,IN625 (Inconel 625),23340,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_4aa19b481c64.npz,voxel,1
+9cafa41a9270,2026-10-23 16:45:33,MONEL400 (Monel 400 Nickel-Copper),44510,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_9cafa41a9270.npz,voxel,1
+2f1903a941c5,2026-10-23 16:45:59,IN625 (Inconel 625),44510,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_2f1903a941c5.npz,voxel,1
+ff7c463dbd9a,2026-10-23 16:46:01,CF8 (Stainless Steel 304),18552,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_ff7c463dbd9a.npz,voxel,1
+73b2fa145056,2026-10-23 16:46:03,C958 (Aluminum Bronze),18552,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_73b2fa145056.npz,voxel,1
+58e5d8391002,2026-10-23 16:46:04,WCB (Carbon Steel Casting),8440,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_58e5d8391002.npz,voxel,1
+669f7019ae88,2026-10-23 16:46:06,IN625 (Inconel 625),8440,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_669f7019ae88.npz,voxel,1
+e8cf4f7f7112,2026-10-23 16:46:08,CA6NM (Cast Steel),23255,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_e8cf4f7f7112.npz,voxel,1
+5fc2f7f1da75,2026-10-23 16:46:10,IN625 (Inconel 625),23255,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_5fc2f7f1da75.npz,voxel,1
+8d03dcf3bd6f,2026-10-23 16:46:13,CF8 (Stainless Steel 304),24480,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_8d03dcf3bd6f.npz,voxel,1
+205d9464af60,2026-10-23 16:46:15,C964 (CuNi),24480,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_205d9464af60.npz,voxel,1
+6ae037b1a9e0,2026-10-23 16:46:18,WCB (Carbon Steel Casting),24122,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_6ae037b1a9e0.npz,voxel,1
+0785f6f70d9c,2026-10-23 16:46:20,CA6NM (Cast Steel),24122,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_0785f6f70d9c.npz,voxel,1
+7cd6bbc769a7,2026-10-23 16:46:22,C958 (Aluminum Bronze),23250,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_7cd6bbc769a7.npz,voxel,1
+65dbf5906897,2026-10-23 16:46:24,MONEL400 (Monel 400 Nickel-Copper),23250,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_65dbf5906897.npz,voxel,1
+e2061da45b63,2026-10-23 16:46:26,C964 (CuNi),22981,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_e2061da45b63.npz,voxel,1
+26f3a62fe38c,2026-10-23 16:46:28,CA6NM (Cast Steel),22981,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_26f3a62fe38c.npz,voxel,1
+461ad40befbd,2026-10-23 16:46:35,WCB (Carbon Steel Casting),23110,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_461ad40befbd.npz,voxel,1
+0d99b1c5784c,2026-10-23 16:46:43,C958 (Aluminum Bronze),23110,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_0d99b1c5784c.npz,voxel,1
+d41c0913fce2,2026-10-23 16:46:57,WCB (Carbon Steel Casting),23862,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_d41c0913fce2.npz,voxel,1
+196e548fbeb3,2026-10-23 16:47:14,IN625 (Inconel 625),23862,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_196e548fbeb3.npz,voxel,1
+31b2b97ba6ec,2026-10-23 16:47:23,C964 (CuNi),19651,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_31b2b97ba6ec.npz,voxel,1
+de0277190746,2026-10-23 16:47:32,CA6NM (Cast Steel),19651,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_de0277190746.npz,voxel,1
+4df73011ada9,2026-10-23 16:47:35,C964 (CuNi),19369,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_4df73011ada9.npz,voxel,1
+eb729e57cb3f,2026-10-23 16:47:37,MONEL400 (Monel 400 Nickel-Copper),19369,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_eb729e57cb3f.npz,voxel,1
+5068f420006c,2026-10-23 16:47:40,C964 (CuNi),24584,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_5068f420006c.npz,voxel,1
+8ba24cbdad62,2026-10-23 16:47:42,IN625 (Inconel 625),24584,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_8ba24cbdad62.npz,voxel,1
+c1c79127259e,2026-10-23 16:47:44,WCB (Carbon Steel Casting),19418,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_c1c79127259e.npz,voxel,1
+a14a92958d9c,2026-10-23 16:47:46,C964 (CuNi),19418,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_a14a92958d9c.npz,voxel,1
+92699f69bdee,2026-10-23 16:47:52,CA6NM (Cast Steel),23690,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_92699f69bdee.npz,voxel,1
+e670fabf2856,2026-10-23 16:47:58,IN625 (Inconel 625),23690,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_e670fabf2856.npz,voxel,1
+1da2b29ff391,2026-10-23 16:48:13,C964 (CuNi),22047,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_1da2b29ff391.npz,voxel,1
+2a6459b822c1,2026-10-23 16:48:26,CA6NM (Cast Steel),22047,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_2a6459b822c1.npz,voxel,1
+a844d9f2b08a,2026-10-23 16:48:29,WCB (Carbon Steel Casting),23112,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_a844d9f2b08a.npz,voxel,1
+14d1aeb5d9ff,2026-10-23 16:48:32,MONEL400 (Monel 400 Nickel-Copper),23112,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_14d1aeb5d9ff.npz,voxel,1
+606c15222675,2026-10-23 16:48:41,WCB (Carbon Steel Casting),22301,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_606c15222675.npz,voxel,1
+b6ef37b30d45,2026-10-23 16:48:52,MONEL400 (Monel 400 Nickel-Copper),22301,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_b6ef37b30d45.npz,voxel,1
+47b933350351,2026-10-23 16:48:58,C964 (CuNi),47617,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_47b933350351.npz,voxel,1
+a29a4385b6d9,2026-10-23 16:49:04,CA6NM (Cast Steel),47617,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_a29a4385b6d9.npz,voxel,1
+3c2972e7363e,2026-10-23 16:49:06,C958 (Aluminum Bronze),21998,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_3c2972e7363e.npz,voxel,1
+e8d717f18d8b,2026-10-23 16:49:08,MONEL400 (Monel 400 Nickel-Copper),21998,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_e8d717f18d8b.npz,voxel,1
+9296e5f3d433,2026-10-23 16:49:11,C958 (Aluminum Bronze),21051,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_9296e5f3d433.npz,voxel,1
+2f404d7e614a,2026-10-23 16:49:13,C964 (CuNi),21051,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_2f404d7e614a.npz,voxel,1
+abcd757e36a3,2026-10-23 16:49:18,WCB (Carbon Steel Casting),16764,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_abcd757e36a3.npz,voxel,1
+df62b5dd5615,2026-10-23 16:49:24,MONEL400 (Monel 400 Nickel-Copper),16764,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_df62b5dd5615.npz,voxel,1
+471344623390,2026-10-23 16:49:31,WCB (Carbon Steel Casting),25701,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_471344623390.npz,voxel,1
+d24bb17f2b82,2026-10-23 16:49:38,CF8 (Stainless Steel 304),25701,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_d24bb17f2b82.npz,voxel,1
+905f074025a2,2026-10-23 16:49:43,C958 (Aluminum Bronze),21617,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_905f074025a2.npz,voxel,1
+18acec1b4615,2026-10-23 16:49:48,CA6NM (Cast Steel),21617,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_18acec1b4615.npz,voxel,1
+41a074c9ba05,2026-10-23 16:49:51,C958 (Aluminum Bronze),21760,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_41a074c9ba05.npz,voxel,1
+736a62169ad3,2026-10-23 16:49:53,CA6NM (Cast Steel),21760,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_736a62169ad3.npz,voxel,1
+a1bd0fcb835d,2026-10-23 16:50:12,CF8 (Stainless Steel 304),22156,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_a1bd0fcb835d.npz,voxel,1
+cdf911a44cbc,2026-10-23 16:50:34,IN625 (Inconel 625),22156,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_cdf911a44cbc.npz,voxel,1
+7e904a6e58a6,2026-10-23 16:50:46,CF8 (Stainless Steel 304),22881,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_7e904a6e58a6.npz,voxel,1
+304d2b7356c4,2026-10-23 16:50:56,C964 (CuNi),22881,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_304d2b7356c4.npz,voxel,1
+adf7bfa8e132,2026-10-23 16:50:59,WCB (Carbon Steel Casting),22621,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_adf7bfa8e132.npz,voxel,1
+610f6bcf183a,2026-10-23 16:51:01,CF8 (Stainless Steel 304),22621,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_610f6bcf183a.npz,voxel,1
+e3871f965039,2026-10-23 16:51:03,WCB (Carbon Steel Casting),20295,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_e3871f965039.npz,voxel,1
+5a59b0e41b36,2026-10-23 16:51:05,MONEL400 (Monel 400 Nickel-Copper),20295,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_5a59b0e41b36.npz,voxel,1
+8a2de7ec808c,2026-10-23 16:51:07,CF8 (Stainless Steel 304),18206,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_8a2de7ec808c.npz,voxel,1
+71198a3d5dc2,2026-10-23 16:51:09,MONEL400 (Monel 400 Nickel-Copper),18206,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_71198a3d5dc2.npz,voxel,1
+5e8ec9ee48ac,2026-10-23 16:51:15,CA6NM (Cast Steel),22016,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_5e8ec9ee48ac.npz,voxel,1
+9c9277522d31,2026-10-23 16:51:21,IN625 (Inconel 625),22016,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_9c9277522d31.npz,voxel,1
+6d670e18cb7d,2026-10-23 16:51:27,WCB (Carbon Steel Casting),24116,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_6d670e18cb7d.npz,voxel,1
+aacaf83117ff,2026-10-23 16:51:34,MONEL400 (Monel 400 Nickel-Copper),24116,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_aacaf83117ff.npz,voxel,1
+081d028368eb,2026-10-23 16:51:35,CF8 (Stainless Steel 304),22371,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_081d028368eb.npz,voxel,1
+1719e53108d9,2026-10-23 16:51:38,C958 (Aluminum Bronze),22371,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_1719e53108d9.npz,voxel,1
+72d6e71732f7,2026-10-23 16:51:40,C964 (CuNi),20454,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_72d6e71732f7.npz,voxel,1
+e67b297a6e32,2026-10-23 16:51:42,MONEL400 (Monel 400 Nickel-Copper),20454,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_e67b297a6e32.npz,voxel,1
+6cc4fdfca72b,2026-10-23 16:51:55,C964 (CuNi),23588,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_6cc4fdfca72b.npz,voxel,1
+283c8b4be707,2026-10-23 16:52:08,CA6NM (Cast Steel),23588,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_283c8b4be707.npz,voxel,1
+805c149e78dc,2026-10-23 16:52:10,WCB (Carbon Steel Casting),17869,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_805c149e78dc.npz,voxel,1
+f4994467c4dc,2026-10-23 16:52:11,C964 (CuNi),17869,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_f4994467c4dc.npz,voxel,1
+85ece72d94e0,2026-10-23 16:52:22,C964 (CuNi),21296,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_85ece72d94e0.npz,voxel,1
+3a8940c9e724,2026-10-23 16:52:33,CA6NM (Cast Steel),21296,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_3a8940c9e724.npz,voxel,1
+8182461ee004,2026-10-23 16:52:35,CA6NM (Cast Steel),18101,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_8182461ee004.npz,voxel,1
+19715b354d0f,2026-10-23 16:52:37,MONEL400 (Monel 400 Nickel-Copper),18101,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_19715b354d0f.npz,voxel,1
+03e53111f4b2,2026-10-23 16:52:39,C964 (CuNi),19971,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_03e53111f4b2.npz,voxel,1
+33d4e20728e5,2026-10-23 16:52:41,CA6NM (Cast Steel),19971,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_33d4e20728e5.npz,voxel,1
+d2c7da979f31,2026-10-23 16:52:58,MONEL400 (Monel 400 Nickel-Copper),21829,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_d2c7da979f31.npz,voxel,1
+e50951f6dbea,2026-10-23 16:53:16,IN625 (Inconel 625),21829,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_e50951f6dbea.npz,voxel,1
+f79d0245ef37,2026-10-23 16:53:18,MONEL400 (Monel 400 Nickel-Copper),20588,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_f79d0245ef37.npz,voxel,1
+2aa58d817836,2026-10-23 16:53:19,IN625 (Inconel 625),20588,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_2aa58d817836.npz,voxel,1
+25595d1fa2ba,2026-10-23 16:53:26,CF8 (Stainless Steel 304),43612,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_25595d1fa2ba.npz,voxel,1
+113ba1649222,2026-10-23 16:53:34,IN625 (Inconel 625),43612,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_113ba1649222.npz,voxel,1
+a1a462eba8f2,2026-10-23 16:53:50,C958 (Aluminum Bronze),20120,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_a1a462eba8f2.npz,voxel,1
+34fc7c7dabc2,2026-10-23 16:54:07,MONEL400 (Monel 400 Nickel-Copper),20120,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_34fc7c7dabc2.npz,voxel,1
+58adf2c3034b,2026-10-23 16:54:09,CF8 (Stainless Steel 304),23015,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_58adf2c3034b.npz,voxel,1
+9da3c795b8fa,2026-10-23 16:54:12,C958 (Aluminum Bronze),23015,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_9da3c795b8fa.npz,voxel,1
+c79d233f28eb,2026-10-23 16:54:14,CA6NM (Cast Steel),21920,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_c79d233f28eb.npz,voxel,1
+1444b0f9d3e9,2026-10-23 16:54:16,MONEL400 (Monel 400 Nickel-Copper),21920,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_1444b0f9d3e9.npz,voxel,1
+7ad0ed9b31be,2026-10-23 16:54:21,WCB (Carbon Steel Casting),50936,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_7ad0ed9b31be.npz,voxel,1
+30c5a199cbec,2026-10-23 16:54:26,CA6NM (Cast Steel),50936,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_30c5a199cbec.npz,voxel,1
+5bd4eb45637d,2026-10-23 16:54:28,CF8 (Stainless Steel 304),21558,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_5bd4eb45637d.npz,voxel,1
+50202ae78a13,2026-10-23 16:54:31,C958 (Aluminum Bronze),21558,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_50202ae78a13.npz,voxel,1
+c3c426840e56,2026-10-23 16:54:34,C964 (CuNi),17503,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_c3c426840e56.npz,voxel,1
+a521a8852f97,2026-10-23 16:54:36,CA6NM (Cast Steel),17503,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_a521a8852f97.npz,voxel,1
+37d43ec02ad2,2026-10-23 16:54:38,C964 (CuNi),25035,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_37d43ec02ad2.npz,voxel,1
+8ff22f73fb2e,2026-10-23 16:54:40,MONEL400 (Monel 400 Nickel-Copper),25035,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_8ff22f73fb2e.npz,voxel,1
+51a7080137a5,2026-10-23 16:54:41,C964 (CuNi),20333,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_51a7080137a5.npz,voxel,1
+42f8ab3d4029,2026-10-23 16:54:43,MONEL400 (Monel 400 Nickel-Copper),20333,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_42f8ab3d4029.npz,voxel,1
+fdb83695f486,2026-10-23 16:54:45,CA6NM (Cast Steel),23214,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_fdb83695f486.npz,voxel,1
+d73e95f7b20e,2026-10-23 16:54:47,IN625 (Inconel 625),23214,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_d73e95f7b20e.npz,voxel,1
+bf9e2a2f968d,2026-10-23 16:54:49,CF8 (Stainless Steel 304),19323,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_bf9e2a2f968d.npz,voxel,1
+10372f0d5bbe,2026-10-23 16:54:53,CA6NM (Cast Steel),19323,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_10372f0d5bbe.npz,voxel,1
+9bd5d7c9a2be,2026-10-23 16:54:56,WCB (Carbon Steel Casting),21265,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_9bd5d7c9a2be.npz,voxel,1
+653ad0cf2384,2026-10-23 16:54:58,IN625 (Inconel 625),21265,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_653ad0cf2384.npz,voxel,1
+bad22ed8a3bb,2026-10-23 16:55:00,WCB (Carbon Steel Casting),15459,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_bad22ed8a3bb.npz,voxel,1
+10fae5d733b7,2026-10-23 16:55:01,CF8 (Stainless Steel 304),15459,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_10fae5d733b7.npz,voxel,1
+cd04d35137c0,2026-10-23 16:55:04,CF8 (Stainless Steel 304),22405,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_cd04d35137c0.npz,voxel,1
+d0f1143890ef,2026-10-23 16:55:07,IN625 (Inconel 625),22405,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_d0f1143890ef.npz,voxel,1
+33c66545b334,2026-10-23 16:55:16,WCB (Carbon Steel Casting),22417,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_33c66545b334.npz,voxel,1
+0923866872cb,2026-10-23 16:55:25,C964 (CuNi),22417,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_0923866872cb.npz,voxel,1
+ee837d12e872,2026-10-23 16:55:27,CF8 (Stainless Steel 304),20517,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_ee837d12e872.npz,voxel,1
+234bf1eddb8b,2026-10-23 16:55:30,IN625 (Inconel 625),20517,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_234bf1eddb8b.npz,voxel,1
+9f866dec576b,2026-10-23 16:55:32,WCB (Carbon Steel Casting),22852,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_9f866dec576b.npz,voxel,1
+b90ba295f291,2026-10-23 16:55:34,IN625 (Inconel 625),22852,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_b90ba295f291.npz,voxel,1
+fda486e2b875,2026-10-23 16:55:43,WCB (Carbon Steel Casting),36626,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_fda486e2b875.npz,voxel,1
+1064a20fdba8,2026-10-23 16:55:51,C964 (CuNi),36626,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_1064a20fdba8.npz,voxel,1
+b0fb8eb474f6,2026-10-23 16:55:56,CA6NM (Cast Steel),23598,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_b0fb8eb474f6.npz,voxel,1
+90c654658a3c,2026-10-23 16:56:02,MONEL400 (Monel 400 Nickel-Copper),23598,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_90c654658a3c.npz,voxel,1
+8a3441308c02,2026-10-23 16:56:03,MONEL400 (Monel 400 Nickel-Copper),12945,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_8a3441308c02.npz,voxel,1
+d4c26608cb13,2026-10-23 16:56:05,IN625 (Inconel 625),12945,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_d4c26608cb13.npz,voxel,1
+ad632d1d54b3,2026-10-23 16:56:18,WCB (Carbon Steel Casting),21008,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_ad632d1d54b3.npz,voxel,1
+dde6fb267c37,2026-10-23 16:56:33,MONEL400 (Monel 400 Nickel-Copper),21008,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_dde6fb267c37.npz,voxel,1
+1888f7a3a614,2026-10-23 16:56:35,CF8 (Stainless Steel 304),24131,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_1888f7a3a614.npz,voxel,1
+0740e4f424eb,2026-10-23 16:56:37,MONEL400 (Monel 400 Nickel-Copper),24131,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_0740e4f424eb.npz,voxel,1
+f4b501cab6dc,2026-10-23 16:56:58,CF8 (Stainless Steel 304),21945,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_f4b501cab6dc.npz,voxel,1
+2d7e85600dd3,2026-10-23 16:57:15,C958 (Aluminum Bronze),21945,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_2d7e85600dd3.npz,voxel,1
+5bfe896a57b1,2026-10-23 16:57:18,C964 (CuNi),22410,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_5bfe896a57b1.npz,voxel,1
+cf36e7cba6a9,2026-10-23 16:57:20,CA6NM (Cast Steel),22410,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_cf36e7cba6a9.npz,voxel,1
+060cb69937d1,2026-10-23 16:57:22,C958 (Aluminum Bronze),19591,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_060cb69937d1.npz,voxel,1
+a71898ba4e45,2026-10-23 16:57:25,C964 (CuNi),19591,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_a71898ba4e45.npz,voxel,1
+f982013bccd3,2026-10-23 16:57:27,C958 (Aluminum Bronze),16458,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_f982013bccd3.npz,voxel,1
+1a205662a67a,2026-10-23 16:57:28,C964 (CuNi),16458,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_1a205662a67a.npz,voxel,1
+55e05ad28b03,2026-10-23 16:57:33,CA6NM (Cast Steel),21406,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_55e05ad28b03.npz,voxel,1
+15372f2c10ff,2026-10-23 16:57:39,MONEL400 (Monel 400 Nickel-Copper),21406,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_15372f2c10ff.npz,voxel,1
+ab905d9c29b4,2026-10-23 16:57:43,CF8 (Stainless Steel 304),23562,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_ab905d9c29b4.npz,voxel,1
+862bed6f7f98,2026-10-23 16:57:48,MONEL400 (Monel 400 Nickel-Copper),23562,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_862bed6f7f98.npz,voxel,1
+a1b8ce8926f3,2026-10-23 16:57:50,CF8 (Stainless Steel 304),22043,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_a1b8ce8926f3.npz,voxel,1
+a76332d79f3b,2026-10-23 16:57:52,IN625 (Inconel 625),22043,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_a76332d79f3b.npz,voxel,1
+26e5223f165f,2026-10-23 16:58:01,CA6NM (Cast Steel),20930,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_26e5223f165f.npz,voxel,1
+1c4061ab4677,2026-10-23 16:58:14,IN625 (Inconel 625),20930,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_1c4061ab4677.npz,voxel,1
+3ba2cbcb617b,2026-10-23 16:58:16,C958 (Aluminum Bronze),16602,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_3ba2cbcb617b.npz,voxel,1
+97c572cc9bcb,2026-10-23 16:58:18,CA6NM (Cast Steel),16602,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_97c572cc9bcb.npz,voxel,1
+8535205aa9cc,2026-10-23 16:58:30,CA6NM (Cast Steel),20945,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_8535205aa9cc.npz,voxel,1
+d6a70d6cc019,2026-10-23 16:58:45,MONEL400 (Monel 400 Nickel-Copper),20945,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_d6a70d6cc019.npz,voxel,1
+93aa66d172eb,2026-10-23 16:58:47,WCB (Carbon Steel Casting),21819,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_93aa66d172eb.npz,voxel,1
+be4e4e6a7823,2026-10-23 16:58:49,IN625 (Inconel 625),21819,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_be4e4e6a7823.npz,voxel,1
+98ab8d0198f0,2026-10-23 16:58:52,C964 (CuNi),16269,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_98ab8d0198f0.npz,voxel,1
+fd3ed817b45a,2026-10-23 16:58:54,CA6NM (Cast Steel),16269,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_fd3ed817b45a.npz,voxel,1
+e8a08a261f04,2026-10-23 16:59:06,WCB (Carbon Steel Casting),19293,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_e8a08a261f04.npz,voxel,1
+534e64ec8fa5,2026-10-23 16:59:18,C964 (CuNi),19293,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_534e64ec8fa5.npz,voxel,1
+63ebd125fe03,2026-10-23 16:59:26,WCB (Carbon Steel Casting),23814,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_63ebd125fe03.npz,voxel,1
+342406a5a8ae,2026-10-23 16:59:35,C964 (CuNi),23814,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_342406a5a8ae.npz,voxel,1
+b32f42d68226,2026-10-23 16:59:43,C958 (Aluminum Bronze),39105,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_b32f42d68226.npz,voxel,1
+1759e4a7e4c6,2026-10-23 16:59:50,CA6NM (Cast Steel),39105,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_1759e4a7e4c6.npz,voxel,1
+f8a227b2ae5d,2026-10-23 17:00:05,WCB (Carbon Steel Casting),20584,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_f8a227b2ae5d.npz,voxel,1
+fa6a70b896f6,2026-10-23 17:00:21,CA6NM (Cast Steel),20584,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_fa6a70b896f6.npz,voxel,1
+8a0838a7bfd3,2026-10-23 17:00:30,CA6NM (Cast Steel),22462,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_8a0838a7bfd3.npz,voxel,1
+51ca5e2dfd60,2026-10-23 17:00:42,IN625 (Inconel 625),22462,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_51ca5e2dfd60.npz,voxel,1
+03c577b4f563,2026-10-23 17:00:53,WCB (Carbon Steel Casting),20410,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_03c577b4f563.npz,voxel,1
+af6f692427c3,2026-10-23 17:01:04,C958 (Aluminum Bronze),20410,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_af6f692427c3.npz,voxel,1
+7f60a5875d4d,2026-10-23 17:01:07,CF8 (Stainless Steel 304),32439,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_7f60a5875d4d.npz,voxel,1
+b54997a3a0cc,2026-10-23 17:01:11,CA6NM (Cast Steel),32439,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_b54997a3a0cc.npz,voxel,1
+6448fad904b9,2026-10-23 17:01:13,C958 (Aluminum Bronze),19006,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_6448fad904b9.npz,voxel,1
+67ba8da051e7,2026-10-23 17:01:15,CA6NM (Cast Steel),19006,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_67ba8da051e7.npz,voxel,1
+8362edeb6496,2026-10-23 17:01:17,WCB (Carbon Steel Casting),20016,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_8362edeb6496.npz,voxel,1
+52c31cd5443f,2026-10-23 17:01:19,MONEL400 (Monel 400 Nickel-Copper),20016,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_52c31cd5443f.npz,voxel,1
+a987f2b38ffb,2026-10-23 17:01:28,C958 (Aluminum Bronze),15613,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_a987f2b38ffb.npz,voxel,1
+dc99c7fc2256,2026-10-23 17:01:37,MONEL400 (Monel 400 Nickel-Copper),15613,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_dc99c7fc2256.npz,voxel,1
+04b0f08d5dcb,2026-10-23 17:01:39,CF8 (Stainless Steel 304),23761,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_04b0f08d5dcb.npz,voxel,1
+80c133a3be46,2026-10-23 17:01:41,C958 (Aluminum Bronze),23761,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_80c133a3be46.npz,voxel,1
+2074bd06ff12,2026-10-23 17:01:47,CF8 (Stainless Steel 304),25065,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_2074bd06ff12.npz,voxel,1
+e4eb172bb5d3,2026-10-23 17:01:53,C958 (Aluminum Bronze),25065,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_e4eb172bb5d3.npz,voxel,1
+ba9711cf1184,2026-10-23 17:01:55,CF8 (Stainless Steel 304),10548,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_ba9711cf1184.npz,voxel,1
+e9c780dddb46,2026-10-23 17:01:56,C958 (Aluminum Bronze),10548,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_e9c780dddb46.npz,voxel,1
+c74872004ada,2026-10-23 17:01:59,WCB (Carbon Steel Casting),23759,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_c74872004ada.npz,voxel,1
+32a6afac23a6,2026-10-23 17:02:02,MONEL400 (Monel 400 Nickel-Copper),23759,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_32a6afac23a6.npz,voxel,1
+8e2f671cd816,2026-10-23 17:02:16,C958 (Aluminum Bronze),39576,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_8e2f671cd816.npz,voxel,1
+8b57675e6e99,2026-10-23 17:02:33,IN625 (Inconel 625),39576,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_8b57675e6e99.npz,voxel,1
+9b72033987fa,2026-10-23 17:02:49,CF8 (Stainless Steel 304),20239,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_9b72033987fa.npz,voxel,1
+af28c851b216,2026-10-23 17:03:05,MONEL400 (Monel 400 Nickel-Copper),20239,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_af28c851b216.npz,voxel,1
+eab4c42cc3ee,2026-10-23 17:03:07,WCB (Carbon Steel Casting),13499,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_eab4c42cc3ee.npz,voxel,1
+fbaca688a01b,2026-10-23 17:03:09,CA6NM (Cast Steel),13499,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_fbaca688a01b.npz,voxel,1
+936c6a6625f5,2026-10-23 17:03:10,CA6NM (Cast Steel),21212,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_936c6a6625f5.npz,voxel,1
+bfe726e6d9fa,2026-10-23 17:03:12,IN625 (Inconel 625),21212,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_bfe726e6d9fa.npz,voxel,1
+795daab5f919,2026-10-23 17:03:16,WCB (Carbon Steel Casting),20950,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_795daab5f919.npz,voxel,1
+b2bda373cfd7,2026-10-23 17:03:19,C958 (Aluminum Bronze),20950,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_b2bda373cfd7.npz,voxel,1
+f4bb08a59dd3,2026-10-23 17:03:28,WCB (Carbon Steel Casting),26915,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_f4bb08a59dd3.npz,voxel,1
+0014d13fb651,2026-10-23 17:03:38,IN625 (Inconel 625),26915,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_0014d13fb651.npz,voxel,1
+89d55730e22f,2026-10-23 17:03:40,WCB (Carbon Steel Casting),20260,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_89d55730e22f.npz,voxel,1
+1d1635577687,2026-10-23 17:03:41,MONEL400 (Monel 400 Nickel-Copper),20260,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_1d1635577687.npz,voxel,1
+8493532d6bd4,2026-10-23 17:03:44,CF8 (Stainless Steel 304),20450,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_8493532d6bd4.npz,voxel,1
+4e04ec916d04,2026-10-23 17:03:47,C964 (CuNi),20450,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_4e04ec916d04.npz,voxel,1
+4cf1c12a7880,2026-10-23 17:04:02,C958 (Aluminum Bronze),22006,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_4cf1c12a7880.npz,voxel,1
+f3f361e42866,2026-10-23 17:04:22,IN625 (Inconel 625),22006,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_f3f361e42866.npz,voxel,1
+6a1c33ddcf94,2026-10-23 17:04:31,CA6NM (Cast Steel),21810,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_6a1c33ddcf94.npz,voxel,1
+bdd6729aac89,2026-10-23 17:04:40,MONEL400 (Monel 400 Nickel-Copper),21810,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_bdd6729aac89.npz,voxel,1
+b4d51c019b3c,2026-10-23 17:04:43,C964 (CuNi),19060,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_b4d51c019b3c.npz,voxel,1
+286ae7582b94,2026-10-23 17:04:44,IN625 (Inconel 625),19060,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_286ae7582b94.npz,voxel,1
+c3be1c091218,2026-10-23 17:04:55,CF8 (Stainless Steel 304),20648,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_c3be1c091218.npz,voxel,1
+f801791ec2aa,2026-10-23 17:05:05,MONEL400 (Monel 400 Nickel-Copper),20648,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_f801791ec2aa.npz,voxel,1
+45f37d39597d,2026-10-23 17:05:07,CA6NM (Cast Steel),17557,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_45f37d39597d.npz,voxel,1
+ffae952dd84c,2026-10-23 17:05:09,MONEL400 (Monel 400 Nickel-Copper),17557,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_ffae952dd84c.npz,voxel,1
+86980c2aadce,2026-10-23 17:05:14,WCB (Carbon Steel Casting),22163,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_86980c2aadce.npz,voxel,1
+de2d150e8ac5,2026-10-23 17:05:19,C958 (Aluminum Bronze),22163,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_de2d150e8ac5.npz,voxel,1
+5472762bb0e8,2026-10-23 17:05:21,WCB (Carbon Steel Casting),24698,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_5472762bb0e8.npz,voxel,1
+e768832cda46,2026-10-23 17:05:22,MONEL400 (Monel 400 Nickel-Copper),24698,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_e768832cda46.npz,voxel,1
+dd0cfc15cb65,2026-10-23 17:05:24,MONEL400 (Monel 400 Nickel-Copper),21724,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_dd0cfc15cb65.npz,voxel,1
+039a50270a8a,2026-10-23 17:05:26,IN625 (Inconel 625),21724,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_039a50270a8a.npz,voxel,1
+0b3182e1080e,2026-10-23 17:05:31,C958 (Aluminum Bronze),12507,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_0b3182e1080e.npz,voxel,1
+bcf81ca32f49,2026-10-23 17:05:36,MONEL400 (Monel 400 Nickel-Copper),12507,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_bcf81ca32f49.npz,voxel,1
+a017f511b37e,2026-10-23 17:05:50,WCB (Carbon Steel Casting),24014,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_a017f511b37e.npz,voxel,1
+de40c0968f2d,2026-10-23 17:06:06,MONEL400 (Monel 400 Nickel-Copper),24014,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_de40c0968f2d.npz,voxel,1
+1f0e2f151c7e,2026-10-23 17:06:13,C958 (Aluminum Bronze),13156,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_1f0e2f151c7e.npz,voxel,1
+d6df48182aa6,2026-10-23 17:06:21,IN625 (Inconel 625),13156,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_d6df48182aa6.npz,voxel,1
+99df5b4f962d,2026-10-23 17:06:32,WCB (Carbon Steel Casting),20033,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_99df5b4f962d.npz,voxel,1
+faf6c6d126d6,2026-10-23 17:06:45,C958 (Aluminum Bronze),20033,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_faf6c6d126d6.npz,voxel,1
+dbea053c384b,2026-10-23 17:06:47,CF8 (Stainless Steel 304),20615,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_dbea053c384b.npz,voxel,1
+7bc5607e6133,2026-10-23 17:06:49,C958 (Aluminum Bronze),20615,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_7bc5607e6133.npz,voxel,1
+a217a6804ae4,2026-10-23 17:06:51,WCB (Carbon Steel Casting),21259,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_a217a6804ae4.npz,voxel,1
+c3ed85f80b30,2026-10-23 17:06:54,C964 (CuNi),21259,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_c3ed85f80b30.npz,voxel,1
+a9a15b83c6bf,2026-10-23 17:06:58,MONEL400 (Monel 400 Nickel-Copper),14462,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_a9a15b83c6bf.npz,voxel,1
+201920c5c92a,2026-10-23 17:07:03,IN625 (Inconel 625),14462,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_201920c5c92a.npz,voxel,1
+82323f54bc22,2026-10-23 17:07:13,MONEL400 (Monel 400 Nickel-Copper),22319,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_82323f54bc22.npz,voxel,1
+608d4f66f19d,2026-10-23 17:07:23,IN625 (Inconel 625),22319,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_608d4f66f19d.npz,voxel,1
+6ffe797172e9,2026-10-23 17:07:33,WCB (Carbon Steel Casting),55424,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_6ffe797172e9.npz,voxel,1
+73b469ebd22b,2026-10-23 17:07:43,CA6NM (Cast Steel),55424,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_73b469ebd22b.npz,voxel,1
+2339931ddc74,2026-10-23 17:07:51,WCB (Carbon Steel Casting),18597,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_2339931ddc74.npz,voxel,1
+d8cc0d2f17f6,2026-10-23 17:07:58,C964 (CuNi),18597,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_d8cc0d2f17f6.npz,voxel,1
+821fbe60abfb,2026-10-23 17:08:12,WCB (Carbon Steel Casting),21183,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_821fbe60abfb.npz,voxel,1
+d9b9e64e6827,2026-10-23 17:08:26,C964 (CuNi),21183,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_d9b9e64e6827.npz,voxel,1
+9a8056edfc2e,2026-10-23 17:08:34,C958 (Aluminum Bronze),22806,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_9a8056edfc2e.npz,voxel,1
+2236e0aa9025,2026-10-23 17:08:42,MONEL400 (Monel 400 Nickel-Copper),22806,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_2236e0aa9025.npz,voxel,1
+088e32ed1b68,2026-10-23 17:09:07,C964 (CuNi),38099,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_088e32ed1b68.npz,voxel,1
+7b5858ff4296,2026-10-23 17:09:40,IN625 (Inconel 625),38099,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_7b5858ff4296.npz,voxel,1
+685ff259b20b,2026-10-23 17:09:42,WCB (Carbon Steel Casting),18321,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_685ff259b20b.npz,voxel,1
+194af25ba70a,2026-10-23 17:09:44,IN625 (Inconel 625),18321,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_194af25ba70a.npz,voxel,1
+1fd52daf2298,2026-10-23 17:09:46,WCB (Carbon Steel Casting),19279,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_1fd52daf2298.npz,voxel,1
+6f4c541cac0b,2026-10-23 17:09:49,CA6NM (Cast Steel),19279,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_6f4c541cac0b.npz,voxel,1
+bd136eea983c,2026-10-23 17:09:57,CF8 (Stainless Steel 304),15569,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_bd136eea983c.npz,voxel,1
+7ac48981c15d,2026-10-23 17:10:05,C964 (CuNi),15569,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_7ac48981c15d.npz,voxel,1
+2d8c2ca559aa,2026-10-23 17:10:11,C958 (Aluminum Bronze),21654,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_2d8c2ca559aa.npz,voxel,1
+88735b3966e2,2026-10-23 17:10:16,CA6NM (Cast Steel),21654,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_88735b3966e2.npz,voxel,1
+e24d4ecf5761,2026-10-23 17:10:22,CA6NM (Cast Steel),25200,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_e24d4ecf5761.npz,voxel,1
+3e14ae2632b6,2026-10-23 17:10:29,IN625 (Inconel 625),25200,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_3e14ae2632b6.npz,voxel,1
+f793f086a418,2026-10-23 17:10:36,WCB (Carbon Steel Casting),18169,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_f793f086a418.npz,voxel,1
+ecd638c8ab72,2026-10-23 17:10:44,C964 (CuNi),18169,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_ecd638c8ab72.npz,voxel,1
+6d0ea94c72c5,2026-10-23 17:10:56,CF8 (Stainless Steel 304),20692,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_6d0ea94c72c5.npz,voxel,1
+e5fcdd4518e7,2026-10-23 17:11:05,CA6NM (Cast Steel),20692,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_e5fcdd4518e7.npz,voxel,1
+7515452acb79,2026-10-23 17:11:08,WCB (Carbon Steel Casting),23852,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_7515452acb79.npz,voxel,1
+950b5c79e5da,2026-10-23 17:11:10,CF8 (Stainless Steel 304),23852,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_950b5c79e5da.npz,voxel,1
+659393371ebe,2026-10-23 17:11:13,WCB (Carbon Steel Casting),21874,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_659393371ebe.npz,voxel,1
+826e721a55dc,2026-10-23 17:11:15,CF8 (Stainless Steel 304),21874,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_826e721a55dc.npz,voxel,1
+1439190497e8,2026-10-23 17:11:18,C958 (Aluminum Bronze),19373,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_1439190497e8.npz,voxel,1
+6535d6ed4752,2026-10-23 17:11:20,IN625 (Inconel 625),19373,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_6535d6ed4752.npz,voxel,1
+865ddde0a9a9,2026-10-23 17:11:24,CF8 (Stainless Steel 304),35096,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_865ddde0a9a9.npz,voxel,1
+e54ca0cabe56,2026-10-23 17:11:27,IN625 (Inconel 625),35096,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_e54ca0cabe56.npz,voxel,1
+36e9dcec2425,2026-10-23 17:11:29,MONEL400 (Monel 400 Nickel-Copper),23543,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_36e9dcec2425.npz,voxel,1
+e03ba48e85cf,2026-10-23 17:11:32,IN625 (Inconel 625),23543,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_e03ba48e85cf.npz,voxel,1
+0cceb1299892,2026-10-23 17:11:34,WCB (Carbon Steel Casting),25854,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_0cceb1299892.npz,voxel,1
+e2b27a098b90,2026-10-23 17:11:36,C958 (Aluminum Bronze),25854,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_e2b27a098b90.npz,voxel,1
+90c7ecafa80e,2026-10-23 17:11:38,WCB (Carbon Steel Casting),21591,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_90c7ecafa80e.npz,voxel,1
+2dd62a55f314,2026-10-23 17:11:39,IN625 (Inconel 625),21591,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_2dd62a55f314.npz,voxel,1
+7d8bac2a495f,2026-10-23 17:11:42,WCB (Carbon Steel Casting),23718,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_7d8bac2a495f.npz,voxel,1
+3ae076ad3a29,2026-10-23 17:11:45,C958 (Aluminum Bronze),23718,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_3ae076ad3a29.npz,voxel,1
+712085794ca6,2026-10-23 17:11:57,CF8 (Stainless Steel 304),25129,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_712085794ca6.npz,voxel,1
+3555f7e77f05,2026-10-23 17:12:08,C958 (Aluminum Bronze),25129,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_3555f7e77f05.npz,voxel,1
+ef0471f00d77,2026-10-23 17:12:24,C958 (Aluminum Bronze),53721,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_ef0471f00d77.npz,voxel,1
+1636808d8bc1,2026-10-23 17:12:42,MONEL400 (Monel 400 Nickel-Copper),53721,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_1636808d8bc1.npz,voxel,1
+80b52c9b2aea,2026-10-23 17:12:45,C964 (CuNi),20540,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_80b52c9b2aea.npz,voxel,1
+004295c8f338,2026-10-23 17:12:47,IN625 (Inconel 625),20540,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_004295c8f338.npz,voxel,1
+9ab5adfea613,2026-10-23 17:12:58,WCB (Carbon Steel Casting),20991,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_9ab5adfea613.npz,voxel,1
+826f556c87d2,2026-10-23 17:13:12,MONEL400 (Monel 400 Nickel-Copper),20991,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_826f556c87d2.npz,voxel,1
+b969f42a687a,2026-10-23 17:13:14,C958 (Aluminum Bronze),10067,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_b969f42a687a.npz,voxel,1
+2a1576166157,2026-10-23 17:13:15,CA6NM (Cast Steel),10067,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_2a1576166157.npz,voxel,1
+513567cb857a,2026-10-23 17:13:25,CF8 (Stainless Steel 304),20483,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_513567cb857a.npz,voxel,1
+7a067aeae458,2026-10-23 17:13:36,MONEL400 (Monel 400 Nickel-Copper),20483,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_7a067aeae458.npz,voxel,1
+b8f77f769699,2026-10-23 17:13:41,WCB (Carbon Steel Casting),20502,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_b8f77f769699.npz,voxel,1
+3be5b09e94ac,2026-10-23 17:13:46,C958 (Aluminum Bronze),20502,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_3be5b09e94ac.npz,voxel,1
+aa5cf74ec4d6,2026-10-23 17:13:53,CF8 (Stainless Steel 304),22844,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_aa5cf74ec4d6.npz,voxel,1
+d39056f8b6f1,2026-10-23 17:13:59,CA6NM (Cast Steel),22844,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_d39056f8b6f1.npz,voxel,1
+ae89aadbc7de,2026-10-23 17:14:01,C958 (Aluminum Bronze),20445,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_ae89aadbc7de.npz,voxel,1
+9321074b6e92,2026-10-23 17:14:02,CA6NM (Cast Steel),20445,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_9321074b6e92.npz,voxel,1
+90b36422163e,2026-10-23 17:14:04,WCB (Carbon Steel Casting),22156,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_90b36422163e.npz,voxel,1
+4ee63f5372b7,2026-10-23 17:14:06,C964 (CuNi),22156,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_4ee63f5372b7.npz,voxel,1
+bc41f0ec8d9c,2026-10-23 17:14:13,CA6NM (Cast Steel),22590,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_bc41f0ec8d9c.npz,voxel,1
+90c0a66a161a,2026-10-23 17:14:23,IN625 (Inconel 625),22590,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_90c0a66a161a.npz,voxel,1
+5f34c079c769,2026-10-23 17:14:34,C958 (Aluminum Bronze),21552,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_5f34c079c769.npz,voxel,1
+937fe2d718a0,2026-10-23 17:14:47,IN625 (Inconel 625),21552,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_937fe2d718a0.npz,voxel,1
+35d5710eba42,2026-10-23 17:14:50,C958 (Aluminum Bronze),20718,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_35d5710eba42.npz,voxel,1
+ff38c8d59c88,2026-10-23 17:14:53,MONEL400 (Monel 400 Nickel-Copper),20718,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_ff38c8d59c88.npz,voxel,1
+17816c3d42d3,2026-10-23 17:14:54,C964 (CuNi),9964,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_17816c3d42d3.npz,voxel,1
+6f0b6963e6fa,2026-10-23 17:14:55,IN625 (Inconel 625),9964,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_6f0b6963e6fa.npz,voxel,1
+d0187070b2b8,2026-10-23 17:14:58,CF8 (Stainless Steel 304),21975,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_d0187070b2b8.npz,voxel,1
+05256c93e414,2026-10-23 17:15:00,MONEL400 (Monel 400 Nickel-Copper),21975,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_05256c93e414.npz,voxel,1
+b8071d1c09ad,2026-10-23 17:15:07,C958 (Aluminum Bronze),25754,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_b8071d1c09ad.npz,voxel,1
+63692d1a95b7,2026-10-23 17:15:13,CA6NM (Cast Steel),25754,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_63692d1a95b7.npz,voxel,1
+4e745a07e69a,2026-10-23 17:15:15,C958 (Aluminum Bronze),27228,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_4e745a07e69a.npz,voxel,1
+96877bc7b7a6,2026-10-23 17:15:17,IN625 (Inconel 625),27228,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_96877bc7b7a6.npz,voxel,1
+ae3deb055cea,2026-10-23 17:15:23,WCB (Carbon Steel Casting),13519,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_ae3deb055cea.npz,voxel,1
+7464eb32bd56,2026-10-23 17:15:30,CA6NM (Cast Steel),13519,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_7464eb32bd56.npz,voxel,1
+e3e988e46cb4,2026-10-23 17:15:43,WCB (Carbon Steel Casting),22899,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_e3e988e46cb4.npz,voxel,1
+dde0b575c857,2026-10-23 17:15:59,MONEL400 (Monel 400 Nickel-Copper),22899,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_dde0b575c857.npz,voxel,1
+cd55aea4272a,2026-10-23 17:16:02,WCB (Carbon Steel Casting),21746,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_cd55aea4272a.npz,voxel,1
+6ec4a93d2fdb,2026-10-23 17:16:05,IN625 (Inconel 625),21746,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_6ec4a93d2fdb.npz,voxel,1
+cd274d6e5904,2026-10-23 17:16:19,C958 (Aluminum Bronze),20613,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_cd274d6e5904.npz,voxel,1
+176ed0043e2d,2026-10-23 17:16:33,CA6NM (Cast Steel),20613,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_176ed0043e2d.npz,voxel,1
+b266bfe580ab,2026-10-23 17:16:35,C964 (CuNi),22590,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_b266bfe580ab.npz,voxel,1
+1ecc906726d3,2026-10-23 17:16:38,MONEL400 (Monel 400 Nickel-Copper),22590,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_1ecc906726d3.npz,voxel,1
+0052c897dee3,2026-10-23 17:16:40,CF8 (Stainless Steel 304),18868,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_0052c897dee3.npz,voxel,1
+fb2460343c00,2026-10-23 17:16:42,C964 (CuNi),18868,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_fb2460343c00.npz,voxel,1
+2b6ed2aa0c49,2026-10-23 17:16:54,CF8 (Stainless Steel 304),24436,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_2b6ed2aa0c49.npz,voxel,1
+e776991de74c,2026-10-23 17:17:06,IN625 (Inconel 625),24436,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_e776991de74c.npz,voxel,1
+2464b1558cc0,2026-10-23 17:17:08,CA6NM (Cast Steel),25397,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_2464b1558cc0.npz,voxel,1
+93bb12f5585c,2026-10-23 17:17:09,IN625 (Inconel 625),25397,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_93bb12f5585c.npz,voxel,1
+37703947160b,2026-10-23 17:17:16,CF8 (Stainless Steel 304),27176,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_37703947160b.npz,voxel,1
+590aff6093ef,2026-10-23 17:17:22,MONEL400 (Monel 400 Nickel-Copper),27176,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_590aff6093ef.npz,voxel,1
+d440614ecd17,2026-10-23 17:17:36,CF8 (Stainless Steel 304),21875,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_d440614ecd17.npz,voxel,1
+ae85c48d8b29,2026-10-23 17:17:51,IN625 (Inconel 625),21875,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_ae85c48d8b29.npz,voxel,1
+1cf2abfa4d4a,2026-10-23 17:18:07,CF8 (Stainless Steel 304),22222,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_1cf2abfa4d4a.npz,voxel,1
+86f824a9de9e,2026-10-23 17:18:21,CA6NM (Cast Steel),22222,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_86f824a9de9e.npz,voxel,1
+41080aaef3f6,2026-10-23 17:18:29,CF8 (Stainless Steel 304),23812,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_41080aaef3f6.npz,voxel,1
+7c250565c0a3,2026-10-23 17:18:37,C958 (Aluminum Bronze),23812,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_7c250565c0a3.npz,voxel,1
+b00dffe6a724,2026-10-23 17:18:39,WCB (Carbon Steel Casting),21020,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_b00dffe6a724.npz,voxel,1
+023abc132a48,2026-10-23 17:18:42,IN625 (Inconel 625),21020,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_023abc132a48.npz,voxel,1
+e56abd2981bb,2026-10-23 17:18:59,CF8 (Stainless Steel 304),23187,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_e56abd2981bb.npz,voxel,1
+9db516a96954,2026-10-23 17:19:22,IN625 (Inconel 625),23187,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_9db516a96954.npz,voxel,1
+ecb9f387dc41,2026-10-23 17:19:25,C964 (CuNi),18156,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_ecb9f387dc41.npz,voxel,1
+78d9f0ef127f,2026-10-23 17:19:27,IN625 (Inconel 625),18156,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_78d9f0ef127f.npz,voxel,1
+095ac6684218,2026-10-23 17:19:34,WCB (Carbon Steel Casting),16788,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_095ac6684218.npz,voxel,1
+7a6fdb6817d1,2026-10-23 17:19:42,CA6NM (Cast Steel),16788,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_7a6fdb6817d1.npz,voxel,1
+1ba2c65abe49,2026-10-23 17:19:45,CA6NM (Cast Steel),25124,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_1ba2c65abe49.npz,voxel,1
+c62047804bb2,2026-10-23 17:19:48,MONEL400 (Monel 400 Nickel-Copper),25124,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_c62047804bb2.npz,voxel,1
+5366d1a83087,2026-10-23 17:19:50,WCB (Carbon Steel Casting),23374,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_5366d1a83087.npz,voxel,1
+3b4cf7387012,2026-10-23 17:19:52,MONEL400 (Monel 400 Nickel-Copper),23374,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_3b4cf7387012.npz,voxel,1
+1a8b4d37ddf7,2026-10-23 17:19:55,CF8 (Stainless Steel 304),19467,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_1a8b4d37ddf7.npz,voxel,1
+86d4a2e4c2b8,2026-10-23 17:19:58,C958 (Aluminum Bronze),19467,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_86d4a2e4c2b8.npz,voxel,1
+a066b9210db3,2026-10-23 17:20:16,WCB (Carbon Steel Casting),22655,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_a066b9210db3.npz,voxel,1
+fee8d8199700,2026-10-23 17:20:38,IN625 (Inconel 625),22655,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_fee8d8199700.npz,voxel,1
+628dc5a028d9,2026-10-23 17:20:53,WCB (Carbon Steel Casting),20912,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_628dc5a028d9.npz,voxel,1
+3f6754d38317,2026-10-23 17:21:07,CA6NM (Cast Steel),20912,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_3f6754d38317.npz,voxel,1
+ff77f581fe47,2026-10-23 17:21:22,WCB (Carbon Steel Casting),21502,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_ff77f581fe47.npz,voxel,1
+019f9038661a,2026-10-23 17:21:36,C958 (Aluminum Bronze),21502,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_019f9038661a.npz,voxel,1
+9833658fe8bf,2026-10-23 17:21:38,CF8 (Stainless Steel 304),20586,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_9833658fe8bf.npz,voxel,1
+bb0f4b195d89,2026-10-23 17:21:41,IN625 (Inconel 625),20586,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_bb0f4b195d89.npz,voxel,1
+4930b05b5316,2026-10-23 17:21:43,C958 (Aluminum Bronze),19964,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_4930b05b5316.npz,voxel,1
+3236d9d8c8ac,2026-10-23 17:21:45,IN625 (Inconel 625),19964,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_3236d9d8c8ac.npz,voxel,1
+61960cabe2b5,2026-10-23 17:21:56,MONEL400 (Monel 400 Nickel-Copper),23355,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_61960cabe2b5.npz,voxel,1
+568dd7104d33,2026-10-23 17:22:08,IN625 (Inconel 625),23355,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_568dd7104d33.npz,voxel,1
+24c6877471ef,2026-10-23 17:22:10,C964 (CuNi),24722,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_24c6877471ef.npz,voxel,1
+54592a04cd53,2026-10-23 17:22:12,CA6NM (Cast Steel),24722,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_54592a04cd53.npz,voxel,1
+6247350e4c7a,2026-10-23 17:22:19,CF8 (Stainless Steel 304),18237,64,/Users/brendonjarett/Desktop/Active Codebase/solidus-pro/data/surrogate_dataset/run_6247350e4c7a.npz,voxel,1

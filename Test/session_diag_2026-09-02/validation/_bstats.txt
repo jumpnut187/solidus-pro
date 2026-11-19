@@ -1,0 +1,26 @@
+last step 20192 rows 41
+  wet_cells          last=       26437 max=26437 min=884
+  fluid_cells        last=       20033 max=20033 min=678
+  iface_cells        last=        6404 max=8328 min=206
+  wet_mass           last=         nan max=22619.8 min=766.386
+  max_abs_u          last= 6.52986e+16 max=6.52986e+16 min=0.0158972
+  eps_min            last=         nan max=0.000484281 min=-0.824423
+  eps_max            last=         nan max=1.033 min=1.00148
+  eps_fluid_min      last=         nan max=0.991019 min=0.00118362
+  eps_fluid_max      last=         nan max=1.033 min=1.00148
+  eps_filter_max     last=         nan max=1.00793 min=1.00292
+  eps_filternb_max   last=         nan max=1.00793 min=0.93038
+  neg_f              last=        3812 max=3812 min=0
+  neg_cells          last=         739 max=739 min=0
+  min_temp           last= -1.1328e+07 max=1619.1 min=-1.1328e+07
+  nonfinite          last=           1 max=1 min=0
+  u_p99              last=     1.00733 max=1.00733 min=0.0139572
+  u_med              last=  0.00727654 max=0.0199688 min=0.00640629
+
+riser wet z profile, last row:
+   {}
+all parts, last row:
+   sprue      z15-94 n10501
+   runner     z17-33 n10634
+   filter     z15-33 n4583
+   cast       z15-89 n719

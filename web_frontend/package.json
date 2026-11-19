@@ -1,0 +1,35 @@
+{
+  "name": "solidus-web-fork",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 5175",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
+    "preview": "vite preview --host 0.0.0.0 --port 4175",
+    "check:kernel": "esbuild tests/kernel.check.ts --bundle --platform=node --format=esm --external:manifold-3d --outfile=tests/.kernel.check.mjs --log-level=warning && node tests/.kernel.check.mjs",
+    "check:orientation": "esbuild tests/orientation.check.ts --bundle --platform=node --format=esm --outfile=tests/.orientation.check.mjs --log-level=warning && node tests/.orientation.check.mjs"
+  },
+  "dependencies": {
+    "@babylonjs/core": "^8.38.0",
+    "lucide-react": "^0.468.0",
+    "manifold-3d": "^3.5.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@eslint/js": "^9.17.0",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "eslint": "^9.17.0",
+    "eslint-plugin-react-hooks": "^5.1.0",
+    "eslint-plugin-react-refresh": "^0.4.16",
+    "typescript": "~5.7.2",
+    "typescript-eslint": "^8.18.2",
+    "vite": "^6.0.5"
+  }
+}

@@ -1,0 +1,206 @@
+{
+  "voxel_size_in": 0.25,
+  "fill_grid_coarsening": 1,
+  "max_fill_time_s_cap": 30.0,
+  "alloy": "WCB",
+  "step_files": [
+    "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/Test_Model/Filling_Test/Feeding Distance Test - Casting.step",
+    "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/Test_Model/Filling_Test/Feeding Distance Test - Chill.step",
+    "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/Test_Model/Filling_Test/Feeding Distance Test - Down Sprue.step",
+    "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/Test_Model/Filling_Test/Feeding Distance Test - Gate.step",
+    "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/Test_Model/Filling_Test/Feeding Distance Test - Riser (1).step",
+    "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/Test_Model/Filling_Test/Feeding Distance Test - Riser.step",
+    "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/Test_Model/Filling_Test/Feeding Distance Test - Runner well.step",
+    "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim/Test_Model/Filling_Test/Feeding Distance Test - Runner.step"
+  ],
+  "loaded_parts": {
+    "Casting": "cast",
+    "Chill": "chill",
+    "Down Sprue": "sprue",
+    "Gate": "gate",
+    "Riser": "riser",
+    "Riser_1": "riser",
+    "Runner well": "runner",
+    "Runner": "runner"
+  },
+  "part_type_counts": {
+    "CAST": 1,
+    "CHILL": 1,
+    "SPRUE": 1,
+    "GATE": 1,
+    "RUNNER": 2,
+    "RISER": 2
+  },
+  "pour_location_point_in": [
+    -9.419826054794342,
+    -5.250002826552093,
+    9.435005007642507
+  ],
+  "gate_checks": {
+    "initial_disabled": true,
+    "initial_filling_false": true,
+    "enabled_after_set": true,
+    "filling_true_after_check_and_apply": true,
+    "disabled_after_clear": true,
+    "filling_false_after_clear": true
+  },
+  "analysis_options": {
+    "shrinkage": true,
+    "hotspot": true,
+    "niyama": false,
+    "hot_tear": false,
+    "sand_burn_in": false,
+    "gas_porosity": false,
+    "fraction_liquid": true,
+    "filling": true,
+    "feeding_path": false,
+    "stress_analysis": false,
+    "microstructure": false,
+    "sand_restraint_index": 0.5
+  },
+  "pipeline_success": true,
+  "pipeline_status": "completed",
+  "wall_seconds": 783.3,
+  "progress_message_count": 12,
+  "filling_progress_message_count": 5,
+  "filling_progress_messages_sample": [
+    "Filling: 16,494 cells at 6.3 mm (coarsening x1), up to 262,609 steps",
+    "Filling: 1,697/16,494 cells (10%) at 1.50 s",
+    "Filling: 4,720/16,494 cells (29%) at 3.00 s",
+    "Filling: 4,720/16,494 cells (29%) at 3.00 s",
+    "Filling: 16,494/16,494 cells (100%) at 4.50 s",
+    "Filling: seeded initial temperature from the fill (16,494 voxels filled, 0 misrun, 100% of the metal) in 4.50 s of pour"
+  ],
+  "fill_time_present_in_visualization_data": true,
+  "fill_stats": {
+    "inlet_voxel_count": 13,
+    "filled_voxel_count": 16494,
+    "misrun_voxel_count": 0,
+    "filled_fraction_pct": 100.0,
+    "fill_seconds_simulated": 4.5,
+    "steps": 39390,
+    "max_fill_time_s_cap": 30.0,
+    "hit_time_cap": false,
+    "entrapped_voxel_count": 0,
+    "cold_shut_voxel_count": 0,
+    "warnings": []
+  },
+  "time_slider_visible": true,
+  "ui_label_at_zero": "0.00s - 13 filled, 0 never fill",
+  "ui_label_misrun_count": 0,
+  "non_metal_voxel_count": 1485,
+  "stage_misrun_voxel_count": 0,
+  "fill_time_range_s": [
+    0.0,
+    4.005650043487549
+  ],
+  "fill_time_sweep": [
+    {
+      "slider_value": 0,
+      "time_s": 0.0,
+      "displayed_voxel_count": 13,
+      "expected_voxel_count": 13,
+      "misrun_count_ground_truth": 0
+    },
+    {
+      "slider_value": 100,
+      "time_s": 0.4006,
+      "displayed_voxel_count": 663,
+      "expected_voxel_count": 663,
+      "misrun_count_ground_truth": 0
+    },
+    {
+      "slider_value": 200,
+      "time_s": 0.8011,
+      "displayed_voxel_count": 1650,
+      "expected_voxel_count": 1650,
+      "misrun_count_ground_truth": 0
+    },
+    {
+      "slider_value": 300,
+      "time_s": 1.2017,
+      "displayed_voxel_count": 2625,
+      "expected_voxel_count": 2625,
+      "misrun_count_ground_truth": 0
+    },
+    {
+      "slider_value": 400,
+      "time_s": 1.6023,
+      "displayed_voxel_count": 3136,
+      "expected_voxel_count": 3136,
+      "misrun_count_ground_truth": 0
+    },
+    {
+      "slider_value": 500,
+      "time_s": 2.0028,
+      "displayed_voxel_count": 3597,
+      "expected_voxel_count": 3597,
+      "misrun_count_ground_truth": 0
+    },
+    {
+      "slider_value": 600,
+      "time_s": 2.4034,
+      "displayed_voxel_count": 4118,
+      "expected_voxel_count": 4118,
+      "misrun_count_ground_truth": 0
+    },
+    {
+      "slider_value": 700,
+      "time_s": 2.804,
+      "displayed_voxel_count": 4843,
+      "expected_voxel_count": 4843,
+      "misrun_count_ground_truth": 0
+    },
+    {
+      "slider_value": 800,
+      "time_s": 3.2045,
+      "displayed_voxel_count": 5710,
+      "expected_voxel_count": 5710,
+      "misrun_count_ground_truth": 0
+    },
+    {
+      "slider_value": 900,
+      "time_s": 3.6051,
+      "displayed_voxel_count": 6794,
+      "expected_voxel_count": 6794,
+      "misrun_count_ground_truth": 0
+    },
+    {
+      "slider_value": 1000,
+      "time_s": 4.0057,
+      "displayed_voxel_count": 16494,
+      "expected_voxel_count": 16494,
+      "misrun_count_ground_truth": 0
+    }
+  ],
+  "png_frames": [
+    "/private/tmp/claude-501/-Users-brendonjarett-Desktop-Active-Codebase-Python-Cast-Sim/69e56bde-743d-49e7-914a-e55c1dae405e/tmp/fill_frame_slider_0000.png",
+    "/private/tmp/claude-501/-Users-brendonjarett-Desktop-Active-Codebase-Python-Cast-Sim/69e56bde-743d-49e7-914a-e55c1dae405e/tmp/fill_frame_slider_0200.png",
+    "/private/tmp/claude-501/-Users-brendonjarett-Desktop-Active-Codebase-Python-Cast-Sim/69e56bde-743d-49e7-914a-e55c1dae405e/tmp/fill_frame_slider_0400.png",
+    "/private/tmp/claude-501/-Users-brendonjarett-Desktop-Active-Codebase-Python-Cast-Sim/69e56bde-743d-49e7-914a-e55c1dae405e/tmp/fill_frame_slider_0600.png",
+    "/private/tmp/claude-501/-Users-brendonjarett-Desktop-Active-Codebase-Python-Cast-Sim/69e56bde-743d-49e7-914a-e55c1dae405e/tmp/fill_frame_slider_0800.png",
+    "/private/tmp/claude-501/-Users-brendonjarett-Desktop-Active-Codebase-Python-Cast-Sim/69e56bde-743d-49e7-914a-e55c1dae405e/tmp/fill_frame_slider_1000.png"
+  ],
+  "vtk_offscreen_rendering_worked": true,
+  "animation_sweep_counts": [
+    13,
+    663,
+    1650,
+    2625,
+    3136,
+    3597,
+    4118,
+    4843,
+    5710,
+    6794,
+    16494
+  ],
+  "animation_monotonic": true,
+  "animation_strictly_increases": true,
+  "displayed_matches_expected_exactly": true,
+  "misrun_voxels_always_visible": true,
+  "problems": [
+    "PROBLEM #1 (environment, worked around in this harness only): constructing a real QVTKRenderWindowInteractor under QT_QPA_PLATFORM=offscreen segfaults (SetWindowInfo(winId()) dereferences a native NSView handle the offscreen Qt platform plugin never creates). Worked around by swapping in a bare off-screen vtkRenderWindow (SetOffScreenRendering) + vtkGenericRenderWindowInteractor before constructing MainWindow; no repo code was changed.",
+    "NOTE (harness accommodation, not an app bug): part_assignment_mode forced to 'sequential' because this script has no __main__ guard for multiprocessing spawn (main.py, the real entry point, has one)."
+  ]
+}

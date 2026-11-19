@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "description": "Internal benchmark case pack for porosity/shrinkage calibration gates. Re-baselined 2026-08-14 (2nd pass) after the conservative two-point-flux fix and mold-penetration boundary: solidification times are physical (~100-400 s); the graphite chill now cuts chill-side solidification time to ~40% of baseline and reduces side porosity; riser posts carry less porosity than riser bodies.",
+  "cases": [
+    {
+      "id": "baseline_block_2in",
+      "builder": "single_block_2in",
+      "reference_id": "baseline_block_2in",
+      "acceptance": {
+        "cast_shrinkage_mean_max": 0.25,
+        "cast_porosity_mean_max": 0.25
+      }
+    },
+    {
+      "id": "riser_post_block",
+      "builder": "cast_with_riser_post",
+      "reference_id": "riser_post_block",
+      "compare_to": "baseline_block_2in",
+      "acceptance": {
+        "cast_shrinkage_mean_ratio_max": 0.8,
+        "post_porosity_to_riser_ratio_max": 1.7
+      },
+      "notes": "post_porosity_to_riser_ratio_max 1.70 re-checked 2026-08-14 (2nd pass): measured ~0.47 after the conservative flux fix (riser body now holds the porosity; the post/neck stays feedable). Threshold remains a loose upper bound."
+    },
+    {
+      "id": "chill_block",
+      "builder": "cast_with_chill",
+      "reference_id": "chill_block",
+      "compare_to": "baseline_block_2in",
+      "acceptance": {
+        "side_porosity_ratio_max": 0.9,
+        "side_solidification_time_ratio_max": 1.05
+      },
+      "notes": "side_solidification_time_ratio_max 1.05 re-checked 2026-08-14 (2nd pass): measured ~0.40 after the conservative flux fix (chill now accelerates the chill side). side_porosity_ratio measured ~0.70. Both gates enforce the chill benefit."
+    },
+    {
+      "id": "dual_riser_block",
+      "builder": "cast_with_two_risers",
+      "reference_id": "dual_riser_block",
+      "compare_to": "baseline_block_2in",
+      "acceptance": {
+        "cast_shrinkage_mean_ratio_max": 0.95
+      },
+      "notes": "cast_shrinkage_mean_ratio_max 0.95 re-checked 2026-08-14 (2nd pass): measured ~0.56 after the conservative flux fix. Two risers still reduce cast shrinkage. Case is flaky (trimesh SIGTRAP, pre-existing)."
+    }
+  ]
+}

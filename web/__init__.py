@@ -1,0 +1,2 @@
+"""React/Babylon web application."""
+

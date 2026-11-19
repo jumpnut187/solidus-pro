@@ -1,0 +1,63 @@
+{
+  "name": "Trained Linear Surrogate",
+  "version": "1.0.0",
+  "kind": "numpy_weights",
+  "backend": "numpy",
+  "grid_resolution": 16,
+  "part_type_divisor": 3.0,
+  "channels": [
+    "occupancy",
+    "part_type",
+    "surface_distance",
+    "local_modulus",
+    "normalized_height",
+    "chill_boost",
+    "riser_slowdown"
+  ],
+  "outputs": [
+    "solidification_start_times",
+    "solidification_end_times",
+    "local_solidification_time"
+  ],
+  "alloy_features": [],
+  "config_features": [],
+  "supported_analyses": [
+    "shrinkage",
+    "porosity",
+    "hotspot",
+    "niyama",
+    "sand_burn_in",
+    "gas_porosity",
+    "fraction_liquid",
+    "chvorinov"
+  ],
+  "alloy_coverage": [
+    "C958 (Aluminum Bronze)",
+    "C964 (CuNi)",
+    "CA6NM (Cast Steel)",
+    "CF8 (Stainless Steel 304)",
+    "IN625 (Inconel 625)",
+    "MONEL400 (Monel 400 Nickel-Copper)",
+    "WCB (Carbon Steel Casting)"
+  ],
+  "accuracy": {
+    "rmse_s": 27.27,
+    "mae_s": 21.74,
+    "max_error_s": 157.81,
+    "end_rmse_s": 27.27,
+    "end_mae_s": 21.74,
+    "baseline_rmse_s": 69.71,
+    "skill": 0.609,
+    "confidence": 0.609,
+    "evaluation": "geometry-grouped holdout; active non-chill cells with reference end > 0",
+    "train_records": 59,
+    "val_records": 21,
+    "train_groups": 11,
+    "val_groups": 3,
+    "val_cells": 19516
+  },
+  "trained_on": "2026-10-22",
+  "units": "inches/seconds/celsius",
+  "notes": "Linear-log ridge least-squares surrogate (end and local-time heads) fit on captured runs, split by geometry group. Upgrade path: torch 3D U-Net + FiLM for higher fidelity.",
+  "artifact_path": ""
+}

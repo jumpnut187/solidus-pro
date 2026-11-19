@@ -1,0 +1,616 @@
+import { useEffect, useId, useRef, useState } from 'react';
+import { ChevronLeft, ChevronRight, FlipHorizontal, Info, Maximize2, Ruler } from 'lucide-react';
+
+import { CollapsibleGroup, Group } from './SetupPanel';
+import { COLORMAPS, defaultColormapForMode, gradientCss, isDefaultColormapFor } from '../lib/colormaps';
+import { formatCount, formatNumber } from '../lib/format';
+import { buildStatGroups } from '../lib/statLabels';
+import {
+  COLORMAP_IDS,
+  DEFAULT_THRESHOLD,
+  RESULT_MODE_HELP,
+  RESULT_MODE_LABELS,
+  RESULT_MODE_UNITS,
+  isSweepMode,
+  isTimeMode,
+  type ColormapId,
+  type GridMeta,
+  type MeasureResult,
+  type ResultModeId,
+  type ResultViewState,
+  type SectionAxisState,
+  type SectionState
+} from '../lib/viewState';
+import type { ResultSectionId } from '../lib/uiPrefs';
+
+export type ResultsPanelProps = {
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
+  sectionsCollapsed: Record<ResultSectionId, boolean>;
+  onSectionToggle: (id: ResultSectionId, collapsed: boolean) => void;
+  view: ResultViewState;
+  onViewChange: (patch: Partial<ResultViewState>) => void;
+  meta: GridMeta | null;
+  resultsAvailable: boolean;
+  measurement: MeasureResult | null;
+  onClearMeasurements: () => void;
+  /** Volume above the current threshold, from the viewport handle. */
+  defectVolumeIn3: number | null;
+  onRecomputeDefectVolume: () => void;
+  onOpenStatistics: () => void;
+};
+
+/** Result modes grouped the way a foundry engineer looks for them. */
+const MODE_GROUPS: { label: string; modes: ResultModeId[] }[] = [
+  {
+    label: 'Solidification',
+    modes: ['fraction_liquid', 'solidification_time', 'hotspot', 'feed_modulus']
+  },
+  {
+    label: 'Feeding and Defects',
+    modes: ['shrinkage', 'porosity', 'niyama', 'niyama_raw', 'combined_feed_risk', 'feeding_quality', 'hot_tear']
+  },
+  {
+    label: 'Filling',
+    modes: ['fill_time', 'fill_animation', 'gas_generation', 'gas_entrapment', 'gas_porosity', 'sand_burn_in']
+  },
+  { label: 'Stress', modes: ['thermal_stress', 'distortion', 'crack_susceptibility'] },
+  { label: 'Microstructure', modes: ['sdas', 'predicted_uts'] }
+];
+
+/**
+ * Info button beside the result selector: a popover with the selected
+ * result's help text (core/result_help.json, shared with the desktop).
+ * Closes on Escape, on a click outside, and when the mode changes.
+ */
+function ResultHelpButton({ mode }: { mode: ResultModeId }) {
+  const [open, setOpen] = useState(false);
+  const anchorRef = useRef<HTMLDivElement | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const popoverId = useId();
+  const label = RESULT_MODE_LABELS[mode];
+
+  useEffect(() => setOpen(false), [mode]);
+
+  useEffect(() => {
+    if (!open) return;
+    function onPointerDown(event: MouseEvent) {
+      if (!anchorRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        event.stopPropagation();
+        setOpen(false);
+        buttonRef.current?.focus();
+      }
+    }
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown, true);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown, true);
+    };
+  }, [open]);
+
+  return (
+    <div className="result-help-anchor" ref={anchorRef}>
+      <button
+        ref={buttonRef}
+        type="button"
+        className="btn btn-ghost btn-icon"
+        aria-label={`About ${label}`}
+        aria-expanded={open}
+        aria-controls={open ? popoverId : undefined}
+        aria-describedby={open ? popoverId : undefined}
+        title={`About ${label}`}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <Info size={14} />
+      </button>
+      {open ? (
+        <div id={popoverId} className="result-help-pop" role="tooltip">
+          <p className="result-help-title">{label}</p>
+          <p className="result-help-body">{RESULT_MODE_HELP[mode]}</p>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function ResultsPanel(props: ResultsPanelProps) {
+  const {
+    collapsed,
+    onToggleCollapsed,
+    sectionsCollapsed,
+    onSectionToggle,
+    view,
+    onViewChange,
+    meta,
+    resultsAvailable,
+    measurement,
+    onClearMeasurements,
+    defectVolumeIn3,
+    onRecomputeDefectVolume,
+    onOpenStatistics
+  } = props;
+  // Before the collapsed early return: hooks run on every render.
+  const resultHelpId = useId();
+
+  if (collapsed) {
+    return (
+      <aside className="results-panel is-collapsed" aria-label="Results (collapsed)">
+        <button
+          type="button"
+          className="btn btn-ghost btn-icon"
+          onClick={onToggleCollapsed}
+          aria-label="Expand results panel"
+          title="Expand results panel"
+        >
+          <ChevronLeft size={15} />
+        </button>
+        <span className="results-collapsed-label">Results</span>
+      </aside>
+    );
+  }
+
+  const available = new Set(meta?.modes ?? []);
+  const emptyModes = new Set(meta?.emptyModes ?? []);
+  // A constant field is a result, not an absence: the mode stays selectable
+  // and says so, rather than being greyed out as if the analysis had not run.
+  const constantModes = new Set(meta?.constantModes ?? []);
+  const range = meta?.ranges[view.mode];
+  const unit = meta?.units?.[view.mode] ?? RESULT_MODE_UNITS[view.mode] ?? '';
+  // A sweep has a time axis but no threshold: the scrubber *is* the cut-off,
+  // so the envelope slider would be a second control fighting the first.
+  const timeMode = isTimeMode(view.mode) || isSweepMode(view.mode);
+  const autoScale = view.scaleMin === null && view.scaleMax === null;
+  const enabledAxes = (['x', 'y', 'z'] as const).filter((axis) => view.section[axis].enabled);
+  const section = (id: ResultSectionId) => ({
+    id,
+    collapsed: sectionsCollapsed[id],
+    onToggle: (next: boolean) => onSectionToggle(id, next)
+  });
+  const patchSection = (patch: Partial<SectionState>) =>
+    onViewChange({ section: { ...view.section, ...patch } });
+
+  return (
+    <aside className="results-panel" aria-label="Results">
+      <header className="panel-head">
+        <h2 className="panel-title">Results</h2>
+        <div className="spacer" />
+        <button
+          type="button"
+          className="btn btn-ghost btn-icon"
+          onClick={onToggleCollapsed}
+          aria-label="Collapse results panel"
+          title="Collapse results panel"
+        >
+          <ChevronRight size={15} />
+        </button>
+      </header>
+
+      <div className="panel-body">
+        {!resultsAvailable ? (
+          <p className="results-empty">
+            No results yet. Run a simulation and the field, threshold, scale and section controls appear here.
+            Tools, views and projection are on the toolbar above the canvas.
+          </p>
+        ) : (
+          <>
+            <CollapsibleGroup title="Field" summary={RESULT_MODE_LABELS[view.mode]} {...section('field')}>
+              <div className="result-type-row">
+                <label className="field">
+                  <span className="visually-hidden">Result type</span>
+                  <select
+                    className="select"
+                    value={view.mode}
+                    aria-describedby={resultHelpId}
+                    onChange={(event) => {
+                      const mode = event.target.value as ResultModeId;
+                      onViewChange({
+                        mode,
+                        threshold: DEFAULT_THRESHOLD[mode],
+                        scaleMin: null,
+                        scaleMax: null,
+                        playing: false,
+                        timePercent: 0,
+                        // Follow the new mode's default map, but only while the
+                        // one on screen is still the old mode's default. A map
+                        // the user picked on purpose survives the switch.
+                        colormap: isDefaultColormapFor(view.mode, view.colormap)
+                          ? defaultColormapForMode(mode)
+                          : view.colormap
+                      });
+                    }}
+                  >
+                    {MODE_GROUPS.map((group) => (
+                      <optgroup key={group.label} label={group.label}>
+                        {group.modes.map((mode) => (
+                          <option
+                            key={mode}
+                            value={mode}
+                            disabled={!available.has(mode)}
+                            title={RESULT_MODE_HELP[mode]}
+                          >
+                            {RESULT_MODE_LABELS[mode]}
+                            {available.has(mode)
+                              ? constantModes.has(mode)
+                                ? ' — one value everywhere'
+                                : ''
+                              : emptyModes.has(mode)
+                                ? ' — no signal'
+                                : ' — not in this run'}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </select>
+                </label>
+                <ResultHelpButton mode={view.mode} />
+              </div>
+              <span id={resultHelpId} className="visually-hidden">
+                {RESULT_MODE_HELP[view.mode]}
+              </span>
+
+              {available.has(view.mode) && constantModes.has(view.mode) ? (
+                <p className="status-note status-note-info">
+                  This field is the same value everywhere in the casting, so it paints one flat colour and
+                  the envelope is all-or-nothing. The analysis ran; it simply found no variation.
+                </p>
+              ) : null}
+
+              <div className="colormap-row">
+                <span
+                  className="colormap-preview"
+                  style={{ background: gradientCss(view.colormap) }}
+                  aria-hidden="true"
+                />
+                <select
+                  className="select"
+                  value={view.colormap}
+                  aria-label="Colormap"
+                  onChange={(event) => onViewChange({ colormap: event.target.value as ColormapId })}
+                >
+                  {COLORMAP_IDS.map((id) => (
+                    <option key={id} value={id}>
+                      {COLORMAPS[id].name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </CollapsibleGroup>
+
+            {!timeMode ? (
+              <CollapsibleGroup
+                title="Threshold"
+                summary={`${view.threshold.toFixed(0)}%`}
+                {...section('threshold')}
+              >
+                <div className="field">
+                  <span className="field-label">
+                    Envelope threshold
+                    <span className="field-unit">{view.threshold.toFixed(0)}%</span>
+                  </span>
+                  <div className="range-marked">
+                    <input
+                      type="range"
+                      className="range"
+                      min={1}
+                      max={100}
+                      step={1}
+                      value={view.threshold}
+                      aria-label="Envelope threshold"
+                      onChange={(event) => onViewChange({ threshold: Number(event.target.value) })}
+                    />
+                    <span
+                      className="range-tick"
+                      style={{ left: `${DEFAULT_THRESHOLD[view.mode]}%` }}
+                      title={`Recommended: ${DEFAULT_THRESHOLD[view.mode]}%`}
+                    />
+                  </div>
+                  <span className="field-hint">
+                    Recommended for {RESULT_MODE_LABELS[view.mode]}: {DEFAULT_THRESHOLD[view.mode]}%.
+                    {' The envelope encloses everything at or above this value.'}
+                  </span>
+                </div>
+
+                <div className="row">
+                  <button type="button" className="btn btn-sm" onClick={onRecomputeDefectVolume}>
+                    Calculate defect volume
+                  </button>
+                  {defectVolumeIn3 !== null ? (
+                    <span className="chip chip-accent mono">{formatNumber(defectVolumeIn3, 3)} in³</span>
+                  ) : null}
+                </div>
+                <span className="field-hint">
+                  Volume of metal above the threshold, counted on the lattice — independent of the camera and
+                  of what is hidden.
+                </span>
+              </CollapsibleGroup>
+            ) : null}
+
+            <CollapsibleGroup
+              title="Scale"
+              summary={autoScale ? 'Auto' : `${formatNumber(view.scaleMin ?? 0, 2)} to ${formatNumber(view.scaleMax ?? 1, 2)}`}
+              {...section('scale')}
+            >
+              <div className="scale-row">
+                <label className="field">
+                  <span className="field-label">Min</span>
+                  <input
+                    type="number"
+                    className="input input-num"
+                    value={view.scaleMin ?? (range ? Number(range.min.toFixed(4)) : 0)}
+                    disabled={autoScale}
+                    onChange={(event) => onViewChange({ scaleMin: Number(event.target.value) })}
+                  />
+                </label>
+                <label className="field">
+                  <span className="field-label">Max</span>
+                  <input
+                    type="number"
+                    className="input input-num"
+                    value={view.scaleMax ?? (range ? Number(range.max.toFixed(4)) : 1)}
+                    disabled={autoScale}
+                    onChange={(event) => onViewChange({ scaleMax: Number(event.target.value) })}
+                  />
+                </label>
+                <label className="check" title="Take the scale bounds from the loaded field">
+                  <input
+                    type="checkbox"
+                    checked={autoScale}
+                    onChange={(event) =>
+                      onViewChange(
+                        event.target.checked
+                          ? { scaleMin: null, scaleMax: null }
+                          : {
+                              scaleMin: range ? Number(range.min.toFixed(4)) : 0,
+                              scaleMax: range ? Number(range.max.toFixed(4)) : 1
+                            }
+                      )
+                    }
+                  />
+                  <span className="check-body">
+                    <span>Auto</span>
+                  </span>
+                </label>
+              </div>
+              {range ? (
+                <span className="field-hint mono">
+                  Field range {formatNumber(range.min, 3)} to {formatNumber(range.max, 3)}
+                  {unit ? ` ${unit}` : ''} (mean {formatNumber(range.mean, 3)})
+                </span>
+              ) : null}
+            </CollapsibleGroup>
+
+            <CollapsibleGroup
+              title="Section"
+              summary={enabledAxes.length ? enabledAxes.join(', ').toUpperCase() : 'Off'}
+              {...section('section')}
+            >
+              {(['x', 'y', 'z'] as const).map((axis) => (
+                <AxisRow
+                  key={axis}
+                  axis={axis}
+                  state={view.section[axis]}
+                  onChange={(patch) => patchSection({ [axis]: { ...view.section[axis], ...patch } })}
+                />
+              ))}
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={view.section.caps}
+                  onChange={(event) => patchSection({ caps: event.target.checked })}
+                />
+                <span className="check-body">
+                  <span>Cap cut faces</span>
+                  <span className="check-note">
+                    Paint the interior field on the cut instead of leaving it hollow.
+                  </span>
+                </span>
+              </label>
+            </CollapsibleGroup>
+          </>
+        )}
+
+        <CollapsibleGroup
+          title="Display"
+          summary={`${view.modelOpacity}% opacity`}
+          {...section('display')}
+        >
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={view.showModel}
+              onChange={(event) => onViewChange({ showModel: event.target.checked })}
+            />
+            <span className="check-body">
+              <span>Show model</span>
+            </span>
+          </label>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={view.showResults}
+              onChange={(event) => onViewChange({ showResults: event.target.checked })}
+            />
+            <span className="check-body">
+              <span>Show results</span>
+            </span>
+          </label>
+          <label className="field">
+            <span className="field-label">
+              Model opacity
+              <span className="field-unit">{view.modelOpacity}%</span>
+            </span>
+            <input
+              type="range"
+              className="range"
+              min={0}
+              max={100}
+              step={1}
+              value={view.modelOpacity}
+              aria-label="Model opacity"
+              onChange={(event) => onViewChange({ modelOpacity: Number(event.target.value) })}
+            />
+          </label>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={view.castOnly}
+              onChange={(event) => onViewChange({ castOnly: event.target.checked })}
+            />
+            <span className="check-body">
+              <span>Cast bodies only</span>
+              <span className="check-note">Leave risers, chills and cores unpainted.</span>
+            </span>
+          </label>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={view.showLegend}
+              onChange={(event) => onViewChange({ showLegend: event.target.checked })}
+            />
+            <span className="check-body">
+              <span>Show color bar</span>
+            </span>
+          </label>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={view.showPartingLine}
+              aria-label="Show parting line on results"
+              onChange={(event) => onViewChange({ showPartingLine: event.target.checked })}
+            />
+            <span className="check-body">
+              <span>Show parting line</span>
+              <span className="check-note">Hidden by default. Always shown while Orient is open.</span>
+            </span>
+          </label>
+        </CollapsibleGroup>
+
+        <Group title="Measurement">
+          {measurement ? (
+            <div className="property-sheet">
+              <div className="property-row">
+                <span className="property-label">Distance</span>
+                <span className="property-value">{formatNumber(measurement.distanceIn, 4)} in</span>
+              </div>
+              <div className="property-row">
+                <span className="property-label">From</span>
+                <span className="property-value">
+                  {measurement.start.map((value) => value.toFixed(2)).join(', ')}
+                </span>
+              </div>
+              <div className="property-row">
+                <span className="property-label">To</span>
+                <span className="property-value">
+                  {measurement.end.map((value) => value.toFixed(2)).join(', ')}
+                </span>
+              </div>
+            </div>
+          ) : (
+            <p className="field-hint">
+              <Ruler size={11} style={{ verticalAlign: '-1px', marginRight: 4 }} />
+              Pick the Measure tool on the canvas toolbar, then click two points on the model.
+            </p>
+          )}
+          <button type="button" className="btn btn-sm" onClick={onClearMeasurements} disabled={!measurement}>
+            Clear measurements
+          </button>
+        </Group>
+
+        {resultsAvailable ? (
+          <CollapsibleGroup
+            title="Statistics"
+            summary={meta ? `${formatCount(meta.voxelCount)} voxels` : ''}
+            {...section('statistics')}
+          >
+            <StatisticsSummary meta={meta} />
+            <button type="button" className="btn btn-sm btn-block" onClick={onOpenStatistics}>
+              <Maximize2 size={12} />
+              All statistics
+            </button>
+          </CollapsibleGroup>
+        ) : null}
+      </div>
+    </aside>
+  );
+}
+
+/** The first handful of statistics, enough to judge a run without a dialog. */
+function StatisticsSummary({ meta }: { meta: GridMeta | null }) {
+  if (!meta) return <p className="field-hint">No statistics reported for this run.</p>;
+  const groups = buildStatGroups(meta.stats, {
+    voxelCount: meta.voxelCount,
+    castVoxelCount: meta.castVoxelCount,
+    totalVolumeIn3: meta.totalVolumeIn3,
+    spacing: meta.spacing
+  });
+  const rows = groups.flatMap((group) => group.rows).slice(0, 6);
+  if (!rows.length) return <p className="field-hint">No statistics reported for this run.</p>;
+  return (
+    <div className="property-sheet">
+      {rows.map((row) => (
+        <div className="property-row" key={row.key}>
+          <span className="property-label" title={row.hint}>
+            {row.label}
+          </span>
+          <span className="property-value">{row.value}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AxisRow({
+  axis,
+  state,
+  onChange
+}: {
+  axis: 'x' | 'y' | 'z';
+  state: SectionAxisState;
+  onChange: (patch: Partial<SectionAxisState>) => void;
+}) {
+  return (
+    <div className="axis-row">
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={state.enabled}
+          onChange={(event) => onChange({ enabled: event.target.checked })}
+        />
+        <span className="check-body">
+          <span>{axis.toUpperCase()}</span>
+        </span>
+      </label>
+      <input
+        type="range"
+        className="range"
+        min={0}
+        max={100}
+        step={1}
+        value={state.position}
+        disabled={!state.enabled}
+        aria-label={`Section ${axis.toUpperCase()} position`}
+        onChange={(event) => onChange({ position: Number(event.target.value) })}
+      />
+      <button
+        type="button"
+        className="btn btn-sm btn-icon"
+        aria-pressed={state.flip}
+        disabled={!state.enabled}
+        title={`Keep the ${state.flip ? 'far' : 'near'} side of the ${axis.toUpperCase()} cut`}
+        aria-label={`Flip ${axis.toUpperCase()} cut direction`}
+        onClick={() => onChange({ flip: !state.flip })}
+        style={
+          state.flip && state.enabled
+            ? { color: 'var(--accent-hover)', borderColor: 'var(--accent-border)' }
+            : undefined
+        }
+      >
+        <FlipHorizontal size={13} />
+      </button>
+    </div>
+  );
+}

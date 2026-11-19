@@ -1,0 +1,5 @@
+# Full install: core runtime + optional deep-learning stack.
+#   pip install -r requirements.txt        everything
+#   pip install -r requirements-core.txt   without torch/coremltools/onnx
+-r requirements-core.txt
+-r requirements-ml.txt

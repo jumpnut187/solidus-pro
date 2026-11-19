@@ -1,0 +1,4 @@
+# CI install set: core runtime + CI tooling. Pinned by constraints-ci.txt.
+#   pip install -r requirements-ci.txt -c constraints-ci.txt
+-r requirements-core.txt
+mypy
