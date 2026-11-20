@@ -1,17 +1,4 @@
 #!/usr/bin/env python3
-"""
-Export a trained deep surrogate to an NPU target.
-
-All three artifacts are produced from the same trained weights
-(``models/deep_model/trained``): Core ML for the Apple ANE, ONNX (fp16) for
-Snapdragon QNN, TFLite (int8) for Google Tensor.
-
-Requires torch + the per-target toolchain (see requirements.txt):
-
-    python tools/export_deep_model.py --target coreml
-    python tools/export_deep_model.py --target onnx
-    python tools/export_deep_model.py --target tflite   # needs onnx2tf
-"""
 
 import argparse
 import os
@@ -20,7 +7,6 @@ import sys
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Export the deep surrogate for an NPU target.")
@@ -68,7 +54,6 @@ def main() -> int:
     if result["note"] and result["note"] != TARGET_NOTES[args.target]:
         print(f"  Note: {result['note']}")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

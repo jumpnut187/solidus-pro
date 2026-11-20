@@ -1,48 +1,14 @@
-/**
- * CAD-style shading for a triangle soup: crease-angle normals and feature edges.
- *
- * `VertexData.ComputeNormals` averages every face around a shared vertex. On
- * an STL that is wrong wherever two faces meet at a real edge: the vertex on
- * the rim of a bore is shared by the flat end face and the cylindrical wall,
- * so its normal points half up and half inward, and the long thin fan
- * triangles of the end face interpolate between those tilted rim normals and
- * the OD's. The flat face then shades as a starburst of bright and dark
- * streaks although it is flat.
- *
- * CAD viewers (SolidWorks, Inventor, NX) split the normal at a crease angle:
- * faces within it are smoothed together, faces beyond it keep their own
- * normal, so a cylinder stays round and an edge stays sharp. The same
- * adjacency gives the feature edges those viewers draw in "shaded with
- * edges": every edge whose two faces meet beyond the crease angle, plus any
- * open boundary.
- *
- * Normals point OUT of a counter-clockwise (seen from outside) triangle, the
- * winding STL and STEP use. That is what `ComputeNormals` produces with
- * `useRightHandedSystem: true`, which is how this viewport's right-handed
- * scene computed them before.
- */
-
-/** Faces meeting beyond this angle are a real edge: split normal, draw a line. */
 export const CAD_CREASE_ANGLE_DEG = 30;
 
 export type CreasedGeometry = {
   positions: Float32Array;
   normals: Float32Array;
   indices: Uint32Array;
-  /** Feature-edge segments, two points (six floats) per edge, in the input frame. */
   edgeSegments: Float32Array;
 };
 
 type ArrayLike3 = ArrayLike<number>;
 
-/**
- * Split vertices at the crease angle and collect the feature edges.
- *
- * Each corner's normal is the area-weighted mean of the faces around its
- * vertex that lie within the crease angle of the corner's own face. Corners
- * of one vertex whose normals agree share an output vertex, so a smooth
- * region keeps the input's vertex count and only real edges are duplicated.
- */
 export function buildCreasedGeometry(
   positions: ArrayLike3,
   indices: ArrayLike3,
@@ -52,7 +18,6 @@ export function buildCreasedGeometry(
   const faceCount = Math.floor(indices.length / 3);
   const creaseCos = Math.cos((creaseAngleDeg * Math.PI) / 180);
 
-  // Face normals: unit direction and the area weight (|cross| = 2 * area).
   const faceUnit = new Float64Array(faceCount * 3);
   const faceArea = new Float64Array(faceCount);
   for (let f = 0; f < faceCount; f += 1) {
@@ -77,7 +42,6 @@ export function buildCreasedGeometry(
     }
   }
 
-  // Vertex -> faces, compressed (CSR).
   const degree = new Uint32Array(vertexCount + 1);
   for (let i = 0; i < faceCount * 3; i += 1) degree[indices[i] + 1] += 1;
   for (let v = 0; v < vertexCount; v += 1) degree[v + 1] += degree[v];
@@ -94,7 +58,6 @@ export function buildCreasedGeometry(
   const outPositions: number[] = [];
   const outNormals: number[] = [];
   const outIndices = new Uint32Array(faceCount * 3);
-  // Per input vertex, the output vertices already emitted for it (usually one).
   const emitted: Array<number[] | undefined> = new Array(vertexCount);
 
   for (let f = 0; f < faceCount; f += 1) {
@@ -151,8 +114,6 @@ export function buildCreasedGeometry(
     }
   }
 
-  // Feature edges: undirected edges whose faces meet beyond the crease, plus
-  // open boundaries and non-manifold edges.
   const firstFace = new Map<number, number>();
   const shared = new Map<number, number>();
   const segments: number[] = [];

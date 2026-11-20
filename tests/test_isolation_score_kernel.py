@@ -1,5 +1,3 @@
-"""Tests for the JIT isolation-score kernel."""
-
 from __future__ import annotations
 
 import unittest
@@ -8,14 +6,10 @@ import numpy as np
 
 from core.acceleration import compute_isolation_score_parallel
 
-
 def _all_cast(solid_times: np.ndarray) -> np.ndarray:
-    """Part-type array for a mesh with no chills or cores."""
     return np.zeros(len(solid_times), dtype=np.int32)
 
-
 class ComputeIsolationScoreParallelTests(unittest.TestCase):
-    """Validate the Numba `prange` replacement for the pure-Python loop."""
 
     def test_returns_array_of_correct_shape(self) -> None:
         n_voxels = 1000
@@ -38,9 +32,6 @@ class ComputeIsolationScoreParallelTests(unittest.TestCase):
         self.assertTrue(np.all(result == 0.0))
 
     def test_simple_three_voxel_chain(self) -> None:
-        # Voxel 0 solidifies last, voxel 1 first, voxel 2 never.
-        # Voxel 0 has neighbors [1, 2]. neighbor 1 solidified before, neighbor 2
-        # never solidified (excluded from count), so ratio = 1/2.
         solid_times = np.array([10.0, 5.0, 0.0], dtype=np.float32)
         neighbors = np.array(
             [
@@ -53,26 +44,20 @@ class ComputeIsolationScoreParallelTests(unittest.TestCase):
 
         result = compute_isolation_score_parallel(solid_times, neighbors, _all_cast(solid_times))
 
-        # Voxel 0: neighbors_before=1, total=2 → 0.5
         self.assertAlmostEqual(result[0], 0.5, places=5)
-        # Voxel 1: solidifies first, no earlier neighbor → 0.0
         self.assertAlmostEqual(result[1], 0.0, places=5)
-        # Voxel 2: never solidified → 0.0
         self.assertAlmostEqual(result[2], 0.0, places=5)
 
     def test_full_isolation_when_all_neighbors_solidified_first(self) -> None:
         n_voxels = 10
-        # Voxel 9 solidifies last; all other voxels solidified earlier.
         solid_times = np.full(n_voxels, 1.0, dtype=np.float32)
         solid_times[9] = 100.0
-        # Every other voxel is a neighbor of voxel 9.
         neighbors = np.full((n_voxels, 26), -1, dtype=np.int32)
         for j in range(9):
             neighbors[9, j] = j
 
         result = compute_isolation_score_parallel(solid_times, neighbors, _all_cast(solid_times))
 
-        # Voxel 9 has 9 neighbors, all solidified before → ratio = 1.0
         self.assertAlmostEqual(result[9], 1.0, places=5)
 
     def test_large_random_runs_fast(self) -> None:
@@ -82,7 +67,6 @@ class ComputeIsolationScoreParallelTests(unittest.TestCase):
         solid_times[rng.choice(n_voxels, 5_000, replace=False)] = 0.0
         neighbors = rng.integers(-1, n_voxels, (n_voxels, 26), dtype=np.int32)
 
-        # First call warms the JIT cache; subsequent calls are fast.
         compute_isolation_score_parallel(solid_times, neighbors, _all_cast(solid_times))
 
         import time
@@ -93,13 +77,9 @@ class ComputeIsolationScoreParallelTests(unittest.TestCase):
         elapsed = (time.perf_counter() - t0) / 3.0
 
         self.assertEqual(result.shape, (n_voxels,))
-        # Should be well under a second on any modern CPU; allow generous slack.
         self.assertLess(elapsed, 2.0)
 
     def test_chill_neighbors_are_excluded_from_both_counts(self) -> None:
-        # Voxel 0 freezes last against a chill (voxel 2) and one earlier cast
-        # neighbor (voxel 1). The chill must drop out of the ratio entirely:
-        # 1/1, not 1/2 (diluted) and not 2/2 (chill counted as solid-before).
         solid_times = np.array([10.0, 5.0, 0.0], dtype=np.float32)
         neighbors = np.array(
             [
@@ -132,8 +112,6 @@ class ComputeIsolationScoreParallelTests(unittest.TestCase):
         self.assertAlmostEqual(result[0], 1.0, places=5)
 
     def test_riser_neighbors_still_count(self) -> None:
-        # Risers are metallurgically continuous with the casting - they are a
-        # feed path, so they must stay in the denominator.
         solid_times = np.array([10.0, 5.0, 20.0], dtype=np.float32)
         neighbors = np.array(
             [
@@ -147,7 +125,6 @@ class ComputeIsolationScoreParallelTests(unittest.TestCase):
 
         result = compute_isolation_score_parallel(solid_times, neighbors, part_types)
 
-        # Voxel 0: neighbor 1 froze earlier, riser neighbor 2 froze later -> 1/2
         self.assertAlmostEqual(result[0], 0.5, places=5)
 
     def test_negative_neighbor_indices_are_skipped(self) -> None:
@@ -163,9 +140,7 @@ class ComputeIsolationScoreParallelTests(unittest.TestCase):
 
         result = compute_isolation_score_parallel(solid_times, neighbors, _all_cast(solid_times))
 
-        # No real neighbors → score stays 0.0
         self.assertAlmostEqual(result[0], 0.0, places=5)
-
 
 if __name__ == "__main__":
     unittest.main()

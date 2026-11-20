@@ -8,9 +8,7 @@ from ui.main_window import MainWindow
 from ui.main_window import FRACTION_LIQUID_TIME_SLIDER_MAX
 from ui.main_window import FRACTION_LIQUID_PLAYBACK_SPEEDS
 
-
 class FractionLiquidStateLabelTests(unittest.TestCase):
-    """Tests for MainWindow._get_fraction_liquid_state_label using synthetic arrays."""
 
     def _label(self, array: np.ndarray) -> str:
         return MainWindow._get_fraction_liquid_state_label(array)
@@ -24,7 +22,7 @@ class FractionLiquidStateLabelTests(unittest.TestCase):
         self.assertEqual("Fully Solid", self._label(arr))
 
     def test_none_returns_fully_solid(self) -> None:
-        self.assertEqual("Fully Solid", self._label(None))  # type: ignore[arg-type]
+        self.assertEqual("Fully Solid", self._label(None))
 
     def test_empty_array_returns_fully_solid(self) -> None:
         self.assertEqual("Fully Solid", self._label(np.array([], dtype=np.float32)))
@@ -84,9 +82,7 @@ class FractionLiquidStateLabelTests(unittest.TestCase):
 
         self.assertEqual(20.0, mapped)
 
-
 class FractionLiquidPlaybackTests(unittest.TestCase):
-    """Tests for fraction liquid playback helper methods."""
 
     def test_advance_normal_advance(self) -> None:
         result = MainWindow._advance_fraction_liquid_slider_value(50, 10, 1000)
@@ -159,7 +155,6 @@ class FractionLiquidPlaybackTests(unittest.TestCase):
         self.assertTrue(stop_called)
         self.assertTrue(start_called)
 
-
 class _FakeCombo:
     def __init__(self, data):
         self._data = data
@@ -167,10 +162,8 @@ class _FakeCombo:
     def currentData(self):
         return self._data
 
-
 def _nop():
     pass
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,32 +1,3 @@
-"""FAVOR-style cut cells on the uniform voxel lattice.
-
-A plain voxel is either full metal or absent, so the voxel model carries
-the wrong metal volume and the wrong mold-contact area at curved and oblique
-walls. This module computes, per occupied lattice cell:
-
-- ``metal_fraction`` (phi, in (0, 1]): the fraction of the cube inside the
-  union of the meshed parts. Cells with no part surface inside them are
-  interior and get phi = 1 without sampling. Boundary cells are sampled with
-  ``subsamples`` points of the R3 low-discrepancy sequence. Its projection
-  onto each axis has ``subsamples`` distinct offsets, so an axis-aligned wall
-  (the common CAD case) is resolved to 1/subsamples, where a regular k^3 grid
-  only resolves it to 1/k.
-- ``surface_area`` (in^2): the area of the union's exterior surface inside
-  the cell. Part-to-part interfaces are excluded. Area samples landing in a
-  cell that is not kept go to the nearest kept cell.
-
-Cells that intersect the surface but were not produced by the voxelizer
-(the center-containment path drops every cell whose centre is outside) are
-added, and cells with no metal (phi = 0) are dropped, so the phi-weighted
-volume converges to the CAD volume on both voxelization paths.
-
-:func:`merge_small_cut_cells` then slaves cells below ``phi_min`` to a face
-neighbour of the same part code: the master takes the slave's volume and
-area, the slave keeps zero capacity and copies the master's temperature.
-
-Units: inches throughout (geometry zone, see ``physics/units.py``).
-"""
-
 from __future__ import annotations
 
 import logging
@@ -42,21 +13,10 @@ from scipy.spatial import cKDTree
 
 logger = logging.getLogger(__name__)
 
-#: Sub-points per boundary cell for the metal fraction. Chosen by
-#: measurement (docs/cut_cells.md).
 DEFAULT_SUBSAMPLES = 64
-#: Area-sample spacing as a fraction of the pitch (16 samples per pitch^2).
 DEFAULT_AREA_SAMPLE_SPACING = 0.25
-#: Outward offset (fraction of the pitch) used to decide whether a surface
-#: sample faces sand or another part. Half a pitch, so a CAD clearance gap
-#: narrower than that (which the lattice bridges by conduction anyway) counts
-#: as a part-to-part interface, not mold contact.
 INTERFACE_PROBE_OFFSET = 0.5
-#: Cells below this metal fraction are merged into a face neighbour.
 DEFAULT_PHI_MIN = 0.25
-#: Point x triangle pairs above which ``winding_number_contains`` falls back
-#: to the voxel path's containment check. Measured 1.8e9 pairs/s on 18
-#: cores, so the cap is about 6 s there.
 WINDING_NUMBER_MAX_PAIRS = 10_000_000_000
 
 _POINT_CHUNK = 2_000_000
@@ -65,16 +25,14 @@ _KEY_BASE = 1 << 21
 
 _FACE_SLOTS = 6
 
-
 @dataclass
 class CutCellGeometry:
-    """Cut-cell arrays aligned with ``centers`` (the final voxel list)."""
 
-    centers: np.ndarray  # (N,3) float32, in
-    metal_fractions: np.ndarray  # (N,) float32, phi in (0,1]
-    surface_areas: np.ndarray  # (N,) float32, in^2, exterior union surface
-    sampled: np.ndarray  # (N,) bool, phi came from sub-point sampling
-    part_counts: np.ndarray  # (N, P) uint16, sub-points inside each part (0 when not sampled)
+    centers: np.ndarray
+    metal_fractions: np.ndarray
+    surface_areas: np.ndarray
+    sampled: np.ndarray
+    part_counts: np.ndarray
     pitch: float
     n_input: int = 0
     n_duplicates: int = 0
@@ -82,42 +40,28 @@ class CutCellGeometry:
     n_dropped: int = 0
     timings: Dict[str, float] = field(default_factory=dict)
 
-
 @dataclass
 class CutCellMerge:
-    """Solver-side arrays after merging small cells."""
 
-    capacity_weights: np.ndarray  # (N,) float64, phi_eff (0 for slaves, may exceed 1 for masters)
-    boundary_areas: np.ndarray  # (N,) float64, in^2, area after merging
-    slaves: np.ndarray  # (S,) int64
-    masters: np.ndarray  # (S,) int64
+    capacity_weights: np.ndarray
+    boundary_areas: np.ndarray
+    slaves: np.ndarray
+    masters: np.ndarray
     n_unmerged_small: int = 0
 
-
 def r3_offsets(n: int) -> np.ndarray:
-    """(n,3) points of the R3 Kronecker sequence in [0,1)^3 (Roberts 2018)."""
-    g = 1.22074408460575947536  # root of x^4 = x + 1
+    g = 1.22074408460575947536
     alpha = np.array([1.0 / g, 1.0 / g**2, 1.0 / g**3])
     j = np.arange(1, n + 1, dtype=np.float64)[:, None]
     return np.mod(0.5 + j * alpha[None, :], 1.0)
 
-
 def _r2_offsets(j: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """R2 sequence (u, v) in [0,1)^2 for sample numbers ``j`` >= 1."""
-    g = 1.32471795724474602596  # plastic number
+    g = 1.32471795724474602596
     u = np.mod(0.5 + j / g, 1.0)
     v = np.mod(0.5 + j / (g * g), 1.0)
     return u, v
 
-
 def contains(mesh: trimesh.Trimesh, points: np.ndarray) -> np.ndarray:
-    """Point-in-part test: embree ray test when watertight, winding number otherwise.
-
-    Open meshes are queried in point chunks small enough that every chunk
-    stays under ``WINDING_NUMBER_MAX_PAIRS``, so the winding
-    number is never replaced by the ray test, which is unreliable on open
-    surfaces.
-    """
     if len(points) == 0:
         return np.zeros(0, dtype=bool)
     if mesh.is_watertight:
@@ -130,18 +74,9 @@ def contains(mesh: trimesh.Trimesh, points: np.ndarray) -> np.ndarray:
         inside[start:stop] = np.asarray(winding_number_contains(mesh, points[start:stop]), dtype=bool)
     return inside
 
-
 def winding_number_contains(
     mesh: trimesh.Trimesh, points: np.ndarray, *, near_surface_tol: float = 0.0
 ) -> np.ndarray:
-    """(P,) bool: generalized winding number of ``mesh`` at each point above 0.5.
-
-    Valid for open and non-manifold surfaces, where ``Trimesh.contains`` ray
-    tests are not. Points within ``near_surface_tol`` (inches) of the surface
-    also count as inside. Above ``WINDING_NUMBER_MAX_PAIRS`` point x triangle
-    pairs it logs a warning and returns
-    ``core.voxel_mesh._robust_contains_check_impl(mesh, points, near_surface_tol)``.
-    """
     from core.voxel_mesh import _near_surface_mask, _robust_contains_check_impl
 
     query = np.ascontiguousarray(points, dtype=np.float64).reshape(-1, 3)
@@ -163,13 +98,8 @@ def winding_number_contains(
         inside |= np.asarray(_near_surface_mask(mesh, query, near_surface_tol), dtype=bool)
     return inside
 
-
 @njit(parallel=True, cache=True)
 def _winding_numbers(triangles: np.ndarray, points: np.ndarray) -> np.ndarray:
-    """(P,) generalized winding numbers: sum of signed triangle solid angles / 4 pi.
-
-    Solid angle by Van Oosterom and Strackee (1983).
-    """
     n_points = points.shape[0]
     n_faces = triangles.shape[0]
     result = np.empty(n_points, dtype=np.float64)
@@ -202,11 +132,9 @@ def _winding_numbers(triangles: np.ndarray, points: np.ndarray) -> np.ndarray:
         result[i] = total / (4.0 * math.pi)
     return result
 
-
 def _keys(ijk: np.ndarray) -> np.ndarray:
     shifted = ijk.astype(np.int64) + _KEY_OFFSET
     return (shifted[:, 0] * _KEY_BASE + shifted[:, 1]) * _KEY_BASE + shifted[:, 2]
-
 
 def _ijk_from_keys(keys: np.ndarray) -> np.ndarray:
     k = keys % _KEY_BASE
@@ -215,9 +143,7 @@ def _ijk_from_keys(keys: np.ndarray) -> np.ndarray:
     i = rest // _KEY_BASE
     return np.column_stack([i, j, k]) - _KEY_OFFSET
 
-
 def _lookup(sorted_keys: np.ndarray, order: np.ndarray, query: np.ndarray) -> np.ndarray:
-    """Index into the unsorted key array for each query key, -1 when absent."""
     pos = np.searchsorted(sorted_keys, query)
     pos = np.minimum(pos, len(sorted_keys) - 1)
     found = sorted_keys[pos] == query
@@ -225,16 +151,9 @@ def _lookup(sorted_keys: np.ndarray, order: np.ndarray, query: np.ndarray) -> np
     out[found] = order[pos[found]]
     return out
 
-
 def surface_samples(
     mesh: trimesh.Trimesh, spacing: float, face_chunk: int = 200_000
 ):
-    """Yield (points, normals, weights) chunks of deterministic area-weighted samples.
-
-    Each triangle gets ceil(area / spacing^2) samples (one at the centroid for
-    small triangles, R2 sequence points otherwise), each weighted with
-    area / count, so the weights sum to the triangle area exactly.
-    """
     triangles = np.asarray(mesh.triangles, dtype=np.float64)
     normals = np.asarray(mesh.face_normals, dtype=np.float64)
     areas = np.asarray(mesh.area_faces, dtype=np.float64)
@@ -242,7 +161,6 @@ def surface_samples(
     n_faces = len(triangles)
     start = 0
     while start < n_faces:
-        # Grow the face chunk until it holds about _POINT_CHUNK samples.
         stop = min(n_faces, start + face_chunk)
         csum = np.cumsum(counts[start:stop])
         if csum[-1] > _POINT_CHUNK:
@@ -264,36 +182,16 @@ def surface_samples(
         yield points, normals[face], weights
         start = stop
 
-
 def _in_box(points: np.ndarray, box: np.ndarray) -> np.ndarray:
     return np.all((points >= box[0]) & (points <= box[1]), axis=1)
-
 
 def split_into_bodies(
     part_meshes: Sequence[trimesh.Trimesh],
 ) -> Tuple[List[trimesh.Trimesh], np.ndarray]:
-    """Containment units: each part split into its connected bodies.
-
-    One STL often holds several closed bodies that touch or overlap
-    (``sample_stl_files/thick_thin_test.stl`` is two boxes sharing a face).
-    A ray-parity test on the combined mesh misclassifies points behind the
-    doubled face, and the shared face is not mold contact. As separate
-    units the shared face becomes an interface. ``Trimesh.split`` repairs
-    each piece (it closes small holes), so an open part whose pieces all
-    come back closed uses them, one piece included. A part stays as given
-    when any piece is still open (its volume depends on the coordinate
-    origin, so open patches cannot be tested alone) or inverted (a void
-    shell).
-
-    Returns ``(units, owner)`` with ``owner[u]`` the index of the part unit
-    ``u`` came from.
-    """
     units: List[trimesh.Trimesh] = []
     owner: List[int] = []
     for p, mesh in enumerate(part_meshes):
         bodies = [mesh]
-        # Split by face adjacency, not vertex connectivity: l_bracket.stl's two
-        # boxes share vertices (body_count 1) but no edges.
         split = mesh.split(only_watertight=False)
         if (len(split) > 1 or not mesh.is_watertight) and len(split) > 0 and all(
             b.is_watertight and b.volume > 0.0 for b in split
@@ -303,7 +201,6 @@ def split_into_bodies(
         owner.extend([p] * len(bodies))
     return units, np.asarray(owner, dtype=np.int64)
 
-
 def exterior_surface_area_by_cell(
     part_meshes: Sequence[trimesh.Trimesh],
     origin: np.ndarray,
@@ -311,15 +208,6 @@ def exterior_surface_area_by_cell(
     *,
     spacing_fraction: float = DEFAULT_AREA_SAMPLE_SPACING,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Exterior union surface binned to lattice cells.
-
-    Returns ``(keys, area, centroid, interface_keys)``: unique lattice keys,
-    area (in^2) per key, the area-weighted sample centroid per key, and the
-    unique keys of cells holding dropped (interface) samples. A sample is exterior
-    when a point offset outward by ``INTERFACE_PROBE_OFFSET * pitch`` lies
-    inside no other part; samples on a face pressed against another part, or
-    buried inside one, are dropped.
-    """
     spacing = spacing_fraction * pitch
     probe = INTERFACE_PROBE_OFFSET * pitch
     boxes = [np.asarray(m.bounds, dtype=np.float64) for m in part_meshes]
@@ -370,7 +258,6 @@ def exterior_surface_area_by_cell(
     ) / np.maximum(area, 1e-300)[:, None]
     return uniq, area, centroid, interface_keys
 
-
 def _face_neighbour_keys(ijk: np.ndarray) -> List[np.ndarray]:
     out = []
     for axis in range(3):
@@ -380,7 +267,6 @@ def _face_neighbour_keys(ijk: np.ndarray) -> List[np.ndarray]:
             out.append(_keys(nb))
     return out
 
-
 def _union_contains(units: Sequence[trimesh.Trimesh], points: np.ndarray) -> np.ndarray:
     inside = np.zeros(len(points), dtype=bool)
     for mesh in units:
@@ -389,17 +275,9 @@ def _union_contains(units: Sequence[trimesh.Trimesh], points: np.ndarray) -> np.
             inside[cand[contains(mesh, points[cand])]] = True
     return inside
 
-
 def _flood_missing_interior(
     keys: np.ndarray, origin: np.ndarray, pitch: float, units: Sequence[trimesh.Trimesh]
 ) -> np.ndarray:
-    """Keys of absent cells whose centre is inside the union, reached through face neighbours.
-
-    The centre-containment voxelizer tests the concatenated assembly mesh,
-    whose ray parity is wrong behind faces two parts share, so it can leave
-    interior holes with no surface in them. Grows the cell set one face layer
-    at a time from its current boundary; each absent key is tested once.
-    """
     present = np.unique(keys)
     tested = present
     added: List[np.ndarray] = []
@@ -418,7 +296,6 @@ def _flood_missing_interior(
         frontier_from = _ijk_from_keys(new)
     return np.concatenate(added) if added else np.zeros(0, dtype=np.int64)
 
-
 def sample_metal_fractions(
     centers: np.ndarray,
     pitch: float,
@@ -429,12 +306,6 @@ def sample_metal_fractions(
     unit_owner: Optional[np.ndarray] = None,
     n_owners: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Union metal fraction and per-part sub-point counts for the cells at ``centers``.
-
-    ``part_meshes`` are containment units; ``unit_owner[u]`` names the part
-    a unit belongs to (default: each unit is its own part).
-    Returns ``(phi (C,) float64, counts (C, n_owners) uint16)``.
-    """
     centers = np.asarray(centers, dtype=np.float64).reshape(-1, 3)
     n_cells = len(centers)
     if unit_owner is None:
@@ -464,7 +335,6 @@ def sample_metal_fractions(
         phi[start:stop] = union.reshape(stop - start, subsamples).mean(axis=1)
     return phi, counts
 
-
 def compute_cut_cell_geometry(
     centers: np.ndarray,
     pitch: float,
@@ -473,13 +343,6 @@ def compute_cut_cell_geometry(
     subsamples: int = DEFAULT_SUBSAMPLES,
     area_spacing_fraction: float = DEFAULT_AREA_SAMPLE_SPACING,
 ) -> CutCellGeometry:
-    """Metal fraction and exterior area for every cell of the voxelized lattice.
-
-    ``centers`` are the voxelizer's cell centres (one lattice, pitch
-    ``pitch``). Cells the part surface passes through are added when
-    missing, cells without metal are dropped. The result's ``centers`` replace
-    the voxelizer output.
-    """
     timings: Dict[str, float] = {}
     t0 = time.perf_counter()
     centers = np.asarray(centers, dtype=np.float64).reshape(-1, 3)
@@ -495,10 +358,6 @@ def compute_cut_cell_geometry(
 
     ijk = np.rint((centers - origin) / pitch).astype(np.int64)
     in_keys = _keys(ijk)
-    # The chunked voxelizer spaces centres by (E - s) / (ceil(E / s) - 1) < s
-    # when the padded extent E is not a multiple of the pitch s, so two
-    # input centres can round to one lattice cell. Keep the first of each,
-    # in input order (a no-op on the trimesh path, whose centres are on the lattice).
     _, first = np.unique(in_keys, return_index=True)
     n_duplicates = n_input - len(first)
     if n_duplicates:
@@ -516,9 +375,6 @@ def compute_cut_cell_geometry(
     sorted_keys = all_keys[order]
     timings["add_s"] = time.perf_counter() - t0 - timings["area_s"]
 
-    # Sampled cells: exterior surface inside, a missing face neighbour, or a
-    # part-to-part interface inside (phi stays ~1 there, but the sub-point
-    # counts give the cell the part code holding most of it).
     boundary = np.zeros(len(all_keys), dtype=bool)
     boundary[_lookup(sorted_keys, order, surf_keys)] = True
     interface_hit = _lookup(sorted_keys, order, interface_keys)
@@ -541,14 +397,11 @@ def compute_cut_cell_geometry(
 
     phi = np.ones(len(all_keys), dtype=np.float64)
     phi[sampled_idx] = phi_sampled
-    # Columns follow ``part_meshes``; parts without faces keep zero counts.
     counts = np.zeros((len(all_keys), len(part_meshes)), dtype=np.uint16)
     counts[np.ix_(sampled_idx, np.asarray(present, dtype=np.int64))] = counts_sampled
     keep = phi > 0.0
     kept_idx = np.flatnonzero(keep)
 
-    # Area per kept cell: samples in a dropped or absent cell go to the
-    # kept cell nearest their area-weighted centroid.
     kept_keys = all_keys[kept_idx]
     kept_order = np.argsort(kept_keys, kind="stable")
     area = np.zeros(len(kept_idx), dtype=np.float64)
@@ -580,22 +433,17 @@ def compute_cut_cell_geometry(
     )
     return geometry
 
-
 def dominant_part_codes(part_counts: np.ndarray, part_codes: Sequence[int]) -> np.ndarray:
-    """(N,) part code holding the most sub-points (higher code on ties), -1 when none."""
     codes = np.asarray(part_codes, dtype=np.int64)
     n = part_counts.shape[0]
     if n == 0 or len(codes) == 0:
         return np.full(n, -1, dtype=np.int64)
-    # Order parts by code so argmax over a reversed column order breaks ties
-    # toward the higher code.
     by_code = np.argsort(codes, kind="stable")[::-1]
     counts = part_counts[:, by_code].astype(np.int64)
     best = np.argmax(counts, axis=1)
     out = codes[by_code][best]
     out[counts.max(axis=1) == 0] = -1
     return out
-
 
 def merge_small_cut_cells(
     metal_fractions: np.ndarray,
@@ -604,13 +452,6 @@ def merge_small_cut_cells(
     part_types: Optional[np.ndarray],
     phi_min: float = DEFAULT_PHI_MIN,
 ) -> CutCellMerge:
-    """Slave every cell with phi < ``phi_min`` to its fullest same-code face neighbour.
-
-    The master must have phi >= ``phi_min``. Its capacity weight and area
-    grow by the slave's, the slave's drop to 0, so the totals are unchanged.
-    A small cell without such a face neighbour is tried against the edge and
-    corner slots, and stays unmerged when none qualifies.
-    """
     phi = np.asarray(metal_fractions, dtype=np.float64).reshape(-1)
     area = np.asarray(surface_areas, dtype=np.float64).reshape(-1)
     nbrs = np.asarray(neighbors)

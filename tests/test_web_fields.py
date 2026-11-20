@@ -1,12 +1,3 @@
-"""
-Tests for the dense field grids and the endpoints that serve them.
-
-The fixture is a 6 x 5 x 4 lattice on a deliberately awkward origin and
-spacing, with two part types and a pair of interior holes, so that a bug in
-the index arithmetic or the hole filling shows up as a wrong number rather
-than as a plausible-looking grid.
-"""
-
 from __future__ import annotations
 
 import gzip
@@ -29,7 +20,6 @@ from web.payloads import GRID_SOURCE_KEY, write_artifact
 from web.routes_fields import clear_envelope_cache, fields_bp
 from web.services.simulation_queue import SimulationQueueManager
 
-
 DIMS = (6, 5, 4)
 ORIGIN = (-1.25, 2.5, 0.75)
 SPACING = 0.25
@@ -37,16 +27,11 @@ FRAME_COUNT = 3
 FRAME_TIMES = [0.0, 4.5, 9.0]
 FILL_TIMES = [0.0, 0.75, 1.5]
 
-#: Cells left empty inside the bounding box, so the lattice is not a solid
-#: brick and the nearest-inside fill has something to do.
 HOLES = {(4, 1, 0), (4, 2, 0), (1, 3, 2)}
 
-#: The real completed run the contract points at. Present in a seeded
-#: worktree, absent in a bare checkout.
 REAL_ARTIFACT = (
     Path(__file__).resolve().parents[1] / "web" / "static" / "temp" / "artifacts" / "ef17b6fc-ac9.json"
 )
-
 
 def _cell_center(ix: int, iy: int, iz: int) -> List[float]:
     return [
@@ -54,7 +39,6 @@ def _cell_center(ix: int, iy: int, iz: int) -> List[float]:
         ORIGIN[1] + SPACING * iy,
         ORIGIN[2] + SPACING * iz,
     ]
-
 
 def _occupied_cells() -> List[Tuple[int, int, int]]:
     nx, ny, nz = DIMS
@@ -66,17 +50,13 @@ def _occupied_cells() -> List[Tuple[int, int, int]]:
         if (ix, iy, iz) not in HOLES
     ]
 
-
 def _shrinkage_value(ix: int, iy: int, iz: int) -> float:
-    """Strictly positive and varying on every axis, so a bleed to zero is loud."""
     return 5.0 + ix + 10.0 * iy + 100.0 * iz
-
 
 def _synthetic_artifact() -> Dict[str, Any]:
     cells = _occupied_cells()
     centers = [_cell_center(*cell) for cell in cells]
     shrinkage = [_shrinkage_value(*cell) for cell in cells]
-    # Cast in the lower half, riser above it: two mask codes, not one.
     part_types = [0 if iz < 2 else 1 for (_, _, iz) in cells]
     solidification = [20.0 + 5.0 * iz for (_, _, iz) in cells]
 
@@ -87,7 +67,6 @@ def _synthetic_artifact() -> Dict[str, Any]:
 
     fill_history: List[List[float]] = []
     for frame_index in range(FRAME_COUNT):
-        # A rising metal front: everything at or below this height is full.
         level = (frame_index / (FRAME_COUNT - 1)) * (DIMS[2] - 1)
         fill_history.append([1.0 if iz <= level else 0.0 for (_, _, iz) in cells])
 
@@ -111,24 +90,14 @@ def _synthetic_artifact() -> Dict[str, Any]:
         },
     }
 
-
 def _flat_index(ix: int, iy: int, iz: int) -> int:
     nx, ny, _ = DIMS
     return ix + nx * (iy + ny * iz)
-
 
 def _brute_force_nearest_values(
     values_by_cell: Dict[Tuple[int, int, int], float],
     target: Tuple[int, int, int],
 ) -> List[float]:
-    """
-    Every value that could legitimately fill ``target``.
-
-    A hole equidistant from several occupied cells has no single right answer
-    -- which one the Euclidean distance transform picks among ties is its own
-    business -- so the assertion is membership in the tied set, not equality
-    with one arbitrary member.
-    """
     best = float("inf")
     tied: List[float] = []
     for cell, value in values_by_cell.items():
@@ -139,7 +108,6 @@ def _brute_force_nearest_values(
         elif abs(distance - best) <= 1e-9:
             tied.append(value)
     return tied
-
 
 class LatticeDerivationTests(unittest.TestCase):
     def test_derives_dims_origin_and_spacing_from_centers(self) -> None:
@@ -156,18 +124,12 @@ class LatticeDerivationTests(unittest.TestCase):
         self.assertEqual(lattice.cell_count, DIMS[0] * DIMS[1] * DIMS[2])
 
     def test_dims_survive_an_entirely_empty_lattice_plane(self) -> None:
-        """
-        Counting occupied planes instead of measuring the extent would shear
-        the grid: a casting with a horizontal slot has a plane with no metal
-        in it, and every cell above the slot would shift down one layer.
-        """
         cells = [cell for cell in _occupied_cells() if cell[2] != 1]
         centers = np.asarray([_cell_center(*cell) for cell in cells], dtype=np.float64)
 
         lattice = fields.derive_lattice(centers, np.full(len(cells), SPACING))
 
         self.assertEqual(lattice.dims, DIMS)
-
 
 class GridBuildTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -217,9 +179,6 @@ class GridBuildTests(unittest.TestCase):
         tolerance = (grid.maximum - grid.minimum) / 255.0
         values_by_cell = {cell: _shrinkage_value(*cell) for cell in _occupied_cells()}
 
-        # The whole point of the fill: no cell anywhere sits below the field's
-        # true minimum, so trilinear sampling cannot fade a surface toward the
-        # bottom of the colormap at the metal boundary.
         self.assertGreaterEqual(float(np.min(dense)), grid.minimum - tolerance)
 
         for hole in HOLES:
@@ -269,12 +228,10 @@ class GridBuildTests(unittest.TestCase):
         self.assertEqual(codes[1]["id"], "cast")
         self.assertEqual(codes[2]["id"], "riser")
 
-        # Nested summary statistics arrive flat, which is what GridMeta.stats is.
         self.assertEqual(meta["stats"]["shrinkage_max"], 5.0)
         self.assertEqual(meta["stats"]["voxel_count"], len(_occupied_cells()))
 
     def test_constant_field_is_reported_but_not_offered_as_a_mode(self) -> None:
-        """A mode the run produced as all zeros has nothing to paint."""
         artifact = _synthetic_artifact()
         artifact["visualization"]["hotspot"] = [0.0] * len(_occupied_cells())
         grids = fields.build_field_grids(artifact["visualization"], artifact["summary"])
@@ -286,7 +243,6 @@ class GridBuildTests(unittest.TestCase):
     def test_empty_visualization_yields_no_voxels(self) -> None:
         grids = fields.build_field_grids({}, {})
         self.assertEqual(grids.voxel_count, 0)
-
 
 class SidecarTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -341,8 +297,6 @@ class SidecarTests(unittest.TestCase):
         self.assertIsNotNone(first)
         self.assertTrue(sidecar.exists())
 
-        # Same file, same mtime: the LRU must hand back the very same object
-        # rather than re-reading anything.
         second = fields.load_grids("proj", artifact_path)
         self.assertIs(first, second)
 
@@ -357,7 +311,6 @@ class SidecarTests(unittest.TestCase):
             _shrinkage_value(*cell) * 2.0 for cell in _occupied_cells()
         ]
         artifact_path.write_text(json.dumps(changed), encoding="utf-8")
-        # Force a distinct mtime even on a coarse-grained filesystem clock.
         stat = artifact_path.stat()
         import os
 
@@ -369,7 +322,6 @@ class SidecarTests(unittest.TestCase):
         self.assertAlmostEqual(
             second.scalars["shrinkage"].maximum, 2.0 * first.scalars["shrinkage"].maximum
         )
-
 
 class GridEndpointTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -447,8 +399,6 @@ class GridEndpointTests(unittest.TestCase):
         float_body = self._body(floats)
         self.assertEqual(len(float_body), cell_count * 4)
 
-        # Little-endian is the wire contract; unpack it explicitly rather than
-        # trusting the host's byte order to be the same one.
         unpacked = struct.unpack(f"<{cell_count}f", float_body)
         raw = np.frombuffer(bytes_body, dtype=np.uint8)
         span = maximum - minimum
@@ -535,16 +485,7 @@ class GridEndpointTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.get_json()["ok"])
 
-
 class FillAnimationTests(unittest.TestCase):
-    """
-    The fill-animation path, on synthetic frames.
-
-    No run in the seed data has a filling stage, so without this the whole
-    route from ``engine._fill_frames`` through the sidecar to the frames
-    endpoint would ship untested. The fixture stands in for the real thing: a
-    metal front that rises one lattice layer at a time.
-    """
 
     def setUp(self) -> None:
         fields.clear_cache()
@@ -560,7 +501,6 @@ class FillAnimationTests(unittest.TestCase):
         stack = self.grids.stacks["fill_animation"]
         self.assertEqual(stack.count, FRAME_COUNT)
         self.assertEqual([float(t) for t in stack.times_s], FILL_TIMES)
-        # Distinct from the solidification stack, not an alias of it.
         self.assertIsNot(stack, self.grids.stacks["fraction_liquid"])
 
     def test_fill_front_rises_with_the_frame(self) -> None:
@@ -582,19 +522,10 @@ class FillAnimationTests(unittest.TestCase):
         self.assertEqual(meta["frames"]["fill"]["times_s"], FILL_TIMES)
 
     def test_the_animated_modes_carry_no_unit(self) -> None:
-        """
-        L2. Their frame *times* are seconds; their *values* are fractions.
-
-        Labelling fill animation "s" put seconds on a colour bar whose axis
-        runs 0 to 1 -- an empty cell to a full one -- and read as though the
-        colours were arrival times.
-        """
         meta = fields.build_grid_metadata(self.grids)
         self.assertNotIn("fill_animation", meta["units"])
         self.assertNotIn("fraction_liquid", meta["units"])
-        # The times themselves are still seconds, and still reported.
         self.assertEqual(meta["frames"]["fill"]["times_s"], FILL_TIMES)
-        # A field that really is a time keeps its unit.
         self.assertEqual(meta["units"]["solidification_time"], "s")
 
     def test_envelope_of_a_fill_frame_grows_over_time(self) -> None:
@@ -602,26 +533,20 @@ class FillAnimationTests(unittest.TestCase):
         late = fields.build_envelope(self.grids, "fill_animation", 0.5, frame_index=2)
         assert early is not None and late is not None
         self.assertGreater(late.vertex_count, 0)
-        # The last frame encloses the whole casting, the first only its floor.
         self.assertGreater(_bounding_height(late), _bounding_height(early))
-
 
 def _bounding_height(envelope: fields.Envelope) -> float:
     if envelope.vertex_count == 0:
         return 0.0
     return float(np.max(envelope.positions[:, 2]) - np.min(envelope.positions[:, 2]))
 
-
 def _bounding_volume(envelope: fields.Envelope) -> float:
-    """Bounding-box volume; enough to compare two thresholds of one field."""
     if envelope.vertex_count == 0:
         return 0.0
     span = np.max(envelope.positions, axis=0) - np.min(envelope.positions, axis=0)
     return float(np.prod(span))
 
-
 class EnvelopeTests(unittest.TestCase):
-    """Isosurface extraction and the binary body that carries it."""
 
     def setUp(self) -> None:
         fields.clear_cache()
@@ -648,11 +573,6 @@ class EnvelopeTests(unittest.TestCase):
         self.assertGreater(_bounding_volume(loose), _bounding_volume(tight))
 
     def test_envelope_stays_inside_the_metal(self) -> None:
-        """
-        The grids are hole-filled so surface painting does not fade at the
-        boundary, which means every cell in the box carries a plausible value.
-        Contouring that unmasked would grow the envelope out through the mold.
-        """
         envelope = fields.build_envelope(self.grids, "shrinkage", self._at(0.1))
         assert envelope is not None
         nx, ny, nz = DIMS
@@ -660,8 +580,6 @@ class EnvelopeTests(unittest.TestCase):
             ix = round((x - ORIGIN[0]) / SPACING)
             iy = round((y - ORIGIN[1]) / SPACING)
             iz = round((z - ORIGIN[2]) / SPACING)
-            # One cell of slack: a contour vertex legitimately sits on the
-            # boundary between an inside cell and an outside one.
             self.assertTrue(-1 <= ix <= nx, msg=f"x {x}")
             self.assertTrue(-1 <= iy <= ny, msg=f"y {y}")
             self.assertTrue(-1 <= iz <= nz, msg=f"z {z}")
@@ -672,26 +590,12 @@ class EnvelopeTests(unittest.TestCase):
         cast_only = fields.build_envelope(self.grids, "shrinkage", threshold, cast_only=True)
         assert everything is not None and cast_only is not None
         self.assertGreater(cast_only.vertex_count, 0)
-        # Cast bodies are the lower half of the fixture, so the cast-only
-        # envelope cannot reach as high.
         self.assertLess(
             float(np.max(cast_only.positions[:, 2])),
             float(np.max(everything.positions[:, 2])),
         )
 
     def test_vertex_scalars_track_the_threshold(self) -> None:
-        """
-        Vertices carry the value the field has where they sit.
-
-        An isosurface is a level set, so they cluster around the threshold --
-        but not exactly on it, and deliberately so: the field is smoothed
-        before contouring, which shifts the surface by a fraction of a cell,
-        and the scalar is then sampled from the *unsmoothed* field. Reporting
-        the value that is really there beats reporting the value the surface
-        was nominally drawn at. On this fixture the field climbs by 100 per
-        cell in z, so a fraction of a cell is a large number; the median is
-        what says the surface is in the right place.
-        """
         threshold = self._at(0.5)
         envelope = fields.build_envelope(self.grids, "shrinkage", threshold)
         assert envelope is not None and envelope.scalars is not None
@@ -721,7 +625,6 @@ class EnvelopeTests(unittest.TestCase):
         np.testing.assert_allclose(normals, envelope.normals.reshape(-1), rtol=1e-6)
         np.testing.assert_array_equal(parsed_indices, envelope.indices)
         np.testing.assert_allclose(scalars, envelope.scalars, rtol=1e-6)
-        # Every index addresses a real vertex.
         self.assertLess(int(parsed_indices.max()), vertices)
 
     def test_scalars_can_be_skipped(self) -> None:
@@ -732,7 +635,6 @@ class EnvelopeTests(unittest.TestCase):
         self.assertIsNone(envelope.scalars)
         expected = envelope.vertex_count * 6 * 4 + int(envelope.indices.size) * 4
         self.assertEqual(len(fields.envelope_bytes(envelope)), expected)
-
 
 class EnvelopeEndpointTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -834,17 +736,7 @@ class EnvelopeEndpointTests(unittest.TestCase):
         self.assertEqual(first.headers["X-Vertex-Count"], second.headers["X-Vertex-Count"])
         self.assertEqual(self._body(first), self._body(second))
 
-
 class SummaryStatisticsTests(unittest.TestCase):
-    """
-    The statistics the shell's panel reads.
-
-    They come off the engine, which no test here can run, so the engine is
-    stood in for by an object carrying the same attributes. What is being
-    checked is the contract: flat scalars, stable names, units in the name,
-    and -- the part that matters most for a panel -- a statistic the run did
-    not produce being *absent* rather than zero.
-    """
 
     def _collect(self, **attributes: Any) -> Dict[str, Any]:
         engine = SimpleNamespace(
@@ -883,7 +775,6 @@ class SummaryStatisticsTests(unittest.TestCase):
         self.assertEqual(stats["feeding_blocked_count"], 9)
         self.assertAlmostEqual(stats["fed_fraction"], 0.87)
 
-        # Every value the panel receives has to be a scalar it can print.
         for key, value in stats.items():
             self.assertIsInstance(value, (int, float, str), msg=key)
 
@@ -905,10 +796,6 @@ class SummaryStatisticsTests(unittest.TestCase):
         self.assertAlmostEqual(stats["defect_threshold"], 0.3)
 
     def test_an_analysis_that_did_not_run_is_absent_not_zero(self) -> None:
-        """
-        Zero hot tears and "hot tearing was not analysed" are different
-        answers, and a panel that shows 0 for the second one is lying.
-        """
         stats = self._collect(hotspot_count=5)
         self.assertIn("hotspot_voxel_count", stats)
         for absent in [
@@ -953,18 +840,7 @@ class SummaryStatisticsTests(unittest.TestCase):
         self.assertAlmostEqual(meta["stats"]["defect_volume_in3"], 2.5)
         self.assertEqual(meta["stats"]["hotspot_voxel_count"], 17)
 
-
 class LatticeBudgetTests(unittest.TestCase):
-    """
-    H3. A lattice too large to build is refused before anything is allocated.
-
-    The dimensions come from the *extent* of the voxel centers, so a handful
-    of voxels strung along a diagonal at a fine voxel size implies an enormous
-    box: 4,000 of them across a 15 inch envelope at 0.05 inch is 27 million
-    cells, and the distance transform alone wants hundreds of megabytes. The
-    lazy rebuild runs inside a Flask request, so unbounded it took the process
-    down and every retry did it again.
-    """
 
     def _diagonal_centers(self, count: int, spacing: float) -> np.ndarray:
         steps = np.arange(count, dtype=np.float64) * spacing
@@ -995,9 +871,7 @@ class LatticeBudgetTests(unittest.TestCase):
         with self.assertRaises(fields.LatticeTooLargeError):
             fields.build_field_grids(visualization, {})
 
-
 class GridCacheTests(unittest.TestCase):
-    """H3. The cache is bounded by bytes, not by a count of entries."""
 
     def _grids(self, cells: int) -> fields.FieldGrids:
         lattice = fields.Lattice(dims=(cells, 1, 1), origin=(0.0, 0.0, 0.0), spacing=1.0)
@@ -1007,7 +881,6 @@ class GridCacheTests(unittest.TestCase):
         cache = fields._GridCache(max_bytes=1000)
         for index in range(4):
             cache.put(("p", index, 0), self._grids(400))
-        # Four 400-byte runs cannot all be held under a 1,000-byte budget.
         self.assertLessEqual(cache.nbytes, 1000)
         self.assertIsNone(cache.get(("p", 0, 0)))
         self.assertIsNotNone(cache.get(("p", 3, 0)))
@@ -1016,7 +889,6 @@ class GridCacheTests(unittest.TestCase):
         cache = fields._GridCache(max_bytes=1000)
         cache.put(("p", 0, 0), self._grids(100))
         cache.put(("p", 1, 0), self._grids(5000))
-        # The oversized entry neither stays nor evicts what came before it.
         self.assertIsNone(cache.get(("p", 1, 0)))
         self.assertIsNotNone(cache.get(("p", 0, 0)))
 
@@ -1024,21 +896,12 @@ class GridCacheTests(unittest.TestCase):
         cache = fields._GridCache(max_bytes=1000)
         cache.put(("p", 0, 0), self._grids(400))
         cache.put(("p", 1, 0), self._grids(400))
-        self.assertIsNotNone(cache.get(("p", 0, 0)))  # refreshes its recency
+        self.assertIsNotNone(cache.get(("p", 0, 0)))
         cache.put(("p", 2, 0), self._grids(400))
         self.assertIsNotNone(cache.get(("p", 0, 0)))
         self.assertIsNone(cache.get(("p", 1, 0)))
 
-
 class StridedArtifactTests(unittest.TestCase):
-    """
-    H4. The sidecar is built from the full mesh, not from the strided JSON.
-
-    Once a run exceeds ``max_voxels_for_visualization`` the visualization
-    payload keeps every step-th voxel. That is fine for a downsampled JSON and
-    ruinous for an occupancy grid: the voxels in between are marked "not
-    metal", so the casting renders as a sieve and the counts under-report.
-    """
 
     def setUp(self) -> None:
         fields.clear_cache()
@@ -1051,7 +914,6 @@ class StridedArtifactTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def _strided(self, step: int = 2) -> Dict[str, Any]:
-        """The artifact as the pipeline would write it with striding on."""
         full_viz = self.full["visualization"]
         total = len(full_viz["centers"])
         keep = list(range(0, total, step))
@@ -1065,12 +927,10 @@ class StridedArtifactTests(unittest.TestCase):
         ]
         strided["fraction_liquid_times"] = full_viz["fraction_liquid_times"]
         summary = dict(self.full["summary"])
-        # The summary always reports the real voxel count.
         summary["voxel_count"] = total
         return {"summary": summary, "visualization": strided}
 
     def test_a_strided_payload_alone_produces_a_sieve(self) -> None:
-        """The failure being fixed, stated so the fix cannot silently regress."""
         artifact = self._strided()
         grids = fields.build_field_grids(artifact["visualization"], artifact["summary"])
         occupied = len(_occupied_cells())
@@ -1078,15 +938,6 @@ class StridedArtifactTests(unittest.TestCase):
         self.assertTrue(grids.downsampled)
 
     def _numpy_grid_source(self) -> Dict[str, Any]:
-        """
-        The grid source as the worker really builds it: numpy arrays.
-
-        `build_fork_artifact` hands over references to the engine's own
-        arrays rather than converting a third of a million floats to Python
-        lists, so the tests have to exercise arrays. A list-only fixture hid
-        a `value or []` in the grid builder, which raises on any array with
-        more than one element.
-        """
         full_viz = self.full["visualization"]
         source: Dict[str, Any] = {
             "centers": np.asarray(full_viz["centers"], dtype=np.float32),
@@ -1113,7 +964,6 @@ class StridedArtifactTests(unittest.TestCase):
         restored = fields.load_sidecar(fields.sidecar_path(artifact_path))
         assert restored is not None
         occupied = len(_occupied_cells())
-        # Every metal voxel is marked, not every second one.
         self.assertEqual(int(np.count_nonzero(restored.mask)), occupied)
         self.assertEqual(restored.voxel_count, occupied)
         self.assertEqual(
@@ -1135,7 +985,6 @@ class StridedArtifactTests(unittest.TestCase):
         )
 
     def test_downsampling_is_inferred_when_only_the_json_survives(self) -> None:
-        """A lazily rebuilt grid has nothing but the JSON, and says so."""
         artifact = self._strided()
         artifact_path = self.root / "lazy.json"
         artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
@@ -1145,7 +994,6 @@ class StridedArtifactTests(unittest.TestCase):
         self.assertTrue(fields.build_grid_metadata(grids)["downsampled"])
 
     def test_grids_build_from_numpy_arrays_as_well_as_lists(self) -> None:
-        """`x or []` raises on an array; the worker only ever passes arrays."""
         grids = fields.build_field_grids(self._numpy_grid_source(), self.full["summary"])
         self.assertEqual(grids.lattice.dims, DIMS)
         self.assertEqual(int(np.count_nonzero(grids.mask)), len(_occupied_cells()))
@@ -1160,9 +1008,7 @@ class StridedArtifactTests(unittest.TestCase):
         self.assertFalse(grids.downsampled)
         self.assertFalse(fields.build_grid_metadata(grids)["downsampled"])
 
-
 class SidecarRobustnessTests(unittest.TestCase):
-    """H5, M1 and M2: a cache that cannot be read is rebuilt, not fatal."""
 
     def setUp(self) -> None:
         fields.clear_cache()
@@ -1175,10 +1021,6 @@ class SidecarRobustnessTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_a_truncated_sidecar_is_discarded_rather_than_raising(self) -> None:
-        """
-        H5. `zipfile.BadZipFile` is not an OSError, so a half-written .npz
-        used to escape the loader and 500 every grid endpoint forever.
-        """
         artifact_path = self.root / "run.json"
         write_artifact(artifact_path, self.artifact)
         sidecar = fields.sidecar_path(artifact_path)
@@ -1186,7 +1028,6 @@ class SidecarRobustnessTests(unittest.TestCase):
         sidecar.write_bytes(whole[: len(whole) // 2])
 
         self.assertIsNone(fields.load_sidecar(sidecar))
-        # And it removes the corpse, so the next request does not find it.
         self.assertFalse(sidecar.exists())
 
     def test_a_truncated_sidecar_is_rebuilt_on_the_next_request(self) -> None:
@@ -1199,7 +1040,6 @@ class SidecarRobustnessTests(unittest.TestCase):
         self.assertIsNotNone(grids)
         assert grids is not None
         self.assertEqual(grids.voxel_count, len(_occupied_cells()))
-        # Rebuilt and republished.
         self.assertTrue(sidecar.exists())
         self.assertIsNotNone(fields.load_sidecar(sidecar))
 
@@ -1210,22 +1050,15 @@ class SidecarRobustnessTests(unittest.TestCase):
             self.assertIsNone(fields.load_sidecar(sidecar))
 
     def test_a_half_written_artifact_is_not_a_server_error(self) -> None:
-        """
-        M1. A re-run rewrites the artifact; a reader that arrives mid-write
-        must get "no results", not a 500 from a JSONDecodeError.
-        """
         artifact_path = self.root / "partial.json"
         artifact_path.write_text('{"summary": {}, "visual', encoding="utf-8")
         self.assertIsNone(fields.load_grids("proj", artifact_path))
 
     def test_write_artifact_never_publishes_a_partial_file(self) -> None:
-        """M1. The JSON is renamed into place, so a reader sees all or none."""
         artifact_path = self.root / "atomic.json"
         write_artifact(artifact_path, self.artifact)
         first = json.loads(artifact_path.read_text())
 
-        # A second write of different content leaves a whole document either
-        # way -- never a truncated one.
         changed = _synthetic_artifact()
         changed["summary"]["voxel_count"] = 4242
         write_artifact(artifact_path, changed)
@@ -1233,14 +1066,9 @@ class SidecarRobustnessTests(unittest.TestCase):
 
         self.assertEqual(first["summary"]["voxel_count"], len(_occupied_cells()))
         self.assertEqual(second["summary"]["voxel_count"], 4242)
-        # No temp files left behind.
         self.assertEqual(sorted(q.suffix for q in self.root.iterdir()), [".json", ".npz"])
 
     def test_concurrent_sidecar_writers_publish_a_loadable_file(self) -> None:
-        """
-        M2. A fixed `<id>.grid.npz.tmp` let two writers interleave and publish
-        a splice, which then failed to load for good.
-        """
         grids = fields.build_field_grids(
             self.artifact["visualization"], self.artifact["summary"]
         )
@@ -1251,7 +1079,7 @@ class SidecarRobustnessTests(unittest.TestCase):
             try:
                 for _ in range(4):
                     fields.save_sidecar(sidecar, grids)
-            except BaseException as exc:  # pragma: no cover - reported below
+            except BaseException as exc:
                 errors.append(exc)
 
         threads = [threading.Thread(target=write) for _ in range(4)]
@@ -1265,17 +1093,9 @@ class SidecarRobustnessTests(unittest.TestCase):
         self.assertIsNotNone(restored)
         assert restored is not None
         np.testing.assert_array_equal(restored.mask, grids.mask)
-        # Every temp file cleaned up.
         self.assertEqual([q.name for q in self.root.iterdir()], ["concurrent.grid.npz"])
 
-
 class ConstantFieldTests(unittest.TestCase):
-    """
-    M5. A field that is the same value everywhere is a result, not an absence.
-
-    "Every voxel solidified at 42 s" and "hot tearing was not analysed" are
-    different answers; reporting both as empty hid the first one.
-    """
 
     def _grids_for(self, values: List[float]) -> fields.FieldGrids:
         artifact = _synthetic_artifact()
@@ -1324,9 +1144,7 @@ class ConstantFieldTests(unittest.TestCase):
         self.assertTrue(restored.scalars["hotspot"].constant)
         self.assertFalse(restored.scalars["hotspot"].empty)
 
-
 class _SpyQueueManager:
-    """Records whether anything reached across to the simulation queue."""
 
     def __init__(self, result: Optional[Dict[str, Any]] = None) -> None:
         self.result = result
@@ -1336,17 +1154,7 @@ class _SpyQueueManager:
         self.calls += 1
         return self.result
 
-
 class ArtifactResolutionTests(unittest.TestCase):
-    """
-    H2. The queue manager is the last resort, not the first.
-
-    It lives in another process, so every `get_result` pickles the whole
-    50-180 MB artifact across a socket and holds the queue lock -- the same
-    lock the running worker needs to report progress -- while it does. Doing
-    that before consulting the mtime cache and the sidecar cost 0.12 to 0.15 s
-    and a 50 MB allocation on every grid request.
-    """
 
     def setUp(self) -> None:
         fields.clear_cache()
@@ -1412,9 +1220,7 @@ class ArtifactResolutionTests(unittest.TestCase):
         response = self.client.get(f"/api/projects/{project_id}/grid")
         self.assertEqual(response.status_code, 404)
 
-
 class LatticeBudgetEndpointTests(unittest.TestCase):
-    """H3. Over-budget runs answer with something the shell can show."""
 
     def setUp(self) -> None:
         fields.clear_cache()
@@ -1460,7 +1266,6 @@ class LatticeBudgetEndpointTests(unittest.TestCase):
         self.assertEqual(body["code"], "lattice_too_large")
         self.assertEqual(body["dims"], [4000, 4000, 4000])
         self.assertGreater(body["cellCount"], body["maxCellCount"])
-        # The message has to tell the user what to do about it.
         self.assertIn("coarser voxel size", body["error"])
 
     def test_every_grid_endpoint_answers_the_same_way(self) -> None:
@@ -1469,9 +1274,7 @@ class LatticeBudgetEndpointTests(unittest.TestCase):
             self.assertEqual(response.status_code, 413, msg=path)
             self.assertEqual(response.get_json()["code"], "lattice_too_large", msg=path)
 
-
 class RemovedTetResultTests(unittest.TestCase):
-    """A result stored by the removed tetrahedral mesher is a 410, not a 500."""
 
     def setUp(self) -> None:
         fields.clear_cache()
@@ -1519,18 +1322,11 @@ class RemovedTetResultTests(unittest.TestCase):
         self._assert_removed()
         self.assertTrue(sidecar.exists())
 
-
 @unittest.skipUnless(
     REAL_ARTIFACT.exists(),
     f"Seeded run artifact not present at {REAL_ARTIFACT}",
 )
 class RealArtifactTests(unittest.TestCase):
-    """
-    The synthetic fixture proves the arithmetic; this proves the assumptions.
-
-    A real run is where a wrong guess about the artifact's key names, its
-    part-type codes or the uniformity of its lattice actually shows up.
-    """
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -1560,8 +1356,6 @@ class RealArtifactTests(unittest.TestCase):
         self.assertEqual(meta["frames"]["fraction_liquid"]["count"], 93)
         self.assertAlmostEqual(meta["ranges"]["solidification_time"]["min"], 64.2396, places=3)
         self.assertAlmostEqual(meta["ranges"]["solidification_time"]["max"], 731.1978, places=3)
-        # niyama came back identically zero on this run; it must not be
-        # offered as something to look at.
         self.assertNotIn("niyama", meta["modes"])
 
     def test_envelope_vertices_sit_on_the_threshold(self) -> None:
@@ -1574,11 +1368,6 @@ class RealArtifactTests(unittest.TestCase):
         self.assertGreater(envelope.vertex_count, 0)
         span = grid.maximum - grid.minimum
         deviation = np.abs(envelope.scalars - threshold) / span
-        # Measured on this run: median 5.9 percent of the span, 90th
-        # percentile 16 percent, worst vertex 22 percent. The tail is where
-        # the field climbs fastest -- the riser neck -- and a half-cell shift
-        # there is a large number of seconds. The median is the statement
-        # that the surface is on its level.
         self.assertLess(float(np.median(deviation)), 0.1)
         self.assertLess(float(np.percentile(deviation, 90)), 0.25)
 
@@ -1594,8 +1383,6 @@ class RealArtifactTests(unittest.TestCase):
         elapsed = time.perf_counter() - started
         assert envelope is not None
         self.assertGreater(envelope.triangle_count, 0)
-        # Generous, because CI machines vary; the point is that this is
-        # milliseconds rather than the seconds a JSON round trip would cost.
         self.assertLess(elapsed, 2.0)
 
     def test_no_scalar_grid_bleeds_below_its_own_minimum(self) -> None:
@@ -1607,7 +1394,6 @@ class RealArtifactTests(unittest.TestCase):
             self.assertGreaterEqual(
                 float(np.min(dense)), grid.minimum - tolerance, msg=f"{mode} bled below its minimum"
             )
-
 
 if __name__ == "__main__":
     unittest.main()

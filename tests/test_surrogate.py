@@ -1,5 +1,3 @@
-"""Tests for the surrogate solidification backend (core/surrogate)."""
-
 from __future__ import annotations
 
 import io
@@ -38,9 +36,7 @@ from core.surrogate.metrics import (
 from core.surrogate.model import ModelManifest, NumpyDemoModel, NumpyWeightsModel, _mushy_fraction
 from core.surrogate.split import geometry_group_key, grouped_train_val_indices
 
-
 def _fake_engine(n=300, resolution=16):
-    """A minimal engine-like object exposing what the codec needs."""
     rng = np.random.default_rng(0)
 
     class Mesh:
@@ -60,7 +56,6 @@ def _fake_engine(n=300, resolution=16):
     engine._get_normalized_heights = heights
     return engine
 
-
 def _loader_for(mesh):
     bounds = np.stack([mesh.bounds[0], mesh.bounds[1]], axis=1)
     return SimpleNamespace(
@@ -69,7 +64,6 @@ def _loader_for(mesh):
         volume=float(getattr(mesh, "volume", 0.0) or 0.0),
         get_bounds_array=lambda: bounds,
     )
-
 
 class ConditioningTests(unittest.TestCase):
     def test_vector_size_and_round_trip(self):
@@ -80,7 +74,6 @@ class ConditioningTests(unittest.TestCase):
         for name in ("liquidus_temp", "max_dim", "chvorinov_mold_constant"):
             self.assertIn(name, raw)
             self.assertGreater(raw[name], 0.0)
-
 
 class FieldsCodecTests(unittest.TestCase):
     def test_encode_and_unproject_round_trip(self):
@@ -106,9 +99,6 @@ class FieldsCodecTests(unittest.TestCase):
         self.assertEqual(set(np.unique(occ)).issubset({0.0, 1.0}), True)
 
     def test_unproject_uses_scatter_cell_not_rounding(self):
-        # Regression: unprojection must fetch the cell the voxel was scattered
-        # into (floor), not round to the neighbour cell — rounding drops voxels
-        # in the upper half of a cell onto empty cells.
         engine = _fake_engine(n=20)
         centers = np.asarray(engine.mesh.voxel_centers, dtype=np.float64)
         boost = np.ones(len(centers), dtype=np.float32)
@@ -126,7 +116,6 @@ class FieldsCodecTests(unittest.TestCase):
         self.assertTrue(np.all(back == 1.0),
                         f"{int(np.sum(back == 0))}/{len(centers)} voxels dropped by rounding")
 
-
 class ModelTests(unittest.TestCase):
     def test_demo_predict(self):
         model = NumpyDemoModel()
@@ -138,7 +127,7 @@ class ModelTests(unittest.TestCase):
         pred = model.predict(channels, cond)
         self.assertEqual(pred.shape, (3, 16, 16, 16))
         self.assertTrue(np.all(np.isfinite(pred)))
-        self.assertTrue(np.all(pred[1] >= 0))  # end times non-negative
+        self.assertTrue(np.all(pred[1] >= 0))
 
     def test_load_demo_and_trained(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -193,7 +182,6 @@ class ModelTests(unittest.TestCase):
         self.assertTrue(np.all(pred_local[active] >= 0))
         np.testing.assert_allclose(start[active], pred_end[active] - pred_local[active], atol=1e-3)
         self.assertTrue(np.all(pred[:, ~active] == 0))
-        # The learned head tracks the 10% local/end ratio, not the mushy fraction (~0.27).
         ratio = np.median(pred_local[active] / pred_end[active])
         self.assertLess(ratio, 0.2)
         self.assertIn("learned", model.describe())
@@ -206,7 +194,6 @@ class ModelTests(unittest.TestCase):
             from core.surrogate.model import _save_manifest
 
             _save_manifest(manifest, tmp)
-            # Artifact layout from before the local head existed: weights only.
             np.savez_compressed(os.path.join(tmp, "weights.npz"), weights=weights)
             res = load_model(tmp)
             self.assertIsNotNone(res.model, res.error)
@@ -232,7 +219,6 @@ class ModelTests(unittest.TestCase):
             self.assertTrue(res.model.has_local_head)
             np.testing.assert_allclose(res.model.local_weights, local_weights)
 
-
 class MetricsTests(unittest.TestCase):
     def test_compute_field_metrics(self):
         ref = np.array([1.0, 2.0, 3.0])
@@ -253,14 +239,13 @@ class MetricsTests(unittest.TestCase):
 
     def test_baseline_and_skill(self):
         ref = np.array([10.0, 20.0, 30.0, 40.0])
-        # Constant-mean baseline RMSE is the population std (11.18 s).
         m_perfect = compute_field_metrics(ref, ref)
         self.assertAlmostEqual(m_perfect["baseline_rmse"], float(np.std(ref)), places=6)
         self.assertAlmostEqual(m_perfect["skill"], 1.0, places=6)
         m_mean = compute_field_metrics(np.full(4, ref.mean()), ref)
         self.assertAlmostEqual(m_mean["skill"], 0.0, places=6)
         m_worse = compute_field_metrics(np.full(4, 1000.0), ref)
-        self.assertEqual(m_worse["skill"], 0.0)  # clipped, never negative
+        self.assertEqual(m_worse["skill"], 0.0)
         self.assertEqual(skill_score(5.0, 10.0), 0.5)
         self.assertTrue(np.isnan(skill_score(float("nan"), 10.0)))
 
@@ -289,7 +274,6 @@ class MetricsTests(unittest.TestCase):
         m = masked_schedule_metrics(pred, np.zeros(8), ref_end, np.zeros(8), mask)
         self.assertEqual(m["end_time"]["n_compared"], 3)
         self.assertAlmostEqual(m["end_time"]["rmse"], np.sqrt((0 + 100 + 100) / 3.0), places=6)
-        # Unmasked comparison would be dominated by 5 zero-vs-100 cells.
         full = compute_field_metrics(pred[1].reshape(-1), ref_end)
         self.assertGreater(full["rmse"], m["end_time"]["rmse"])
 
@@ -302,10 +286,10 @@ class MetricsTests(unittest.TestCase):
         from core.surrogate.fields import PART_TYPE_DIVISOR
 
         channels = np.zeros((7, 2, 2, 2), dtype=np.float32)
-        channels[0, 0] = 1.0  # first 4 cells active
-        channels[1, 0, 0, 0] = PART_TYPE_CHILL / PART_TYPE_DIVISOR  # one chill cell
+        channels[0, 0] = 1.0
+        channels[1, 0, 0, 0] = PART_TYPE_CHILL / PART_TYPE_DIVISOR
         ref_end = np.ones(8)
-        ref_end[1] = 0.0  # active, non-chill, but end == 0
+        ref_end[1] = 0.0
         mask = schedule_evaluation_mask(channels, ref_end)
         self.assertEqual(mask.shape, (8,))
         self.assertEqual(int(mask.sum()), 2)
@@ -313,7 +297,6 @@ class MetricsTests(unittest.TestCase):
         self.assertFalse(mask[1])
         self.assertTrue(mask[2] and mask[3])
         self.assertFalse(mask[4:].any())
-
 
 class DatasetTests(unittest.TestCase):
     def test_capture_and_load_round_trip(self):
@@ -334,7 +317,6 @@ class DatasetTests(unittest.TestCase):
             records = load_dataset(tmp)
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0]["end"].size, 8 ** 3)
-
 
 class TrainingTests(unittest.TestCase):
     def _make_record(self, out_dir: str, seed: int = 0, geometry_seed: int = None) -> str:
@@ -402,7 +384,6 @@ class TrainingTests(unittest.TestCase):
         from core.surrogate.training import train_numpy
 
         with tempfile.TemporaryDirectory() as tmp:
-            # 3 geometries x 2 alloy-ish variants = 6 records.
             for geometry in range(3):
                 for variant in range(2):
                     self._make_record(tmp, seed=geometry * 2 + variant, geometry_seed=geometry)
@@ -478,7 +459,6 @@ class TrainingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 retrain_from_dataset(data_dir=tmp, output_dir=tmp, grid=8)
 
-
 class PipelineTests(unittest.TestCase):
     def test_surrogate_pipeline_end_to_end(self):
         box = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
@@ -529,15 +509,9 @@ class PipelineTests(unittest.TestCase):
         ref_end = np.asarray(ref.engine.solidification_times, dtype=np.float64)
         sur_end = np.asarray(sur.engine.solidification_times, dtype=np.float64)
         m = compute_field_metrics(sur_end, ref_end)
-        # Loose bound: the reference model mirrors Chvorinov physics, so it must
-        # be in the right ballpark on a simple box (relative RMSE < 1.0).
         self.assertLess(m["relative_rmse"], 1.0)
 
-
     def test_fraction_liquid_window_matches_schedule_completion(self):
-        # The fraction-liquid timeline must span exactly the schedule-defined
-        # completion (max(start + local)), never the predicted end field —
-        # an incoherent end head used to stretch the slider past completion.
         box = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
         loader = _loader_for(box)
         inputs = PipelineInputs(
@@ -565,12 +539,10 @@ class PipelineTests(unittest.TestCase):
             delta=1e-3,
         )
 
-
 if __name__ == "__main__":
     unittest.main()
 
 class TrainBaselineTests(unittest.TestCase):
-    """The manifest baseline is the TRAIN-mean constant scored on val cells."""
 
     def test_train_numpy_baseline_is_train_mean_on_val(self):
         from core.surrogate.metrics import schedule_evaluation_mask
@@ -600,6 +572,5 @@ class TrainBaselineTests(unittest.TestCase):
             result = train_numpy(records, grid=8)
             baseline = result["headline"]["baseline_rmse_s"]
             self.assertAlmostEqual(baseline, expected, places=4)
-            # Train-mean baseline is never below the oracle (val std) constant.
             self.assertGreaterEqual(baseline + 1e-9, oracle)
             self.assertEqual(result["metrics"]["end_time"]["baseline_rmse"], baseline)

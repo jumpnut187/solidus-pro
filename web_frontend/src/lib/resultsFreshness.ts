@@ -1,13 +1,3 @@
-/**
- * Whether the loaded results still describe the parts on screen.
- *
- * A finished run records the parts it simulated in its summary
- * (`simulated_parts`, see `simulated_parts_snapshot` in web/payloads.py). Any
- * difference in a field the run depends on -- a part deleted, added, moved,
- * hidden, retyped, or a modeled body rebuilt into a new file -- means the field
- * on screen belongs to a model that no longer exists: a deleted riser is still
- * in it, solidifying where nothing is drawn.
- */
 import type { ProjectPart } from './api';
 
 export type SimulatedPart = Partial<PartFields>;
@@ -29,13 +19,11 @@ type PartFields = Pick<
   | 'scale'
 >;
 
-/** Positions and angles equal to a millionth are equal; the server stores floats. */
 const round = (value: unknown, fallback: number) => {
   const number = Number(value ?? fallback);
   return Number.isFinite(number) ? Math.round(number * 1e6) / 1e6 : fallback;
 };
 
-/** A key that is equal exactly when two part lists would simulate the same. */
 export function simulatedPartsKey(parts: SimulatedPart[]): string {
   return parts
     .map((part) =>
@@ -45,7 +33,6 @@ export function simulatedPartsKey(parts: SimulatedPart[]): string {
         String(part.part_type ?? ''),
         part.visible === false ? 0 : 1,
         part.is_open_top ? 1 : 0,
-        // Runs recorded before the sleeve choice are insulating.
         part.riser_sleeve === 'none' || part.riser_sleeve === 'adiabatic' ? part.riser_sleeve : 'insulating',
         round(part.position_x, 0),
         round(part.position_y, 0),
@@ -60,13 +47,11 @@ export function simulatedPartsKey(parts: SimulatedPart[]): string {
     .join('\n');
 }
 
-/** The parts a run simulated, or null for a run that predates the record. */
 export function simulatedPartsFromSummary(summary: Record<string, unknown> | null | undefined): SimulatedPart[] | null {
   const recorded = summary?.simulated_parts;
   return Array.isArray(recorded) ? (recorded as SimulatedPart[]) : null;
 }
 
-/** What changed, in a few words, for the banner. */
 export function describePartChanges(simulated: SimulatedPart[], current: SimulatedPart[]): string {
   const before = new Map(simulated.map((part) => [String(part.id), part]));
   const now = new Map(current.map((part) => [String(part.id), part]));

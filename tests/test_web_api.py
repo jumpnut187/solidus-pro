@@ -17,7 +17,6 @@ from web.services.simulation_queue import SimulationQueueManager
 from web import repository as repo
 from web.routes import api_bp
 
-
 def _synthetic_visualization() -> dict:
     centers = []
     shrinkage = []
@@ -42,10 +41,8 @@ def _synthetic_visualization() -> dict:
         "fraction_liquid_times": [0.0, 10.0],
     }
 
-
 class WebApiPayloadTests(unittest.TestCase):
     def test_shrinkage_mode_is_shrink_only(self) -> None:
-        """The web 'shrinkage' (Shrink) payload is shrink risk, not max(shrink, porosity)."""
         shrinkage = np.array([0.1, 0.8, 0.0], dtype=np.float32)
         porosity = np.array([0.7, 0.2, 0.4], dtype=np.float32)
         engine = SimpleNamespace(
@@ -86,7 +83,6 @@ class WebApiPayloadTests(unittest.TestCase):
         self.assertEqual(summary["shrinkage_stats"]["affected_count"], 2)
 
     def test_porosity_mode_exposed_separately(self) -> None:
-        """Feeding-blocked, path lengths, open fraction, and porosity are exposed."""
         shrinkage = np.array([0.1, 0.8, 0.3], dtype=np.float32)
         porosity = np.array([0.7, 0.2, 0.4], dtype=np.float32)
         feeding_blocked = np.array([False, True, True], dtype=bool)
@@ -125,7 +121,6 @@ class WebApiPayloadTests(unittest.TestCase):
             max_voxels=10,
         )
 
-        # Check that all new fields are present and have correct length.
         self.assertIn("porosity", visualization)
         self.assertEqual(len(visualization["porosity"]), 3)
         np.testing.assert_allclose(visualization["porosity"], [0.7, 0.2, 0.4])
@@ -194,7 +189,7 @@ class WebApiPayloadTests(unittest.TestCase):
             voxel_sizes=np.ones(3, dtype=np.float32),
             surface_voxels=None,
             voxel_states=None,
-            voxel_part_types=np.array([0, 2, 0], dtype=np.int32),  # 0=CAST, 2=CHILL
+            voxel_part_types=np.array([0, 2, 0], dtype=np.int32),
             voxel_moduli=np.array([0.1, 0.1, 0.1], dtype=np.float32),
         )
 
@@ -206,12 +201,9 @@ class WebApiPayloadTests(unittest.TestCase):
             max_voxels=10,
         )
 
-        # Chill voxel (index 1) must report 0.0 feed modulus.
         np.testing.assert_allclose(visualization["feed_modulus"], [0.25, 0.0, 1.0])
-        # Stats should only reflect non-chill voxels.
         self.assertAlmostEqual(summary["feed_modulus_stats"]["min_in"], 0.25, places=5)
         self.assertAlmostEqual(summary["feed_modulus_stats"]["max_in"], 1.0, places=5)
-
 
 class WebApiTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -257,7 +249,6 @@ class WebApiTests(unittest.TestCase):
         part_payload = part_response.get_json()["part"]
         self.assertTrue(part_payload["is_open_top"])
         self.assertEqual(part_payload["part_type"], "riser")
-        # A part saved without a sleeve choice is insulating; the choice persists.
         self.assertEqual(part_payload["riser_sleeve"], "insulating")
         update_response = self.client.put(
             f"/api/projects/{project_id}/parts/{part_payload['id']}",
@@ -268,7 +259,6 @@ class WebApiTests(unittest.TestCase):
         stored = self.client.get(f"/api/projects/{project_id}").get_json()["parts"]
         self.assertEqual(stored[0]["riser_sleeve"], "none")
         self.assertTrue(stored[0]["is_open_top"])
-        # The no-heat-loss sleeve is a stored choice too; an unknown one falls back to insulating.
         for posted, kept in (("adiabatic", "adiabatic"), ("exothermic", "insulating")):
             response = self.client.put(
                 f"/api/projects/{project_id}/parts/{part_payload['id']}",
@@ -280,12 +270,6 @@ class WebApiTests(unittest.TestCase):
             self.assertEqual(stored[0]["riser_sleeve"], kept)
 
     def test_pour_location_round_trips_through_project_api(self) -> None:
-        """A pour location set via PUT persists and reads back through GET.
-
-        The value is stored inside the existing ``ui_state`` JSON blob (see
-        ``web.repository._merge_pour_location``) rather than a new column,
-        but the API exposes it as a plain top-level ``pour_location`` field.
-        """
         create_response = self.client.post(
             "/api/projects",
             json={"name": "Pour Location Test", "alloy": "WCB"},
@@ -311,8 +295,6 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(get_response.status_code, 200)
         project = get_response.get_json()["project"]
         self.assertEqual(project["pour_location"], pour_location)
-        # It must also be readable back out of the ui_state blob it is
-        # actually stored in, since that is the persistence mechanism.
         self.assertEqual(project["ui_state"]["pour_location"], pour_location)
 
         clear_response = self.client.put(
@@ -394,13 +376,6 @@ class WebApiTests(unittest.TestCase):
         self.assertNotIn("visualization", summary_response.get_json())
 
     def test_retired_json_result_routes_are_gone(self) -> None:
-        """The sampled-field, surface and volume routes no longer exist.
-
-        Everything the viewport draws now comes from the dense grid endpoints
-        in ``web/routes_fields.py``. A 404 here is the whole point: a stale
-        client asking for the old shapes must fail loudly rather than get a
-        half-maintained payload.
-        """
         project_id = repo.create_project(self.database_path, {"name": "Retired Routes"})
         artifact_path = self.temp_folder / "artifacts" / f"{project_id}.json"
         artifact_path.parent.mkdir(parents=True)
@@ -415,16 +390,7 @@ class WebApiTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(self.client.get(f"/api/projects/{project_id}/{path}").status_code, 404)
 
-
 class BuildPipelineInputsTests(unittest.TestCase):
-    """Verify the web layer plumbs stored options into PipelineInputs.
-
-    Targets web.services.simulation_queue.build_pipeline_inputs, which is the
-    mapping the live queued-simulation path actually uses. These assertions
-    previously ran against web.routes.execute_project_task -- a dead duplicate
-    of the same mapping that nothing but this test called, so drift between the
-    two copies could not have been caught.
-    """
 
     def _build(self, project: dict):
         from web.services.simulation_queue import build_pipeline_inputs
@@ -432,17 +398,14 @@ class BuildPipelineInputsTests(unittest.TestCase):
         return build_pipeline_inputs(project)
 
     def test_use_gpu_option_reaches_pipeline_inputs(self) -> None:
-        """performance_options={'use_gpu': True} must reach PipelineInputs.use_gpu=True."""
         inputs = self._build({"performance_options": {"use_gpu": True}, "alloy": "WCB"})
         self.assertTrue(inputs.use_gpu)
 
     def test_use_gpu_defaults_to_false_when_option_missing(self) -> None:
-        """Callers that omit use_gpu must keep the existing default of False."""
         inputs = self._build({"alloy": "WCB"})
         self.assertFalse(inputs.use_gpu)
 
     def test_performance_options_are_plumbed_through(self) -> None:
-        """Every performance key the queue reads must land on PipelineInputs."""
         inputs = self._build(
             {
                 "alloy": "CF8",
@@ -472,11 +435,6 @@ class BuildPipelineInputsTests(unittest.TestCase):
         self.assertEqual(inputs.max_voxels_for_visualization, 12345)
 
     def test_pour_location_reaches_pipeline_inputs(self) -> None:
-        """A project's pour_location must reach PipelineInputs.pour_location.
-
-        Mold filling (core.filling_stage.maybe_run_filling) gates entirely on
-        this attribute being set, so the web layer must plumb it through.
-        """
         pour_location = {
             "schema_version": 1,
             "point_in": [1.0, 2.0, 3.0],
@@ -487,12 +445,10 @@ class BuildPipelineInputsTests(unittest.TestCase):
         self.assertEqual(inputs.pour_location, pour_location)
 
     def test_pour_location_defaults_to_none_when_missing(self) -> None:
-        """Projects with no pour location must leave PipelineInputs.pour_location unset."""
         inputs = self._build({"alloy": "WCB"})
         self.assertIsNone(inputs.pour_location)
 
     def test_analysis_and_solidification_params_pass_through(self) -> None:
-        """Nested option dicts travel opaquely, so new keys need no queue change."""
         inputs = self._build(
             {
                 "analysis_options": {"hot_tear": True},
@@ -505,7 +461,6 @@ class BuildPipelineInputsTests(unittest.TestCase):
             inputs.solidification_params,
             {"feeding": {"base_feeding_distance": 8.0}},
         )
-
 
 if __name__ == "__main__":
     unittest.main()

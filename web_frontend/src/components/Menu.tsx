@@ -6,16 +6,9 @@ export type MenuItemSpec = {
   onSelect?: () => void;
   shortcut?: string;
   disabled?: boolean;
-  /** Renders a section heading instead of a clickable row. */
   heading?: boolean;
 };
 
-/**
- * A dropdown that closes on Escape, on outside click, and after a selection.
- *
- * Menus are plain buttons in a popover rather than a `<select>`: the top bar's
- * Export and Help menus mix actions with headings, which a select cannot do.
- */
 export function Menu({
   label,
   icon,

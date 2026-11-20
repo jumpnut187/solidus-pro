@@ -1,4 +1,3 @@
-"""Candidate robust-thickness statistics on a saved part-type grid."""
 import sys
 import numpy as np
 from scipy import ndimage

@@ -1,16 +1,3 @@
-/**
- * Typed client for the dense field grids the viewport renders.
- *
- * Metadata arrives as JSON; grids and frame stacks arrive as raw typed
- * arrays. The layout is x-fastest -- `index = ix + nx * (iy + ny * iz)` --
- * which is exactly a WebGL 3D texture of width `nx`, so the bytes go from
- * `fetch` into `RawTexture3D` with no repacking.
- *
- * Every fetcher takes an `AbortSignal`. Loading results is the one place in
- * this application where a user can outrun the network -- clicking through
- * result modes queues a 100 KB request each -- and an unaborted response
- * arriving late would paint the previous mode over the current one.
- */
 import type { GridMeta, ResultModeId } from './viewState';
 
 export class GridRequestError extends Error {
@@ -23,22 +10,17 @@ export class GridRequestError extends Error {
   }
 }
 
-/** A scalar grid plus the range needed to turn its bytes back into field units. */
 export type FieldGridData = {
   mode: ResultModeId;
-  /** One byte per cell, x-fastest. */
   data: Uint8Array;
   dims: [number, number, number];
-  /** `value = min + (byte / 255) * (max - min)`. */
   min: number;
   max: number;
   unit: string;
 };
 
-/** A window of consecutive time frames, each one a full grid. */
 export type FrameStackData = {
   mode: ResultModeId;
-  /** `count * nx * ny * nz` bytes, frame-major. */
   data: Uint8Array;
   dims: [number, number, number];
   start: number;
@@ -58,7 +40,6 @@ async function failure(response: Response): Promise<GridRequestError> {
     const body = await response.json();
     if (body && typeof body.error === 'string') message = body.error;
   } catch {
-    // A binary endpoint that failed may not have produced JSON at all.
   }
   return new GridRequestError(message, response.status);
 }
@@ -82,19 +63,12 @@ async function fetchBinary(url: string, signal?: AbortSignal): Promise<Response>
   return response;
 }
 
-/**
- * Dimensions, placement, available modes, ranges, frame times and statistics.
- *
- * Always the first call: everything else needs the dims to make sense of the
- * bytes, and the shell needs the mode list to build its menu.
- */
 export async function fetchGridMeta(projectId: string, signal?: AbortSignal): Promise<GridMeta> {
   const response = await fetch(projectBase(projectId), { signal, headers: { Accept: 'application/json' } });
   if (!response.ok) throw await failure(response);
   return (await response.json()) as GridMeta;
 }
 
-/** The occupancy grid: 0 outside the metal, otherwise a part-type code + 1. */
 export async function fetchMaskGrid(
   projectId: string,
   signal?: AbortSignal
@@ -104,22 +78,12 @@ export async function fetchMaskGrid(
   return { data: new Uint8Array(buffer), dims: parseDims(response.headers.get('X-Grid-Dims')) };
 }
 
-/** Signed distance from each cell to the parts' real surface; see `RunResources.skinTexture`. */
 export type SkinGridData = {
   data: Uint8Array;
   dims: [number, number, number];
-  /** Half-width of the encoded range, in voxels. Byte 127.5 is the surface. */
   rangeVoxels: number;
 };
 
-/**
- * The skin distance grid, or null when the server cannot build one.
- *
- * Missing part files or a lattice too large to measure come back as a 404,
- * and that is not a failure of the run: the viewport clips the front against
- * the mask instead, which is what it did before this grid existed. Only an
- * abort propagates.
- */
 export async function fetchSkinGrid(projectId: string, signal?: AbortSignal): Promise<SkinGridData | null> {
   try {
     const response = await fetchBinary(`${projectBase(projectId)}/skin`, signal);
@@ -135,7 +99,6 @@ export async function fetchSkinGrid(projectId: string, signal?: AbortSignal): Pr
   }
 }
 
-/** One dense scalar grid, quantized to bytes. */
 export async function fetchFieldGrid(
   projectId: string,
   mode: ResultModeId,
@@ -153,7 +116,6 @@ export async function fetchFieldGrid(
   };
 }
 
-/** The same grid in field units, for callers that want floats rather than bytes. */
 export async function fetchFieldGridFloat(
   projectId: string,
   mode: ResultModeId,
@@ -172,13 +134,6 @@ export async function fetchFieldGridFloat(
   };
 }
 
-/**
- * A window of time frames.
- *
- * `count` defaults to the whole stack. A 93-frame run of a 41,000-voxel
- * casting is 9.5 MB raw and about 1.7 MB over a gzipped connection, so
- * fetching the lot in one request is cheaper than paging it.
- */
 export async function fetchFrames(
   projectId: string,
   mode: ResultModeId,
@@ -204,13 +159,11 @@ export async function fetchFrames(
   };
 }
 
-/** A threshold isosurface, as the buffers a vertex buffer wants. */
 export type EnvelopeData = {
   mode: ResultModeId;
   positions: Float32Array;
   normals: Float32Array;
   indices: Uint32Array;
-  /** Per-vertex field value in field units, when the server sampled it. */
   scalars: Float32Array | null;
   vertexCount: number;
   triangleCount: number;
@@ -221,24 +174,13 @@ export type EnvelopeData = {
 };
 
 export type EnvelopeOptions = {
-  /** Iso level in **field units**, not percent. */
   threshold: number;
   castOnly?: boolean;
-  /** Skip the per-vertex sampling pass when the colour is not needed. */
   scalars?: boolean;
-  /** Frame index, for the animated modes. */
   frame?: number;
   signal?: AbortSignal;
 };
 
-/**
- * Fetch the threshold isosurface for a mode.
- *
- * The body is one little-endian block -- positions, normals, indices, then
- * optional scalars -- with the counts in headers. Each section is a whole
- * number of 4-byte words, so the typed-array views below are windows onto the
- * response buffer rather than copies of it.
- */
 export async function fetchEnvelope(
   projectId: string,
   mode: ResultModeId,
@@ -283,7 +225,6 @@ export async function fetchEnvelope(
   };
 }
 
-/** True when a rejection is the caller's own abort rather than a real failure. */
 export function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
 }

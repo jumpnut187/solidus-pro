@@ -5,13 +5,6 @@ import { shortcutFor } from '../lib/shortcuts';
 import { RESULT_MODE_LABELS, type GridMeta, type MeasureResult, type ProbeReading } from '../lib/viewState';
 import type { Toast } from '../hooks/useToasts';
 
-/**
- * Voxel and volume counts for the loaded run.
- *
- * A statistic the viewport did not report is omitted rather than shown as
- * zero: "0.0 in³" next to forty thousand voxels reads as a broken model, not
- * as a missing number.
- */
 export function StatsChip({ meta }: { meta: GridMeta | null }) {
   if (!meta || meta.voxelCount <= 0) return null;
   const showCast = meta.castVoxelCount > 0 && meta.castVoxelCount !== meta.voxelCount;
@@ -43,13 +36,6 @@ export function StatsChip({ meta }: { meta: GridMeta | null }) {
   );
 }
 
-/**
- * The probe value and the last measurement, in one card.
- *
- * They share a corner because they are the same kind of answer — "what is it
- * here?" — and because two floating cards fighting for the top-left is worse
- * than one that grows a section.
- */
 export function ProbeReadout({
   reading,
   measurement,
@@ -105,22 +91,6 @@ export function ProbeReadout({
   );
 }
 
-/**
- * Warning that the results on screen came from a thinned lattice.
- *
- * A run past the stored-result voxel cap keeps only every step-th voxel in the
- * JSON, and this run has no full-resolution sidecar to fall back on, so the
- * grid was rebuilt from the thinned copy: the field the viewport paints and
- * every count derived from it under-report. That is not an error and must not
- * stop anyone working, but it is exactly the kind of thing a person quotes off
- * a screenshot without knowing — so it says so on the canvas, once per run,
- * and gets out of the way when dismissed.
- *
- * Re-running is the fix on its own: a completed run writes the full-resolution
- * grid beside its artifact regardless of the cap. Raising the cap is worth
- * mentioning second because it is what keeps the stored result itself whole,
- * which is what riser design reads.
- */
 export function DownsampledBanner({ onDismiss }: { onDismiss: () => void }) {
   return (
     <div className="canvas-banner" role="status">
@@ -143,14 +113,6 @@ export function DownsampledBanner({ onDismiss }: { onDismiss: () => void }) {
   );
 }
 
-/**
- * The parts have changed since the results on screen were solved.
- *
- * The field is kept, because it is still the last answer anyone has, but it
- * describes a model that no longer exists: a deleted riser is still in it,
- * feeding the casting from where nothing is drawn. Not dismissible -- it goes
- * away when the parts match the run again or a new run finishes.
- */
 export function StaleResultsBanner({
   changes,
   onRun,
@@ -190,8 +152,7 @@ export function EmptyState({ onAddParts }: { onAddParts: () => void }) {
         <button type="button" className="btn btn-primary" onClick={onAddParts}>
           Add parts
         </button>
-        {/* From the shortcut table, so the chips name the modifier this
-            platform actually uses and cannot drift from the handler. */}
+        {}
         <span className="chip">{shortcutFor('Add CAD parts')}</span>
         <span className="chip">{shortcutFor('Run simulation')} to run</span>
       </div>

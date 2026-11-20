@@ -12,13 +12,6 @@ export type SolidificationPanelProps = {
   onClose: () => void;
 };
 
-/**
- * A summary of the solver parameters with a way into the full dialog.
- *
- * Forty-five numeric fields do not belong in a 380px panel next to the canvas;
- * they belong in a dialog the user opens deliberately. What is useful at a
- * glance is which groups have been moved off their defaults.
- */
 export function SolidificationPanel({ params, onOpenModal, onReset, onClose }: SolidificationPanelProps) {
   const totalChanged = PARAM_TABS.reduce((sum, tab) => sum + changedCount(params, tab.id), 0);
   return (

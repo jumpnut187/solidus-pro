@@ -34,13 +34,11 @@ export type ResultsPanelProps = {
   resultsAvailable: boolean;
   measurement: MeasureResult | null;
   onClearMeasurements: () => void;
-  /** Volume above the current threshold, from the viewport handle. */
   defectVolumeIn3: number | null;
   onRecomputeDefectVolume: () => void;
   onOpenStatistics: () => void;
 };
 
-/** Result modes grouped the way a foundry engineer looks for them. */
 const MODE_GROUPS: { label: string; modes: ResultModeId[] }[] = [
   {
     label: 'Solidification',
@@ -58,11 +56,6 @@ const MODE_GROUPS: { label: string; modes: ResultModeId[] }[] = [
   { label: 'Microstructure', modes: ['sdas', 'predicted_uts'] }
 ];
 
-/**
- * Info button beside the result selector: a popover with the selected
- * result's help text (core/result_help.json, shared with the desktop).
- * Closes on Escape, on a click outside, and when the mode changes.
- */
 function ResultHelpButton({ mode }: { mode: ResultModeId }) {
   const [open, setOpen] = useState(false);
   const anchorRef = useRef<HTMLDivElement | null>(null);
@@ -133,7 +126,6 @@ export function ResultsPanel(props: ResultsPanelProps) {
     onRecomputeDefectVolume,
     onOpenStatistics
   } = props;
-  // Before the collapsed early return: hooks run on every render.
   const resultHelpId = useId();
 
   if (collapsed) {
@@ -155,13 +147,9 @@ export function ResultsPanel(props: ResultsPanelProps) {
 
   const available = new Set(meta?.modes ?? []);
   const emptyModes = new Set(meta?.emptyModes ?? []);
-  // A constant field is a result, not an absence: the mode stays selectable
-  // and says so, rather than being greyed out as if the analysis had not run.
   const constantModes = new Set(meta?.constantModes ?? []);
   const range = meta?.ranges[view.mode];
   const unit = meta?.units?.[view.mode] ?? RESULT_MODE_UNITS[view.mode] ?? '';
-  // A sweep has a time axis but no threshold: the scrubber *is* the cut-off,
-  // so the envelope slider would be a second control fighting the first.
   const timeMode = isTimeMode(view.mode) || isSweepMode(view.mode);
   const autoScale = view.scaleMin === null && view.scaleMax === null;
   const enabledAxes = (['x', 'y', 'z'] as const).filter((axis) => view.section[axis].enabled);
@@ -214,9 +202,6 @@ export function ResultsPanel(props: ResultsPanelProps) {
                         scaleMax: null,
                         playing: false,
                         timePercent: 0,
-                        // Follow the new mode's default map, but only while the
-                        // one on screen is still the old mode's default. A map
-                        // the user picked on purpose survives the switch.
                         colormap: isDefaultColormapFor(view.mode, view.colormap)
                           ? defaultColormapForMode(mode)
                           : view.colormap
@@ -538,7 +523,6 @@ export function ResultsPanel(props: ResultsPanelProps) {
   );
 }
 
-/** The first handful of statistics, enough to judge a run without a dialog. */
 function StatisticsSummary({ meta }: { meta: GridMeta | null }) {
   if (!meta) return <p className="field-hint">No statistics reported for this run.</p>;
   const groups = buildStatGroups(meta.stats, {

@@ -1,5 +1,3 @@
-"""Rigged training assemblies (core/surrogate/assemblies.py, design_rules.py) and their generate_dataset path."""
-
 from __future__ import annotations
 
 import tempfile
@@ -24,7 +22,6 @@ from core.surrogate.assemblies import (
 from core.surrogate.dataset import load_dataset
 from core.surrogate.fields import CHANNELS, PART_TYPE_DIVISOR
 from core.surrogate.training import alloys_for_geometry, generate_dataset
-
 
 class AssemblyGeneratorTests(unittest.TestCase):
     @classmethod
@@ -66,7 +63,6 @@ class AssemblyGeneratorTests(unittest.TestCase):
         self.assertTrue(self.heavy)
         for spec in self.heavy:
             raster = design_rules.rasterize(spec.parts)
-            # A core inside a section saturates and freezes with it, so it counts as section.
             section = np.isin(raster.labels, (design_rules.METAL, design_rules.CORE))
             thickness = 2.0 * float(ndimage.distance_transform_edt(section).max()) * raster.pitch
             self.assertGreaterEqual(spec.max_dim, 18.0, spec.name)
@@ -79,9 +75,7 @@ class AssemblyGeneratorTests(unittest.TestCase):
         self.assertEqual(len(picks), 2)
         self.assertEqual(alloys_for_geometry("rig_box_001", alloys, None), alloys)
 
-
 class DesignRuleTests(unittest.TestCase):
-    """``design_rules.check`` rejects the classic bad designs."""
 
     def setUp(self) -> None:
         self.cast = trimesh.creation.box(extents=(4.0, 4.0, 2.0))
@@ -121,8 +115,6 @@ class DesignRuleTests(unittest.TestCase):
         self.assertTrue(any("does not touch" in v for v in report.violations), report.violations)
 
     def test_core_faces_do_not_count_as_cooling(self) -> None:
-        # A through core leaves 1 in walls; a riser that would feed them if the
-        # core faces cooled at half rate is too small once they do not.
         core = trimesh.creation.box(extents=(2.0, 6.0, 1.0))
         core.apply_translation((0.0, 0.0, 1.0))
         parts = [(self.cast, PART_TYPE_CAST), (core, PART_TYPE_CORE), (self._riser(1.8), PART_TYPE_RISER)]
@@ -133,8 +125,6 @@ class DesignRuleTests(unittest.TestCase):
         self.assertFalse(any("modulus" in v for v in half.violations), half.violations)
 
     def test_a_riser_is_sized_for_the_heaviest_section_not_the_average(self) -> None:
-        # A 4 in boss on a 1 in plate: averaged with the plate, a 3 in riser
-        # is twice what the zone needs; the boss alone needs more.
         plate = trimesh.creation.box(extents=(16.0, 16.0, 1.0))
         plate.apply_translation((0.0, 0.0, 0.5))
         boss = trimesh.creation.box(extents=(4.0, 4.0, 4.0))
@@ -174,11 +164,8 @@ class DesignRuleTests(unittest.TestCase):
         self.assertAlmostEqual(design_rules.feeding_distance(1.0), 4.5)
         self.assertAlmostEqual(design_rules.feeding_distance(4.0), 12.0)
 
-
 class AssemblyDatasetTests(unittest.TestCase):
     def test_generate_dataset_runs_an_assembly_as_a_multi_part_job(self) -> None:
-        # Seed 1: seed 0's rigging misses the soundness check by 0.4 % of the
-        # casting in the explicit sand mold, and the run is rejected.
         spec = next(iter_assemblies(1, seed=1, families=["cored_cylinder"]))
         with tempfile.TemporaryDirectory() as out_dir:
             generated = generate_dataset(
@@ -192,11 +179,8 @@ class AssemblyDatasetTests(unittest.TestCase):
         self.assertIn(PART_TYPE_CORE, codes.tolist())
         self.assertIn(PART_TYPE_RISER, codes.tolist())
         end = np.asarray(record["end"])[occupied]
-        # A cell is labelled by its majority part, so a core-labelled cell on
-        # the core face can still average in some metal end time.
         self.assertEqual(float(np.median(end[codes == PART_TYPE_CORE])), 0.0)
         self.assertGreater(float(end[codes == PART_TYPE_CAST].max()), 0.0)
-
 
 if __name__ == "__main__":
     unittest.main()

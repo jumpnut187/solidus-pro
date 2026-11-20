@@ -1,17 +1,3 @@
-"""Where does Test 2's runaway fill fraction live, now that the filter is fixed?
-
-Round 3 fixed the porous negatives (0 in every sample of the whole run) and
-the fill ran to step 16,600 before going non-finite -- a NEW failure. The
-ledger's precursor is unambiguous: ``eps_max`` starts climbing the moment the
-RISER starts to wet and tracks its wet-cell count monotonically, 1.97 at 24
-riser cells to 7.76 at 3,140, while ``eps_min`` falls to -9.5.
-
-This locates the over-filled cells: part, z, flag, neighbour census, and
-whether they sit at the riser's open top (z = 93, the last plane of the grid,
-which is open to atmosphere by omission) or at its foot where metal arrives.
-
-  FROM_STEP=10000 EVERY=250 STOP=16600 python eps_locator.py
-"""
 import sys, os, time, collections
 sys.path.insert(0, "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -27,10 +13,8 @@ TYPES_NPY = os.environ.get(
     "ae9fb16b-4a3f-4912-aa13-a696388671c4/scratchpad/r3_t2_ledger.csv.types.npy")
 STATE = {}
 
-
 def log(m):
     print(f"[{time.strftime('%H:%M:%S')}] {m}", flush=True)
-
 
 def census(mask, types, names, z):
     hist = collections.Counter(
@@ -38,7 +22,6 @@ def census(mask, types, names, z):
     zz = z[mask]
     return dict(hist), (int(zz.min()), int(zz.max()),
                         collections.Counter(zz.tolist()).most_common(3))
-
 
 def install(fs):
     import physics.filling as pf
@@ -60,18 +43,11 @@ def install(fs):
         out = orig_step(state, units, **kw)
         n["i"] += 1
         i = n["i"]
-        # Cheap per-step tripwire: state.mass is one (nx, ny, nz) float64
-        # array, ~1/19th of the populations and already float64, so this costs
-        # a few ms rather than the 260 MB widening of state.f. Mass goes
-        # non-finite in the same step the populations do -- the exchange reads
-        # them -- so nothing is missed by not scanning f every step.
         finite = bool(np.isfinite(state.mass).all())
         if i % 2000 == 0:
             log(f"heartbeat step {i} finite={finite} "
                 f"wet={int(((state.flags == FLAG_FLUID) | (state.flags == FLAG_INTERFACE)).sum())}")
         if "types" not in STATE:
-            # The build_porous_zone hook did not fire on this path; fall back to
-            # the grid the driver run saved, which is the same solve grid.
             STATE["types"] = np.load(TYPES_NPY)
         if i >= FROM_STEP and (i % EVERY == 0 or not finite):
             f = np.asarray(state.f, dtype=np.float64)
@@ -110,7 +86,6 @@ def install(fs):
     pf.step = step
     import core.filling_stage as cfs
     cfs.step = step
-
 
 def main():
     import scipy.spatial as ss
@@ -156,7 +131,6 @@ def main():
                              progress_message_callback=lambda m: log(f"FILL: {m}"))
     except SystemExit:
         log("probe stop")
-
 
 if __name__ == "__main__":
     import threading

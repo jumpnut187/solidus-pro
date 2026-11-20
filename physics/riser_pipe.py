@@ -1,31 +1,3 @@
-"""Primary shrinkage pipe by gravity-drained volume balance.
-
-A feeder does not shrink in a fixed shape. Every voxel it feeds gives up
-``beta * V`` of volume when it freezes, and that volume leaves the feed pool
-at the pool's free surface: the highest voxel that is still liquid. Walls and
-the top crust freeze first, so the free surface falls inside a shrinking
-liquid core and the drained voxels trace the pipe. Its depth and shape follow
-the solidification times. An insulating sleeve, a bigger riser or less feed
-demand gives a shallower pipe. A feeder that freezes before the section it
-feeds lets the free surface drop into the casting, and the pipe follows it.
-
-This module is mesh-agnostic like the rest of ``physics/``. It takes plain
-arrays and imports nothing from ``core/`` or ``config/``.
-
-Assumptions:
-- The liquid in one feed pool is hydraulically connected (the caller builds
-  the pool from the feeding-path tracer's ``feeding_source``, or, for metal
-  no feeder reaches, from :func:`label_unfed_pools`: a liquid region drains by
-  gravity whether or not anything is labelled a feeder).
-- Volume demand is booked when a voxel reaches its solidification time.
-  A voxel with no time (still liquid when the run stopped) freezes after all
-  the others, lowest first.
-- The free surface is the highest liquid voxel. Ties go to the voxel that
-  freezes last, the thermal centre.
-- Liquid contraction above the liquidus is not counted. That underestimates
-  the pipe a little for superheated pours.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -35,14 +7,11 @@ from numba import njit
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
-
 @njit(cache=True)
 def _higher(z: np.ndarray, t: np.ndarray, a: int, b: int) -> bool:
-    # True when voxel ``a`` sits above ``b`` in the free-surface order.
     if z[a] != z[b]:
         return z[a] > z[b]
     return t[a] > t[b]
-
 
 @njit(cache=True)
 def _sift_up(heap: np.ndarray, pos: int, z: np.ndarray, t: np.ndarray) -> None:
@@ -55,7 +24,6 @@ def _sift_up(heap: np.ndarray, pos: int, z: np.ndarray, t: np.ndarray) -> None:
         else:
             break
     heap[pos] = item
-
 
 @njit(cache=True)
 def _sift_down(heap: np.ndarray, size: int, z: np.ndarray, t: np.ndarray) -> None:
@@ -75,7 +43,6 @@ def _sift_down(heap: np.ndarray, size: int, z: np.ndarray, t: np.ndarray) -> Non
             break
     heap[pos] = item
 
-
 @njit(cache=True)
 def _drain_pool(
     times: np.ndarray,
@@ -83,12 +50,6 @@ def _drain_pool(
     volumes: np.ndarray,
     beta: float,
 ) -> tuple:
-    """Drain one feed pool. Arrays are local to the pool.
-
-    Returns ``(drained_volume_per_voxel, unfed_volume)``. ``unfed_volume`` is
-    demand left once the pool had no liquid voxel to give, which only happens
-    in the last instants of freezing.
-    """
     n = times.shape[0]
     drained = np.zeros(n, dtype=np.float64)
     if n == 0:
@@ -110,7 +71,6 @@ def _drain_pool(
         now = times[i]
         demand += beta * (volumes[i] - drained[i])
         while demand > eps:
-            # Lazily drop voxels that are already solid or fully drained.
             while size > 0:
                 top = heap[0]
                 if times[top] > now and drained[top] < volumes[top] - eps:
@@ -129,25 +89,11 @@ def _drain_pool(
             demand -= take
     return drained, unfed
 
-
 def label_unfed_pools(
     neighbors: np.ndarray,
     metal_mask: np.ndarray,
     feeder_mask: np.ndarray,
 ) -> tuple[np.ndarray, int]:
-    """Label the connected metal regions that contain no feeder voxel.
-
-    Args:
-        neighbors: (N, K) int neighbor indices, -1 where there is none.
-        metal_mask: (N,) bool. Voxels that hold metal and may join a pool.
-        feeder_mask: (N,) bool. Feeder voxels. A connected region holding any
-            of them is left out: the feeder's own pool (and the feeding-path
-            tracer) already covers it.
-
-    Returns:
-        ``(labels, n_pools)``. ``labels`` is (N,) int64, 0..n_pools-1 for the
-        voxels of each feeder-free region and -1 everywhere else.
-    """
     metal = np.asarray(metal_mask, dtype=bool)
     feeder = np.asarray(feeder_mask, dtype=bool) & metal
     nbr = np.asarray(neighbors)
@@ -172,17 +118,14 @@ def label_unfed_pools(
     _, labels[keep] = np.unique(component[keep], return_inverse=True)
     return labels, int(labels.max()) + 1
 
-
 @dataclass(frozen=True)
 class PoolPipe:
-    """Pipe summary for one feed pool."""
 
-    demand_volume: float      # beta * volume that froze in the pool (drained volume never freezes)
-    pipe_volume: float        # volume drained out of the pool
-    unfed_volume: float       # demand nothing liquid was left to supply
-    feeder_pipe_volume: float  # drained volume inside the feeder voxels
-    section_pipe_volume: float  # drained volume outside the feeder (in the casting)
-
+    demand_volume: float
+    pipe_volume: float
+    unfed_volume: float
+    feeder_pipe_volume: float
+    section_pipe_volume: float
 
 def gravity_drain_pipe(
     solidification_times: np.ndarray,
@@ -192,34 +135,10 @@ def gravity_drain_pipe(
     feeder_mask: np.ndarray,
     beta: float,
 ) -> tuple[np.ndarray, list[PoolPipe]]:
-    """Per-voxel pipe fraction for every feed pool.
-
-    Args:
-        solidification_times: (N,) seconds. Non-finite means never froze in
-            the simulated window and is treated as the latest time.
-        heights: (N,) vertical coordinate, any length unit (gravity is -z).
-        volumes: (N,) voxel volumes, any unit. Reported volumes use it.
-        pool_ids: (N,) int. Voxels sharing an id >= 0 form one connected feed
-            pool. -1 means the voxel takes no part (unfed, chill, core).
-        feeder_mask: (N,) bool. Voxels that belong to a feeder (riser),
-            used only to split the reported pipe volume.
-        beta: volumetric solidification shrinkage as a fraction (0.03 = 3 %).
-
-    Returns:
-        ``(pipe_fraction, pools)``. ``pipe_fraction`` is the drained share of
-        each voxel's volume, 0..1 (1 = open pipe). ``pools`` is indexed by
-        pool id.
-    """
     times = np.asarray(solidification_times, dtype=np.float64)
     heights = np.asarray(heights, dtype=np.float64)
     finite = np.isfinite(times)
     if not np.all(finite):
-        # Still liquid when the run stopped (a riser that outlasts the time
-        # horizon): these freeze after everything else, lowest first, one after
-        # the other, so the liquid left above goes on feeding what freezes
-        # under it. Given one shared instant they would all be solid at once
-        # and their own shrinkage would find no liquid to draw on. Only the
-        # order is used, so the spacing is arbitrary.
         latest = float(times[finite].max()) if np.any(finite) else 0.0
         late = np.flatnonzero(~finite)
         times = times.copy()
@@ -232,8 +151,6 @@ def gravity_drain_pipe(
     fraction = np.zeros(times.shape[0], dtype=np.float32)
     pools: list[PoolPipe] = []
     n_pools = int(pool_ids.max()) + 1 if pool_ids.size and pool_ids.max() >= 0 else 0
-    # One stable sort instead of a full-array scan per pool: each pool's voxels
-    # stay in ascending index order, as flatnonzero would give them.
     order = np.argsort(pool_ids, kind="stable")
     starts = np.searchsorted(pool_ids[order], np.arange(n_pools + 1))
     for pool in range(n_pools):

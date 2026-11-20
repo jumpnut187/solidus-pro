@@ -26,14 +26,12 @@ from physics.solidification_physics import (
     compute_fraction_solid_scheil_parallel,
 )
 
-
 class _DummyAlloy:
     liquidus_temp = 100.0
     solidus_temp = 0.0
     latent_heat = 10.0
     density_liquid = 2.0
     density_solid = 2.0
-
 
 class ScheilRegressionTests(unittest.TestCase):
     def test_scalar_scheil_stays_bounded_and_monotonic(self) -> None:
@@ -51,11 +49,6 @@ class ScheilRegressionTests(unittest.TestCase):
         self.assertLess(fractions[2], 0.95)
 
     def test_true_scheil_matches_analytic_values(self) -> None:
-        # With the solvent melting point known, the Scheil option uses the
-        # true microsegregation equation, not the bounded surrogate. These are
-        # the analytic values for the WCB binary approximation (k = 0.17,
-        # T_f = 1538, T_L = 1460, T_S = 1399): the surrogate previously
-        # returned 0.194 / 0.558 here.
         T_liq, T_sol, k, T_f = 1460.0, 1399.0, 0.17, 1538.0
         self.assertEqual(
             FractionSolidCalculator.scheil(1500.0, T_liq, T_sol, k, melting_point=T_f),
@@ -71,13 +64,10 @@ class ScheilRegressionTests(unittest.TestCase):
             0.324,
             delta=0.01,
         )
-        # Raw Scheil leaves residual liquid at the solidus; the lever-rule
-        # floor completes the model to exactly 1.0 there.
         self.assertEqual(
             FractionSolidCalculator.scheil(1399.0, T_liq, T_sol, k, melting_point=T_f),
             1.0,
         )
-        # Bounded and monotone across the freezing range.
         temps = np.linspace(T_liq, T_sol, 50)
         fractions = [
             FractionSolidCalculator.scheil(t, T_liq, T_sol, k, melting_point=T_f)
@@ -121,7 +111,6 @@ class ScheilRegressionTests(unittest.TestCase):
         self.assertTrue(np.all(actual >= lower))
         self.assertTrue(np.all(actual <= upper))
 
-
 class LatentHeatRegressionTests(unittest.TestCase):
     def test_get_state_reports_latest_latent_heat_rate(self) -> None:
         model = SolidificationModel(
@@ -155,7 +144,6 @@ class LatentHeatRegressionTests(unittest.TestCase):
         self.assertTrue(np.isinf(local[1]))
         self.assertTrue(np.isinf(local[2]))
         self.assertFalse(bool(np.any(np.isnan(local))))
-
 
 class FeedingEffectivenessRegressionTests(unittest.TestCase):
     def test_ferrostatic_pressure_uses_traced_riser_component_head(self) -> None:
@@ -365,7 +353,6 @@ class FeedingEffectivenessRegressionTests(unittest.TestCase):
 
         self.assertEqual(effectiveness[0], 1.0)
 
-
 class VerticalSolidificationRegressionTests(unittest.TestCase):
     def test_part_type_update_freezes_lower_voxels_faster(self) -> None:
         states = np.array([0.2, 0.2, 1.0], dtype=np.float32)
@@ -464,7 +451,6 @@ class VerticalSolidificationRegressionTests(unittest.TestCase):
 
         final_risk = base_risk * modifier
         self.assertGreater(float(final_risk[1]), float(final_risk[0]))
-
 
 class PorosityRegressionTests(unittest.TestCase):
     def test_shrinkage_evidence_damps_well_fed_cast_and_flags_feed_loss(self) -> None:
@@ -596,7 +582,6 @@ class PorosityRegressionTests(unittest.TestCase):
             float(dummy.porosity_probability[0]),
         )
 
-
 class DistortionRegressionTests(unittest.TestCase):
     def test_distortion_scales_linearly_with_weighted_vector(self) -> None:
         distortion_vectors = np.array(
@@ -612,7 +597,6 @@ class DistortionRegressionTests(unittest.TestCase):
 
         np.testing.assert_allclose(magnitude, np.array([0.2, 0.4], dtype=np.float64), atol=1e-8)
         self.assertAlmostEqual(float(magnitude[1] / magnitude[0]), 2.0)
-
 
 class MaterialPermeabilityEvolutionTests(unittest.TestCase):
     def test_dynamic_viscosity_increases_as_temperature_drops(self) -> None:
@@ -653,7 +637,6 @@ class MaterialPermeabilityEvolutionTests(unittest.TestCase):
 
         factors = SolidificationEngine._estimate_feeder_neck_resistance_factors(dummy)
         np.testing.assert_allclose(factors, np.array([1.35, 1.20, 1.0], dtype=np.float32))
-
 
 class MicrostructureRegressionTests(unittest.TestCase):
     def test_microstructure_correlations_behave_monotonically(self) -> None:
@@ -699,7 +682,6 @@ class MicrostructureRegressionTests(unittest.TestCase):
         self.assertTrue(np.all(cooling_rates > 0.0))
         self.assertTrue(np.all(cooling_rates <= base_rates * 1.5 + 1e-8))
         self.assertGreater(float(cooling_rates[1]), float(base_rates[1]))
-
 
 class FeedingPathCacheRegressionTests(unittest.TestCase):
     def test_ensure_feeding_path_result_called_once_per_run(self) -> None:
@@ -750,7 +732,6 @@ class FeedingPathCacheRegressionTests(unittest.TestCase):
             SolidificationEngine._ensure_feeding_path_result(dummy, dummy.feeding_fraction_solid)
 
         self.assertEqual(call_count, 1)
-
 
 if __name__ == "__main__":
     unittest.main()

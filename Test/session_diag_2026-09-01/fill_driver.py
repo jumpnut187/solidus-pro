@@ -1,15 +1,3 @@
-"""Headless mold-filling driver.
-
-Usage:
-  python fill_driver.py --dir <assembly dir> --voxel 0.17 --refine 4 [--ledger out.csv]
-
-Loads every STL/STEP in a directory through PartManager (same auto part typing
-the GUI uses), builds the adaptive voxel mesh, picks the pour point at the top
-centre of the sprue, and runs core.filling_stage.run_filling_stage.
-
-No tracked file is modified; instrumentation is installed by monkeypatching
-physics.filling.step at import time.
-"""
 from __future__ import annotations
 
 import argparse
@@ -22,21 +10,14 @@ REPO = Path("/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim")
 sys.path.insert(0, str(REPO))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-import faulthandler  # noqa: E402
-import traceback  # noqa: E402
+import faulthandler
+import traceback
 
-import numpy as np  # noqa: E402
+import numpy as np
 
 faulthandler.enable()
 
-
 def _trace_kdtree():
-    """Log every cKDTree build: size, finiteness, and the Python call site.
-
-    Two runs died with 512 MB of C stack consumed inside ckdtree build() --
-    runaway recursion, which is what a non-finite coordinate does to a
-    midpoint split.
-    """
     import scipy.spatial as ss
     orig = ss.cKDTree
 
@@ -60,10 +41,8 @@ def _trace_kdtree():
     import scipy.spatial._ckdtree as ck
     ck.cKDTree = TracedKDTree
 
-
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
-
 
 def main():
     ap = argparse.ArgumentParser()
@@ -93,7 +72,7 @@ def main():
     for f in files:
         try:
             ids = pm.load_assembly_parts(str(f))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log(f"  FAILED {f.name}: {exc}")
             continue
         for pid in ids:
@@ -103,12 +82,11 @@ def main():
     parts = pm.get_all_parts()
     log(f"{len(parts)} parts loaded")
 
-    # Pour point: top centre of the sprue (matches Test/fill_verification/e2e_gui.py)
     from core.part_manager import PartType
     sprue = next((p for p in parts if p.part_type is PartType.SPRUE), None)
     if sprue is None:
         raise SystemExit("no sprue part found")
-    b = sprue.get_bounds()  # (3, 2): rows X, Y, Z; cols min, max
+    b = sprue.get_bounds()
     top = (
         float((b[0][0] + b[0][1]) / 2.0),
         float((b[1][0] + b[1][1]) / 2.0),
@@ -165,13 +143,7 @@ def main():
         for w in getattr(result, "warnings", []) or []:
             log(f"  warn: {w}")
 
-
 def capture_types(fs):
-    """Grab the coarse part-type grid the solver actually runs on.
-
-    Hooked on build_porous_zone rather than coarsen_part_types: it is called
-    with solve_types a few lines later and cannot be missed.
-    """
     from core.part_manager import PART_TYPE_TO_CODE
     orig = fs.build_porous_zone
 
@@ -196,7 +168,6 @@ def capture_types(fs):
 
     fs.build_porous_zone = wrapped
     log("capture_types installed on build_porous_zone")
-
 
 def geometry_report(st, fs):
     from scipy import ndimage
@@ -226,12 +197,9 @@ def geometry_report(st, fs):
     log(f"  open (non-obstacle) components: {n2} sizes "
         f"{sorted(np.bincount(lab2.ravel())[1:], reverse=True)[:6]}")
 
-
 LEDGER_STATE = {}
 
-
 def install_ledger(fs, path, every):
-    """Wrap physics.filling.step to record a per-N-step ledger."""
     import physics.filling as pf
     from physics.filling import (
         FLAG_FLUID, FLAG_INTERFACE, FLAG_GAS, FLAG_OBSTACLE, fluid_fraction,
@@ -285,7 +253,6 @@ def install_ledger(fs, path, every):
                     m = (types == code) & wet
                     parts.append(f"{name}={float(np.sum(mass[m])):.4g}/{int(m.sum())}")
                 by_type = " ".join(parts)
-                # z-profile of wet mass, to see where the metal actually is
                 zsum = mass.sum(axis=(0, 1))
                 nz_ = np.nonzero(zsum > 1e-9)[0]
                 if nz_.size:
@@ -310,11 +277,9 @@ def install_ledger(fs, path, every):
         return out
 
     pf.step = wrapped
-    # filling_stage imported `step` by name
     import core.filling_stage as cfs
     cfs.step = wrapped
     log(f"ledger -> {path} every {every} steps")
-
 
 def dump_nonfinite(fh, state, n):
     from physics.filling import fluid_fraction
@@ -335,7 +300,6 @@ def dump_nonfinite(fh, state, n):
             f"eps={eps[x,y,z]:.6g} por={float(state.porous.porosity[x,y,z]):.4g} "
             f"u={np.asarray(state.u)[:,x,y,z]}\n"
         )
-        # neighbourhood
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
                 for dz in (-1, 0, 1):
@@ -354,12 +318,7 @@ def dump_nonfinite(fh, state, n):
                     )
     fh.flush()
 
-
 if __name__ == "__main__":
-    # scipy's cKDTree (built inside trimesh proximity, outside this repo's
-    # own balanced_tree=False fix) recurses past the 8 MB macOS main-thread
-    # stack on this assembly and takes the process down with SIGSEGV.
-    # Run everything on a 512 MB thread stack instead.
     import threading
     threading.stack_size(512 * 1024 * 1024)
     t = threading.Thread(target=main)

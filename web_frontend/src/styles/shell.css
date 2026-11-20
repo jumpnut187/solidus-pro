@@ -1,14 +1,3 @@
-/* The application frame: top bar, icon rail, docked setup panel, canvas well,
- * results panel, transport bar, and the overlays that sit on the canvas.
- *
- * The frame is a grid, not a stack of absolutely positioned drawers: opening a
- * setup panel takes width away from the canvas instead of covering it, which
- * is the whole point of the redesign. Nothing here ever scrolls the canvas. */
-
-/* Rows are assigned explicitly rather than by source order: the connection
- * banner and the transport bar are both conditional, and with implicit
- * placement a missing banner let the workspace take the transport bar's row
- * and push it off the bottom of the window. */
 .app {
   display: grid;
   grid-template-rows: var(--topbar-h) auto minmax(0, 1fr) auto;
@@ -27,10 +16,6 @@
   color: #ffd6d7;
   font-size: var(--fs-sm);
 }
-
-/* --------------------------------------------------------------------------
- * Top bar
- * ----------------------------------------------------------------------- */
 
 .topbar {
   grid-row: 1;
@@ -107,8 +92,6 @@
   flex: 0 0 auto;
 }
 
-/* Run progress lives inline with Run/Stop so the state of the job is never
- * hidden behind a panel. */
 .job-status {
   display: flex;
   align-items: center;
@@ -148,8 +131,6 @@
 .job-text.is-error {
   color: var(--danger);
 }
-
-/* --- Menus ------------------------------------------------------------- */
 
 .menu-anchor {
   position: relative;
@@ -210,10 +191,6 @@
   text-transform: uppercase;
 }
 
-/* --------------------------------------------------------------------------
- * Body: rail | setup panel | canvas | results
- * ----------------------------------------------------------------------- */
-
 .workspace {
   grid-row: 3;
   display: flex;
@@ -236,16 +213,12 @@
 .rail-btn {
   position: relative;
   display: grid;
-  /* One full-width column, not a content-sized one: with an auto column the
-   * label was measured against the icon and clipped its own last letter. */
   grid-template-columns: 1fr;
   justify-items: center;
   align-content: center;
   gap: 1px;
   width: 48px;
   height: 42px;
-  /* Chrome's default button padding is 1px 6px, which was eating twelve
-   * pixels and clipping the last letter of "Analysis". */
   padding: 0;
   border: 1px solid transparent;
   border-radius: var(--radius);
@@ -270,8 +243,6 @@
   max-width: 100%;
   font-size: 8.5px;
   font-weight: 600;
-  /* "Analysis" and "Projects" are the longest labels; the button is sized to
-   * fit them, and the ellipsis is only a backstop for a future longer one. */
   letter-spacing: -0.01em;
   line-height: 1;
   overflow: hidden;
@@ -294,8 +265,6 @@
   line-height: 14px;
   text-align: center;
 }
-
-/* --- Docked setup panel ------------------------------------------------ */
 
 .setup-panel {
   display: flex;
@@ -343,7 +312,6 @@
   background: var(--bg-1);
 }
 
-/* A titled group inside a panel. */
 .group {
   display: flex;
   flex-direction: column;
@@ -371,8 +339,6 @@
   height: 1px;
   background: var(--border);
 }
-
-/* --- Collapsible section ---------------------------------------------- */
 
 .group-toggle {
   width: 100%;
@@ -430,10 +396,6 @@
   background: var(--bg-2);
 }
 
-/* --------------------------------------------------------------------------
- * Canvas well
- * ----------------------------------------------------------------------- */
-
 .stage {
   display: flex;
   flex-direction: column;
@@ -444,9 +406,6 @@
   overflow: hidden;
 }
 
-/* The canvas and its overlays. Everything absolutely positioned over the 3D
- * view is positioned against this box, not against the whole well, so the log
- * drawer below can never sit on top of the stats chip or the gizmo. */
 .stage-main {
   position: relative;
   flex: 1 1 auto;
@@ -459,9 +418,6 @@
   inset: 0;
 }
 
-/* Structural rules for the renderer's own markup (`src/viewport/`). The shell
- * owns the stylesheet but not that component, so these stay minimal: fill the
- * well, do not scroll, and let the gizmo overlay sit in a corner. */
 .viewport-canvas {
   display: block;
   width: 100%;
@@ -486,16 +442,12 @@
   user-select: none;
 }
 
-/* --- Overlays on the canvas ------------------------------------------- */
-
 .overlay-colorbar {
   position: absolute;
   top: var(--sp-4);
   right: var(--sp-4);
   z-index: var(--z-overlay);
 }
-
-/* --- Floating viewport toolbar ---------------------------------------- */
 
 .viewport-toolbar {
   position: absolute;
@@ -583,8 +535,6 @@
   box-shadow: var(--shadow-panel);
 }
 
-/* Bottom-centre, clear of the renderer's orientation gizmo in the corner and
- * of the toast stack at the bottom right. */
 .stats-chip {
   position: absolute;
   left: 50%;
@@ -601,9 +551,6 @@
   box-shadow: var(--shadow-chip);
 }
 
-/* Transient loading text from the viewport. It is a child of
- * `.stage-top-stack`, which does the positioning; on its own it used to sit at
- * `top: var(--sp-4)` and cover the floating toolbar. */
 .stage-status {
   max-width: 100%;
   padding: var(--sp-2) var(--sp-4);
@@ -674,23 +621,6 @@
   text-align: right;
 }
 
-/* --- The column under the toolbar --------------------------------------- */
-
-/* Everything that speaks about the whole view — the reduced-resolution banner
- * and the viewport's own loading pill — lives in one column under the floating
- * toolbar, so they stack instead of landing on each other. Before this they
- * both used `top: var(--sp-4)`, which put the pill squarely on the toolbar.
- *
- * The two constants are measured, not guessed, and the overlay audit in
- * `scratchpad/uitest/audit_banner.mjs` re-checks them by comparing bounding
- * boxes at 1920x1200 and 1366x768:
- *   --toolbar-height   a 30px `.vtool` plus `--sp-1` padding and a 1px border
- *                      on each side, which measures 40px.
- *   --colorbar-gutter  the widest ColorBar (111px) plus its own `--sp-4` inset
- *                      and a gap, so the column can never run underneath it.
- * The column is inset by the gutter on the right only: the left of the canvas
- * carries nothing at this height except the probe readout, which appears only
- * while a probe reading is being held. */
 .stage-top-stack {
   --toolbar-height: calc(30px + var(--sp-1) * 2 + 2px);
   --colorbar-gutter: 135px;
@@ -703,8 +633,6 @@
   flex-direction: column;
   align-items: center;
   gap: var(--sp-3);
-  /* The column is a layout box, not a surface: only its children take the
-   * pointer, so the canvas can still be orbited around them. */
   pointer-events: none;
 }
 
@@ -712,14 +640,10 @@
   pointer-events: auto;
 }
 
-/* --- Canvas banner ------------------------------------------------------ */
-
 .canvas-banner {
   display: flex;
   align-items: flex-start;
   gap: var(--sp-3);
-  /* The column's insets already keep it clear of both edges, so this is only
-   * the comfortable reading measure. */
   max-width: 560px;
   padding: var(--sp-3) var(--sp-3) var(--sp-3) var(--sp-4);
   border: 1px solid rgba(245, 184, 61, 0.45);
@@ -730,8 +654,6 @@
   color: var(--warning);
 }
 
-/* Keep the glyph on the first line of the text rather than letting it stretch
- * with the flex row. */
 .canvas-banner-icon {
   flex: 0 0 auto;
   margin-top: 2px;
@@ -750,8 +672,6 @@
   font-weight: 600;
 }
 
-/* The dismiss button inherits the panel button colours, which are tuned for a
- * neutral surface; on the amber ground it needs the banner's own palette. */
 .canvas-banner .btn-icon {
   flex: 0 0 auto;
   color: var(--warning);
@@ -761,8 +681,6 @@
   background: rgba(245, 184, 61, 0.16);
   color: #f6e4bd;
 }
-
-/* --- Empty state ------------------------------------------------------- */
 
 .empty-state {
   position: absolute;
@@ -808,7 +726,6 @@
   margin-top: var(--sp-2);
 }
 
-/* The whole canvas becomes a drop target while a file is over it. */
 .drop-veil {
   position: absolute;
   inset: var(--sp-4);
@@ -824,10 +741,6 @@
   font-weight: 600;
   pointer-events: none;
 }
-
-/* --------------------------------------------------------------------------
- * Transport bar
- * ----------------------------------------------------------------------- */
 
 .transport {
   grid-row: 4;
@@ -864,13 +777,6 @@
   text-align: right;
 }
 
-/* --------------------------------------------------------------------------
- * Job log drawer
- * ----------------------------------------------------------------------- */
-
-/* A sibling of the canvas rather than an overlay on it: opening the drawer
- * shortens the 3D view, the same rule the setup panels follow, so it cannot
- * cover the stats chip or the renderer's orientation gizmo. */
 .log-drawer {
   flex: 0 0 auto;
   display: flex;
@@ -936,12 +842,6 @@
   font-size: var(--fs-sm);
 }
 
-/* --------------------------------------------------------------------------
- * Toasts
- * ----------------------------------------------------------------------- */
-
-/* Absolute inside the canvas well rather than fixed to the window, so a toast
- * can never sit on top of the transport bar or the docked panels. */
 .toasts {
   position: absolute;
   right: var(--sp-5);
@@ -954,10 +854,6 @@
   pointer-events: none;
 }
 
-/* The stats chip is centred on the same bottom edge, and at 1366px it is wide
- * enough to reach into the toast column — measured at 147px of overlap. When
- * the chip is on screen the toasts sit one band higher; 54px is the chip's
- * measured height and the audit script re-checks the two boxes. */
 .stage-main.has-stats .toasts {
   bottom: calc(var(--sp-5) + 54px + var(--sp-3));
 }

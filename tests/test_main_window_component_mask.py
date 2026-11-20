@@ -1,8 +1,3 @@
-"""Voxel attribution for hidden components (main window side).
-
-Uses the real ui.main_window import like the other MainWindow unit tests.
-"""
-
 from __future__ import annotations
 
 import unittest
@@ -12,9 +7,7 @@ import numpy as np
 from core import part_manager
 from ui.main_window import MainWindow
 
-
 class VoxelMaskFromPartsTests(unittest.TestCase):
-    """The main window attributes voxels to hidden parts by type + bounding box."""
 
     def _window_with(self, parts, hidden):
         mw = MainWindow.__new__(MainWindow)
@@ -58,10 +51,10 @@ class VoxelMaskFromPartsTests(unittest.TestCase):
         class _Mesh:
             base_voxel_size = 1.0
             voxel_centers = np.array([
-                [5, 5, 5],     # cast metal under the riser: stays
-                [5, 5, 12],    # riser voxel: dropped
-                [5, 5, 12.5],  # cast-typed voxel inside riser box (gap fill): stays
-                [9, 9, 9],     # cast far away: stays
+                [5, 5, 5],
+                [5, 5, 12],
+                [5, 5, 12.5],
+                [9, 9, 9],
             ], dtype=np.float64)
             voxel_part_types = np.array([
                 code[PartType.CAST], code[PartType.RISER], code[PartType.CAST], code[PartType.CAST]
@@ -90,8 +83,6 @@ class VoxelMaskFromPartsTests(unittest.TestCase):
 
         mask = mw._build_voxel_display_mask(_Mesh())
         np.testing.assert_array_equal(mask, np.array([False, True]))
-
-
 
 if __name__ == "__main__":
     unittest.main()

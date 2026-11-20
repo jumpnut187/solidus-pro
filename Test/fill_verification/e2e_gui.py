@@ -1,31 +1,3 @@
-"""End-to-end verification that the DESKTOP APP (ui.main_window.MainWindow)
-can run a complete mold-filling simulation headlessly, and that the Fill
-Time animation sweep is real.
-
-This drives the *real* MainWindow -- real PartManager, real
-AnalysisOptionsDialog gate, a real SimulationWorker QThread, and the real
-CastingVisualizer/VTK fill-time rendering path -- under
-QT_QPA_PLATFORM=offscreen. It does NOT call core.simulation_pipeline.run_pipeline
-directly; that would prove the physics works but not that the app wires it up.
-
-Environment note (see PROBLEM #1 in the JSON output): constructing a real
-QVTKRenderWindowInteractor under QT_QPA_PLATFORM=offscreen segfaults on this
-machine (VTK's Qt interactor calls SetWindowInfo(winId()) which dereferences
-a native NSView handle that the offscreen platform plugin never creates).
-Pure off-screen VTK rendering (a bare vtkRenderWindow with
-SetOffScreenRendering(1) + a vtkGenericRenderWindowInteractor) works fine
-stand-alone. So this harness monkeypatches ui.visualizer.QVTKRenderWindowInteractor
-with a small shim exposing only the one method visualizer.py actually calls
-on it (GetRenderWindow()) before constructing MainWindow. Everything else
-about MainWindow, the visualizer, and the simulation is the real, unmodified
-application code -- no repo files were changed.
-
-Usage:
-    QT_QPA_PLATFORM=offscreen ./venv/bin/python e2e_gui.py [voxel_size]
-
-voxel_size defaults to 0.25 (per task spec); pass 0.30 to retry if 0.25
-crashes.
-"""
 from __future__ import annotations
 
 import os
@@ -50,7 +22,7 @@ VOXEL_SIZE = float(sys.argv[1]) if len(sys.argv) > 1 else 0.25
 FILL_GRID_COARSENING = 1
 MAX_FILL_TIME_S = 30.0
 ALLOY = "WCB"
-HARD_TIMEOUT_MS = 20 * 60 * 1000  # 20 minutes
+HARD_TIMEOUT_MS = 20 * 60 * 1000
 
 STEP_DIR = os.path.join(REPO_ROOT, "Test_Model", "Filling_Test")
 STEP_FILES = sorted(
@@ -66,28 +38,16 @@ summary: dict = {
     "step_files": STEP_FILES,
 }
 
-
 def log(msg: str) -> None:
     print(msg, flush=True)
 
-
-# ---------------------------------------------------------------------------
-# 0. VTK offscreen shim -- see module docstring.
-# ---------------------------------------------------------------------------
-import vtk  # noqa: E402
-from PySide6.QtWidgets import QApplication, QWidget, QMessageBox  # noqa: E402
-from PySide6.QtCore import QEventLoop, QTimer  # noqa: E402
+import vtk
+from PySide6.QtWidgets import QApplication, QWidget, QMessageBox
+from PySide6.QtCore import QEventLoop, QTimer
 
 app = QApplication.instance() or QApplication([])
 
-
 class _OffscreenVTKWidget(QWidget):
-    """Stand-in for QVTKRenderWindowInteractor that never touches a native
-    window handle. visualizer.py's _init_ui only ever calls
-    .GetRenderWindow() on this object -- everything else (renderer, camera,
-    actors, Render() calls) operates on the real vtkRenderWindow/vtkRenderer
-    objects this hands back, unmodified.
-    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -100,8 +60,7 @@ class _OffscreenVTKWidget(QWidget):
     def GetRenderWindow(self):
         return self._rw
 
-
-import ui.visualizer as viz_mod  # noqa: E402
+import ui.visualizer as viz_mod
 viz_mod.QVTKRenderWindowInteractor = _OffscreenVTKWidget
 problems.append(
     "PROBLEM #1 (environment, worked around in this harness only): "
@@ -113,21 +72,14 @@ problems.append(
     "constructing MainWindow; no repo code was changed."
 )
 
-# Auto-continue any confirmation dialog _run_simulation might pop up (large
-# mesh warning, etc.) -- the same as a user always clicking through.
 QMessageBox.warning = staticmethod(lambda *a, **kw: QMessageBox.Yes)
 QMessageBox.critical = staticmethod(lambda *a, **kw: QMessageBox.Yes)
 QMessageBox.question = staticmethod(lambda *a, **kw: QMessageBox.Yes)
 QMessageBox.information = staticmethod(lambda *a, **kw: QMessageBox.Ok)
 
-# ---------------------------------------------------------------------------
-# Spies: capture internal objects the real code computes but the desktop
-# worker doesn't keep around, without changing what they compute.
-# ---------------------------------------------------------------------------
-import core.filling_stage as filling_stage_mod  # noqa: E402
+import core.filling_stage as filling_stage_mod
 _orig_run_filling_stage = filling_stage_mod.run_filling_stage
 _filling_capture: dict = {}
-
 
 def _spy_run_filling_stage(*a, **kw):
     result = _orig_run_filling_stage(*a, **kw)
@@ -135,46 +87,26 @@ def _spy_run_filling_stage(*a, **kw):
         _filling_capture["result"] = result
     return result
 
-
 filling_stage_mod.run_filling_stage = _spy_run_filling_stage
 
-import ui.workers as workers_mod  # noqa: E402
+import ui.workers as workers_mod
 _orig_run_pipeline = workers_mod.run_pipeline
 _pipeline_capture: dict = {}
-
 
 def _spy_run_pipeline(*a, **kw):
     result = _orig_run_pipeline(*a, **kw)
     _pipeline_capture["result"] = result
     return result
 
-
 workers_mod.run_pipeline = _spy_run_pipeline
 
-# ---------------------------------------------------------------------------
-# 1. Construct the real MainWindow.
-# ---------------------------------------------------------------------------
-from ui.main_window import MainWindow  # noqa: E402
+from ui.main_window import MainWindow
 
 t_construct = time.perf_counter()
 w = MainWindow()
-# The real app starts capturing stdout into the Console Output dialog the
-# moment _create_dialogs() runs (ConsoleWindow.start_capture()). That's
-# correct desktop behavior, but it means every print() from here on
-# (including this harness's own) would silently vanish into a Qt widget
-# instead of the terminal. Stop the capture so we (and the app's own
-# progress/print output) stay visible; this does not change any simulation
-# behavior, only where stdout text goes.
 w.console_window.stop_capture()
 log(f"MainWindow constructed OK in {time.perf_counter() - t_construct:.1f}s")
 
-# This harness script is invoked directly (not through main.py's
-# `if __name__ == "__main__":` guard), so macOS's spawn-based multiprocessing
-# cannot safely re-import it in a child process for the default "parallel"
-# part-assignment mode -- every real launch goes through main.py, which does
-# have that guard, so this is a harness artifact, not an app bug. Forcing
-# sequential part assignment here avoids a noisy (but already-handled)
-# "Parallel part assignment failed; falling back to sequential" recovery path.
 w._performance_options["part_assignment_mode"] = "sequential"
 problems.append(
     "NOTE (harness accommodation, not an app bug): part_assignment_mode forced "
@@ -182,10 +114,6 @@ problems.append(
     "multiprocessing spawn (main.py, the real entry point, has one)."
 )
 
-# ---------------------------------------------------------------------------
-# 2. Load all 8 STEP files into the real PartManager, the same way
-#    MainWindow._add_part() does for a .step/.stp file.
-# ---------------------------------------------------------------------------
 assert len(STEP_FILES) == 8, f"expected 8 STEP files, found {len(STEP_FILES)}: {STEP_FILES}"
 
 for f in STEP_FILES:
@@ -195,8 +123,8 @@ for f in STEP_FILES:
 w._update_parts_ui()
 w._update_visualization()
 
-from core.part_manager import PartType  # noqa: E402
-from collections import Counter  # noqa: E402
+from core.part_manager import PartType
+from collections import Counter
 
 parts = list(w.part_manager.parts.values())
 type_counts = Counter(p.part_type for p in parts)
@@ -219,18 +147,13 @@ expected = {"CAST": 1, "CHILL": 1, "SPRUE": 1, "GATE": 1, "RUNNER": 2, "RISER": 
 assert loaded_types == expected, f"part type mix mismatch: got {loaded_types}, expected {expected}"
 assert w.stl_loader.is_valid(), "stl_loader did not become valid after loading parts"
 
-# ---------------------------------------------------------------------------
-# 3. Pour location = top face centre of the Down Sprue, and the gate must
-#    work BOTH ways: disabled with none set, enabled once set, forced back
-#    off when cleared.
-# ---------------------------------------------------------------------------
 sprue = next(p for p in parts if p.part_type is PartType.SPRUE)
 lo, hi = sprue.get_transformed_mesh().bounds
 top_centre = (float((lo[0] + hi[0]) / 2.0), float((lo[1] + hi[1]) / 2.0), float(hi[2]))
 log(f"Sprue '{sprue.name}' bounds: lo={tuple(lo)} hi={tuple(hi)}")
 log(f"Pour location (top face centre): {top_centre}")
 
-from core.pour_location import PourLocation  # noqa: E402
+from core.pour_location import PourLocation
 
 pour_location = PourLocation(point_in=top_centre, normal=(0.0, 0.0, 1.0), part_id=sprue.id)
 summary["pour_location_point_in"] = list(top_centre)
@@ -245,21 +168,17 @@ w._on_pour_location_changed(pour_location)
 gate["enabled_after_set"] = w.analysis_dialog.filling_check.isEnabled()
 assert gate["enabled_after_set"], "Mold Filling checkbox must become enabled once a pour location is set"
 
-# Check it like a user would, and apply -- this is the real path that flips
-# _analysis_options['filling'] to True (the checkbox alone does not).
 w.analysis_dialog.filling_check.setChecked(True)
 w.analysis_dialog.apply_values()
 gate["filling_true_after_check_and_apply"] = w._analysis_options["filling"] is True
 assert gate["filling_true_after_check_and_apply"], "_analysis_options['filling'] should be True after checking + applying"
 
-# Now clear the pour location and confirm it snaps back off, both ways.
 w._on_pour_location_changed(None)
 gate["disabled_after_clear"] = not w.analysis_dialog.filling_check.isEnabled()
 gate["filling_false_after_clear"] = w._analysis_options["filling"] is False
 assert gate["disabled_after_clear"], "Mold Filling checkbox must be disabled again after clearing the pour location"
 assert gate["filling_false_after_clear"], "_analysis_options['filling'] must be forced back to False after clearing"
 
-# Set it for real and enable filling for the actual run.
 w._on_pour_location_changed(pour_location)
 w.analysis_dialog.filling_check.setChecked(True)
 w.analysis_dialog.apply_values()
@@ -267,9 +186,6 @@ assert w.analysis_dialog.filling_check.isEnabled() and w._analysis_options["fill
 log(f"Gate checks passed both ways: {gate}")
 summary["gate_checks"] = gate
 
-# ---------------------------------------------------------------------------
-# 4. Settings: voxel size, alloy, filling params.
-# ---------------------------------------------------------------------------
 w._on_mesh_settings_confirmed(VOXEL_SIZE, w._current_refinement, w._current_memory_mode)
 w._on_alloy_confirmed(ALLOY)
 assert w._current_voxel_size == VOXEL_SIZE
@@ -278,7 +194,6 @@ assert w._current_alloy == ALLOY
 w._solidification_params["filling"]["fill_grid_coarsening"] = FILL_GRID_COARSENING
 w._solidification_params["filling"]["max_fill_time_s"] = MAX_FILL_TIME_S
 
-# Analyses: shrinkage, hotspot, fraction_liquid, filling.
 w.analysis_dialog.shrinkage_check.setChecked(True)
 w.analysis_dialog.hotspot_check.setChecked(True)
 w.analysis_dialog.fraction_liquid_check.setChecked(True)
@@ -291,13 +206,7 @@ log(f"Settings: voxel_size={VOXEL_SIZE}, alloy={ALLOY}, "
     f"fill_grid_coarsening={FILL_GRID_COARSENING}, max_fill_time_s={MAX_FILL_TIME_S}")
 log(f"Analysis options: {w._analysis_options}")
 
-# ---------------------------------------------------------------------------
-# 5. Run the simulation the way the app does: MainWindow._run_simulation()
-#    spawns a real SimulationWorker QThread. Hook progress/finished BEFORE
-#    the OS thread actually starts (inside an overridden .start()) so there
-#    is no race with early progress messages.
-# ---------------------------------------------------------------------------
-import ui.main_window as mw_mod  # noqa: E402
+import ui.main_window as mw_mod
 
 _OrigSimulationWorker = mw_mod.SimulationWorker
 progress_messages: list[str] = []
@@ -305,12 +214,10 @@ detailed_progress: list[tuple] = []
 run_result: dict = {}
 loop = QEventLoop()
 
-
 def _on_finished(success, status):
     run_result["success"] = bool(success)
     run_result["status"] = str(status)
     loop.quit()
-
 
 class _TracedSimulationWorker(_OrigSimulationWorker):
     def start(self, *a, **kw):
@@ -320,7 +227,6 @@ class _TracedSimulationWorker(_OrigSimulationWorker):
         )
         self.finished.connect(_on_finished)
         super().start(*a, **kw)
-
 
 mw_mod.SimulationWorker = _TracedSimulationWorker
 
@@ -342,11 +248,9 @@ timeout_timer = QTimer()
 timeout_timer.setSingleShot(True)
 timed_out = {"flag": False}
 
-
 def _on_timeout():
     timed_out["flag"] = True
     loop.quit()
-
 
 timeout_timer.timeout.connect(_on_timeout)
 timeout_timer.start(HARD_TIMEOUT_MS)
@@ -389,11 +293,6 @@ if not run_result.get("success"):
 
 assert len(fill_progress) > 0, "no progress message mentioned 'Filling' -- the filling stage may not have run"
 
-# ---------------------------------------------------------------------------
-# 6. Cross-check against what the pipeline/filling-stage actually computed
-#    internally (captured via the spies above), independent of anything the
-#    UI derives -- the honest headline numbers.
-# ---------------------------------------------------------------------------
 pipeline_result = _pipeline_capture.get("result")
 assert pipeline_result is not None, "run_pipeline spy never captured a result"
 assert "fill_time" in pipeline_result.visualization_data, "'fill_time' missing from visualization_data"
@@ -428,19 +327,7 @@ else:
         for msg in filling_result.warnings:
             log(f"  warning: {msg}")
 
-# ---------------------------------------------------------------------------
-# 7. Fill Time result mode through the real UI path, then sweep the slider,
-#    driving _update_fill_time_visualization via the real signal chain
-#    (time_slider.setValue -> _update_time_slider -> _update_fill_time_slider
-#    -> _update_fill_time_visualization), and read back the real VTK
-#    polydata each step.
-# ---------------------------------------------------------------------------
 w._on_result_type_changed("Fill Time")
-# isVisible() requires the whole ancestor chain (incl. the top-level
-# MainWindow) to be shown; we never call w.show() in this headless run,
-# so isVisibleTo(w) is the correct check -- it reflects setVisible(True)
-# on this widget and its intermediate parents without needing a real
-# on-screen window.
 assert w.time_slider_widget.isVisibleTo(w), "time slider must become visible in Fill Time mode"
 summary["time_slider_visible"] = True
 
@@ -449,13 +336,6 @@ fill_times_raw = np.asarray(getattr(sim, "_fill_arrival_times"), dtype=np.float6
 misrun_mask_raw = fill_times_raw < 0.0
 misrun_count_raw = int(misrun_mask_raw.sum())
 
-# Cross-check the number the USER actually reads against the stage's own
-# metal-masked count. These are computed independently: the label counts
-# negative arrival times over the whole mesh, the stage counts metal voxels
-# the fill did not reach. Mold, core and chill can never fill, so if the
-# sentinel does not distinguish them the label inflates by exactly the
-# non-metal voxel count. Ground truth mirrored from the renderer's own mask
-# cannot catch this -- it shares the bug -- so assert against the stage.
 w._update_fill_time_slider(0)
 label_text = w.time_label.text()
 summary["ui_label_at_zero"] = label_text
@@ -480,20 +360,18 @@ log(f"Fill time range: {min_time:.3f}s .. {max_time:.3f}s")
 summary["fill_time_range_s"] = [min_time, max_time]
 
 SLIDER_MAX = mw_mod.FRACTION_LIQUID_TIME_SLIDER_MAX
-slider_positions = list(range(0, SLIDER_MAX + 1, SLIDER_MAX // 10))  # 11 evenly-spaced points
-png_positions = set(slider_positions[::2])  # 6 of those get a PNG frame
+slider_positions = list(range(0, SLIDER_MAX + 1, SLIDER_MAX // 10))
+png_positions = set(slider_positions[::2])
 
 sweep = []
 png_paths = []
 vtk_render_ok = None
 
 for v in slider_positions:
-    w.time_slider.setValue(v)  # real UI path when v differs from the current value
-    w._update_time_slider(v)  # idempotent direct call so every position renders, even a repeat of 0
+    w.time_slider.setValue(v)
+    w._update_time_slider(v)
     time_value = w._map_fraction_liquid_slider_time(v, min_time, max_time)
 
-    # Ground truth for this frame, mirroring CastingVisualizer._build_fill_time_geometry's
-    # own mask exactly: misrun voxels always shown, plus anything arrived by time_value.
     arrived_mask = (~misrun_mask_raw) & (fill_times_raw <= time_value)
     expected_count = int(np.sum(misrun_mask_raw | arrived_mask))
 
@@ -539,10 +417,6 @@ summary["fill_time_sweep"] = sweep
 summary["png_frames"] = png_paths
 summary["vtk_offscreen_rendering_worked"] = vtk_render_ok
 
-# Monotonic + non-trivial check on the actual VTK-rendered polydata counts
-# (falling back to the independently-computed expected count only for a
-# position where no PNG/actor readback happened -- displayed_voxel_count is
-# populated every step here since load_fill_time always builds the actor).
 counts_for_check = [
     f["displayed_voxel_count"] if f["displayed_voxel_count"] is not None else f["expected_voxel_count"]
     for f in sweep
@@ -557,8 +431,6 @@ assert is_strictly_greater_end, f"fill time sweep does not reveal more voxels at
 log(f"Animation sweep counts: {counts_for_check}")
 log("Animation sweep is monotonic and non-trivial: PASS")
 
-# Cross-check the real VTK-displayed count against the independently
-# computed mask exactly, everywhere we have a real actor readback.
 mismatches = [
     f for f in sweep
     if f["displayed_voxel_count"] is not None and f["displayed_voxel_count"] != f["expected_voxel_count"]
@@ -570,11 +442,6 @@ if mismatches:
     )
 summary["displayed_matches_expected_exactly"] = (len(mismatches) == 0)
 
-# Misrun voxels must be visible (i.e. counted) at every position: since
-# expected_count = misrun | arrived and misrun voxels are unconditionally
-# included by _build_fill_time_geometry, expected_count >= misrun_count_raw
-# must hold at every step -- this is the "always-on" guarantee, checked
-# against the real per-frame numbers rather than just trusting the comment.
 misrun_always_included = all(f["expected_voxel_count"] >= f["misrun_count_ground_truth"] for f in sweep)
 summary["misrun_voxels_always_visible"] = misrun_always_included
 assert misrun_always_included, "misrun voxels were not present in the mask at every slider position"

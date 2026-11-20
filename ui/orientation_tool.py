@@ -1,14 +1,3 @@
-"""Qt-free logic behind the desktop "Orient & Parting Line" tool.
-
-The dialog in ``ui/dialogs/orientation_dialog.py`` only forwards button
-presses here and redraws. Every transform goes through ``core.orientation``
-so the desktop and web apps share one set of conventions: Z-up, inches,
-``x = R(s*v) + p`` with ``R`` the static-XYZ ('sxyz') Euler matrix.
-
-The parting line is a horizontal plane ``z = parting.z``. It is persisted in
-the project ``ui_state["parting_line"]``; a missing key means "not set yet".
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -21,13 +10,10 @@ from core import orientation
 from core.part_manager import Part, PartManager, PartType
 from ui.project_state import normalize_parting_line
 
-#: Rotation step choices (degrees). The first entry is the default.
 ROTATION_STEPS_DEG: Tuple[float, ...] = (90.0, 45.0, 15.0, 5.0)
 
-#: Height / parting nudge step choices (inches). Index 1 (0.25 in) is the default.
 HEIGHT_STEPS_IN: Tuple[float, ...] = (0.1, 0.25, 0.5, 1.0)
 
-#: Preset name -> key of ``core.orientation.suggest_parting_z``.
 PARTING_PRESET_KEYS: Dict[str, str] = {
     "widest": "max_section",
     "top": "top",
@@ -35,18 +21,12 @@ PARTING_PRESET_KEYS: Dict[str, str] = {
     "center": "center",
 }
 
-#: Part types that normally hang below the parting plane (drag side). Every
-#: other non-casting type defaults to sitting on top of it (cope side).
 _DRAG_SIDE_TYPES = frozenset({PartType.RUNNER, PartType.GATE, PartType.FILTER})
 
-#: Fraction of the assembly's largest horizontal size added around the
-#: parting plane so it reads as a plane, not as the casting's footprint.
 PARTING_PLANE_MARGIN = 0.25
-
 
 @dataclass
 class PartingLine:
-    """Flat horizontal parting plane. Above = cope, below = drag."""
 
     z: float
     visible: bool = True
@@ -61,7 +41,6 @@ class PartingLine:
 
     @classmethod
     def from_dict(cls, value: object) -> Optional["PartingLine"]:
-        """Parse a persisted ``ui_state["parting_line"]``; ``None`` if absent or malformed."""
         normalized = normalize_parting_line(value)
         if normalized is None:
             return None
@@ -71,20 +50,10 @@ class PartingLine:
             locked_to_casting=bool(normalized["locked_to_casting"]),
         )
 
-
 def default_seat_side(part_type: PartType) -> str:
-    """``'below'`` for runner/gate/filter (drag side), ``'above'`` otherwise."""
     return "below" if part_type in _DRAG_SIDE_TYPES else "above"
 
-
 def outward_face_normal(triangle: Sequence[Sequence[float]], toward_viewer: Sequence[float]) -> Optional[np.ndarray]:
-    """Unit normal of a picked triangle, flipped to face the viewer.
-
-    The face a user clicks is the one facing the camera, so its outward
-    normal points back toward the viewer. Using the triangle geometry
-    instead of the stored winding keeps "Face down" correct on STL files
-    with inconsistent winding. Returns ``None`` for a degenerate triangle.
-    """
     tri = np.asarray(triangle, dtype=float)
     normal = np.cross(tri[1] - tri[0], tri[2] - tri[0])
     length = float(np.linalg.norm(normal))
@@ -95,34 +64,21 @@ def outward_face_normal(triangle: Sequence[Sequence[float]], toward_viewer: Sequ
         normal = -normal
     return normal
 
-
 def _shift_z(part: Part, dz: float) -> None:
-    """Move a part vertically (float math: ``Part.translate`` fails on an int position array)."""
     if dz:
         x, y, z = (float(v) for v in part.position)
         part.set_position(x, y, z + float(dz))
 
-
 def part_world_bounds(part: Part) -> np.ndarray:
-    """``[[xmin, ymin, zmin], [xmax, ymax, zmax]]`` of a placed part."""
     return orientation.world_bounds(part.trimesh_obj, part.rotation, part.position, part.scale)
-
 
 @dataclass
 class OrientationSnapshot:
-    """Part transforms plus parting line, for "Revert changes"."""
 
     transforms: Dict[str, Tuple[Tuple[float, float, float], Tuple[float, float, float]]]
     parting: Optional[Dict[str, object]]
 
-
 class OrientationController:
-    """Orientation, height and parting-line operations on a ``PartManager``.
-
-    The target is the selected part, or the casting when nothing is selected.
-    Every mutating method returns ``True`` when it changed something so the
-    caller knows whether to redraw.
-    """
 
     def __init__(
         self,
@@ -133,10 +89,7 @@ class OrientationController:
         self._selected_part_id = selected_part_id
         self.parting: Optional[PartingLine] = None
         self.keep_on_floor: bool = True
-        #: "Lock to casting" value used when the parting line is first created.
         self.lock_default: bool = True
-
-    # ------------------------------------------------------------------ parts
 
     def casting(self) -> Optional[Part]:
         for part in self.part_manager.get_all_parts():
@@ -157,14 +110,11 @@ class OrientationController:
         return part is not None and part.part_type == PartType.CAST
 
     def reference_part(self) -> Optional[Part]:
-        """Part the parting presets and cope/drag split are measured on."""
         return self.casting() or self.target()
 
     def is_single_casting_project(self) -> bool:
         parts = self.part_manager.get_all_parts()
         return len(parts) == 1 and parts[0].part_type == PartType.CAST
-
-    # ------------------------------------------------------------ orientation
 
     def _place(self, part: Part, rotation: Sequence[float], position: Sequence[float], bottom_before: float) -> None:
         part.set_rotation(*(float(a) for a in rotation))
@@ -173,7 +123,6 @@ class OrientationController:
             _shift_z(part, bottom_before - float(part_world_bounds(part)[0, 2]))
 
     def rotate(self, axis: str, angle_deg: float) -> bool:
-        """Turn the target ``angle_deg`` about world ``axis`` through its bbox center."""
         part = self.target()
         if part is None or angle_deg == 0:
             return False
@@ -186,7 +135,6 @@ class OrientationController:
         return True
 
     def face_to(self, world_normal: Sequence[float], direction: str) -> bool:
-        """Turn the target so a face with ``world_normal`` points down (-Z) or up (+Z)."""
         part = self.target()
         if part is None:
             return False
@@ -199,14 +147,12 @@ class OrientationController:
         return True
 
     def set_rotation(self, rx: float, ry: float, rz: float) -> bool:
-        """Exact Euler entry (advanced). Keeps the bbox center, then the floor rule."""
         part = self.target()
         if part is None:
             return False
         return self._set_rotation_keep_center(part, (rx, ry, rz))
 
     def reset_orientation(self) -> bool:
-        """Rotation back to (0, 0, 0) as imported."""
         part = self.target()
         if part is None:
             return False
@@ -223,15 +169,12 @@ class OrientationController:
         return True
 
     def size(self) -> Optional[Tuple[float, float, float]]:
-        """World-axis W x D x H of the target (in)."""
         part = self.target()
         if part is None:
             return None
         bounds = part_world_bounds(part)
         extent = bounds[1] - bounds[0]
         return (float(extent[0]), float(extent[1]), float(extent[2]))
-
-    # ----------------------------------------------------------------- height
 
     def bottom_z(self) -> Optional[float]:
         part = self.target()
@@ -240,7 +183,6 @@ class OrientationController:
         return float(part_world_bounds(part)[0, 2])
 
     def move_z(self, dz: float) -> bool:
-        """Raise (+) or lower (-) the target. A locked parting line follows the casting."""
         part = self.target()
         if part is None or dz == 0:
             return False
@@ -266,8 +208,6 @@ class OrientationController:
             return False
         return self.move_z(orientation.drop_to_floor_dz(part_world_bounds(part), 0.0))
 
-    # ---------------------------------------------------------- parting line
-
     def parting_presets(self) -> Optional[Dict[str, float]]:
         part = self.reference_part()
         if part is None:
@@ -275,7 +215,6 @@ class OrientationController:
         return orientation.suggest_parting_z(part.trimesh_obj, part.rotation, part.position, part.scale)
 
     def ensure_parting(self) -> Optional[PartingLine]:
-        """Create the parting line at the widest section if it is not set yet."""
         if self.parting is None:
             presets = self.parting_presets()
             if presets is None:
@@ -342,7 +281,6 @@ class OrientationController:
         return default_seat_side(part.part_type)
 
     def seat_target(self, side: str) -> bool:
-        """``'above'``: bottom on the plane (Seat). ``'below'``: top on the plane (Hang)."""
         part = self.target()
         if part is None or part.part_type == PartType.CAST or self.parting is None:
             return False
@@ -353,7 +291,6 @@ class OrientationController:
         return True
 
     def section_segments(self) -> np.ndarray:
-        """``(n, 2, 3)`` segments where the parting plane cuts the casting."""
         part = self.reference_part()
         if part is None or self.parting is None:
             return np.zeros((0, 2, 3))
@@ -368,7 +305,6 @@ class OrientationController:
         return np.asarray(lines, dtype=float).reshape(-1, 2, 3)
 
     def plane_extent(self, margin: float = PARTING_PLANE_MARGIN) -> Optional[Tuple[float, float, float, float]]:
-        """``(xmin, xmax, ymin, ymax)`` of the drawn parting plane: assembly plus margin."""
         parts = [p for p in self.part_manager.get_all_parts() if p.visible] or self.part_manager.get_all_parts()
         if not parts:
             return None
@@ -377,8 +313,6 @@ class OrientationController:
         hi = bounds.max(axis=0)
         pad = max(float(hi[0] - lo[0]), float(hi[1] - lo[1]), 1.0) * float(margin)
         return (float(lo[0] - pad), float(hi[0] + pad), float(lo[1] - pad), float(hi[1] + pad))
-
-    # ---------------------------------------------------------------- revert
 
     def snapshot(self) -> OrientationSnapshot:
         transforms = {

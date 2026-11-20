@@ -1,11 +1,3 @@
-"""Where do Test 2's negative populations live, and what is around them?
-
-Runs the real stage and, past a threshold step, reports for every wet cell
-holding a negative population: its part type, its z, its flag, its eps, and
-whether it sits next to a gas cell or an obstacle. The question the round-2
-abort raises is whether these are a front artefact (interface cells running
-fast into gas) or a geometry artefact (a wall or a choke).
-"""
 import sys, os, time, collections
 sys.path.insert(0, "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -16,10 +8,8 @@ EVERY = int(os.environ.get("EVERY", "1000"))
 STOP = int(os.environ.get("STOP", "12000"))
 STATE = {}
 
-
 def log(m):
     print(f"[{time.strftime('%H:%M:%S')}] {m}", flush=True)
-
 
 def install(fs):
     import physics.filling as pf
@@ -76,7 +66,6 @@ def install(fs):
     import core.filling_stage as cfs
     cfs.step = step
 
-
 def main():
     import scipy.spatial as ss
     o = ss.cKDTree
@@ -112,7 +101,6 @@ def main():
                              progress_message_callback=lambda m: log(f"FILL: {m}"))
     except SystemExit:
         log("probe stop")
-
 
 if __name__ == "__main__":
     import threading

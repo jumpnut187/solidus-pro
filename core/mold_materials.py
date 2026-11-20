@@ -1,26 +1,3 @@
-"""Molding and core sands: temperature-dependent thermal properties.
-
-Each sand is a bonded, packed aggregate as it sits in a mold or core: the
-density is the bulk (packed) density, not the grain density, and k(T) is
-the effective conductivity of the packed bed, which rises steeply at high
-temperature as radiation across the pores takes over.
-
-The thermal solve carries a sand as a :class:`physics.heat_transfer.TabulatedBody`:
-the apparent volumetric heat capacity rho * cp(T) with the sand's latent
-effects added as peaks, integrated to an enthalpy table, so a cell crossing
-a peak in one step still pays its heat:
-
-- free water in green sand evaporates at the boiling point
-  (2257 kJ/kg of water);
-- quartz-bearing sands (silica, green sand) take the alpha-beta quartz
-  inversion at 573 °C.
-
-Codes in :data:`SAND_MATERIALS` are stored in saved projects and settings
-(``MoldParams.mold_material_code`` / ``core_material_code``). Append new
-sands; never renumber. Code 0 is the constant custom sand of
-ThermalBoundaryParams.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -31,21 +8,12 @@ import numpy as np
 from core.solidification_params import SAND_MATERIAL_CUSTOM, ThermalBoundaryParams
 from physics.heat_transfer import TabulatedBody
 
-#: Latent heat of evaporation of water, J/kg.
 WATER_LATENT_HEAT = 2.257e6
-#: Specific heat of liquid water, J/(kg K), carried by green sand below 100 °C.
 WATER_SPECIFIC_HEAT = 4180.0
-#: Temperature band (°C) the evaporation peak is spread over. Popielarski and
-#: Ignaszak fitted 98-102 °C for 3.5 % water; the enthalpy update holds a
-#: cell on the band however large its step, so the band can stay narrow.
 WATER_EVAPORATION_BAND = (100.0, 104.0)
-#: Alpha-beta quartz inversion: 0.729 kJ/mol = 12.1 kJ/kg of quartz
-#: (NIST-JANAF), at 573 °C. About 0.8 % of the sand's enthalpy to 1300 °C:
-#: it matters to expansion defects far more than to heat flow.
 QUARTZ_INVERSION_HEAT = 12.1e3
 QUARTZ_INVERSION_BAND = (568.0, 578.0)
 
-#: Source keys used in SandMaterial.sources.
 SOURCES = {
     "midea_shah": "Midea & Shah, Mold material thermophysical data, AFS Trans. 110 (2002) 121-136 "
     "(tables in Modern Casting, Aug 2004)",
@@ -61,37 +29,25 @@ SOURCES = {
     "patent_5355931": "US Patent 5,355,931, Table I (unbonded silica, chromite, silicon carbide)",
 }
 
-
 @dataclass(frozen=True)
 class SandMaterial:
-    """A molding or core sand as packed in the mold."""
 
     code: int
     key: str
     label: str
-    #: Table temperatures, °C, ascending.
     temp_points: Tuple[float, ...]
-    #: Effective conductivity of the packed sand, W/(m K), at temp_points.
     conductivity: Tuple[float, ...]
-    #: Sensible specific heat, J/(kg K), at temp_points (latent peaks excluded).
     specific_heat: Tuple[float, ...]
-    #: Packed bulk density, kg/m^3: one value, or one per temp_point (the
-    #: measured density falls as binder burns and grains rearrange).
     density: Tuple[float, ...]
-    #: Mass fraction of free water (green sand).
     moisture: float = 0.0
-    #: Mass fraction of quartz whose inversion the cp table leaves out.
     quartz_fraction: float = 0.0
-    #: Sintering / fusion onset of the grain, °C.
     sintering_temperature: float = 0.0
     uses: str = ""
-    #: Keys of SOURCES, and a note on which values are estimates.
     sources: Tuple[str, ...] = ()
     notes: str = ""
 
     @property
     def bulk_density(self) -> float:
-        """Packed bulk density at room temperature, kg/m^3."""
         return float(self.density[0])
 
     def _density_at(self, temps: np.ndarray) -> np.ndarray:
@@ -100,13 +56,6 @@ class SandMaterial:
         return np.interp(temps, self.temp_points, self.density)
 
     def volumetric_heat_capacity(self) -> Tuple[np.ndarray, np.ndarray]:
-        """(temps, rho(T) * cp_apparent(T)) with the latent peaks folded in, J/(m^3 K).
-
-        The cells keep their volume, so the measured density change goes into
-        the heat capacity (rho(T) cp(T) per unit volume). Peaks are top hats
-        over their bands: the extra capacity times the band width is the latent
-        heat per volume. Water also adds its own sensible heat below boiling.
-        """
         temps = np.asarray(self.temp_points, dtype=np.float64)
         peaks = []
         if self.moisture > 0.0:
@@ -124,34 +73,27 @@ class SandMaterial:
         return grid, self._density_at(grid) * cp
 
     def tables(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """(temps, k, rho*cp_apparent) on one grid for a TabulatedBody."""
         grid, rho_cp = self.volumetric_heat_capacity()
         k = np.interp(grid, np.asarray(self.temp_points), np.asarray(self.conductivity))
         return grid, k, rho_cp
 
     def thermal_effusivity(self, temperature: float = 20.0) -> float:
-        """sqrt(k rho cp) at ``temperature`` (sensible cp), W s^0.5 / (m^2 K): the sand's chilling power."""
         k = float(np.interp(temperature, self.temp_points, self.conductivity))
         cp = float(np.interp(temperature, self.temp_points, self.specific_heat))
         rho = float(self._density_at(np.array([temperature]))[0])
         return float(np.sqrt(k * rho * cp))
 
-
 _T100 = (20.0, 100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0, 800.0, 900.0, 1000.0,
          1100.0, 1200.0, 1300.0, 1400.0, 1500.0, 1600.0)
 _T200 = (20.0, 200.0, 400.0, 600.0, 800.0, 1000.0, 1200.0, 1400.0, 1600.0)
 
-#: Pure-quartz heat capacity (NIST-JANAF), J/(kg K), on _T100.
 _QUARTZ_CP = (742.0, 855.0, 968.0, 1052.0, 1125.0, 1203.0, 1126.0, 1143.0, 1160.0, 1177.0, 1193.0,
               1210.0, 1227.0, 1243.0, 1260.0, 1277.0, 1294.0)
-#: Mullite (NIST-JANAF), J/(kg K), on _T100.
 _MULLITE_CP = (763.0, 889.0, 992.0, 1062.0, 1112.0, 1150.0, 1179.0, 1201.0, 1219.0, 1233.0, 1244.0,
                1254.0, 1263.0, 1274.0, 1285.0, 1292.0, 1300.0)
-#: Synthetic ceramic bead conductivity (estimate anchored to CARBO and Naigai single values).
 _CERAMIC_K = (0.60, 0.598, 0.595, 0.59, 0.58, 0.585, 0.59, 0.60, 0.62, 0.65, 0.685,
               0.72, 0.78, 0.84, 0.90, 0.975, 1.05)
 
-#: Every sand by code. Append only (codes are saved in projects).
 SAND_MATERIALS: Dict[int, SandMaterial] = {
     m.code: m
     for m in (
@@ -346,16 +288,11 @@ SAND_MATERIALS: Dict[int, SandMaterial] = {
     )
 }
 
-
 def get_sand(code: int) -> SandMaterial:
-    """The database sand for ``code`` (KeyError for 0 or an unknown code)."""
     return SAND_MATERIALS[int(code)]
 
-
 def is_database_sand(code: int) -> bool:
-    """True for a code in :data:`SAND_MATERIALS` (not custom, not unknown)."""
     return int(code) in SAND_MATERIALS
-
 
 def sand_label(code: int) -> str:
     if int(code) == SAND_MATERIAL_CUSTOM:
@@ -363,16 +300,12 @@ def sand_label(code: int) -> str:
     sand = SAND_MATERIALS.get(int(code))
     return sand.label if sand is not None else f"Unknown sand {code}"
 
-
 def sand_choices() -> Sequence[Tuple[int, str]]:
-    """(code, label) for the settings menus, custom first."""
     return [(SAND_MATERIAL_CUSTOM, sand_label(SAND_MATERIAL_CUSTOM))] + [
         (code, m.label) for code, m in sorted(SAND_MATERIALS.items())
     ]
 
-
 def tabulated_body(indices: np.ndarray, code: int) -> TabulatedBody:
-    """A TabulatedBody of database sand ``code`` on cells ``indices``."""
     temps, k, rho_cp = get_sand(code).tables()
     return TabulatedBody(
         indices=np.asarray(indices, dtype=np.int64),
@@ -381,11 +314,9 @@ def tabulated_body(indices: np.ndarray, code: int) -> TabulatedBody:
         volumetric_heat_capacity=rho_cp,
     )
 
-
 def mold_tabulated_body(
     indices: np.ndarray, code: int, boundary: Optional[ThermalBoundaryParams] = None
 ) -> TabulatedBody:
-    """Mold sand cells: database sand ``code``, or for code 0 the constant mold sand of ``boundary``."""
     if int(code) != SAND_MATERIAL_CUSTOM and int(code) in SAND_MATERIALS:
         return tabulated_body(indices, code)
     boundary = boundary or ThermalBoundaryParams()

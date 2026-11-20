@@ -7,23 +7,13 @@ export type LogDrawerProps = {
   lines: string[];
   available: boolean;
   isRunning: boolean;
-  /** Lines the server's ring buffer discarded before they were fetched. */
   dropped: number;
 };
 
-/**
- * The solver's own narration, at the foot of the canvas.
- *
- * The top bar shows one bucketed line ("Running solidification physics...");
- * this is every line the solver actually emitted, plus the traceback when a run
- * fails. Collapsed it is a single strip, so it costs nothing when unwanted.
- */
 export function LogDrawer({ open, onToggle, lines, available, isRunning, dropped }: LogDrawerProps) {
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const pinnedRef = useRef(true);
 
-  // Follow the tail while the user is at the bottom; stop the moment they
-  // scroll up to read something, which is when autoscroll becomes a fight.
   useEffect(() => {
     const body = bodyRef.current;
     if (!body || !open || !pinnedRef.current) return;

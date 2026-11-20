@@ -7,14 +7,12 @@ import numpy as np
 
 import physics.heat_transfer as heat_transfer
 
-
 class _DummyAlloy:
     thermal_diffusivity = 1.0e-5
     density_liquid = 7200.0
     specific_heat = 600.0
     liquidus_temp = 1500.0
     solidus_temp = 1450.0
-
 
 class HeatTransferNumbaBackendTests(unittest.TestCase):
     def _build_model(
@@ -78,9 +76,6 @@ class HeatTransferNumbaBackendTests(unittest.TestCase):
         self.assertTrue(model.last_step_used_numba)
 
     def test_temperature_dependent_uses_heterogeneous_kernel(self) -> None:
-        """Temperature-dependent alpha (a per-voxel array) now dispatches the
-        conservative Numba flux kernel; the uniform Laplacian/update kernels
-        are not called."""
         model = self._build_model(use_temperature_dependent=True)
 
         def _fake_heterogeneous(
@@ -116,8 +111,6 @@ class HeatTransferNumbaBackendTests(unittest.TestCase):
         self.assertTrue(model.last_step_used_numba)
 
     def test_chill_overrides_use_heterogeneous_kernel(self) -> None:
-        """Chill diffusivity/rho_cp overrides make the field heterogeneous and
-        dispatch the conservative Numba flux kernel, not the uniform one."""
         override_idx = np.array([1], dtype=np.int64)
         model = self._build_model(
             diffusivity_overrides=(override_idx, np.array([1.0e-4], dtype=np.float64)),
@@ -148,8 +141,6 @@ class HeatTransferNumbaBackendTests(unittest.TestCase):
                 create=True,
             ) as het_mock,
         ):
-            # Uniform eligibility alone must NOT route an alpha-array step into
-            # the uniform kernels.
             model._numba_parallel_eligible = True
             model.step(1.0e-3)
 
@@ -157,7 +148,6 @@ class HeatTransferNumbaBackendTests(unittest.TestCase):
         self.assertFalse(upd_mock.called)
         self.assertTrue(het_mock.called)
         self.assertTrue(model.last_step_used_numba)
-
 
 if __name__ == "__main__":
     unittest.main()

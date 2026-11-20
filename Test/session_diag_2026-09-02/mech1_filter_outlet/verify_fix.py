@@ -1,14 +1,3 @@
-"""Verify the two hard constraints on the proposed Fix 1, as literally written
-in REPORT.md section 3:
-
-  A. byte-identical to HEAD wherever porosity == 1.0  (so Full_Gating_Test and
-     every no-filter model are unaffected)
-  B. removes the eps amplification wherever porosity < 1.0
-
-Constraint A is checked bit-for-bit on state.mass over 400 steps of a
-no-filter lattice with a real free surface (GAS, INTERFACE and FLUID cells all
-present, transitions firing), not just on an all-FLUID box.
-"""
 import os, sys, copy
 sys.path.insert(0, "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -19,9 +8,7 @@ from physics.fluid_flow import lattice_units, LATTICE_VELOCITIES, Q, OPPOSITE
 
 NU, DX_M = 0.006 / 7200.0, 0.0152
 
-
 def advance_mass_fixed(state, f_post_collision, f_streamed):
-    """Fix 1, exactly as proposed for physics/filling.py:717-727."""
     outgoing = np.asarray(f_post_collision, dtype=np.float64)
     incoming = np.asarray(f_streamed, dtype=np.float64)
     eps = np.clip(pf.fluid_fraction(state), 0.0, 1.0)
@@ -45,7 +32,6 @@ def advance_mass_fixed(state, f_post_collision, f_streamed):
                           (incoming[ibar] - outgoing[i]) * weight, 0.0)
     return state.mass + delta
 
-
 def make(nz=16, w=3, porous=False, half_full=True):
     n = w + 2; shape = (n, n, nz + 2)
     ob = np.zeros(shape, bool)
@@ -55,13 +41,11 @@ def make(nz=16, w=3, porous=False, half_full=True):
     if porous:
         b = np.zeros(shape, bool); b[1:w+1, 1:w+1, 5:8] = True
         z.porosity[b] = np.float32(0.85)
-    # a real free surface: fill only the bottom third, leave the rest GAS
     init = ~ob
     if half_full:
         init = init & (np.arange(shape[2])[None, None, :] <= nz // 3)
     st = pf.create_state(ob, dx_m=DX_M, dt_s=u.dt_s, initial_fluid=init, porous=z)
     return st, u
-
 
 print("=== A. porosity == 1.0 everywhere: HEAD vs Fix 1, bit-for-bit ===")
 a, u = make(porous=False); b = copy.deepcopy(a)
@@ -92,7 +76,6 @@ for label, patch in (("HEAD  ", False), ("Fix 1 ", True)):
     st, u = make(porous=True)
     band = st.porous.porosity_f64 < 1.0
     full = st.rho.astype(np.float64) * st.porous.porosity_f64
-    # seed the band 5% over full, as the real run's 1-2% lag does
     st.mass[band & (st.flags == FLAG_FLUID)] = (full * 1.05)[band & (st.flags == FLAG_FLUID)]
     orig = pf.advance_mass
     if patch: pf.advance_mass = advance_mass_fixed
@@ -115,11 +98,7 @@ for label, patch in (("HEAD  ", False), ("Fix 1 ", True)):
 print("\n=== C. Fix 1 + Fix 2 (re-pin porous FLUID cells through _redistribute) ===")
 orig_trans_global = pf.apply_transitions
 
-
 def repin_then_transitions(state, time_s, **kw):
-    """Fix 2, as proposed: re-pin porous FLUID cells to rho*porosity and route
-    the difference through _redistribute, which conserves exactly. Touches
-    exactly zero cells where porosity == 1.0."""
     por = state.porous.porosity_f64
     m = (state.flags == FLAG_FLUID) & (por < 1.0)
     if m.any():
@@ -129,7 +108,6 @@ def repin_then_transitions(state, time_s, **kw):
         state.mass[m] = full[m]
         pf._redistribute(state, excess, use_numba=False)
     return orig_trans_global(state, time_s, **kw)
-
 
 for label, (pa, pt) in (("Fix1+Fix2", (True, True)), ("Fix2 only", (False, True))):
     st, u = make(porous=True)

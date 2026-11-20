@@ -1,9 +1,3 @@
-"""Tests for the application-shell server routes.
-
-Covers the endpoints the web shell added for project management, hardware
-information, the help guide, part-geometry restore, and the upload-naming fix.
-"""
-
 from __future__ import annotations
 
 import io
@@ -20,12 +14,9 @@ from web.routes import api_bp
 from web.routes_tools import tools_bp
 from web.services.simulation_queue import SimulationQueueManager
 
-
 def _cube_stl_bytes(size: float = 2.0) -> bytes:
-    """A small watertight STL, as an upload would arrive."""
     mesh = trimesh.creation.box(extents=(size, size, size))
     return bytes(mesh.export(file_type="stl"))
-
 
 class WebToolsTestCase(unittest.TestCase):
     def setUp(self) -> None:
@@ -50,8 +41,6 @@ class WebToolsTestCase(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
-
-    # -- helpers ---------------------------------------------------------
 
     def _create_project(self, **overrides) -> str:
         payload = {
@@ -98,26 +87,19 @@ class WebToolsTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         return str(response.get_json()["id"])
 
-    # -- upload naming ---------------------------------------------------
-
     def test_upload_reports_a_display_name_without_the_storage_prefix(self) -> None:
         entry = self._upload("b0_cast.stl")
 
         self.assertEqual(entry["display_name"], "b0_cast")
-        # The stored filename still carries exactly one prefix for collisions.
         self.assertTrue(entry["filename"].endswith("_b0_b0_cast.stl"))
 
     def test_re_uploading_a_stored_file_does_not_compound_prefixes(self) -> None:
         first = self._upload("cast.stl")
-        # Re-uploading the file as it sits on disk is what produced names like
-        # "3c3a67b8_b0_602e27b4_b0_cast" before the fix.
         second = self._upload(Path(first["filepath"]).name)
 
         self.assertEqual(first["display_name"], "cast")
         self.assertEqual(second["display_name"], "cast")
         self.assertNotEqual(first["filepath"], second["filepath"])
-
-    # -- part geometry restore -------------------------------------------
 
     def test_part_mesh_route_returns_geometry_for_a_stored_part(self) -> None:
         project_id = self._create_project()
@@ -155,8 +137,6 @@ class WebToolsTestCase(unittest.TestCase):
         self.assertIsNone(load_part_mesh_data(str(self.upload_folder / "gone.stl")))
         self.assertIsNone(load_part_mesh_data(""))
 
-    # -- rename ----------------------------------------------------------
-
     def test_rename_project_updates_the_stored_name(self) -> None:
         project_id = self._create_project()
 
@@ -178,8 +158,6 @@ class WebToolsTestCase(unittest.TestCase):
         response = self.client.post("/api/projects/nope/rename", json={"name": "x"})
 
         self.assertEqual(response.status_code, 404)
-
-    # -- duplicate -------------------------------------------------------
 
     def test_duplicate_project_copies_settings_and_parts(self) -> None:
         project_id = self._create_project()
@@ -212,8 +190,6 @@ class WebToolsTestCase(unittest.TestCase):
 
         copy = repo.get_project(self.database_path, response.get_json()["id"])
         self.assertEqual(copy["name"], "Trial B")
-        # A copy is a fresh setup to re-run, not a second row pointing at an
-        # artifact it did not produce.
         self.assertEqual(copy["status"], "draft")
         self.assertIsNone(copy["artifact_path"])
         self.assertEqual(copy["summary"], {})
@@ -230,8 +206,6 @@ class WebToolsTestCase(unittest.TestCase):
         self.assertNotEqual(original_path, copy_path)
         self.assertTrue(Path(copy_path).exists())
 
-        # Deleting the copy must not take the original's geometry with it,
-        # which is exactly what a shared filepath would have caused.
         for filepath in repo.delete_project(self.database_path, copy_id):
             Path(filepath).unlink(missing_ok=True)
         self.assertTrue(Path(original_path).exists())
@@ -240,8 +214,6 @@ class WebToolsTestCase(unittest.TestCase):
         response = self.client.post("/api/projects/nope/duplicate", json={})
 
         self.assertEqual(response.status_code, 404)
-
-    # -- reference data --------------------------------------------------
 
     def test_hardware_route_reports_cores_memory_and_a_gpu_backend(self) -> None:
         response = self.client.get("/api/hardware")
@@ -300,14 +272,10 @@ class WebToolsTestCase(unittest.TestCase):
 
         project = repo.get_project(self.database_path, project_id)
 
-        # `use_gpu` is read by the simulation queue; before the shell rewrite it
-        # had no default and no control anywhere on the web side.
         self.assertIn("use_gpu", project["performance_options"])
         self.assertTrue(project["performance_options"]["use_gpu"])
 
-
 class ReportRouteTests(WebToolsTestCase):
-    """Report generation, including the formats the server cannot produce."""
 
     def test_report_formats_flags_pdf_availability_with_a_reason(self) -> None:
         payload = self.client.get("/api/report/formats").get_json()
@@ -316,8 +284,6 @@ class ReportRouteTests(WebToolsTestCase):
         self.assertEqual(set(by_id), {"html", "markdown", "pdf"})
         self.assertTrue(by_id["html"]["available"])
         self.assertTrue(by_id["markdown"]["available"])
-        # PDF depends on an optional native stack; whichever way it goes, an
-        # unavailable format must carry a reason the UI can show.
         if not by_id["pdf"]["available"]:
             self.assertIn("weasyprint", by_id["pdf"]["reason"])
 
@@ -364,7 +330,6 @@ class ReportRouteTests(WebToolsTestCase):
         import base64
         import zlib
 
-        # Smallest valid PNG: an 1x1 opaque pixel.
         def chunk(tag: bytes, data: bytes) -> bytes:
             body = tag + data
             return len(data).to_bytes(4, "big") + body + zlib.crc32(body).to_bytes(4, "big")
@@ -389,9 +354,7 @@ class ReportRouteTests(WebToolsTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("data:image/png;base64", response.get_data(as_text=True))
 
-
 class ProjectFileTests(WebToolsTestCase):
-    """Import and export of the desktop ``.solidus-project.json`` format."""
 
     def test_export_produces_schema_v2_with_bare_part_filenames(self) -> None:
         import json
@@ -406,12 +369,9 @@ class ProjectFileTests(WebToolsTestCase):
         self.assertIn(".solidus-project.json", response.headers["Content-Disposition"])
         payload = json.loads(response.get_data())
         self.assertEqual(payload["schema_version"], 2)
-        # The desktop nests settings and calls the alloy `alloy_name`.
         self.assertEqual(payload["simulation"]["alloy_name"], "WCB")
         self.assertEqual(payload["simulation"]["pour_location"]["point_in"], [1.0, 2.0, 3.0])
         self.assertEqual(len(payload["parts"]), 1)
-        # A server path means nothing on another machine; the importer matches
-        # parts to uploaded files by name.
         self.assertNotIn("/", payload["parts"][0]["filepath"])
 
     def test_export_404s_for_an_unknown_project(self) -> None:
@@ -443,7 +403,6 @@ class ProjectFileTests(WebToolsTestCase):
         self.assertEqual(imported["voxel_size"], 0.2)
         self.assertTrue(imported["analysis_options"]["gas_porosity"])
         self.assertEqual(imported["solidification_params"]["feeding"]["shrink_scalar"], 1.75)
-        # pour_location lives in ui_state on the web side and is mirrored out.
         self.assertEqual(imported["pour_location"]["point_in"], [1.0, 2.0, 3.0])
         self.assertEqual([part["name"] for part in repo.get_parts(self.database_path, body["id"])], ["cast"])
         self.assertEqual(json.loads(exported)["schema_version"], 2)
@@ -489,7 +448,6 @@ class ProjectFileTests(WebToolsTestCase):
         )
 
         self.assertEqual(response.status_code, 201)
-        # Named, not silently dropped: the user has to know what to re-attach.
         self.assertEqual(response.get_json()["missing_parts"], ["cast"])
 
     def test_import_migrates_a_schema_v1_pour_rate(self) -> None:
@@ -505,7 +463,6 @@ class ProjectFileTests(WebToolsTestCase):
                 "memory_mode": "auto",
                 "analysis_options": {},
                 "performance_options": {},
-                # 5.0 was the legacy default; v2 means "derive it" with 0.0.
                 "solidification_params": {"filling": {"pour_rate_lb_s": 5.0}},
                 "pour_location": None,
             },
@@ -555,7 +512,6 @@ class ProjectFileTests(WebToolsTestCase):
 
         self.assertEqual(response.status_code, 400)
 
-
 class JobLogTests(WebToolsTestCase):
     def test_log_route_reports_unavailable_for_a_project_that_never_ran(self) -> None:
         project_id = self._create_project()
@@ -588,14 +544,7 @@ class JobLogTests(WebToolsTestCase):
 
         self.assertIsNone(manager.get_log(project_id))
 
-
 class PartFilePathSecurityTests(WebToolsTestCase):
-    """A part's file path is a file-read primitive unless it is confined.
-
-    Chain that used to work: add a part whose ``filepath`` is any file on the
-    server, duplicate the project (which copies part files into the upload
-    folder), then fetch it back through ``/api/uploads/<name>``.
-    """
 
     def _secret(self) -> Path:
         secret = Path(self.temp_dir.name) / "secret.pem"
@@ -664,8 +613,6 @@ class PartFilePathSecurityTests(WebToolsTestCase):
     def test_duplicate_will_not_copy_a_file_from_outside_the_upload_folder(self) -> None:
         project_id = self._create_project()
         secret = self._secret()
-        # Straight to SQL: add_part refuses this path now, and the point of
-        # the test is a row written before that check existed.
         with repo.get_db_connection(self.database_path) as db:
             db.execute(
                 "INSERT INTO parts (id, project_id, name, part_type, filepath) VALUES (?,?,?,?,?)",
@@ -678,7 +625,6 @@ class PartFilePathSecurityTests(WebToolsTestCase):
         copies = list(self.upload_folder.glob("*"))
         self.assertEqual(copies, [], "the foreign file must not be laundered into the served folder")
         copy_id = response.get_json()["id"]
-        # The copy keeps pointing at the original path, which nothing serves.
         self.assertEqual(repo.get_parts(self.database_path, copy_id)[0]["filepath"], str(secret))
 
     def test_resolve_upload_path_accepts_a_file_inside_the_folder(self) -> None:
@@ -695,9 +641,7 @@ class PartFilePathSecurityTests(WebToolsTestCase):
             with self.assertRaises(repo.UnsafePartFileError):
                 repo.resolve_upload_path(candidate, self.upload_folder)
 
-
 class ReportEscapingTests(WebToolsTestCase):
-    """A report is the artifact most likely to be mailed around a foundry."""
 
     def test_html_report_escapes_a_hostile_project_name(self) -> None:
         project_id = self._create_project(name="<script>alert(1)</script>")
@@ -776,7 +720,6 @@ class ReportEscapingTests(WebToolsTestCase):
 
         self.assertEqual(response.status_code, 413)
 
-
 class ImportRobustnessTests(WebToolsTestCase):
     def test_import_rejects_a_non_scalar_schema_version(self) -> None:
         import io
@@ -790,7 +733,6 @@ class ImportRobustnessTests(WebToolsTestCase):
             content_type="multipart/form-data",
         )
 
-        # int({}) raises TypeError, which used to escape as a 500.
         self.assertEqual(response.status_code, 400)
 
     def test_import_rejects_a_json_array(self) -> None:
@@ -868,8 +810,6 @@ class ImportRobustnessTests(WebToolsTestCase):
         self.assertEqual(response.status_code, 201)
         parts = repo.get_parts(self.database_path, response.get_json()["id"])
         self.assertEqual(len(parts), 1)
-        # A position that is not three numbers falls back to the origin rather
-        # than raising; the schema loader pads a short rotation itself.
         self.assertEqual(
             (parts[0]["position_x"], parts[0]["position_y"], parts[0]["position_z"]),
             (0.0, 0.0, 0.0),
@@ -900,10 +840,8 @@ class ImportRobustnessTests(WebToolsTestCase):
 
         self.assertEqual(response.status_code, 201)
         body = response.get_json()
-        # The second body did not silently replace the first.
         self.assertEqual(body["name_collisions"], ["bracket"])
         self.assertEqual(body["missing_parts"], [])
-
 
 class JobLogCursorTests(WebToolsTestCase):
     def _manager(self):
@@ -914,14 +852,11 @@ class JobLogCursorTests(WebToolsTestCase):
     def test_cursor_survives_the_ring_buffer_wrapping(self) -> None:
         project_id = self._create_project()
         manager = self._manager()
-        # 20 lines produced, but only the last 5 kept: sequence numbers 15..19.
         manager.simulation_logs[project_id] = {
             "lines": [f"line {n}" for n in range(15, 20)],
             "first": 15,
         }
 
-        # A client still holding cursor 5 must be told it fell behind and be
-        # given everything still available, not an empty list forever.
         payload = self.client.get(f"/api/projects/{project_id}/log?since=5").get_json()
 
         self.assertEqual(payload["dropped"], 10)
@@ -946,7 +881,6 @@ class JobLogCursorTests(WebToolsTestCase):
         manager = self._manager()
         manager.simulation_logs[project_id] = {"lines": ["old run"], "first": 0}
 
-        # What the worker does at the top of a run.
         manager.simulation_logs[project_id] = {"lines": [], "first": 0}
 
         payload = self.client.get(f"/api/projects/{project_id}/log").get_json()
@@ -962,7 +896,6 @@ class JobLogCursorTests(WebToolsTestCase):
         self.assertFalse(payload["available"])
         self.assertEqual(payload["lines"], [])
 
-
 class HardwareTierTests(WebToolsTestCase):
     def test_hardware_reports_core_tiers_by_name(self) -> None:
         payload = self.client.get("/api/hardware").get_json()
@@ -975,12 +908,6 @@ class HardwareTierTests(WebToolsTestCase):
             self.assertGreater(tier["cores"], 0)
 
     def test_core_tier_detection_reads_names_not_positions(self) -> None:
-        """The tiers must come from ``hw.perflevelN.name``, not an assumption.
-
-        This machine reports perflevel0 = "Super" and perflevel1 =
-        "Performance", so a detector that assumed position would label twelve
-        fast cores as efficiency cores.
-        """
         import platform
 
         from config.hardware_config import HardwareConfig
@@ -993,7 +920,6 @@ class HardwareTierTests(WebToolsTestCase):
         total = sum(tier["cores"] for tier in tiers)
         self.assertGreater(total, 0)
         self.assertTrue(all(tier["name"] for tier in tiers))
-
 
 class ArtifactCacheTests(WebToolsTestCase):
     def test_artifact_cache_reparses_when_the_file_changes(self) -> None:
@@ -1034,15 +960,12 @@ class ArtifactCacheTests(WebToolsTestCase):
 
         self.assertIsNone(tools._read_artifact_cached(str(Path(self.temp_dir.name) / "gone.json")))
 
-
 class PartNameTests(WebToolsTestCase):
     def test_a_users_own_name_is_never_rewritten_on_read(self) -> None:
         project_id = self._create_project()
         uploaded = self._upload("cast.stl")
         part_id = self._add_part(project_id, uploaded, "cast")
 
-        # Eight hex digits and an underscore is a perfectly good part name, and
-        # it used to be mangled into "v2" by the read-time prefix stripping.
         self.client.put(
             f"/api/projects/{project_id}/parts/{part_id}",
             json={"name": "12345678_v2", "part_type": "cast", "filepath": uploaded["filepath"]},
@@ -1053,7 +976,6 @@ class PartNameTests(WebToolsTestCase):
 
     def test_legacy_storage_names_are_repaired_once_at_startup(self) -> None:
         project_id = self._create_project()
-        # A row as written before uploads reported a clean display name.
         with repo.get_db_connection(self.database_path) as db:
             db.execute(
                 "INSERT INTO parts (id, project_id, name, part_type, filepath) VALUES (?,?,?,?,?)",
@@ -1064,9 +986,7 @@ class PartNameTests(WebToolsTestCase):
 
         self.assertEqual(repo.get_parts(self.database_path, project_id)[0]["name"], "cast")
 
-
 class UploadPrefixTests(unittest.TestCase):
-    """Unit coverage for the naming rule itself."""
 
     def test_strip_upload_prefix_removes_every_layer(self) -> None:
         self.assertEqual(repo.strip_upload_prefix("602e27b4_b0_cast"), "cast")
@@ -1080,9 +1000,7 @@ class UploadPrefixTests(unittest.TestCase):
     def test_strip_upload_prefix_never_returns_an_empty_name(self) -> None:
         self.assertEqual(repo.strip_upload_prefix("602e27b4_b0_"), "602e27b4_b0_")
 
-
 class UploadCadFileNamingTests(unittest.TestCase):
-    """The single-body upload path, exercised without the Flask layer."""
 
     def test_single_body_upload_keeps_the_original_stem(self) -> None:
         from werkzeug.datastructures import FileStorage
@@ -1097,7 +1015,6 @@ class UploadCadFileNamingTests(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["display_name"], "Impeller_Housing")
         self.assertEqual(entries[0]["part_type"], "cast")
-
 
 if __name__ == "__main__":
     unittest.main()

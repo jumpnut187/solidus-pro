@@ -5,7 +5,6 @@ import unittest
 from core.solidification import SOLVER_MODE_SCHEDULE_LEGACY, SOLVER_MODE_THERMAL_COUPLED
 from core.simulation_pipeline import create_analysis_options
 
-
 class SimulationPipelineOptionsTests(unittest.TestCase):
     def test_sand_restraint_defaults_to_neutral(self) -> None:
         options = create_analysis_options({}, use_gpu=False, use_incremental=False)
@@ -72,28 +71,14 @@ class SimulationPipelineOptionsTests(unittest.TestCase):
         )
         self.assertFalse(options_off.filling)
 
-
 if __name__ == "__main__":
     unittest.main()
 
-
 class AnalysisHeaderTests(unittest.TestCase):
-    """
-    The run header lists which analyses are active. It is a hand-maintained
-    table, and `filling` was missing from it at first -- so a run with the fill
-    switched off printed exactly what a successful fill would have, and there
-    was no way to tell from the log which had happened.
-    """
 
-    #: Boolean fields on AnalysisOptions that are NOT analyses.
     _NOT_ANALYSES = frozenset({"use_gpu", "use_incremental"})
 
     def test_every_analysis_flag_is_reported(self) -> None:
-        """
-        The guard that matters: a new analysis flag must be added to
-        ANALYSIS_LABELS or this fails. Catches the omission class, not just
-        the one instance of it.
-        """
         import dataclasses
 
         from core.solidification import ANALYSIS_LABELS, AnalysisOptions
@@ -110,10 +95,6 @@ class AnalysisHeaderTests(unittest.TestCase):
                 )
 
     def test_only_real_toggles_are_listed(self) -> None:
-        """
-        The inverse guard. sand_restraint_index is a float defaulting to 0.5,
-        so listing it would report "Sand Restraint" on every single run.
-        """
         import dataclasses
 
         from core.solidification import ANALYSIS_LABELS, AnalysisOptions

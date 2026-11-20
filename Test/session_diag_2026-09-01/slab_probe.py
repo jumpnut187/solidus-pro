@@ -1,5 +1,3 @@
-"""Closed box, metal on top of a ceramic slab, gravity: does it get through
-without losing mass or producing a negative population? Sizing probe."""
 import os, sys
 sys.path.insert(0, "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -15,7 +13,6 @@ from physics.fluid_flow import (
 
 DX = 0.0043
 NU = 0.006 / 7200.0
-
 
 def slab(n=16, band=(4, 6)):
     units = lattice_units(DX, NU, u_max_physical_m_s=2.8)
@@ -38,7 +35,6 @@ def slab(n=16, band=(4, 6)):
                       initial_fluid=fluid, porous=zone)
     st.porous.primed[...] = True
     return st, units, (c0, c1)
-
 
 def run(use_numba, steps=4000, every=500):
     st, units, (c0, c1) = slab()
@@ -63,7 +59,6 @@ def run(use_numba, steps=4000, every=500):
                   f"neg {int(negc.sum())} negpor {int((negc & por).sum())} "
                   f"|u|max {np.abs(np.asarray(st.u)).max():.4f}")
     print(f"  worst neg {worst_neg} worst neg_porous {worst_neg_por}")
-
 
 print("numba"); run(True)
 print("numpy"); run(False, steps=1500, every=500)

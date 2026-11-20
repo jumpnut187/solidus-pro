@@ -1,22 +1,3 @@
-/**
- * The modeling session and the history of modeled bodies behind it.
- *
- * Four commands, each SOLIDWORKS':
- *
- * - Extrude: choose a plane (a datum plane, a reference plane or a face),
- *   sketch closed profiles on it, exit the sketch into the Extrude property
- *   manager, watch the preview as the end condition and depth change, OK.
- *   Extrude Face is the same with the clicked face's outline as the sketch.
- *   The body is stored as a part of the chosen type (riser, chill, ...) with
- *   the feature that made it, so editing it later replays the same steps.
- * - Extruded Cut: the same plane and sketch, swept into a tool that removes
- *   material from the bodies in its feature scope, uploaded castings
- *   included. Each cut body keeps its pre-cut STL on the server as its base,
- *   so editing or deleting the cut rebuilds the body from the base.
- * - Plane: a reference plane offset from a plane or face, or midway between
- *   two. Sketches on it follow it when its distance changes.
- * - Measure: pick vertices, edges and faces and read distances and angles.
- */
 import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
 
 import { api, type MeshData, type PartType, type ProjectPart } from '../lib/api';
@@ -74,44 +55,28 @@ export type ExtrudeStage = 'plane' | 'sketch' | 'feature';
 
 export type ModelingSession = {
   stage: ExtrudeStage;
-  /** What a click in the plane stage chooses: a sketch plane, or a face to extrude as it is. */
   purpose: Extract<PickPurpose, 'sketch' | 'faceExtrude'>;
-  /** A boss extrude (makes a body) or an extrude cut (removes material). */
   feature: ModelFeature;
-  /** The body a boss extrude makes; unused by a cut. */
   body: FeatureBody & { autoName: boolean };
-  /** The part being edited, or null for a new body. */
   editingPartId: string | null;
-  /** The cut being edited, or null for a new cut or a boss extrude. */
   editingCutId: string | null;
-  /**
-   * A new cut's direction is still the default: leaving the sketch points it
-   * at the material (see `cutDirection`). Cleared once that has happened.
-   */
   autoDirection?: boolean;
   tool: SketchTool;
   polygonSides: number;
-  /** The selected sketch entities, in the order they were selected. */
   selectedEntityIds: string[];
   snap: boolean;
 };
 
 export type PlaneSession = {
   mode: 'offset' | 'mid';
-  /** The chosen references: one for an offset plane, two for a mid plane. */
   refs: SketchPlane[];
   distance: number;
   flip: boolean;
   count: number;
   name: string;
-  /** The reference plane being edited, or null for a new one. */
   editingId: string | null;
 };
 
-/**
- * The live preview. For a cut, `body` is the material the cut removes and
- * `removed` is how much it takes from each body in its scope, by part id.
- */
 export type PreviewState =
   | { status: 'idle' }
   | { status: 'building' }
@@ -133,7 +98,6 @@ export type UseModelingOptions = {
   viewportRef: MutableRefObject<ViewportHandle | null>;
   referencePlanes: ReferencePlane[];
   setReferencePlanes: (planes: ReferencePlane[]) => void;
-  /** The project's extrude cuts (its `ui_state.cut_features`). */
   cutFeatures: CutFeature[];
   setCutFeatures: (cuts: CutFeature[]) => void;
   notify: Notify;
@@ -158,7 +122,6 @@ function featureKey(feature: ModelFeature, targets: ProjectPart[]): string {
   );
 }
 
-/** World bounds of a triangle soup, for a preview that has no kernel bbox. */
 function positionsBox(positions: Float32Array): Box3 {
   const min: Vec3 = [Infinity, Infinity, Infinity];
   const max: Vec3 = [-Infinity, -Infinity, -Infinity];
@@ -175,12 +138,10 @@ function meshPayload(body: { positions: Float32Array; indices: Uint32Array }) {
   return { vertices: Array.from(body.positions), faces: Array.from(body.indices) };
 }
 
-/** The world centre of all part meshes, for centring a sketch that has nothing in it yet. */
 function assemblyCenter(parts: ProjectPart[]): Vec3 | null {
   let min: Vec3 | null = null;
   let max: Vec3 | null = null;
   for (const part of parts) {
-    // Through the full placement, rotation included, as the viewport draws it.
     const box = worldBounds(part);
     if (!box) continue;
     const lo: Vec3 = box.min;
@@ -191,12 +152,6 @@ function assemblyCenter(parts: ProjectPart[]): Vec3 | null {
   return min && max ? [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2] : null;
 }
 
-/**
- * A face outline as closed sketch polylines on `plane`: each world loop
- * pressed onto the plane and cleared of the collinear points the
- * tessellation put on its straight edges. Orientation is left to the
- * profile's even-odd rule, so holes stay holes.
- */
 export function outlineToEntities(face: FaceOutline, plane: SketchPlane): SketchEntity[] {
   const frame = planeFrame(plane);
   return face.loops
@@ -205,7 +160,6 @@ export function outlineToEntities(face: FaceOutline, plane: SketchPlane): Sketch
     .map((points) => ({ id: newEntityId(), type: 'polyline' as const, points }));
 }
 
-/** A part's bounds in world space, as the kernel places it, or null without geometry. */
 function worldBounds(part: ProjectPart): Box3 | null {
   const bounds = part.meshData?.bounds;
   if (!bounds) return null;
@@ -230,11 +184,6 @@ function worldBounds(part: ProjectPart): Box3 | null {
   return { min, max };
 }
 
-/**
- * Which way a cut sketched on `plane` finds the bodies in `parts`: the
- * direction and end condition a new cut starts with. A plane with material
- * on one side cuts toward it; a plane through the bodies cuts both ways.
- */
 function cutDirection(
   parts: ProjectPart[],
   plane: SketchPlane
@@ -264,11 +213,6 @@ function cutDirection(
   return { reverse: ahead <= tolerance, endCondition: 'throughAll' };
 }
 
-/**
- * Whether two parts' world bounds touch, within `pad`. A body that does not
- * touch another cannot have stopped on it or been trimmed by it. Unknown
- * geometry counts as touching, so the caller errs toward rebuilding.
- */
 function boundsTouch(a: ProjectPart, b: ProjectPart, pad = 1e-3): boolean {
   const boxA = worldBounds(a);
   const boxB = worldBounds(b);
@@ -326,7 +270,6 @@ export function useModeling(options: UseModelingOptions) {
   const cutsRef = useRef(cutFeatures);
   cutsRef.current = cutFeatures;
 
-  /** Reference planes as planes, carrying their ids. */
   const resolvedReferences = useMemo(
     () =>
       referencePlanes
@@ -337,8 +280,6 @@ export function useModeling(options: UseModelingOptions) {
         .filter((entry): entry is { id: string; name: string; plane: SketchPlane } => entry !== null),
     [referencePlanes]
   );
-
-  // --- Camera --------------------------------------------------------------
 
   const lookAtSketch = useCallback(
     (plane: SketchPlane, entities: SketchEntity[]) => {
@@ -359,8 +300,6 @@ export function useModeling(options: UseModelingOptions) {
     [viewportRef]
   );
 
-  // --- Session lifecycle ---------------------------------------------------
-
   const closeAll = useCallback(() => {
     setSession(null);
     setPlaneSession(null);
@@ -374,8 +313,6 @@ export function useModeling(options: UseModelingOptions) {
       const current = partsRef.current;
       const seq = nextFeatureSeq(current, cutsRef.current);
       const feature = defaultExtrude(seq, plane ?? { kind: 'standard', id: 'top', offset: 0 });
-      // A face extruded as it is is almost always a chill on that face; a
-      // sketched boss is almost always a riser.
       const partType: PartType = purpose === 'faceExtrude' ? 'chill' : 'riser';
       setSession({
         stage: plane ? 'sketch' : 'plane',
@@ -418,11 +355,6 @@ export function useModeling(options: UseModelingOptions) {
     [closeAll, lookAtSketch]
   );
 
-  /**
-   * Start an extrude cut. Its scope starts as every visible body, the way
-   * SOLIDWORKS' Feature Scope starts at All Bodies; bodies the cut misses are
-   * left alone when it is applied.
-   */
   const startCut = useCallback(
     (plane?: SketchPlane) => {
       closeAll();
@@ -515,7 +447,6 @@ export function useModeling(options: UseModelingOptions) {
     setSession((current) => {
       if (!current) return current;
       const plane = { ...current.feature.sketch.plane, offset };
-      // Moved by hand, the plane is no longer the reference plane it came from.
       delete plane.refId;
       return { ...current, feature: { ...current.feature, sketch: { ...current.feature.sketch, plane } } };
     });
@@ -563,8 +494,6 @@ export function useModeling(options: UseModelingOptions) {
   );
 
   const deleteEntity = useCallback((id: string) => deleteEntities([id]), [deleteEntities]);
-
-  // --- Reference planes ----------------------------------------------------
 
   const startPlane = useCallback(
     (editId?: string) => {
@@ -624,8 +553,6 @@ export function useModeling(options: UseModelingOptions) {
     [ensureProject, projectId, setReferencePlanes]
   );
 
-  // --- Measure -------------------------------------------------------------
-
   const startMeasure = useCallback(() => {
     closeAll();
     setMeasurePicks([]);
@@ -633,15 +560,6 @@ export function useModeling(options: UseModelingOptions) {
 
   const clearMeasure = useCallback(() => setMeasurePicks((current) => (current ? [] : current)), []);
 
-  // --- Events from the viewport --------------------------------------------
-
-  // --- Sketch regions ------------------------------------------------------
-
-  /**
-   * The regions of the sketch being extruded, computed by the worker when the
-   * feature stage opens or the sketch changes. Keyed by the entities, so a
-   * stale answer for an earlier sketch is never shown.
-   */
   const [regionState, setRegionState] = useState<{ key: string; regions: SketchRegion[] } | null>(null);
   const regionStateRef = useRef(regionState);
   regionStateRef.current = regionState;
@@ -656,9 +574,6 @@ export function useModeling(options: UseModelingOptions) {
       .then((regions) => {
         if (cancelled) return;
         setRegionState({ key: regionKey, regions });
-        // Picks that no longer land in a region (the sketch was edited under
-        // them) are dropped; with none left the feature goes back to the
-        // default rather than failing on an empty profile.
         setSession((current) => {
           const seeds = current?.feature.regions;
           if (!current || !seeds) return current;
@@ -673,16 +588,9 @@ export function useModeling(options: UseModelingOptions) {
     return () => {
       cancelled = true;
     };
-    // The key stands for the sketch: a new object with the same entities is the same sketch.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [regionKey, client]);
   const currentRegions = regionState && regionState.key === regionKey ? regionState.regions : null;
 
-  /**
-   * Add the region under `point` to the feature's profile, or take it out,
-   * as clicking a region does in Onshape. The first click on a sketch that
-   * used the even-odd default starts from what that default extruded.
-   */
   const toggleRegion = useCallback((point: Vec2) => {
     const regions = regionStateRef.current?.regions;
     setSession((current) => {
@@ -788,14 +696,12 @@ export function useModeling(options: UseModelingOptions) {
     lookAtSketch(session.feature.sketch.plane, session.feature.sketch.entities);
   }, [lookAtSketch, session]);
 
-  /** Patch the feature being edited; a patch for the other kind's fields is ignored by it. */
   const patchFeature = useCallback((patch: Partial<ExtrudeFeature> | Partial<CutFeature>) => {
     setSession((current) =>
       current ? { ...current, feature: { ...current.feature, ...patch, kind: current.feature.kind } as ModelFeature } : current
     );
   }, []);
 
-  /** Back to every region the even-odd rule fills. */
   const resetRegions = useCallback(() => {
     setSession((current) => (current ? { ...current, feature: { ...current.feature, regions: null } as ModelFeature } : current));
   }, []);
@@ -811,17 +717,9 @@ export function useModeling(options: UseModelingOptions) {
     });
   }, []);
 
-  // --- Bodies before their cuts --------------------------------------------
-
-  /** Pre-cut base meshes fetched from the server, by base file path. */
   const baseMeshes = useRef(new Map<string, Promise<MeshData>>());
   useEffect(() => baseMeshes.current.clear(), [projectId]);
 
-  /**
-   * `part` as it was before any extrude cut: itself when uncut, else a copy
-   * carrying its base STL, fetched once per base file. The copy's file path
-   * is the base's, so the worker caches it apart from the cut body.
-   */
   const baseOf = useCallback(async (target: string, part: ProjectPart): Promise<ProjectPart> => {
     const basePath = part.base_filepath;
     if (!basePath) return part;
@@ -833,8 +731,6 @@ export function useModeling(options: UseModelingOptions) {
     }
     return { ...part, filepath: basePath, meshData: await pending };
   }, []);
-
-  // --- Preview -------------------------------------------------------------
 
   const previewFeature = session?.stage === 'feature' ? session.feature : null;
   const previewOwner = session?.editingPartId ?? null;
@@ -855,8 +751,6 @@ export function useModeling(options: UseModelingOptions) {
     setPreview((current) => (current.status === 'ok' && current.key === key ? current : { status: 'building' }));
     const run = async (): Promise<PreviewState> => {
       if (feature.kind !== 'cut') return { status: 'ok', body: await client().build(feature, targets, parts), key };
-      // What the cut takes from each body as it was before any cut, so an
-      // edited cut previews all of what it removes, not only the change.
       const bases = projectId ? await Promise.all(targets.map((part) => baseOf(projectId, part))) : targets;
       const cut = await client().previewCut(feature, bases, [...parts, ...bases]);
       return {
@@ -889,8 +783,6 @@ export function useModeling(options: UseModelingOptions) {
     };
   }, [previewFeature, previewOwner, parts, client, projectId, baseOf]);
 
-  // --- Storing bodies ------------------------------------------------------
-
   const store = useCallback(
     async (
       target: string,
@@ -922,10 +814,6 @@ export function useModeling(options: UseModelingOptions) {
     [setParts]
   );
 
-  /**
-   * The cuts that reach a modeled body, applied to geometry its extrude just
-   * produced, or null when none changes it.
-   */
   const cutBuilt = useCallback(
     async (part: ProjectPart, built: BuiltBody, cuts: CutFeature[]): Promise<CutBody | null> => {
       const applicable = cutsOnPart(cuts, part);
@@ -940,11 +828,6 @@ export function useModeling(options: UseModelingOptions) {
     [client]
   );
 
-  /**
-   * Apply every cut that reaches `part` to the body's base and store the
-   * result, or point the body back at its base when no cut changes it any
-   * more. Returns the part as stored.
-   */
   const recut = useCallback(
     async (target: string, part: ProjectPart, cuts: CutFeature[]): Promise<ProjectPart> => {
       const applicable = cutsOnPart(cuts, part);
@@ -987,7 +870,6 @@ export function useModeling(options: UseModelingOptions) {
     [setCutFeatures]
   );
 
-  /** Re-cut every body in `partIds` against `cuts`. Returns the assembly as stored and the failures. */
   const recutBodies = useCallback(
     async (target: string, partIds: Set<string>, cuts: CutFeature[], assembly: ProjectPart[]) => {
       let current = assembly;
@@ -1006,12 +888,6 @@ export function useModeling(options: UseModelingOptions) {
     [recut]
   );
 
-  /**
-   * Rebuild every modeled body after `afterSeq`, in history order, each
-   * against the assembly as the ones before it left it, with the cuts that
-   * reach it applied. This is what keeps a chill extruded Up To Next sitting
-   * on a riser that was just made taller.
-   */
   const rebuildFrom = useCallback(
     async (target: string, afterSeq: number, assembly: ProjectPart[], cuts: CutFeature[] = cutsRef.current): Promise<number> => {
       let current = assembly;
@@ -1048,12 +924,6 @@ export function useModeling(options: UseModelingOptions) {
     [client, cutBuilt, store]
   );
 
-  /**
-   * Store a cut: its definition first (it is what a Rebuild replays), then
-   * every body it reaches or used to reach, each re-cut from its base, then
-   * the modeled bodies after it, which may have been built against material
-   * the cut changed.
-   */
   const commitCut = useCallback(
     async (cut: CutFeature, editingCutId: string | null) => {
       const cuts = cutsRef.current;
@@ -1114,7 +984,6 @@ export function useModeling(options: UseModelingOptions) {
     }
   }, [client, closeAll, commitCut, committing, cutBuilt, ensureProject, preview, projectId, rebuildFrom, session, setSelectedPartId, store]);
 
-  /** Delete a cut and give back the material it removed. */
   const deleteCut = useCallback(
     async (cutId: string) => {
       const cut = cutsRef.current.find((item) => item.id === cutId);
@@ -1140,9 +1009,6 @@ export function useModeling(options: UseModelingOptions) {
     setRebuilding(true);
     try {
       const cuts = cutsRef.current;
-      // Uploaded bodies first: the modeled ones are rebuilt against them. An
-      // uploaded body is re-cut from its base, which also cuts a body
-      // imported uncut into a project whose cuts came with it.
       const uploaded = partsRef.current.filter(
         (part) => !featureOf(part) && (part.base_filepath || cutsOnPart(cuts, part).length)
       );
@@ -1154,20 +1020,9 @@ export function useModeling(options: UseModelingOptions) {
     }
   }, [projectId, rebuildFrom, rebuilding, recutBodies]);
 
-  // Deletions are rebuilt one after another, each against the assembly as it
-  // stands when its turn comes: two bodies deleted in quick succession must
-  // not leave a later body rebuilt against the first deletion only.
   const removalQueue = useRef<Promise<void>>(Promise.resolve());
   const removedIds = useRef(new Set<string>());
 
-  /**
-   * Call when a body is about to be deleted. Every later modeled body that
-   * was built against it -- one that stopped on it Up To Next, was trimmed by
-   * it, or was extruded up to it -- is rebuilt without it, in history order.
-   * A pad modeled down onto a riser then runs on to the casting once the
-   * riser is gone, instead of keeping the riser's shape as a pocket that the
-   * simulation would mesh as an empty, sealed void.
-   */
   const rebuildDependents = useCallback(
     (partId: string) => {
       const before = partsRef.current;
@@ -1180,7 +1035,6 @@ export function useModeling(options: UseModelingOptions) {
           part.id !== partId &&
           feature !== null &&
           featureTargets(before, feature, part.id).some((target) => target.id === partId) &&
-          // Up To Body has to fail visibly even from across the scene.
           (feature.endCondition === 'upToBody' || boundsTouch(part, removed))
         );
       });
@@ -1240,8 +1094,6 @@ export function useModeling(options: UseModelingOptions) {
       );
       closeAll();
       if (plane.editingId) {
-        // Sketches on the plane move with it, and their bodies -- and the
-        // bodies cut from it -- are rebuilt.
         const moved = resolveReferencePlane(made[0]);
         if (!moved || !projectId) return;
         let earliest = Infinity;
@@ -1259,7 +1111,6 @@ export function useModeling(options: UseModelingOptions) {
             cut.sketch.plane.refId === plane.editingId ? { ...cut, sketch: { ...cut.sketch, plane: moved } } : cut
           );
           await saveCuts(projectId, nextCuts);
-          // Modeled bodies are re-cut when they are rebuilt below.
           const reached = new Set(movedCuts.flatMap((cut) => cut.partIds));
           const uploaded = new Set(assembly.filter((part) => reached.has(part.id) && !featureOf(part)).map((part) => part.id));
           assembly = (await recutBodies(projectId, uploaded, nextCuts, assembly)).assembly;
@@ -1286,8 +1137,6 @@ export function useModeling(options: UseModelingOptions) {
     },
     [savePlanes]
   );
-
-  // --- What the viewport draws ---------------------------------------------
 
   const measureResult = useMemo(() => (measurePicks ? measure(measurePicks) : null), [measurePicks]);
   const planePreview = useMemo(() => {
@@ -1317,7 +1166,6 @@ export function useModeling(options: UseModelingOptions) {
       return { ...base, stage: 'measure', purpose: 'sketch', measure: { picks: measurePicks, result: measureResult } };
     }
     if (planeSession) {
-      // A plane being edited is drawn as its preview, not as itself.
       const references = planeSession.editingId
         ? resolvedReferences.filter((ref) => ref.id !== planeSession.editingId)
         : resolvedReferences;

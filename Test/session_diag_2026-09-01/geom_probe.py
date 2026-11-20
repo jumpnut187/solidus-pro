@@ -1,14 +1,9 @@
-"""Geometry-only probe: coarse part-type grid, choke thickness, filter layout."""
 import os, sys, time
 from pathlib import Path
 REPO = Path("/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim")
 sys.path.insert(0, str(REPO))
 import numpy as np
 
-# trimesh's proximity.nearby_faces builds cKDTree with the default (median)
-# split; the STEP tessellations here have ~50% duplicate vertices and that
-# recurses until the C stack dies. Force midpoint splitting, as the repo's
-# own core.voxel_mesh._build_kdtree already does for its own trees.
 import scipy.spatial as _ss
 _orig_kd = _ss.cKDTree
 class _KD(_orig_kd):
@@ -53,7 +48,6 @@ for c in (1, 2):
         print(f"    code {code}: {n}")
     print(f"    choke thickness (sprue/runner/gate) = "
           f"{fs.measure_choke_thickness_cells(st):.2f} cells")
-    # per-part thickness via distance transform
     from scipy import ndimage
     for name, code in (("sprue", PART_TYPE_SPRUE), ("runner", PART_TYPE_RUNNER),
                        ("gate", PART_TYPE_GATE), ("filter", PART_TYPE_FILTER)):
@@ -65,16 +59,12 @@ for c in (1, 2):
         print(f"    {name}: {int(m.sum())} cells, max inscribed radius "
               f"{dt.max():.2f} -> thickness {2*dt.max()-1:.2f} cells, "
               f"bbox {[int(x.max()-x.min()+1) for x in np.nonzero(m)]}")
-    # connectivity of the flow path incl. filter
     flowmask = np.isin(st, (PART_TYPE_SPRUE, PART_TYPE_RUNNER, PART_TYPE_GATE, PART_TYPE_FILTER))
     lab, n = ndimage.label(flowmask, structure=np.ones((3,3,3), bool))
     print(f"    flow path (sprue|runner|gate|filter) components: {n}, "
           f"sizes {sorted(np.bincount(lab.ravel())[1:], reverse=True)[:6]}")
-    # is the metal domain (obstacle-free) one piece?
     obst = fs._obstacle_mask(st)
     lab2, n2 = ndimage.label(~obst, structure=np.ones((3,3,3), bool))
     print(f"    open (non-obstacle) components: {n2}, "
           f"sizes {sorted(np.bincount(lab2.ravel())[1:], reverse=True)[:6]}")
 print("done")
-
-

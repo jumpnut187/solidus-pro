@@ -1,6 +1,4 @@
 import { Modal } from './Modal';
-// Single source of truth for the version: the manifest that is already
-// bumped on release, rather than a constant that quietly goes stale.
 import { version as appVersion } from '../../../package.json';
 import { formatNumber } from '../../lib/format';
 import { SHORTCUT_GROUPS } from '../../lib/shortcuts';

@@ -1,9 +1,3 @@
-"""Prototype: inlet velocity driven by the head DIFFERENCE, not measured.
-
-u_z = -Cd sqrt(2 cs^2 (rho_head - rho_throat) / rho0), rho_throat measured on
-the layer below the mouth. Reduces to Torricelli at an open throat and to zero
-at a throat backed up to the head. Reports delivery against the target.
-"""
 import sys, numpy as np
 sys.path.insert(0, "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim")
 from physics.filling import (create_state, step, ensure_interface_skin,

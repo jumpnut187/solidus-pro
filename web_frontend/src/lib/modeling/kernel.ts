@@ -1,27 +1,3 @@
-/**
- * The geometry kernel behind modeled bodies: sketch profiles, extrudes and
- * their end conditions, on Manifold.
- *
- * Manifold is a mesh-boolean kernel, and that is the right kind for this
- * application: every body it has to work against is an uploaded STL, a
- * triangle mesh with no B-rep behind it, and what it has to hand the
- * simulation is a watertight triangle mesh. A B-rep kernel would have to turn
- * a 200,000-triangle casting into 200,000 planar faces before it could cut
- * anything. Manifold's booleans are exact and guarantee a manifold result.
- *
- * "Up To Next" is the operation the foundry needs most -- a riser or a chill
- * that sits exactly on a curved casting -- and on a mesh kernel it is three
- * steps. Extrude the profile far past everything in the extrude direction,
- * subtract the bodies, and keep only the pieces that start at the sketch
- * plane: each of those ran from the plane until it met the first surface in
- * its way, and its end face IS that surface. As in SOLIDWORKS, the surface
- * has to cover the whole profile; a piece that runs all the way to the far
- * end found nothing to stop it, and the feature fails rather than build a
- * body that goes nowhere.
- *
- * Pure apart from the Manifold module it is given, so it runs in the worker
- * and in tests alike. Every WASM object it makes is freed before it returns.
- */
 import type { CrossSection, Manifold, ManifoldToplevel, Mat4, Vec2 as MVec2 } from 'manifold-3d';
 
 import {
@@ -41,11 +17,9 @@ import {
 
 export type Box3 = { min: Vec3; max: Vec3 };
 
-/** A body the kernel can stop at or trim against, already in world space. */
 export type KernelBody = {
   id: string;
   name: string;
-  /** Null when the mesh is not a closed solid; `error` says why. */
   manifold: Manifold | null;
   error: string | null;
   bbox: Box3 | null;
@@ -60,18 +34,12 @@ export type BuildOutput = {
   warnings: string[];
 };
 
-/** A feature that cannot be built as specified. The message is for the user. */
 export class FeatureBuildError extends Error {}
-
-// ---------------------------------------------------------------------------
-// Matrices (column-major, as Manifold takes them)
-// ---------------------------------------------------------------------------
 
 function frameMatrix(u: Vec3, v: Vec3, w: Vec3, origin: Vec3): Mat4 {
   return [u[0], u[1], u[2], 0, v[0], v[1], v[2], 0, w[0], w[1], w[2], 0, origin[0], origin[1], origin[2], 1];
 }
 
-/** Inverse of an orthonormal frame matrix (mirrored or not). */
 function inverseFrame(u: Vec3, v: Vec3, w: Vec3, origin: Vec3): Mat4 {
   const tx = -(u[0] * origin[0] + u[1] * origin[1] + u[2] * origin[2]);
   const ty = -(v[0] * origin[0] + v[1] * origin[1] + v[2] * origin[2]);
@@ -79,13 +47,6 @@ function inverseFrame(u: Vec3, v: Vec3, w: Vec3, origin: Vec3): Mat4 {
   return [u[0], v[0], w[0], 0, u[1], v[1], w[1], 0, u[2], v[2], w[2], 0, tx, ty, tz, 1];
 }
 
-/**
- * The engine's part transform as a matrix: scale, then rotate about X, Y and
- * Z in that order (`trimesh.transformations.euler_matrix(..., 'sxyz')`), then
- * translate -- `core/part_manager.Part._apply_transform`. The modeled body
- * has to meet the casting where the simulation will put the casting, not
- * where some other convention would.
- */
 export function partWorldMatrix(
   position: Vec3,
   rotationDeg: Vec3,
@@ -98,7 +59,6 @@ export function partWorldMatrix(
   const sy = Math.sin(ay);
   const cz = Math.cos(az);
   const sz = Math.sin(az);
-  // R = Rz * Ry * Rx, row-major entries rij.
   const r00 = cz * cy;
   const r01 = cz * sy * sx - sz * cx;
   const r02 = cz * sy * cx + sz * sx;
@@ -117,18 +77,6 @@ export function partWorldMatrix(
   ];
 }
 
-// ---------------------------------------------------------------------------
-// Bodies
-// ---------------------------------------------------------------------------
-
-/**
- * A Manifold from a part's triangles, in world space.
- *
- * STL stores every triangle's corners separately; `merge` welds them back
- * into a closed surface. A mesh that still has open edges after that is not
- * a solid, and nothing can be "up to" its surface, so it comes back with an
- * error instead of a Manifold.
- */
 export function bodyFromMesh(
   wasm: ManifoldToplevel,
   id: string,
@@ -167,11 +115,6 @@ export function bodyFromMesh(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Build
-// ---------------------------------------------------------------------------
-
-/** Tracks WASM objects so a build frees everything it made, however it exits. */
 class Scope {
   private readonly _items: Array<{ delete(): void }> = [];
   keep<T extends { delete(): void }>(item: T): T {
@@ -183,7 +126,6 @@ class Scope {
       try {
         item.delete();
       } catch {
-        /* already freed */
       }
     }
   }
@@ -210,22 +152,10 @@ function toBox3(box: { min: ArrayLike<number>; max: ArrayLike<number> }): Box3 {
   return { min: [box.min[0], box.min[1], box.min[2]], max: [box.max[0], box.max[1], box.max[2]] };
 }
 
-/** Regions smaller than this (in²) are boolean noise, not something drawn. */
 const REGION_AREA_EPS = 1e-6;
 
 type RegionAtom = { section: CrossSection; contours: Vec2[][]; count: number };
 
-/**
- * The sketch's regions: every piece its closed contours divide the plane
- * into. Two overlapping circles are three regions -- two crescents and the
- * lens between them -- each of which can be extruded on its own. `count` is
- * how many contours a region lies inside; the even-odd rule fills the ones
- * where it is odd.
- *
- * Built by splitting: start from the union of all contours, and split every
- * piece so far by each contour in turn into the part inside it and the part
- * outside.
- */
 function regionAtoms(wasm: ManifoldToplevel, scope: Scope, sketch: Sketch): RegionAtom[] {
   const { CrossSection } = wasm;
   const loops = sketchProfiles(sketch.entities).loops;
@@ -255,7 +185,6 @@ function regionAtoms(wasm: ManifoldToplevel, scope: Scope, sketch: Sketch): Regi
   }));
 }
 
-/** The sketch's regions, for drawing and picking them (see `regions.ts`). */
 export function sketchRegions(wasm: ManifoldToplevel, sketch: Sketch): SketchRegion[] {
   const scope = new Scope();
   try {
@@ -283,13 +212,6 @@ export function sketchRegions(wasm: ManifoldToplevel, sketch: Sketch): SketchReg
   }
 }
 
-/**
- * The profile a feature sweeps. With no regions picked, every closed contour
- * goes in together under the even-odd rule, the way a sketch's contours
- * become regions: a circle inside a rectangle is a hole in it, which is how a
- * ring chill or a sleeve is drawn. With regions picked, it is the union of
- * the regions the feature's seed points fall in.
- */
 function sketchSection(
   wasm: ManifoldToplevel,
   scope: Scope,
@@ -317,14 +239,6 @@ function sketchSection(
   return profile;
 }
 
-/**
- * Build an extrude feature.
- *
- * `targets` are the bodies this feature may stop at or trim against (see
- * `featureTargets`); they are not modified and stay owned by the caller.
- * Throws `FeatureBuildError` with a user-facing message when the feature
- * cannot be built.
- */
 export function buildExtrude(wasm: ManifoldToplevel, feature: ExtrudeFeature, targets: KernelBody[]): BuildOutput {
   const problem = featureProblem(feature);
   if (problem) throw new FeatureBuildError(problem);
@@ -366,8 +280,6 @@ export function buildExtrude(wasm: ManifoldToplevel, feature: ExtrudeFeature, ta
               : 'There is no body in the extrude direction. Reverse the direction.'
           );
         }
-        // Past the far side of everything, so a piece that reaches the end
-        // is one that met nothing on the way.
         length = extent + Math.max(size * 0.05, 0.1);
         break;
       }
@@ -448,16 +360,6 @@ export function buildExtrude(wasm: ManifoldToplevel, feature: ExtrudeFeature, ta
   }
 }
 
-// ---------------------------------------------------------------------------
-// Extrude cut
-// ---------------------------------------------------------------------------
-//
-// A cut is the extrude's tool solid subtracted from the bodies in its scope.
-// It is applied to each body in that body's own frame -- the frame its STL is
-// stored in -- with the tool carried there, so every face the cut does not
-// touch comes back exactly as it was uploaded.
-
-/** A body to cut, in its own (stored) frame, with the matrix that places it in the world. */
 export type CutTarget = {
   name: string;
   positions: Float32Array;
@@ -465,20 +367,16 @@ export type CutTarget = {
   matrix: Mat4;
 };
 
-/** The cut body in its own frame, or `changed: false` when no cut reached it. */
 export type CutOutput = ({ changed: true } & BuildOutput) | { changed: false; warnings: string[] };
 
 export type CutPreview = {
-  /** The material the cut removes, in world space. */
   positions: Float32Array;
   indices: Uint32Array;
-  /** Volume removed from each body, by body id; bodies it misses are absent. */
   removed: Record<string, number>;
   volume: number;
   warnings: string[];
 };
 
-/** Column-major `a * b`. */
 function multiply(a: Mat4, b: Mat4): Mat4 {
   const out = new Array<number>(16).fill(0);
   for (let c = 0; c < 4; c += 1) {
@@ -491,7 +389,6 @@ function multiply(a: Mat4, b: Mat4): Mat4 {
   return out as unknown as Mat4;
 }
 
-/** Inverse of an affine matrix (the part transform: rotation, uniform scale, translation). */
 function inverseAffine(m: Mat4): Mat4 {
   const [a, b, c] = [m[0], m[4], m[8]];
   const [d, e, f] = [m[1], m[5], m[9]];
@@ -502,7 +399,6 @@ function inverseAffine(m: Mat4): Mat4 {
   const det = a * A + b * B + c * C;
   if (!(Math.abs(det) > 1e-12)) throw new FeatureBuildError('The body has a zero scale and cannot be cut.');
   const s = 1 / det;
-  // Rows of the inverse 3x3.
   const r0 = [A * s, -(b * i - c * h) * s, (b * f - c * e) * s];
   const r1 = [B * s, (a * i - c * g) * s, -(a * f - c * d) * s];
   const r2 = [C * s, -(a * h - b * g) * s, (a * e - b * d) * s];
@@ -540,16 +436,6 @@ function cutFrame(wasm: ManifoldToplevel, scope: Scope, cut: CutFeature): CutFra
   };
 }
 
-/**
- * The solid a cut removes, in the cut's frame (sketch plane at z = 0, cutting
- * toward +z), long enough to get through `reach` -- a box in that frame around
- * the body being cut. Null when the cut cannot reach the body: Through All
- * from a sketch that lies past it.
- *
- * Both-sided conditions are built as two halves that each start at the
- * sketch plane, so a draft tapers away from the sketch in both directions.
- * Flip Side to Cut is a block around the body less the profile's tool.
- */
 function cutTool(
   wasm: ManifoldToplevel,
   scope: Scope,
@@ -592,7 +478,6 @@ function cutTool(
   const bounds = profile.bounds();
   const lo: [number, number] = [Math.min(reach.min[0], bounds.min[0]) - margin, Math.min(reach.min[1], bounds.min[1]) - margin];
   const hi: [number, number] = [Math.max(reach.max[0], bounds.max[0]) + margin, Math.max(reach.max[1], bounds.max[1]) + margin];
-  // The prism's own ends, so the block is exactly as deep as the cut.
   const prismBox = prism.boundingBox();
   const block = scope.keep(
     Manifold.cube([hi[0] - lo[0], hi[1] - lo[1], prismBox.max[2] - prismBox.min[2]]).translate([lo[0], lo[1], prismBox.min[2]])
@@ -604,14 +489,6 @@ function boxSize(box: Box3): number {
   return Math.max(box.max[0] - box.min[0], box.max[1] - box.min[1], box.max[2] - box.min[2], 1);
 }
 
-/**
- * Cut one body by `cuts`, in history order.
- *
- * `target` is the body before any of these cuts (its base), in its own frame;
- * the result is in that frame too, ready to store as the body's STL. A cut
- * that leaves nothing of the body is refused rather than stored as an empty
- * part.
- */
 export function applyCuts(wasm: ManifoldToplevel, target: CutTarget, cuts: CutFeature[]): CutOutput {
   const scope = new Scope();
   const warnings: string[] = [];
@@ -675,11 +552,6 @@ export function applyCuts(wasm: ManifoldToplevel, target: CutTarget, cuts: CutFe
   }
 }
 
-/**
- * What `cut` removes from each of `bodies` (world space, the bodies in its
- * scope), for the preview: the removed material as one mesh and its volume
- * per body. Throws when the cut removes nothing or all of a body.
- */
 export function previewCut(wasm: ManifoldToplevel, cut: CutFeature, bodies: KernelBody[]): CutPreview {
   const problem = featureProblem(cut);
   if (problem) throw new FeatureBuildError(problem);
@@ -731,37 +603,6 @@ export function previewCut(wasm: ManifoldToplevel, cut: CutFeature, bodies: Kern
   }
 }
 
-// ---------------------------------------------------------------------------
-// Output that stays closed through STL storage
-// ---------------------------------------------------------------------------
-//
-// Two bodies that touch -- a riser modeled onto the casting -- do not touch
-// exactly once stored: the riser's STL holds float32 copies of points on the
-// casting's surface, up to 2e-7 in off it, so the seam between them is a
-// field of sub-micron gaps and overlaps. An extrude that stops on both bodies
-// fills every space they leave open, the seam included, and comes out with
-// sheets of no thickness and vertices that coincide. Manifold represents that
-// as a valid solid. An STL cannot: it has no topology, every reader (trimesh,
-// the voxelizer, this worker) rebuilds it by welding equal positions, and the
-// weld turns those sheets into edges shared by four triangles and the body
-// into a surface no voxelizer can call inside or outside.
-//
-// So the output is finished in three steps: pieces that are only such a sheet
-// are dropped, every face the body took from another body is pushed a hair
-// into that body, and what is left is welded the way storage will weld it and
-// refused if it does not come out closed. The push opens every sheet and pinch
-// into a solid of real (if tiny) thickness, and it leaves the stored body
-// overlapping its neighbours instead of meeting them at a seam, so the next
-// feature drawn across them finds no seam to fill.
-
-/**
- * `solid` without the pieces thinner than `minThickness`, the number of
- * solid pieces left, and the number of enclosed voids. Thickness is 2|V|/A: a
- * plate's thickness, a rod's radius. A sheet that leaked into a seam is about
- * 1e-7 in thick; nothing modeled for a casting is under a thousandth of an
- * inch. A void (a cut that stops inside a body) is a separate shell of
- * negative volume; it is kept, unless it is itself a sliver.
- */
 function withoutSlivers(
   wasm: ManifoldToplevel,
   scope: Scope,
@@ -780,20 +621,6 @@ function withoutSlivers(
   return { solid: scope.keep(wasm.Manifold.compose(kept)), pieces: solids, voids };
 }
 
-/**
- * The solid's triangles, made to survive storage, verified by doing what
- * storage does to them.
- *
- * Faces Manifold marks as taken from a subtracted body move along their
- * outward normal, into that body, by eight float32 steps at the largest
- * coordinate or two millionths of the scene, whichever is more -- 2.4e-5 in
- * on a 12 in casting, far below any voxel. Storage rounds by half a step, so
- * the stored body still overlaps its neighbour. Two vertices still within a
- * few float32 steps of each other -- a pinch the push did not reach, or an
- * edge too short for float32 or for trimesh's 8-decimal weld -- are moved
- * apart (see `separate`). A mesh that would still weld into anything but a
- * closed solid is refused rather than stored.
- */
 function watertightMesh(
   wasm: ManifoldToplevel,
   solid: Manifold,
@@ -830,13 +657,6 @@ function watertightMesh(
   return { positions, indices };
 }
 
-/**
- * Move every vertex of a face taken from a subtracted body (a run Manifold
- * flags as backside) `distance` along the area-weighted normal of those faces
- * around it -- out of this body, into the one it was cut against. A vertex
- * where faces of opposite sides meet (the edge of a sheet) has no such normal
- * and stays.
- */
 function pushContactFaces(
   positions: Float32Array,
   indices: Uint32Array,
@@ -882,12 +702,10 @@ function pushContactFaces(
   }
 }
 
-/** Hash of a grid cell. Collisions only cost a distance test. */
 function cellHash(cx: number, cy: number, cz: number): number {
   return Math.imul(cx | 0, 73856093) ^ Math.imul(cy | 0, 19349663) ^ Math.imul(cz | 0, 83492791);
 }
 
-/** How many triangles use each edge, keyed `min * count + max`. */
 function edgeUses(indices: Uint32Array, count: number): Map<number, number> {
   const uses = new Map<number, number>();
   for (let t = 0; t < indices.length; t += 3) {
@@ -901,7 +719,6 @@ function edgeUses(indices: Uint32Array, count: number): Map<number, number> {
   return uses;
 }
 
-/** Every pair of vertices closer than `gap`, as `[i, j]` with `i < j`. */
 function closePairs(positions: Float32Array, gap: number): Array<[number, number]> {
   const cells = new Map<number, number[]>();
   const count = positions.length / 3;
@@ -931,7 +748,6 @@ function closePairs(positions: Float32Array, gap: number): Array<[number, number
           const list = cells.get(cellHash(cx + dx, cy + dy, cz + dz));
           if (!list) continue;
           for (const j of list) {
-            // Hash collisions can list a cell twice; count each pair once.
             if (j <= i || seen.has(i * count + j)) continue;
             const ex = positions[3 * j] - x;
             const ey = positions[3 * j + 1] - y;
@@ -948,14 +764,6 @@ function closePairs(positions: Float32Array, gap: number): Array<[number, number
   return pairs;
 }
 
-/**
- * Move the vertices of each close pair apart by about `step`.
- *
- * Two ends of one edge move away from each other along it, which lengthens
- * the edge without leaving the surface. Two vertices with no edge between
- * them are a pinch: each moves toward the centre of its own ring of
- * neighbours, which lies on its own side of the pinch.
- */
 function separate(
   positions: Float32Array,
   indices: Uint32Array,
@@ -1006,7 +814,6 @@ function separate(
       const dz = sz / n - positions[3 * vertex + 2];
       const length = Math.hypot(dx, dy, dz);
       if (length < 1e-12) continue;
-      // Never past halfway to the ring centre, so a small ring is not folded.
       const s = Math.min(step, length / 2) / length;
       add(vertex, dx * s, dy * s, dz * s);
     }
@@ -1018,21 +825,12 @@ function separate(
   }
 }
 
-/**
- * Why the triangles would not survive storage, or null: what the server, the
- * STL file and the next build all do to them -- weld equal positions -- must
- * leave every edge on exactly two triangles, and the result must load back
- * into Manifold as a solid.
- */
 function weldProblem(
   wasm: ManifoldToplevel,
   positions: Float32Array,
   indices: Uint32Array,
   edges: Map<number, number>
 ): string | null {
-  // trimesh welds positions equal to 8 decimals: vertices 4e-8 apart differ
-  // by more than that in some coordinate, and STL keeps any two distinct
-  // float32 positions apart.
   const crowded = closePairs(positions, 4e-8).length;
   if (crowded) return `${crowded} pairs of vertices share a position`;
   for (let t = 0; t < indices.length; t += 3) {
@@ -1055,16 +853,6 @@ function weldProblem(
   return null;
 }
 
-/**
- * The profile swept along +Z for `length`, with the draft applied.
- *
- * A draft is a taper of `length * tan(angle)` on every side. Each separate
- * region of the profile is scaled about its own centre so that its width and
- * its height each change by twice that, which is an exact draft for the
- * circles and rectangles risers and chills are drawn with and a close one for
- * anything else. An inward draft that would close the profile before the end
- * stops at the apex instead.
- */
 function extrudeProfile(
   wasm: ManifoldToplevel,
   scope: Scope,
@@ -1086,7 +874,6 @@ function extrudeProfile(
     const height = Math.max(bounds.max[1] - bounds.min[1], 1e-9);
     let run = length;
     if (sign < 0) {
-      // Where the narrower side would reach zero.
       const apex = Math.min(width, height) / (2 * draft);
       run = Math.min(length, apex * 0.999);
     }
@@ -1099,12 +886,6 @@ function extrudeProfile(
   return scope.keep(solids.length === 1 ? solids[0] : Manifold.union(solids));
 }
 
-/**
- * The bodies whose bounding boxes reach `localBox` (given in the feature's
- * local frame), carried into that frame. The test is made in world space on
- * the cached boxes, so a body nowhere near the feature costs nothing. A body
- * that is not a closed solid is an error only if it is in the way.
- */
 function localBodies(
   scope: Scope,
   bodies: KernelBody[],
@@ -1142,7 +923,6 @@ function transformBox(box: Box3, m: Mat4): Box3 {
   return { min, max };
 }
 
-/** World-space bounds of a mesh's vertices under a part transform. */
 function meshBounds(positions: Float32Array, m: Mat4): Box3 | null {
   if (positions.length < 3) return null;
   const min: Vec3 = [Infinity, Infinity, Infinity];
@@ -1164,7 +944,6 @@ function meshBounds(positions: Float32Array, m: Mat4): Box3 | null {
   return { min, max };
 }
 
-/** How far the bodies reach along `direction` from `origin`, or null with no bodies. */
 function extentAlong(bodies: KernelBody[], origin: Vec3, direction: Vec3): number | null {
   let extent: number | null = null;
   for (const body of bodies) {
@@ -1180,7 +959,6 @@ function extentAlong(bodies: KernelBody[], origin: Vec3, direction: Vec3): numbe
   return extent;
 }
 
-/** A length scale for tolerances: the largest of the bodies and the profile. */
 function sceneSize(bodies: KernelBody[], profile: CrossSection): number {
   const bounds = profile.bounds();
   let size = Math.max(bounds.max[0] - bounds.min[0], bounds.max[1] - bounds.min[1]);

@@ -1,5 +1,3 @@
-"""Flask factory for the React/Babylon web application."""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -15,7 +13,6 @@ from web.routes_fields import fields_bp
 from web.routes_modeling import modeling_bp
 from web.routes_orientation import orientation_bp
 from web.routes_tools import tools_bp
-
 
 def create_app() -> Flask:
     base_dir = Path(__file__).resolve().parent
@@ -33,8 +30,6 @@ def create_app() -> Flask:
     app.config["UPLOAD_FOLDER"] = base_dir / "static" / "uploads"
     app.config["TEMP_FOLDER"] = base_dir / "static" / "temp"
     app.config["DATABASE"] = base_dir / "simulations.db"
-    # Bumped from 250 MB to 500 MB to accommodate STEP assemblies,
-    # which are typically 2-5x larger than equivalent STLs.
     app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024
 
     Path(app.config["UPLOAD_FOLDER"]).mkdir(parents=True, exist_ok=True)
@@ -84,4 +79,3 @@ def create_app() -> Flask:
         return jsonify({"error": "Frontend build not found"}), 404
 
     return app
-

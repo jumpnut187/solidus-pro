@@ -1,22 +1,3 @@
-/**
- * Sketch entities, the profiles they enclose, and their driving dimensions.
- *
- * Two kinds of entity, as in SOLIDWORKS:
- *
- * - Closed shapes (rectangle, circle, polygon, slot, closed polyline) are
- *   each a profile on their own, defined by their driving dimensions, so a
- *   change to a dimension cannot leave them under- or over-defined.
- * - Open segments (line, arc) are joined into profiles wherever their ends
- *   meet. The loops are found by walking the graph of segments face by face
- *   (see `sketchProfiles`), so a rectangle drawn as four lines, a slot drawn
- *   as two lines and two arcs, or a rectangle split in two by a line all give
- *   the regions you would expect.
- *
- * Any entity can be marked For Construction. Construction geometry is drawn
- * dashed and never forms a profile; a centerline is a construction line.
- *
- * Coordinates are sketch-plane (u, v) inches; angles are degrees.
- */
 import { distance2, type Vec2 } from './vec';
 
 type Construction = { construction?: boolean };
@@ -27,12 +8,7 @@ export type SketchEntity =
   | ({ id: string; type: 'polygon'; cx: number; cy: number; d: number; sides: number; angle: number } & Construction)
   | ({ id: string; type: 'slot'; cx: number; cy: number; length: number; width: number; angle: number } & Construction)
   | ({ id: string; type: 'polyline'; points: Vec2[] } & Construction)
-  /**
-   * `relation` is the Horizontal or Vertical relation inferred while drawing:
-   * it keeps the line so when a joined end or a dimension moves it.
-   */
   | ({ id: string; type: 'line'; x1: number; y1: number; x2: number; y2: number; relation?: 'horizontal' | 'vertical' } & Construction)
-  /** Counter-clockwise from `start` to `end` (degrees) about the centre. */
   | ({ id: string; type: 'arc'; cx: number; cy: number; r: number; start: number; end: number } & Construction);
 
 export type SketchEntityType = SketchEntity['type'];
@@ -52,7 +28,6 @@ export function entityLabel(entity: SketchEntity): string {
   return ENTITY_LABELS[entity.type] + (entity.construction ? ' (construction)' : '');
 }
 
-/** Sketch tools: what a click on the sketch plane does. */
 export type SketchTool =
   | 'select'
   | 'line'
@@ -66,9 +41,7 @@ export type SketchTool =
   | 'slot'
   | 'convert';
 
-/** The longest chord allowed on a tessellated arc, in inches. */
 const ARC_CHORD_IN = 0.06;
-/** Endpoints closer than this are the same point. */
 export const COINCIDENT_TOL = 1e-5;
 
 export function arcSegments(radius: number, sweepRad = Math.PI * 2): number {
@@ -86,11 +59,6 @@ export function rotate2(point: Vec2, center: Vec2, angleDeg: number): Vec2 {
   return [center[0] + point[0] * c - point[1] * s, center[1] + point[0] * s + point[1] * c];
 }
 
-// ---------------------------------------------------------------------------
-// Arcs
-// ---------------------------------------------------------------------------
-
-/** Sweep of an arc in degrees, in (0, 360]. */
 export function arcSweep(start: number, end: number): number {
   let sweep = (end - start) % 360;
   if (sweep <= 1e-9) sweep += 360;
@@ -110,7 +78,6 @@ function angleOf(center: Vec2, point: Vec2): number {
   return (Math.atan2(point[1] - center[1], point[0] - center[0]) * 180) / Math.PI;
 }
 
-/** The circle through three points, or null when they are collinear. */
 export function circleThrough(a: Vec2, b: Vec2, c: Vec2): { center: Vec2; r: number } | null {
   const d = 2 * (a[0] * (b[1] - c[1]) + b[0] * (c[1] - a[1]) + c[0] * (a[1] - b[1]));
   if (Math.abs(d) < 1e-12) return null;
@@ -124,15 +91,12 @@ export function circleThrough(a: Vec2, b: Vec2, c: Vec2): { center: Vec2; r: num
   return { center, r: distance2(center, a) };
 }
 
-/** SOLIDWORKS' 3 Point Arc: from `start` to `end`, bulging through `through`. */
 export function arcThrough(start: Vec2, end: Vec2, through: Vec2, id: string): SketchEntity | null {
   const circle = circleThrough(start, end, through);
   if (!circle || circle.r < 1e-4) return null;
   const a0 = angleOf(circle.center, start);
   const a1 = angleOf(circle.center, end);
   const at = angleOf(circle.center, through);
-  // Counter-clockwise from start to end passes `through`? Otherwise the arc
-  // runs the other way, which is counter-clockwise from end to start.
   const ccw = arcSweep(a0, at) < arcSweep(a0, a1);
   return {
     id,
@@ -145,7 +109,6 @@ export function arcThrough(start: Vec2, end: Vec2, through: Vec2, id: string): S
   };
 }
 
-/** SOLIDWORKS' Centerpoint Arc: radius from `start`, sweep to the angle of `end`. */
 export function arcFromCenter(center: Vec2, start: Vec2, end: Vec2, clockwise: boolean, id: string): SketchEntity | null {
   const r = distance2(center, start);
   if (r < 1e-4 || distance2(center, end) < 1e-9) return null;
@@ -155,11 +118,6 @@ export function arcFromCenter(center: Vec2, start: Vec2, end: Vec2, clockwise: b
   return { id, type: 'arc', cx: center[0], cy: center[1], r, start: clockwise ? a1 : a0, end: clockwise ? a0 : a1 };
 }
 
-/**
- * The arc with the same sweep through two moved endpoints, for an arc whose
- * end was dragged along with the line it is joined to. Keeping the sweep
- * keeps the arc's shape; the radius follows the chord.
- */
 function arcThroughEnds(arc: Extract<SketchEntity, { type: 'arc' }>, p1: Vec2, p2: Vec2): SketchEntity {
   const sweep = (arcSweep(arc.start, arc.end) * Math.PI) / 180;
   const chord = distance2(p1, p2);
@@ -173,16 +131,6 @@ function arcThroughEnds(arc: Extract<SketchEntity, { type: 'arc' }>, p1: Vec2, p
   return { ...arc, cx: center[0], cy: center[1], r: Math.abs(r), start: angleOf(center, p1), end: angleOf(center, p2) };
 }
 
-// ---------------------------------------------------------------------------
-// Geometry of an entity
-// ---------------------------------------------------------------------------
-
-/**
- * The points of an entity, in order. A closed shape comes back
- * counter-clockwise without repeating its first point; an open one (line,
- * arc) from its first end to its second. What is drawn is exactly what is
- * built.
- */
 export function entityPath(entity: SketchEntity): { points: Vec2[]; closed: boolean } {
   switch (entity.type) {
     case 'rectangle': {
@@ -246,7 +194,6 @@ export function entityPath(entity: SketchEntity): { points: Vec2[]; closed: bool
       const n = arcSegments(entity.r, (sweep * Math.PI) / 180);
       const points: Vec2[] = [];
       for (let i = 0; i <= n; i += 1) points.push(arcPoint(entity.cx, entity.cy, entity.r, entity.start + (sweep * i) / n));
-      // Pin the ends exactly, so they weld with whatever they were snapped to.
       const [p0, p1] = arcEnds(entity);
       points[0] = p0;
       points[points.length - 1] = p1;
@@ -255,7 +202,6 @@ export function entityPath(entity: SketchEntity): { points: Vec2[]; closed: bool
   }
 }
 
-/** The outline of an entity: `entityPath(entity).points`. */
 export function entityOutline(entity: SketchEntity): Vec2[] {
   return entityPath(entity).points;
 }
@@ -270,14 +216,12 @@ export function signedArea(points: Vec2[]): number {
   return area / 2;
 }
 
-/** The ends of an open entity, or null for a closed one. */
 export function entityEnds(entity: SketchEntity): [Vec2, Vec2] | null {
   if (entity.type === 'line') return [[entity.x1, entity.y1], [entity.x2, entity.y2]];
   if (entity.type === 'arc') return arcEnds(entity);
   return null;
 }
 
-/** Points worth snapping to: centres, corners, ends and midpoints. */
 export function entityKeyPoints(entity: SketchEntity): Vec2[] {
   switch (entity.type) {
     case 'rectangle':
@@ -314,7 +258,6 @@ export function entityKeyPoints(entity: SketchEntity): Vec2[] {
   }
 }
 
-/** Why an entity cannot be part of a profile, or null if it can. */
 export function entityProblem(entity: SketchEntity): string | null {
   const positive = (value: number) => Number.isFinite(value) && value > 1e-4;
   switch (entity.type) {
@@ -339,29 +282,11 @@ export function entityProblem(entity: SketchEntity): string | null {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Profiles
-// ---------------------------------------------------------------------------
-
 export type SketchProfiles = {
-  /** Closed contours, each counter-clockwise; combined even-odd into regions. */
   loops: Vec2[][];
-  /** Ends of segments that meet nothing: an open contour. */
   openEnds: Vec2[];
 };
 
-/**
- * The closed contours a sketch encloses.
- *
- * Closed shapes are contours as they stand. Lines and arcs become a planar
- * graph: ends within `COINCIDENT_TOL` are one vertex, and segments hanging
- * off the graph by a free end are pruned (their free ends are the open
- * contour SOLIDWORKS marks). What remains is walked face by face -- at each
- * vertex leave by the segment next clockwise from the one you arrived on,
- * which keeps the face on your left -- and every face that comes out
- * counter-clockwise is a bounded region. Each region is a contour; the
- * clockwise face of each component is its outside and is dropped.
- */
 export function sketchProfiles(entities: SketchEntity[]): SketchProfiles {
   const loops: Vec2[][] = [];
   const segments: Vec2[][] = [];
@@ -372,12 +297,8 @@ export function sketchProfiles(entities: SketchEntity[]): SketchProfiles {
     else segments.push(path.points);
   }
 
-  // An end landing on the middle of another segment (a T junction, a line
-  // drawn across to an edge) splits that segment there, so the regions on
-  // either side of it come out as faces of their own.
   splitAtEnds(segments);
 
-  // Weld ends into vertices.
   const vertices: Vec2[] = [];
   const vertexOf = (point: Vec2): number => {
     for (let i = 0; i < vertices.length; i += 1) {
@@ -402,7 +323,6 @@ export function sketchProfiles(entities: SketchEntity[]): SketchProfiles {
   }
   const openEnds = vertices.filter((_, index) => degree[index] === 1);
 
-  // Prune dangling segments until every live vertex has degree >= 2.
   let pruned = true;
   while (pruned) {
     pruned = false;
@@ -417,7 +337,6 @@ export function sketchProfiles(entities: SketchEntity[]): SketchProfiles {
     }
   }
 
-  // Half-edges, and the outgoing ones at each vertex sorted by angle.
   type Half = { edge: number; from: number; to: number; points: Vec2[]; angle: number; used: boolean };
   const halves: Half[] = [];
   const outgoing: number[][] = vertices.map(() => []);
@@ -442,7 +361,6 @@ export function sketchProfiles(entities: SketchEntity[]): SketchProfiles {
     const twin = twinOf(index);
     const list = outgoing[halves[index].to];
     const at = list.indexOf(twin);
-    // Next clockwise from the twin = previous in counter-clockwise order.
     return list[(at - 1 + list.length) % list.length];
   };
 
@@ -464,10 +382,7 @@ export function sketchProfiles(entities: SketchEntity[]): SketchProfiles {
   return { loops, openEnds };
 }
 
-/** Split, in place, every segment polyline at the ends of the others lying on it. */
 function splitAtEnds(segments: Vec2[][]): void {
-  // Each split removes one end from the middle of a segment, so this ends;
-  // the cap only guards against a pathological sketch.
   for (let guard = 0; guard < 2000; guard += 1) {
     const ends = segments.flatMap((points) => [points[0], points[points.length - 1]]);
     let split = false;
@@ -499,7 +414,6 @@ function splitAtEnds(segments: Vec2[][]): void {
   }
 }
 
-/** The sketch's problem, or null when it encloses at least one region and has no open contour. */
 export function sketchProblem(entities: SketchEntity[]): string | null {
   const real = entities.filter((entity) => !entity.construction);
   if (!real.length) return 'Draw at least one closed profile.';
@@ -516,25 +430,13 @@ export function sketchProblem(entities: SketchEntity[]): string | null {
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// Editing with coincident ends
-// ---------------------------------------------------------------------------
-
 function withEnds(entity: SketchEntity, ends: [Vec2, Vec2]): SketchEntity {
   if (entity.type === 'line') return { ...entity, x1: ends[0][0], y1: ends[0][1], x2: ends[1][0], y2: ends[1][1] };
   if (entity.type === 'arc') return arcThroughEnds(entity, ends[0], ends[1]);
   return entity;
 }
 
-/**
- * Replace one entity and carry along everything joined to the ends it
- * moved, the way coincident and horizontal/vertical relations behave in a
- * sketch: drag the corner of a rectangle drawn with four lines and both
- * lines at the corner follow, and a vertical side stays vertical by moving
- * its far end too -- which in turn moves the line joined there.
- */
 export function replaceEntity(entities: SketchEntity[], next: SketchEntity): SketchEntity[] {
-  // An edit that breaks the line's own relation removes the relation.
   if (next.type === 'line' && next.relation) {
     const holds = next.relation === 'horizontal' ? Math.abs(next.y2 - next.y1) < 1e-9 : Math.abs(next.x2 - next.x1) < 1e-9;
     if (!holds) {
@@ -567,7 +469,6 @@ export function replaceEntity(entities: SketchEntity[], next: SketchEntity): Ske
       if (k < 0) continue;
       const moved: [Vec2, Vec2] = [ends[0], ends[1]];
       moved[k] = move.to;
-      // Keep the line's relation by moving its far end along with it.
       if (entity.type === 'line' && entity.relation) {
         const far = 1 - k;
         moved[far] = entity.relation === 'horizontal' ? [moved[far][0], move.to[1]] : [move.to[0], moved[far][1]];
@@ -581,7 +482,6 @@ export function replaceEntity(entities: SketchEntity[], next: SketchEntity): Ske
   return entities.map((entity) => result.get(entity.id) as SketchEntity);
 }
 
-/** Move one end of a line or arc (index 0 or 1) and everything joined there. */
 export function moveEnd(entities: SketchEntity[], id: string, end: 0 | 1, to: Vec2): SketchEntity[] {
   const entity = entities.find((item) => item.id === id);
   const ends = entity ? entityEnds(entity) : null;
@@ -601,7 +501,6 @@ export function translateEntity(entity: SketchEntity, dx: number, dy: number): S
   }
 }
 
-/** The entities joined to `id` through shared ends, `id` included. */
 export function connectedIds(entities: SketchEntity[], id: string): Set<string> {
   const found = new Set([id]);
   let grew = true;
@@ -625,32 +524,17 @@ export function connectedIds(entities: SketchEntity[], id: string): Set<string> 
   return found;
 }
 
-// ---------------------------------------------------------------------------
-// Dimensions
-// ---------------------------------------------------------------------------
-
 export type DimensionKey = 'cx' | 'cy' | 'w' | 'h' | 'd' | 'length' | 'width' | 'angle' | 'sides' | 'r' | 'lineLength';
 
-/**
- * A driving dimension as the viewport draws it: a value, where its label sits
- * on the sketch, and the span it measures. Editing the label edits the
- * entity, which is the whole of what makes the sketch parametric.
- */
 export type DimensionSpec = {
   entityId: string;
   key: DimensionKey;
   value: number;
   prefix: string;
   anchor: Vec2;
-  /** The measured span, drawn as a thin dimension line. */
   line?: [Vec2, Vec2];
 };
 
-/**
- * Size dimensions for every entity, and position dimensions (to the sketch
- * origin) for the selected one. Showing every entity's position at once
- * buries a busy sketch in labels; the selected one is the one being placed.
- */
 export function sketchDimensions(entities: SketchEntity[], selectedId: string | null, gap: number): DimensionSpec[] {
   const dims: DimensionSpec[] = [];
   for (const entity of entities) {
@@ -725,7 +609,6 @@ export function sketchDimensions(entities: SketchEntity[], selectedId: string | 
       case 'line': {
         const length = Math.hypot(entity.x2 - entity.x1, entity.y2 - entity.y1);
         if (length < 1e-9) break;
-        // Offset to the left of the line's direction, the side its label reads from.
         const nx = -(entity.y2 - entity.y1) / length;
         const ny = (entity.x2 - entity.x1) / length;
         const mid: Vec2 = [(entity.x1 + entity.x2) / 2 + nx * gap, (entity.y1 + entity.y2) / 2 + ny * gap];
@@ -763,7 +646,6 @@ export function sketchDimensions(entities: SketchEntity[], selectedId: string | 
   return dims;
 }
 
-/** Apply an edited dimension, refusing values that would break the entity. */
 export function withDimension(entity: SketchEntity, key: DimensionKey, value: number): SketchEntity | null {
   if (!Number.isFinite(value) || entity.type === 'polyline') return null;
   if (key === 'lineLength') {
@@ -771,7 +653,6 @@ export function withDimension(entity: SketchEntity, key: DimensionKey, value: nu
     const length = Math.hypot(entity.x2 - entity.x1, entity.y2 - entity.y1);
     if (length < 1e-12) return null;
     const scale = value / length;
-    // The first end stays put; the second moves along the line.
     return { ...entity, x2: entity.x1 + (entity.x2 - entity.x1) * scale, y2: entity.y1 + (entity.y2 - entity.y1) * scale };
   }
   if ((key === 'w' || key === 'h' || key === 'd' || key === 'width' || key === 'r') && value <= 1e-4) return null;
@@ -787,11 +668,6 @@ export function newEntityId(): string {
   return `e${Date.now().toString(36)}${entityCounter.toString(36)}`;
 }
 
-/**
- * Drop points that lie on the straight line between their neighbours, for a
- * contour traced off a tessellated face: a straight edge of an STL face is
- * usually several collinear triangle edges.
- */
 export function simplifyLoop(points: Vec2[], tolerance: number): Vec2[] {
   if (points.length <= 3) return points;
   let current = points;

@@ -1,4 +1,3 @@
-"""End-to-end: load Test 2 and run part assignment in-process. No workaround."""
 import faulthandler, os, sys, time
 from pathlib import Path
 REPO = Path("/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim")
@@ -15,7 +14,6 @@ out = sys.argv[4] if len(sys.argv) > 4 else None
 from core.part_manager import PartManager
 from core import simulation_pipeline as sp
 from core import filling_stage as fs
-
 
 def main():
 
@@ -49,7 +47,6 @@ def main():
             np.save(f"{out}_types_c{c}.npy", fs.coarsen_part_types(fine, c))
         log(f"saved {out}_types_c1.npy / _c2.npy  (dx_in={dx_in})")
     log("DONE")
-
 
 if __name__ == "__main__":
     main()

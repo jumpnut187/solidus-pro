@@ -1,20 +1,3 @@
-"""Tests for voxel part-type codes and the semantic grouping predicates.
-
-``AdaptiveVoxelMesh.voxel_part_types`` is an int8 array. Before these existed,
-the codes appeared as bare integers at ~45 comparison sites across core/, which
-meant adding a part type required auditing every one of them.
-
-The mold-filling stage added POUR_CUP, SPRUE, RUNNER, FILTER and GATE. The four
-metal ones are metal-filled (so they solidify) but are not the casting (so they
-must not be scored for shrinkage defects) -- that split is METAL_PART_CODES vs
-SCORED_METAL_PART_CODES. FILTER is a refractory ceramic, so it groups with the
-mold, but it restricts flow rather than blocking it, which is why
-FLOW_RESTRICTOR_PART_CODES exists separately from MOLD_PART_CODES.
-
-ALL_CODES below is derived from PART_TYPE_TO_CODE rather than listed by hand, so
-a new part type cannot be added without these assertions being confronted.
-"""
-
 from __future__ import annotations
 
 import unittest
@@ -55,25 +38,14 @@ from core.part_manager import (
     is_scored_metal,
 )
 
-
-#: Every code, ascending. Derived so a new part type is automatically covered.
 ALL_CODES = np.array(sorted(PART_TYPE_TO_CODE.values()), dtype=np.int32)
 
-
 def _expected(*codes: int) -> np.ndarray:
-    """Boolean expectation over ALL_CODES for the given member codes."""
     members = set(codes)
     return np.array([code in members for code in ALL_CODES], dtype=bool)
 
-
 class PartTypeCodeTests(unittest.TestCase):
     def test_codes_match_the_documented_convention(self) -> None:
-        """0=CAST 1=RISER 2=CHILL 3=RISER_POST 4=CORE, then the flow path.
-
-        These integers are persisted in saved projects and encoded into ML
-        training records, so they are not free to renumber. The gating codes
-        run 5..9 in flow order: pour cup, sprue, runner, filter, gate.
-        """
         self.assertEqual(PART_TYPE_CAST, 0)
         self.assertEqual(PART_TYPE_RISER, 1)
         self.assertEqual(PART_TYPE_CHILL, 2)
@@ -93,13 +65,11 @@ class PartTypeCodeTests(unittest.TestCase):
         for part_type, code in PART_TYPE_TO_CODE.items():
             self.assertIs(CODE_TO_PART_TYPE[code], part_type)
 
-
 class GroupingTests(unittest.TestCase):
     def test_metal_and_mold_are_disjoint(self) -> None:
         self.assertEqual(set(METAL_PART_CODES) & set(MOLD_PART_CODES), set())
 
     def test_every_code_is_classified(self) -> None:
-        """No part type may be neither metal nor mold."""
         classified = set(METAL_PART_CODES) | set(MOLD_PART_CODES)
         self.assertEqual(
             classified,
@@ -115,7 +85,6 @@ class GroupingTests(unittest.TestCase):
         self.assertNotIn(PART_TYPE_CAST, FEEDER_PART_CODES)
 
     def test_scored_metal_is_a_strict_subset_of_metal(self) -> None:
-        """Gating metal solidifies but must never reach a defect score."""
         self.assertTrue(set(SCORED_METAL_PART_CODES).issubset(set(METAL_PART_CODES)))
         self.assertTrue(set(SCORED_METAL_PART_CODES) < set(METAL_PART_CODES))
 
@@ -138,11 +107,9 @@ class GroupingTests(unittest.TestCase):
         )
 
     def test_flow_restrictors_are_mold_not_metal(self) -> None:
-        """A filter must not solidify, and must not be an impermeable wall."""
         self.assertTrue(set(FLOW_RESTRICTOR_PART_CODES).issubset(set(MOLD_PART_CODES)))
         self.assertEqual(set(FLOW_RESTRICTOR_PART_CODES) & set(METAL_PART_CODES), set())
         self.assertTrue(set(FLOW_RESTRICTOR_PART_CODES) < set(MOLD_PART_CODES))
-
 
 class PredicateTests(unittest.TestCase):
     def test_is_metal_selects_casting_metal_and_gating_metal(self) -> None:
@@ -171,7 +138,6 @@ class PredicateTests(unittest.TestCase):
         )
 
     def test_is_scored_metal_excludes_the_gating_system(self) -> None:
-        """The whole point of the split: a sprue solidifies but is not scored."""
         np.testing.assert_array_equal(
             is_scored_metal(ALL_CODES),
             _expected(PART_TYPE_CAST, PART_TYPE_RISER, PART_TYPE_RISER_POST),
@@ -190,7 +156,6 @@ class PredicateTests(unittest.TestCase):
         )
 
     def test_is_gating_metal_excludes_the_filter(self) -> None:
-        """The filter is on the flow path but is ceramic, not metal."""
         np.testing.assert_array_equal(
             is_gating_metal(ALL_CODES),
             _expected(
@@ -223,7 +188,6 @@ class PredicateTests(unittest.TestCase):
         empty = np.array([], dtype=np.int32)
         self.assertEqual(is_metal(empty).shape, (0,))
         self.assertEqual(is_metal(empty).dtype, bool)
-
 
 if __name__ == "__main__":
     unittest.main()

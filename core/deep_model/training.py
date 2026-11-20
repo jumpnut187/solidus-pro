@@ -1,28 +1,3 @@
-"""Deep model training: loop, masked loss, metrics, checkpointing.
-
-Shared by the desktop UI (Deep Model menu), the auto-train worker, and the
-CLI (``tools/train_deep_model.py``).  Trains the :class:`UNet3D` on captured
-records (``data/surrogate_dataset``) at the configured grid resolution and
-saves artifacts to ``models/deep_model/trained/``:
-
-* ``weights.pt`` — torch state dict of the best-validation epoch (includes
-  the ``target_mean`` / ``target_std`` normalization buffers).
-* ``manifest.json`` — standard surrogate manifest (kind="torch_unet",
-  backend="torch") so the shared ``load_model`` dispatch reads it unchanged.
-* ``deep_manifest.json`` — deep-only metadata (targets, normalization
-  statistics, training summary, quantization).
-
-Targets are ``log1p(start)`` and ``log1p(local)``, normalized with the train
-split mean / std; ``end`` is derived as ``start + local``.  Validation
-metrics run the exact inference reconstruction
-(``core.deep_model.inference.reconstruct_schedule``) on active, non-chill
-cells with reference end > 0, and report a constant-mean baseline for end
-time so the skill score means something.
-
-Captured records are never modified; training refits on the entire
-accumulated dataset (identical guarantee to the numpy surrogate).
-"""
-
 from __future__ import annotations
 
 import copy
@@ -87,37 +62,25 @@ _SUPPORTED_ANALYSES = [
     "chvorinov",
 ]
 
-
 class DeepTrainingCancelledError(RuntimeError):
-    """Raised when the user requests cancellation during deep training."""
-
+    pass
 
 def _check_cancel(cancel: CancelCallback) -> None:
     if cancel is not None and cancel():
         raise DeepTrainingCancelledError("Training cancelled")
 
-
 def masked_normalized_loss(
     pred_normalized: torch.Tensor, batch: Dict[str, torch.Tensor], model: UNet3D
 ) -> torch.Tensor:
-    """Masked MSE between the normalized heads and the normalized log1p targets.
-
-    ``pred_normalized`` is ``UNet3D.forward_normalized`` output
-    ``(B, 2, R, R, R)``.  Targets are ``log1p(start)``, ``log1p(local)``
-    standardized with the model's stored ``target_mean`` / ``target_std``.
-    Cells outside ``batch["mask"]`` (inactive, chill, or zero reference end)
-    do not contribute.
-    """
-    mask = batch["mask"]  # (B, R, R, R) bool
+    mask = batch["mask"]
     if not bool(mask.any()):
         return torch.zeros((), device=pred_normalized.device)
-    targets = log1p_targets(batch["start"], batch["local"])  # (B, 2, R, R, R)
+    targets = log1p_targets(batch["start"], batch["local"])
     mean = model.target_mean.view(1, -1, 1, 1, 1)
     std = model.target_std.view(1, -1, 1, 1, 1)
     targets = (targets - mean) / std
     mask2 = mask.unsqueeze(1).expand_as(targets)
     return F.mse_loss(pred_normalized[mask2], targets[mask2])
-
 
 def _validation_loss(model: UNet3D, loader: Optional[DataLoader], device: torch.device) -> Optional[float]:
     if loader is None:
@@ -134,9 +97,7 @@ def _validation_loss(model: UNet3D, loader: Optional[DataLoader], device: torch.
             count += int(batch["channels"].shape[0])
     return total / count if count else None
 
-
 def _masked_end_mean(dataset: DeepDataset) -> float:
-    """Mean reference end time over the loss-mask cells of ``dataset``."""
     total = 0.0
     count = 0
     for item in dataset:
@@ -145,23 +106,12 @@ def _masked_end_mean(dataset: DeepDataset) -> float:
         count += int(vals.numel())
     return total / count if count else 0.0
 
-
 def _evaluate(
     model: UNet3D,
     dataset: Optional[DeepDataset],
     device: torch.device,
     baseline_end_mean: float,
 ) -> Dict[str, Any]:
-    """Per-field metrics on ``dataset`` through the exact inference path.
-
-    Each item goes through ``UNet3D.forward`` and
-    ``reconstruct_schedule`` (active-cell zeroing and the
-    ``max_simulation_time`` clamp), identical to
-    ``DeepSurrogateModel.predict``.  Metrics use the item mask (active,
-    non-chill, reference end > 0).  ``baseline_end_mean`` is the train-split
-    constant predictor for end time; its RMSE on the same cells gives the
-    skill score ``1 - rmse / baseline_rmse`` (clipped to [0, 1]).
-    """
     if dataset is None or len(dataset) == 0:
         return {}
     model.eval()
@@ -202,9 +152,7 @@ def _evaluate(
     }
     return metric_dict
 
-
 def _headline(metric_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """Headline accuracy: per-field aggregate plus honest end-time skill."""
     if not metric_dict:
         return {
             "rmse_s": 0.0,
@@ -218,8 +166,6 @@ def _headline(metric_dict: Dict[str, Any]) -> Dict[str, Any]:
         }
     headline = aggregate_schedule_metrics(metric_dict)
     baseline = metric_dict.get("baseline", {})
-    # One baseline definition everywhere: the constant fit on the TRAIN
-    # split scored on val (same as core.surrogate.training.train_numpy).
     skill = float(round(baseline.get("skill_end", 0.0), 3))
     headline["end_rmse_s"] = float(metric_dict["end_time"]["rmse"])
     headline["baseline_end_rmse_s"] = float(baseline.get("end_rmse", 0.0))
@@ -229,12 +175,10 @@ def _headline(metric_dict: Dict[str, Any]) -> Dict[str, Any]:
     headline["validated"] = True
     return headline
 
-
 def _select_device() -> torch.device:
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
-
 
 def _warmup_cosine_lambda(total_steps: int) -> Callable[[int], float]:
     warmup = max(1, int(round(WARMUP_FRACTION * total_steps)))
@@ -247,7 +191,6 @@ def _warmup_cosine_lambda(total_steps: int) -> Callable[[int], float]:
         return MIN_LR_FRACTION + (1.0 - MIN_LR_FRACTION) * cosine
 
     return _lr
-
 
 def train_deep_model(
     data_dir: str = DEFAULT_DATASET_DIR,
@@ -269,20 +212,6 @@ def train_deep_model(
     base_channels: int = DEFAULT_BASE_CHANNELS,
     seed: int = 0,
 ) -> Dict[str, Any]:
-    """Train the 3D U-Net from captured records and persist the best epoch.
-
-    Returns:
-        Dict with ``records``, ``train``, ``test``, ``headline``, ``saved_to``,
-        ``alloys``, ``epochs`` (requested), ``epochs_run``, ``best_epoch``,
-        ``device``, ``train_loss`` / ``val_loss`` (best epoch),
-        ``first_loss`` / ``last_loss`` (train loss), ``early_stopped``.
-
-    Raises:
-        ValueError: When no usable training records are available, or the
-            dataset has fewer than two geometry groups (no honest validation
-            split exists).
-        DeepTrainingCancelledError: When cancellation is requested.
-    """
     grid = int(grid)
     if grid not in (8, 16, 32, 64, 128):
         raise ValueError(
@@ -484,7 +413,6 @@ def train_deep_model(
         "metrics": metric_dict,
     }
 
-
 def save_trained(
     model: UNet3D,
     headline: Dict[str, Any],
@@ -498,12 +426,7 @@ def save_trained(
     device_name: str = "",
     training_summary: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Persist the U-Net weights (current state) + standard + deep manifests."""
     os.makedirs(output_dir, exist_ok=True)
-    # Exported artifacts (Core ML / ONNX / TFLite) were built from the previous
-    # weights.  Leaving them in place lets backend="auto" prefer a stale
-    # .mlpackage over the fresh torch weights, so drop them; export is
-    # reproducible from weights.pt.
     stale_export = os.path.join(output_dir, "export")
     if os.path.isdir(stale_export):
         shutil.rmtree(stale_export, ignore_errors=True)
@@ -564,13 +487,10 @@ def save_trained(
     save_deep_manifest(deep, output_dir)
     return output_dir
 
-
 def _fmt(value: Optional[float]) -> str:
     return "n/a" if value is None else f"{float(value):.4e}"
 
-
 def _json_safe(value: Any) -> Any:
-    """Convert numpy scalars / non-finite floats so ``json.dump`` succeeds."""
     if isinstance(value, dict):
         return {str(k): _json_safe(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):

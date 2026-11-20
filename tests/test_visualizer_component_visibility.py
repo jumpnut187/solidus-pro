@@ -1,11 +1,3 @@
-"""Review-time component hiding in the desktop visualizer.
-
-Hiding a component must (1) switch off that part's skin actor while leaving
-the others and the master "Show Model" toggle coherent, and (2) drop that
-part's voxels from every result geometry builder through the shared display
-mask. VTK and Qt are stubbed the same way as the other visualizer tests.
-"""
-
 import importlib
 import threading
 import types
@@ -24,10 +16,8 @@ from tests.helpers.module_stubs import (
 
 _MODULE_SNAPSHOT = snapshot_modules()
 
-
 def tearDownModule() -> None:
     restore_modules(_MODULE_SNAPSHOT)
-
 
 class _DummyVTKClass:
     def __init__(self, *args, **kwargs):
@@ -38,9 +28,7 @@ class _DummyVTKClass:
             return None
         return _method
 
-
 class _ActorStub:
-    """Actor that remembers its visibility flag."""
 
     def __init__(self):
         self.visible = True
@@ -56,9 +44,7 @@ class _ActorStub:
             return None
         return _method
 
-
 class _SurfaceStub:
-    """Records what the visualizer forwards to the result renderer."""
 
     def __init__(self):
         self.mask = "unset"
@@ -75,17 +61,15 @@ class _SurfaceStub:
     def painted_part_ids(self):
         return set()
 
-
 class _DummySignal:
     def emit(self, *args, **kwargs):
         return None
-
 
 def _install_stubs() -> None:
     vtk_module = types.ModuleType("vtk")
     vtk_module.VTK_FLOAT = 1
     vtk_module.VTK_UNSIGNED_CHAR = 2
-    vtk_module.__getattr__ = lambda name: _DummyVTKClass  # type: ignore[attr-defined]
+    vtk_module.__getattr__ = lambda name: _DummyVTKClass
 
     vtk_util_module = types.ModuleType("vtk.util")
     numpy_support_module = types.ModuleType("vtk.util.numpy_support")
@@ -99,7 +83,6 @@ def _install_stubs() -> None:
         **make_vtk_qt_stub_modules(_DummyVTKClass),
         **make_qt_stub_modules(_DummyVTKClass, lambda *args, **kwargs: _DummySignal()),
     })
-
 
 class ComponentVisibilityTests(unittest.TestCase):
     @classmethod
@@ -121,8 +104,6 @@ class ComponentVisibilityTests(unittest.TestCase):
         viz._mold_preview_ids = []
         return viz
 
-    # ---- sand bodies (mold, cores) ------------------------------------------
-
     def test_sand_bodies_show_while_setting_up_and_hide_in_results(self) -> None:
         viz = self._bare_visualizer()
         viz.part_actors = {"cast": _ActorStub(), "riser": _ActorStub(), "core": _ActorStub(), "__auto_mold_0": _ActorStub()}
@@ -138,11 +119,9 @@ class ComponentVisibilityTests(unittest.TestCase):
         self.assertFalse(viz.part_actors["core"].visible)
         self.assertFalse(viz.part_actors["__auto_mold_0"].visible)
 
-        viz.result_surface.visible = False  # "Show Results" off
+        viz.result_surface.visible = False
         viz._apply_part_actor_visibility()
         self.assertTrue(viz.part_actors["core"].visible)
-
-    # ---- skin actors ------------------------------------------------------
 
     def test_hidden_component_skin_is_off_and_others_stay_on(self) -> None:
         viz = self._bare_visualizer()
@@ -179,8 +158,6 @@ class ComponentVisibilityTests(unittest.TestCase):
         self.assertEqual(viz.hidden_part_ids(), set())
         self.assertIsNone(viz.voxel_display_mask())
 
-    # ---- voxel display mask ----------------------------------------------
-
     def test_display_mask_is_anded_into_builder_selection(self) -> None:
         viz = self._bare_visualizer()
         selection = np.array([True, True, False, True])
@@ -216,7 +193,6 @@ class ComponentVisibilityTests(unittest.TestCase):
         viz.clear_hidden_components()
         self.assertIsNone(viz.result_surface.mask)
         self.assertEqual(viz.result_surface.hidden, set())
-
 
 if __name__ == "__main__":
     unittest.main()

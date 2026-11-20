@@ -1,15 +1,3 @@
-"""Headless mold-filling driver.
-
-Usage:
-  python fill_driver.py --dir <assembly dir> --voxel 0.17 --refine 4 [--ledger out.csv]
-
-Loads every STL/STEP in a directory through PartManager (same auto part typing
-the GUI uses), builds the adaptive voxel mesh, picks the pour point at the top
-centre of the sprue, and runs core.filling_stage.run_filling_stage.
-
-No tracked file is modified; instrumentation is installed by monkeypatching
-physics.filling.step at import time.
-"""
 from __future__ import annotations
 
 import argparse
@@ -22,21 +10,14 @@ REPO = Path("/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim")
 sys.path.insert(0, str(REPO))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-import faulthandler  # noqa: E402
-import traceback  # noqa: E402
+import faulthandler
+import traceback
 
-import numpy as np  # noqa: E402
+import numpy as np
 
 faulthandler.enable()
 
-
 def _trace_kdtree():
-    """Log every cKDTree build: size, finiteness, and the Python call site.
-
-    Two runs died with 512 MB of C stack consumed inside ckdtree build() --
-    runaway recursion, which is what a non-finite coordinate does to a
-    midpoint split.
-    """
     import scipy.spatial as ss
     orig = ss.cKDTree
 
@@ -60,10 +41,8 @@ def _trace_kdtree():
     import scipy.spatial._ckdtree as ck
     ck.cKDTree = TracedKDTree
 
-
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
-
 
 def main():
     ap = argparse.ArgumentParser()
@@ -93,7 +72,7 @@ def main():
     for f in files:
         try:
             ids = pm.load_assembly_parts(str(f))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log(f"  FAILED {f.name}: {exc}")
             continue
         for pid in ids:
@@ -103,12 +82,11 @@ def main():
     parts = pm.get_all_parts()
     log(f"{len(parts)} parts loaded")
 
-    # Pour point: top centre of the sprue (matches Test/fill_verification/e2e_gui.py)
     from core.part_manager import PartType
     sprue = next((p for p in parts if p.part_type is PartType.SPRUE), None)
     if sprue is None:
         raise SystemExit("no sprue part found")
-    b = sprue.get_bounds()  # (3, 2): rows X, Y, Z; cols min, max
+    b = sprue.get_bounds()
     top = (
         float((b[0][0] + b[0][1]) / 2.0),
         float((b[1][0] + b[1][1]) / 2.0),
@@ -152,18 +130,6 @@ def main():
     if args.ledger:
         LEDGER_STATE["types_out"] = args.ledger + ".types.npy"
         install_ledger(fs, args.ledger, args.ledger_every)
-    # --- MECHANISM 3 fix validation ------------------------------------
-    # physics/filling.py:2076-2091 passes float(TRT_MAGIC_PARAMETER) into
-    # collide_kernel, which forms
-    #     half = 1/omega_plus - 1/2 ;  omega_minus = 1/(magic/half + 1/2)
-    # (physics/fluid_flow.py:1337-1339). At tau_plus = 0.50001, half = 1.04e-5
-    # and the stock magic = 3/16 gives tau_minus = 18,060 -- the odd,
-    # momentum-carrying moments have an 18,000-step relaxation time.
-    # Setting magic = 4.5 * half emulates the proposed "clamp tau_minus <= 5"
-    # exactly at the molecular tau, which is where all but a handful of cells
-    # sit, and over-relaxes omega_minus (toward 2) only in the few cells where
-    # Smagorinsky has already raised tau_eff -- i.e. conservative in the
-    # stabilising direction. Monkeypatch only; the repo is untouched.
     _magic = os.environ.get("MAGIC")
     if _magic:
         import physics.filling as _pf
@@ -189,13 +155,7 @@ def main():
         for w in getattr(result, "warnings", []) or []:
             log(f"  warn: {w}")
 
-
 def capture_types(fs):
-    """Grab the coarse part-type grid the solver actually runs on.
-
-    Hooked on build_porous_zone rather than coarsen_part_types: it is called
-    with solve_types a few lines later and cannot be missed.
-    """
     from core.part_manager import PART_TYPE_TO_CODE
     orig = fs.build_porous_zone
 
@@ -234,8 +194,6 @@ def capture_types(fs):
                 f"c0 off-filter={sorted(set(np.round(c0[~m],12).tolist()))[:3]} "
                 f"c1 off-filter={sorted(set(np.round(c1[~m],9).tolist()))[:3]}")
             LEDGER_STATE["zone"] = zone
-            # the stability map: fractional momentum removed per step,
-            # R = 2[(2c0-1)+c1|u|] / (2c0 + c1|u|)
             cc0 = float(c0[m].max()) if m.any() else 0.5
             cc1 = float(c1[m].max()) if m.any() else 0.0
             for uu in (0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0):
@@ -250,7 +208,6 @@ def capture_types(fs):
 
     fs.build_porous_zone = wrapped
     log("capture_types installed on build_porous_zone")
-
 
 def geometry_report(st, fs):
     from scipy import ndimage
@@ -280,12 +237,9 @@ def geometry_report(st, fs):
     log(f"  open (non-obstacle) components: {n2} sizes "
         f"{sorted(np.bincount(lab2.ravel())[1:], reverse=True)[:6]}")
 
-
 LEDGER_STATE = {}
 
-
 def install_ledger(fs, path, every):
-    """Wrap physics.filling.step to record a per-N-step ledger."""
     import physics.filling as pf
     from physics.filling import (
         FLAG_FLUID, FLAG_INTERFACE, FLAG_GAS, FLAG_OBSTACLE, fluid_fraction,
@@ -308,9 +262,6 @@ def install_ledger(fs, path, every):
         n = ctr["n"]
         LEDGER_STATE["state"] = state
         types = LEDGER_STATE.get("types")
-        # mass goes non-finite in the same step f does, and widening f to
-        # float64 every step dominates a long run -- so check mass per step and
-        # f only on the ledger cadence.
         nonfinite = not np.all(np.isfinite(state.mass))
         due = (n % every == 0)
         if due or (nonfinite and not ctr["dumped"]):
@@ -337,7 +288,6 @@ def install_ledger(fs, path, every):
                 float(np.nanmin(temps)) if temps is not None and temps.size
                 and np.any(np.isfinite(temps)) else float("nan")
             )
-            # --- FLUID-only eps band, and the filter zone + its neighbours ---
             eps_fl_min = eps_fl_max = float("nan")
             if fluid.any():
                 ef = eps[fluid]
@@ -365,7 +315,6 @@ def install_ledger(fs, path, every):
             up99 = float(np.percentile(speed[wet], 99)) if nwet else 0.0
             umed = float(np.median(speed[wet])) if nwet else 0.0
 
-            # --- per-part WET CELL counts by z ---
             wetz = ""
             if types is not None:
                 chunks = []
@@ -388,7 +337,6 @@ def install_ledger(fs, path, every):
                     m = (types == code) & wet
                     parts.append(f"{name}={float(np.sum(mass[m])):.4g}/{int(m.sum())}")
                 by_type = " ".join(parts)
-                # z-profile of wet mass, to see where the metal actually is
                 zsum = mass.sum(axis=(0, 1))
                 nz_ = np.nonzero(zsum > 1e-9)[0]
                 if nz_.size:
@@ -416,32 +364,13 @@ def install_ledger(fs, path, every):
         return out
 
     pf.step = wrapped
-    # filling_stage imported `step` by name
     import core.filling_stage as cfs
     cfs.step = wrapped
     log(f"ledger -> {path} every {every} steps")
 
-
-# ---------------------------------------------------------------------------
-# MECHANISM 3 probe: the filter-inlet pocket, and the drag actually applied
-# ---------------------------------------------------------------------------
-#
-# The fatal pocket is ORIGINAL x[115,116] y[48,51] z[20,26] == PADDED
-# x[116,117] y[49,52] z[21,27]. Watch a margin around it.
-POCKET = (113, 121, 46, 56, 18, 30)      # padded, inclusive-exclusive slices
-
+POCKET = (113, 121, 46, 56, 18, 30)
 
 def install_pocket(fs, out, from_step, every, perstep_from):
-    """Second wrapper on physics.filling.step.
-
-    Records, without touching the repo:
-      * per-step pocket + global summary from ``perstep_from``
-      * per-cell pocket dumps every ``every`` steps from ``from_step``
-      * the Guo-Zhao drag ACTUALLY applied, recomputed from the kernel's own
-        closed form on the recorded (rho, u, c0, c1) -- collide_kernel computes
-        it inline (physics/fluid_flow.py:1223-1257) so there is no function to
-        hook, but the formula is exact and the inputs are all in ``state``.
-    """
     import physics.filling as pf
     from physics.filling import FLAG_FLUID, FLAG_INTERFACE
 
@@ -490,9 +419,8 @@ def install_pocket(fs, out, from_step, every, perstep_from):
         wet = (flags == FLAG_FLUID) | (flags == FLAG_INTERFACE)
         with np.errstate(over="ignore", invalid="ignore"):
             speed = np.sqrt(np.sum(u * u, axis=0))
-            # the kernel's own quantities
             a = c1 * speed
-            denom = 2.0 * c0 + a                       # == c0+sqrt(c0^2+c1|v|)
+            denom = 2.0 * c0 + a
             R = np.where(denom > 0, 2.0 * ((2.0 * c0 - 1.0) + a) / denom, 0.0)
 
         pm = (por < 1.0) & wet
@@ -556,7 +484,6 @@ def install_pocket(fs, out, from_step, every, perstep_from):
         f"pocket(padded)={POCKET} from={from_step} every={every} "
         f"perstep_from={perstep_from}")
 
-
 def dump_nonfinite(fh, state, n):
     from physics.filling import fluid_fraction
     mass = np.asarray(state.mass, dtype=np.float64)
@@ -576,7 +503,6 @@ def dump_nonfinite(fh, state, n):
             f"eps={eps[x,y,z]:.6g} por={float(state.porous.porosity[x,y,z]):.4g} "
             f"u={np.asarray(state.u)[:,x,y,z]}\n"
         )
-        # neighbourhood
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
                 for dz in (-1, 0, 1):
@@ -595,12 +521,7 @@ def dump_nonfinite(fh, state, n):
                     )
     fh.flush()
 
-
 if __name__ == "__main__":
-    # scipy's cKDTree (built inside trimesh proximity, outside this repo's
-    # own balanced_tree=False fix) recurses past the 8 MB macOS main-thread
-    # stack on this assembly and takes the process down with SIGSEGV.
-    # Run everything on a 512 MB thread stack instead.
     import threading
     threading.stack_size(512 * 1024 * 1024)
     t = threading.Thread(target=main)

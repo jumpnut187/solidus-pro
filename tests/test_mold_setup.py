@@ -1,13 +1,3 @@
-"""Explicit sand mold, automatic mold box and cores, and the sand database.
-
-Pins the mold stage (core/mold_setup.py), the solver pieces it relies on
-(physics/heat_transfer.py: InterfaceLinks, TabulatedBody, the RADIATION
-boundary), the sands (core/mold_materials.py), and the end-to-end effect:
-the explicit mold freezes a steel cube in the time Chvorinov's rule gives
-for real sand, open risers lose heat to the air, and auto cores appear where
-a vertical pattern draw cannot form the sand.
-"""
-
 from __future__ import annotations
 
 import contextlib
@@ -66,15 +56,12 @@ from physics.heat_transfer import (
 )
 from tests.test_simulation_scenarios import _memory_monitor_check, _ok_validation
 
-
 def _box(extents, centre) -> trimesh.Trimesh:
     mesh = trimesh.creation.box(extents=extents)
     mesh.apply_translation(centre)
     return mesh
 
-
 def _periodic_column(n_layers: int):
-    """3 x 3 x n_layers lattice, periodic in x and y, so every cell has its full 26-cell stencil."""
     side = 3
 
     def cell(x, y, z):
@@ -89,7 +76,6 @@ def _periodic_column(n_layers: int):
                     if 0 <= z + dz < n_layers:
                         neighbors[cell(x, y, z), slot] = cell(x + dx, y + dy, z + dz)
     return neighbors, cell
-
 
 class MoldBoxTests(unittest.TestCase):
     cast = _box((6, 4, 2), (0, 0, 1))
@@ -112,8 +98,8 @@ class MoldBoxTests(unittest.TestCase):
         self.assertAlmostEqual(hi[2], 4.0)
 
     def test_open_riser_below_a_covered_casting_gets_a_shaft(self) -> None:
-        low_riser = _box((1.5, 1.5, 1.0), (2.0, 0, 2.5))  # top at 3, casting top at 2
-        tall_closed = _box((1.0, 1.0, 3.0), (-2.0, 0, 3.5))  # top at 5 -> cope at 7
+        low_riser = _box((1.5, 1.5, 1.0), (2.0, 0, 2.5))
+        tall_closed = _box((1.0, 1.0, 3.0), (-2.0, 0, 3.5))
         parts = [
             (self.cast, PART_TYPE_CAST, False),
             (low_riser, PART_TYPE_RISER, True),
@@ -130,17 +116,15 @@ class MoldBoxTests(unittest.TestCase):
         _, hi = mold_box([(self.cast, PART_TYPE_CAST, False), (cup, PART_TYPE_POUR_CUP, False)], MoldParams())
         self.assertAlmostEqual(hi[2], 4.0)
 
-
 class CoreRuleTests(unittest.TestCase):
-    """A block with a horizontal through-hole, a vertical through-hole and a sealed cavity."""
 
     @classmethod
     def setUpClass(cls) -> None:
         labels = np.full((40, 30, 30), -1, np.int16)
         labels[5:35, 5:25, 5:15] = PART_TYPE_CAST
-        labels[5:35, 13:17, 9:12] = -1  # horizontal hole along x
-        labels[26:30, 13:17, :] = -1  # vertical hole
-        labels[20:24, 6:9, 6:9] = -1  # sealed cavity
+        labels[5:35, 13:17, 9:12] = -1
+        labels[26:30, 13:17, :] = -1
+        labels[20:24, 6:9, 6:9] = -1
         cls.labels = labels
         cls.lattice = Lattice(origin=np.zeros(3), pitch=0.1, shape=labels.shape)
         cls.open = np.zeros(labels.shape, dtype=bool)
@@ -150,7 +134,6 @@ class CoreRuleTests(unittest.TestCase):
 
     def test_draw_rule_cores_the_horizontal_hole_and_the_cavity(self) -> None:
         layout = self._layout(0)
-        # Horizontal hole less its crossing with the vertical hole, plus the cavity.
         self.assertEqual(int(layout.auto_core.sum()), 30 * 4 * 3 - 4 * 4 * 3 + 4 * 3 * 3)
         self.assertFalse(layout.auto_core[27, 14, 20], "a vertical through-hole is moldable")
 
@@ -169,7 +152,7 @@ class CoreRuleTests(unittest.TestCase):
     def test_one_cell_gaps_are_neither_sand_nor_air(self) -> None:
         labels = np.full((10, 10, 10), -1, np.int16)
         labels[2:8, 2:8, 2:4] = PART_TYPE_CAST
-        labels[2:8, 2:8, 5:7] = PART_TYPE_CAST  # one empty layer at z = 4
+        labels[2:8, 2:8, 5:7] = PART_TYPE_CAST
         layout = plan_layout(labels, np.zeros_like(labels, bool), Lattice(np.zeros(3), 0.1, labels.shape),
                              MoldParams(auto_mold=1, auto_cores=1))
         self.assertTrue(layout.gap[4, 4, 4])
@@ -181,7 +164,6 @@ class CoreRuleTests(unittest.TestCase):
         mesh = mask_surface(layout.auto_core, self.lattice, smooth=0)
         self.assertTrue(mesh.is_watertight)
         self.assertAlmostEqual(mesh.volume, layout.auto_core.sum() * 0.1 ** 3, places=6)
-
 
 class PartTypeTests(unittest.TestCase):
     def test_mold_code_and_names(self) -> None:
@@ -202,12 +184,10 @@ class PartTypeTests(unittest.TestCase):
         self.assertEqual(len(manager.get_mold_meshes()), 1)
         self.assertEqual(len(manager.get_mold_setup_parts()), 1)
 
-
 class SolverPieceTests(unittest.TestCase):
     alloy = get_alloy("WCB")
 
     def test_interface_link_matches_the_semi_infinite_sand_solution(self) -> None:
-        """Heat into sand behind a 1000 °C face: 2 b dT sqrt(t / pi), b = sqrt(k rho cp)."""
         neighbors, cell = _periodic_column(200)
         n_sand = len(neighbors)
         n = n_sand + 9
@@ -254,7 +234,6 @@ class SolverPieceTests(unittest.TestCase):
         self.assertAlmostEqual(after / before, 1.0, places=6)
 
     def test_enthalpy_update_pays_the_moisture_peak_on_a_large_step(self) -> None:
-        """Green sand heated past 100 °C in one step still absorbs the water's latent heat."""
         sand = get_sand(1)
         body = tabulated_body(np.array([1]), 1)
         neighbors = np.full((2, 26), -1, dtype=np.int32)
@@ -274,7 +253,6 @@ class SolverPieceTests(unittest.TestCase):
             self.assertGreater(heat_in, latent)
 
     def test_coupled_mold_solver_conserves_energy(self) -> None:
-        """Casting heat lost = mold enthalpy gained, with the mold on a slower clock."""
         from physics.mold_coupling import CoupledMoldSolver, MoldPairs
 
         dx = 0.005
@@ -318,7 +296,6 @@ class SolverPieceTests(unittest.TestCase):
         q = 0.8 * STEFAN_BOLTZMANN * ((1500 + 273.15) ** 4 - (20 + 273.15) ** 4) + 10.0 * 1480.0
         self.assertAlmostEqual(1500.0 - model.temperatures[0], dt * q / (rho_cp * 0.01), places=6)
 
-
 class SandDatabaseTests(unittest.TestCase):
     def test_tables_are_complete_and_positive(self) -> None:
         for code, sand in SAND_MATERIALS.items():
@@ -331,14 +308,12 @@ class SandDatabaseTests(unittest.TestCase):
             self.assertTrue(np.all(k > 0) and np.all(rho_cp > 0), sand.key)
 
     def test_chilling_power_order(self) -> None:
-        """Chromite and zircon chill harder than bonded silica; ceramic beads do not."""
         silica = get_sand(2).thermal_effusivity(600.0)
         self.assertGreater(get_sand(5).thermal_effusivity(600.0), 1.15 * silica)
         self.assertGreater(get_sand(6).thermal_effusivity(600.0), 1.15 * silica)
         self.assertLess(get_sand(4).thermal_effusivity(600.0), 1.05 * silica)
 
     def test_green_sand_carries_its_water(self) -> None:
-        """Wet minus dry enthalpy to 200 °C is the water: latent heat plus its sensible heat to boiling."""
         wet = get_sand(1)
         dry = dataclasses.replace(wet, moisture=0.0)
 
@@ -359,9 +334,7 @@ class SandDatabaseTests(unittest.TestCase):
         self.assertEqual(params.mold.core_rule_code, 1)
         self.assertEqual(SolidificationParameters.from_dict(params.to_dict()).mold, params.mold)
 
-
 def _run(manager: PartManager, mold: dict | None, voxel_size: float = 0.2, extra: dict | None = None):
-    """Run the pipeline; ``mold`` is the mold group and ``extra`` any other solidification-parameter groups."""
     params = None if mold is None and not extra else {**(extra or {}), **({} if mold is None else {"mold": mold})}
     inputs = PipelineInputs(
         alloy_name="WCB",
@@ -380,7 +353,6 @@ def _run(manager: PartManager, mold: dict | None, voxel_size: float = 0.2, extra
         stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
         return run_pipeline(inputs, part_manager=manager).engine
 
-
 def _cube(with_riser: bool = False, open_top: bool = False, sleeve: str = "insulating") -> PartManager:
     manager = PartManager()
     cast = manager.get_part(manager.load_part(ci_model("block_2inch.stl"), name="cast"))
@@ -393,7 +365,6 @@ def _cube(with_riser: bool = False, open_top: bool = False, sleeve: str = "insul
         riser.is_open_top = open_top
         riser.riser_sleeve = sleeve
     return manager
-
 
 class ExplicitMoldPipelineTests(unittest.TestCase):
     @classmethod
@@ -432,12 +403,10 @@ class ExplicitMoldPipelineTests(unittest.TestCase):
         self.assertIsNotNone(_run(_cube(), None)._mold_extension)
 
     def test_freeze_time_is_chvorinov_for_real_sand(self) -> None:
-        """2 in WCB cube: Chvorinov with hot PUNB silica (b^2 1.0-1.4e6) gives 180-252 s."""
         end = float(np.nanmax(self.explicit.solidification_end_times))
         self.assertGreater(end, 180.0)
         self.assertLess(end, 290.0)
         self.assertGreater(end, float(np.nanmax(self.legacy.solidification_end_times)))
-
 
 class RiserTopTests(unittest.TestCase):
     def test_an_open_riser_freezes_before_a_closed_one(self) -> None:
@@ -452,9 +421,7 @@ class RiserTopTests(unittest.TestCase):
         self.assertLess(riser_end(opened), riser_end(closed))
         self.assertGreater(len(opened._mold_extension.air_mesh_cells), 0)
 
-
 def _lone_riser(sleeve: str = "insulating", core: bool = False) -> PartManager:
-    """The 2 x 3 in cylinder typed riser, alone or with a sand core block against its side."""
     manager = PartManager()
     riser = manager.get_part(manager.load_part(ci_model("cylinder.stl"), name="riser"))
     riser.set_part_type(PartType.RISER)
@@ -462,28 +429,20 @@ def _lone_riser(sleeve: str = "insulating", core: bool = False) -> PartManager:
     if core:
         (_, x_hi), (y_lo, y_hi), (z_lo, z_hi) = riser.get_bounds()
         path = os.path.join(tempfile.mkdtemp(), "core.stl")
-        # 1 in of sand against the +X side, sunk 0.3 in into the riser so the two share voxel faces.
         _box((1.0, 1.0, 1.0), (x_hi + 0.2, 0.5 * (y_lo + y_hi), 0.5 * (z_lo + z_hi))).export(path)
         manager.get_part(manager.load_part(path, name="core")).set_part_type(PartType.CORE)
     return manager
 
-
-#: Stops a run that cannot freeze (a riser nothing cools) after a minute of simulated time.
 SHORT_RUN = {"timing": {"min_simulation_time": 30.0, "max_simulation_time": 60.0}}
 
-
 class RiserSleeveTests(unittest.TestCase):
-    """Per riser (``Part.riser_sleeve``): an insulating sleeve leaks into the sand, the
-    no-heat-loss sleeve ("adiabatic") cuts its riser off from the mold sand and from cores."""
 
     def test_insulating_sleeve_extends_the_modulus_by_about_1_3(self) -> None:
-        """The default sleeve: MEF = sqrt(t_riser / t_cast) of one 2 x 3 in cylinder, typed riser and then casting."""
 
         def freeze(part_type):
             manager = PartManager()
             part = manager.get_part(manager.load_part(ci_model("cylinder.stl"), name="c"))
             part.set_part_type(part_type)
-            # The insulating sleeve's coefficient was calibrated with the automatic wall: pinned (the default is 2 in).
             return float(np.nanmax(_run(manager, {"wall_thickness_in": 0}).solidification_end_times))
 
         mef = np.sqrt(freeze(PartType.RISER) / freeze(PartType.CAST))
@@ -497,7 +456,6 @@ class RiserSleeveTests(unittest.TestCase):
         contact_cells = solver._first[~solver._is_stencil]
         self.assertFalse(np.any(types[contact_cells] == PART_TYPE_RISER))
         self.assertTrue(np.any(types[contact_cells] == PART_TYPE_CAST))
-        # The riser does stand in mold sand: the faces are there, only the heat path is gone.
         extension = engine._mold_extension
         self.assertGreater(float(extension.pair_area[types[extension.pair_first] == PART_TYPE_RISER].sum()), 10.0)
 
@@ -515,13 +473,11 @@ class RiserSleeveTests(unittest.TestCase):
         self.assertGreater(float(np.nanmax(end[types == PART_TYPE_RISER])), float(np.nanmax(end[types == PART_TYPE_CAST])))
 
     def test_mold_sand_takes_no_heat_from_a_no_heat_loss_riser(self) -> None:
-        """A closed no-heat-loss riser with nothing to feed: no heat leaves it, on the mold and on the sand boundary."""
         for mold in ({"auto_mold": 1, "wall_thickness_in": 2.0}, {"auto_mold": 0, "auto_cores": 0}):
             engine = _run(_lone_riser(sleeve="adiabatic"), mold, extra=SHORT_RUN)
             pour = float(engine.alloy.pouring_temp)
             np.testing.assert_allclose(np.asarray(engine._thermal_latest_temperatures), pour, atol=1e-3)
             self.assertTrue(np.all(np.isnan(np.asarray(engine.solidification_end_times))))
-        # The same riser in bare sand cools, and so does one in an insulating sleeve, more slowly.
         bare = _run(_lone_riser(sleeve="none"), {"auto_mold": 1, "wall_thickness_in": 2.0}, extra=SHORT_RUN)
         self.assertLess(float(np.min(bare._thermal_latest_temperatures)), float(bare.alloy.pouring_temp) - 50.0)
         insulated = _run(_lone_riser(), {"auto_mold": 1, "wall_thickness_in": 2.0}, extra=SHORT_RUN)
@@ -542,13 +498,11 @@ class RiserSleeveTests(unittest.TestCase):
             cols = neighbors[rows, slots]
             return int(np.count_nonzero((riser[rows] & core[cols]) | (core[rows] & riser[cols])))
 
-        # The mesh keeps the adjacency (the analyses read it); the solver's stencil has none of it.
         self.assertGreater(riser_core_links(np.asarray(engine.mesh.voxel_neighbors)), 0)
         self.assertEqual(riser_core_links(np.asarray(engine._thermal_heat_model.casting.neighbors)), 0)
         temperatures = np.asarray(engine._thermal_latest_temperatures)
         np.testing.assert_allclose(temperatures[riser], float(engine.alloy.pouring_temp), atol=1e-3)
         np.testing.assert_allclose(temperatures[core], 21.0, atol=1e-3)
-        # Without the sleeve the core draws heat from the riser.
         bare = _run(_lone_riser(sleeve="none", core=True), mold, extra=SHORT_RUN)
         self.assertGreater(float(np.max(np.asarray(bare._thermal_latest_temperatures)[core])), 200.0)
 
@@ -561,7 +515,6 @@ class RiserSleeveTests(unittest.TestCase):
 
         self.assertEqual(riser_boundary_cells(_run(_cube(with_riser=True, sleeve="adiabatic"), mold)), 0)
         self.assertGreater(riser_boundary_cells(_run(_cube(with_riser=True), mold)), 0)
-
 
 class AutoCorePipelineTests(unittest.TestCase):
     def test_horizontal_tunnel_is_cored_by_the_draw_rule_only(self) -> None:
@@ -579,12 +532,11 @@ class AutoCorePipelineTests(unittest.TestCase):
         drawn = _run(manager(), {"auto_cores": 1})
         enclosed = _run(manager(), {"auto_cores": 1, "core_rule_code": CORE_RULE_ENCLOSED})
         cores = int(np.sum(np.asarray(drawn.mesh.voxel_part_types) == PART_TYPE_CORE))
-        self.assertGreater(cores, 300)  # the 4 x 1 x 1 in tunnel is 500 cells at 0.2 in
+        self.assertGreater(cores, 300)
         self.assertEqual(int(np.sum(np.asarray(enclosed.mesh.voxel_part_types) == PART_TYPE_CORE)), 0)
         np.testing.assert_array_equal(
             np.asarray(drawn.shrinkage_probability)[np.asarray(drawn.mesh.voxel_part_types) == PART_TYPE_CORE], 0.0
         )
-
 
 class SuppliedGeometryOverrideTests(unittest.TestCase):
     def test_a_loaded_core_part_turns_auto_cores_off(self) -> None:
@@ -601,20 +553,14 @@ class SuppliedGeometryOverrideTests(unittest.TestCase):
         flask = _box((10, 10, 10), (0, 0, 2))
         layout, meshes = preview([(cast, PART_TYPE_CAST, False)], [flask], MoldParams(), voxel_size=0.25)
         self.assertTrue(layout.from_parts)
-        self.assertEqual(meshes["mold"], [])  # the loaded flask is drawn as itself
+        self.assertEqual(meshes["mold"], [])
         lo, hi = layout.lattice.bounds()
         self.assertAlmostEqual(float(hi[2] - lo[2]), 10.0, delta=0.3)
 
-
-#: Graded mold (levels 3, band 4) against the uniform mold, 2 in WCB cube with 4 in walls at
-#: 0.2 in: measured max per-voxel end-time difference 0.39 % of the freeze time, 131,320 ->
-#: 20,433 sand cells (6.4x). tests/verify_graded_mold.py has the wider study (all cases <= 0.70 %).
 GRADED_FREEZE_TOLERANCE = 0.01
 GRADED_CUBE_CELL_CUT = 6.0
 
-
 class GradedMoldTests(unittest.TestCase):
-    """The graded mold (MoldParams.mold_grading_levels): partition, faces, solver and pipeline."""
 
     alloy = get_alloy("WCB")
 
@@ -639,7 +585,6 @@ class GradedMoldTests(unittest.TestCase):
         self.assertIsNone(self.uniform_engine._thermal_heat_model.mold._interface_links)
 
     def test_graded_path_with_nothing_coarsened_is_the_uniform_mold(self) -> None:
-        """A band wider than the wall: the graded code builds the uniform mold's arrays."""
         layout = dataclasses.replace(self.layout, grading=None)
         ext = build_thermal_extension(self.mesh, layout, grading_levels=2, fine_band_cells=1000)
         self.assertFalse(ext.graded)
@@ -653,11 +598,10 @@ class GradedMoldTests(unittest.TestCase):
         held = np.bincount(grading.owner[self.layout.mold], minlength=grading.n_cells)
         np.testing.assert_array_equal(held, grading.span ** 3)
         self.assertEqual(int(np.sum(grading.span ** 3)), self.layout.mold_cell_count)
-        # Each cell owns the block at its low corner.
         for c in np.flatnonzero(grading.span > 1)[::50]:
             (i, j, k), s = grading.ijk[c], grading.span[c]
             np.testing.assert_array_equal(grading.owner[i:i + s, j:j + s, k:k + s], c)
-        self.assertEqual(grading.max_span, 4)  # 4 in of sand at 0.2 in: no aligned 8-block clears t_3
+        self.assertEqual(grading.max_span, 4)
         self.assertGreater(self.layout.mold_cell_count / grading.n_cells, 5.0)
 
     def test_cells_near_the_assembly_are_voxel_size(self) -> None:
@@ -679,7 +623,6 @@ class GradedMoldTests(unittest.TestCase):
         np.testing.assert_array_equal(self.graded.pair_first, self.uniform.pair_first)
 
     def test_every_coarse_cell_face_is_accounted_for(self) -> None:
-        """Same-size stencil faces + cross-size links + air faces = 6 span^2 lattice faces."""
         ext = self.graded
         span = ext.mold_span
         pitch2 = self.layout.lattice.pitch ** 2
@@ -692,18 +635,16 @@ class GradedMoldTests(unittest.TestCase):
         coarse = span > 1
         self.assertGreater(int(coarse.sum()), 100)
         np.testing.assert_array_equal((faces + air)[coarse], 6 * span[coarse] ** 2)
-        # Links join cells of different size, finer first.
         self.assertTrue(np.all(span[ext.link_first] < span[ext.link_second]))
 
     def test_graded_mold_model_conserves_energy(self) -> None:
-        """The engine's graded mold model, no air: heat in a hot patch spreads without loss."""
         engine = self.graded_engine
         solver = engine._build_coupled_mold(self.graded, engine._thermal_heat_model.casting, 20.0)
         mold = solver.mold
         mold.clear_boundaries()
         self.assertIsNotNone(mold._interface_links)
         start = np.full(self.graded.n_mold, 20.0)
-        start[self.graded.mold_span == 1] = 900.0  # the fine band hot, the coarse sand cold
+        start[self.graded.mold_span == 1] = 900.0
         mold.set_initial_temperature(start)
         volume = mold._cell_volumes(np.arange(self.graded.n_mold))
 
@@ -714,11 +655,9 @@ class GradedMoldTests(unittest.TestCase):
         for _ in range(20):
             mold.step(2.0)
         self.assertGreater(float(mold.temperatures[self.graded.mold_span == 2].max()), 20.5)
-        # Round-off of the tabulated enthalpy inversion only (measured 8e-10).
         self.assertAlmostEqual(energy() / before, 1.0, places=8)
 
     def test_graded_column_conducts_like_the_uniform_column(self) -> None:
-        """1-D: 2x2 periodic voxel cells then a column of 2x cells, against the voxel column."""
         dx, k, rho_cp = 0.0025, 0.8, 1.6e6
         n_fine, n_coarse = 8, 12
         body = lambda idx: TabulatedBody(idx, np.array([0.0, 2000.0]), np.array([k, k]), np.array([rho_cp, rho_cp]))
@@ -757,7 +696,6 @@ class GradedMoldTests(unittest.TestCase):
         fine_g = graded.temperatures[:n_f].reshape(n_fine, 4).mean(axis=1)
         coarse_u = layers_u[n_fine:].reshape(n_coarse, 2).mean(axis=1)
         coarse_g = graded.temperatures[n_f:]
-        # Measured: 0.8 K (fine) and 0.95 K (coarse) apart, 168 K at the first coarse cell.
         self.assertLess(float(np.max(np.abs(fine_g - layers_u[:n_fine]))), 2.0)
         self.assertLess(float(np.max(np.abs(coarse_g - coarse_u))), 2.0)
         self.assertGreater(float(coarse_g[0]), 100.0)
@@ -804,7 +742,6 @@ class GradedMoldTests(unittest.TestCase):
             edges = {i for i in range(n + 1) if (i + s) % 8 == 0}
             if n % 2 == 0:
                 self.assertEqual(edges, {n - i for i in edges})
-
 
 class WebMoldRouteTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -860,16 +797,10 @@ class WebMoldRouteTests(unittest.TestCase):
         vertices = np.asarray(on["mold"][0]["vertices"]).reshape(-1, 3)
         self.assertGreater(float(np.ptp(vertices[:, 0])), 5.5)
 
-
 class OccupancyEstimateTests(unittest.TestCase):
-    """The run-size estimate from the assembly's own occupancy (mold_setup.estimate_from_occupancy, the Mesh panel's
-    preview), against what the run builds, and the Mold panel's graded preview."""
 
     @staticmethod
     def _two_bodies() -> PartManager:
-        """Two 1 in cubes at opposite corners of a 7 in box: one bounding box that is almost all sand, like a spread-out
-        rigging. Off the 0.2 in cell boundaries: a face exactly on one marks the cells on both sides, and the run's cut
-        cells then drop the empty ones."""
         manager = PartManager()
         for n, c in enumerate((-3.03, 3.03)):
             part = manager.get_part(manager.load_part(ci_model("small_block.stl"), name=f"cast{n}"))
@@ -891,11 +822,10 @@ class OccupancyEstimateTests(unittest.TestCase):
         grid.fill()
         origin = np.rint(np.asarray(grid.transform)[:3, 3] / 0.2).astype(np.int64)
         estimate = estimate_from_occupancy(parts, [], MoldParams(), np.asarray(grid.matrix, bool), origin, 0.2)
-        self.assertAlmostEqual(estimate.voxels / real_voxels, 1.0, delta=0.02)  # the run's cut cells add or merge a few
+        self.assertAlmostEqual(estimate.voxels / real_voxels, 1.0, delta=0.02)
         self.assertAlmostEqual(estimate.lattice_cells / real_lattice, 1.0, delta=0.05)
         self.assertAlmostEqual(estimate.mold_cells / real_graded, 1.0, delta=0.15)
 
-        # Most of the box is far-field sand that the grading coarsens.
         self.assertLess(estimate.mold_cells, 0.6 * estimate.lattice_cells)
 
     def test_the_mold_preview_is_graded_when_grading_is_on(self) -> None:
@@ -908,7 +838,6 @@ class OccupancyEstimateTests(unittest.TestCase):
                              voxel_size=0.1)
         self.assertNotIn("graded_mold_cells", uniform.summary())
         self.assertEqual(uniform.summary()["mold_cells"], summary["mold_cells"])
-
 
 if __name__ == "__main__":
     unittest.main()

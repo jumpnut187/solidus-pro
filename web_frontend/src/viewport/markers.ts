@@ -1,4 +1,3 @@
-/** Scene markers that are not part geometry: the pour location. */
 import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial';
 import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture';
 import { Color3 } from '@babylonjs/core/Maths/math.color';
@@ -6,12 +5,6 @@ import { Mesh } from '@babylonjs/core/Meshes/mesh';
 import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder';
 import type { Scene } from '@babylonjs/core/scene';
 
-/**
- * The metal-entry point, as a sphere with a billboarded label.
- *
- * Magenta because no part type and no colormap uses it, so the marker can
- * never be mistaken for a hot region of the result.
- */
 export function createPourMarker(scene: Scene, size: number): Mesh {
   const diameter = Math.max(size * 0.035, 0.15);
   const marker = MeshBuilder.CreateSphere('pour-marker', { diameter, segments: 16 }, scene);
@@ -34,8 +27,6 @@ export function createPourMarker(scene: Scene, size: number): Mesh {
 
   const texture = new DynamicTexture('pour-marker-label-texture', { width: 256, height: 128 }, scene, false);
   texture.hasAlpha = true;
-  // drawText, not the raw 2D context: Babylon's canvas abstraction exposes
-  // only this across its WebGL and native backends.
   texture.drawText('POUR', null, 84, 'bold 44px Helvetica, Arial, sans-serif', '#ff21ff', 'transparent', true, true);
 
   const labelMaterial = new StandardMaterial('pour-marker-label-mat', scene);

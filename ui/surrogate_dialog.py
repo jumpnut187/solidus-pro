@@ -1,5 +1,3 @@
-"""Surrogate model info dialog."""
-
 from __future__ import annotations
 
 from typing import Optional
@@ -20,9 +18,7 @@ from core.surrogate.backend import backend_device_name
 from core.surrogate.dataset import DEFAULT_DATASET_DIR, dataset_summary
 from core.surrogate.model import SurrogateModel
 
-
 class SurrogateModelInfoDialog(QDialog):
-    """Displays the loaded surrogate model's manifest and capabilities."""
 
     def __init__(self, model: Optional[SurrogateModel], parent=None):
         super().__init__(parent)
@@ -64,9 +60,7 @@ class SurrogateModelInfoDialog(QDialog):
         buttons.accepted.connect(self.accept)
         layout.addWidget(buttons)
 
-
 class SurrogateSettingsDialog(QDialog):
-    """Edit surrogate backend and training-data settings."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -119,7 +113,6 @@ class SurrogateSettingsDialog(QDialog):
             pass
         self.accept()
 class SurrogateTrainDialog(QDialog):
-    """Ask how to train the surrogate model from captured data."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -157,7 +150,6 @@ class SurrogateTrainDialog(QDialog):
         layout.addWidget(buttons)
 
     def options(self) -> dict:
-        """Return the user's choices as a dict."""
         return {
             "generate_first": bool(self.generate_check.isChecked()),
             "load_model": bool(self.load_check.isChecked()),

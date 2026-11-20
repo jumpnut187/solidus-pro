@@ -1,5 +1,3 @@
-"""Tests for core.surrogate.geometries and the synthetic-data generation path."""
-
 from __future__ import annotations
 
 import contextlib
@@ -20,7 +18,6 @@ from core.surrogate.geometries import (
     voxel_size_for,
 )
 
-
 class GeneratorDeterminismTests(unittest.TestCase):
     def test_same_seed_same_geometries(self):
         a = generate_geometries(12, seed=3)
@@ -39,7 +36,6 @@ class GeneratorDeterminismTests(unittest.TestCase):
     def test_families_cycle(self):
         specs = generate_geometries(len(FAMILIES) * 2, seed=0)
         self.assertEqual([s.family for s in specs], FAMILIES + FAMILIES)
-
 
 class MeshQualityTests(unittest.TestCase):
     def _check_spec(self, spec: GeometrySpec):
@@ -65,15 +61,11 @@ class MeshQualityTests(unittest.TestCase):
             vs = voxel_size_for(spec, grid=64, target_voxels=20_000, max_voxels=50_000)
             estimate = spec.mesh.volume / vs ** 3
             self.assertGreaterEqual(vs, 0.05, spec.name)
-            # Count cap can be nudged by the 0.005 in rounding; allow 10%.
             self.assertLessEqual(estimate, 55_000, spec.name)
             self.assertGreaterEqual(estimate, 2_000, spec.name)
 
-
 class CompoundVoxelizeCaptureTests(unittest.TestCase):
     def test_plate_with_boss_voxelizes_solid_and_captures(self):
-        """Overlapping shells (plate + cylinder boss) must voxelize with no hollow
-        interior cells, then solve and capture into a valid record."""
         from core.simulation_pipeline import PipelineInputs, run_pipeline
         from core.surrogate.dataset import capture_run, load_dataset, validate_record
         from core.surrogate.training import _loader_for_trimesh, _run_on_large_stack
@@ -96,7 +88,6 @@ class CompoundVoxelizeCaptureTests(unittest.TestCase):
         result = _run_on_large_stack(_solve)
         centers = np.asarray(result.engine.mesh.voxel_centers, dtype=np.float64)
 
-        # Rebuild the occupancy lattice and compare to the analytic solid.
         origin = centers.min(axis=0)
         idx = np.round((centers - origin) / voxel).astype(int)
         shape = tuple(idx.max(axis=0) + 1)
@@ -124,7 +115,6 @@ class CompoundVoxelizeCaptureTests(unittest.TestCase):
             self.assertEqual(len(records), 1)
             self.assertIsNone(validate_record(records[0]))
             self.assertEqual(records[0]["end"].size, 32 ** 3)
-
 
 class RecordValidationTests(unittest.TestCase):
     def _record(self, end_value: float = 100.0, start_value: float = 50.0):
@@ -154,18 +144,14 @@ class RecordValidationTests(unittest.TestCase):
         from core.surrogate.fields import PART_TYPE_DIVISOR
 
         rec = self._record()
-        # Turn most active cells into chills with end 0; the remaining cast cells stay valid.
         active_idx = np.flatnonzero(rec["channels"][0].reshape(-1) > 0.5)
         chill_idx = active_idx[:-2]
         rec["channels"][1].reshape(-1)[chill_idx] = 2.0 / PART_TYPE_DIVISOR
         rec["end"][chill_idx] = 0.0
         rec["start"][chill_idx] = 0.0
-        # A record with chills must also carry chill_boost on the cast cells;
-        # a zero channel is rejected as a decayed end-of-run capture.
         self.assertEqual(validate_record(rec), "chill_present_but_zero_boost")
         rec["channels"][5].reshape(-1)[active_idx[-2:]] = 0.5
         self.assertIsNone(validate_record(rec))
-
 
 if __name__ == "__main__":
     unittest.main()

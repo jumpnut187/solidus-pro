@@ -1,26 +1,3 @@
-"""Defect-region extraction for shrink/porosity pockets.
-
-The desktop Shrink and Microporosity results are per-voxel scalar fields
-(``SolidificationEngine.get_shrink_display_intensity`` and
-``get_microporosity_display_intensity``). For the
-inspector feature we need to recover the connected defect pocket
-under the active threshold so we can show the user the volume of
-the pocket they clicked on.
-
-This module operates on the voxel mesh's neighbor graph so the
-pocket boundaries follow the same canonical adjacency that the
-solidification kernels use. The mesh stores up to 26 neighbors per
-voxel with the canonical layout documented in
-``core/voxel_mesh.py:_canonicalize_neighbor_order``:
-
-    0-5   face neighbors:   +X, -X, +Y, -Y, +Z, -Z
-    6-17  edge neighbors:   combinations of two axes
-    18-25 corner neighbors: combinations of three axes
-
-6-connectivity uses slots 0-5 (face-adjacent only) so two defect
-volumes that touch only at a corner remain separate pockets.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -28,28 +5,10 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-
 MIXED_DEFECT_TOLERANCE = 0.05
-
 
 @dataclass(frozen=True)
 class DefectPocket:
-    """A connected shrink/porosity pocket above the active threshold.
-
-    Attributes:
-        id: Monotonically increasing pocket identifier (per call).
-        voxel_indices: Global voxel indices belonging to the pocket.
-        anchor_voxel_index: The voxel the user clicked on.
-        anchor_position: World position of the anchor voxel.
-        centroid: Mean world position of the pocket voxels.
-        bounds: ``((x_min, x_max), (y_min, y_max), (z_min, z_max))``.
-        geometric_volume_in3: Sum of per-voxel volumes in cubic inches.
-        voxel_count: Number of voxels in the pocket.
-        max_shrinkage_risk: Maximum shrinkage probability in the pocket.
-        max_porosity_risk: Maximum porosity probability in the pocket.
-        mean_display_risk: Mean display intensity across the pocket.
-        dominant_defect_type: ``"shrinkage"``, ``"porosity"``, or ``"mixed"``.
-    """
 
     id: int
     voxel_indices: np.ndarray
@@ -64,7 +23,6 @@ class DefectPocket:
     mean_display_risk: float
     dominant_defect_type: str
 
-
 def compute_merged_shrink_display_intensity(
     shrinkage_probability: Optional[np.ndarray],
     porosity_probability: Optional[np.ndarray],
@@ -72,14 +30,6 @@ def compute_merged_shrink_display_intensity(
     chill_part_type: int = 2,
     core_part_type: int = 4,
 ) -> np.ndarray:
-    """Build the merged max(shrink, microporosity) intensity.
-
-    Mirrors ``SolidificationEngine.get_shrinkage_display_intensity`` (the field
-    the old "Shrinkage/Porosity" view showed). The desktop inspector now takes
-    the Shrink or Microporosity display array directly.
-    CHILL and CORE voxels are forced to zero so mold material doesn't pollute
-    the merged field.
-    """
     if shrinkage_probability is None and porosity_probability is None:
         return np.zeros(0, dtype=np.float32)
 
@@ -111,9 +61,7 @@ def compute_merged_shrink_display_intensity(
 
     return np.clip(display, 0.0, 1.0).astype(np.float32, copy=False)
 
-
 def _resolve_connectivity_slot_count(connectivity: int) -> int:
-    """Return the neighbor slot count for the requested connectivity."""
     if connectivity == 6:
         return 6
     if connectivity == 18:
@@ -123,7 +71,6 @@ def _resolve_connectivity_slot_count(connectivity: int) -> int:
     raise ValueError(
         f"connectivity must be 6, 18, or 26 (got {connectivity!r})"
     )
-
 
 def extract_pocket_at(
     voxel_index: int,
@@ -137,24 +84,6 @@ def extract_pocket_at(
     connectivity: int = 6,
     pocket_id: int = 0,
 ) -> Optional[DefectPocket]:
-    """Extract the connected shrink/porosity pocket that contains ``voxel_index``.
-
-    Args:
-        voxel_index: Global voxel index that the user clicked on.
-        display_intensity: Per-voxel merged shrink/porosity intensity.
-        voxel_neighbors: ``(N, 26)`` int32 neighbor table (see module docstring).
-        voxel_centers: ``(N, 3)`` float array of voxel center positions.
-        voxel_volumes: ``(N,)`` float array of per-voxel volumes in cubic inches.
-        shrinkage_risk: Optional per-voxel shrinkage probability (cast to float32).
-        porosity_risk: Optional per-voxel porosity probability (cast to float32).
-        threshold: Minimum display intensity to retain a voxel in the pocket.
-        connectivity: ``6`` (face), ``18`` (face+edge), or ``26`` (face+edge+corner).
-        pocket_id: Identifier stamped onto the returned ``DefectPocket``.
-
-    Returns:
-        The connected pocket, or ``None`` if the anchor voxel is below
-        the threshold or the arrays are inconsistent.
-    """
     display_intensity = np.asarray(display_intensity, dtype=np.float32)
     voxel_centers = np.asarray(voxel_centers, dtype=np.float64)
     voxel_volumes = np.asarray(voxel_volumes, dtype=np.float32)
@@ -258,7 +187,5 @@ def extract_pocket_at(
         dominant_defect_type=dominant,
     )
 
-
 def format_pocket_volume_label(pocket: DefectPocket) -> str:
-    """Return the leader text for a defect pocket."""
     return f"Shrink pocket: {pocket.geometric_volume_in3:.3f} in^3"

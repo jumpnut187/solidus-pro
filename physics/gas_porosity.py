@@ -1,17 +1,3 @@
-"""
-Gas Porosity Analysis — Post-processing module for Solidus Pro.
-
-Computes a gas porosity risk score (0-1) per voxel based on mold gas
-generation and entrapment.  Three separable visualization layers are
-produced:
-
-  gas_generation   — raw SGI field (source + exponential decay)
-  gas_entrapment   — E field (solidification-time-based)
-  gas_porosity_risk— combined R_gas field
-
-All Numba-JIT kernels use parallel=True for O(N) performance.
-"""
-
 from __future__ import annotations
 
 from typing import Optional, Tuple
@@ -19,9 +5,6 @@ from typing import Optional, Tuple
 import numpy as np
 from numba import jit, prange
 
-# ---------------------------------------------------------------------------
-# Surface-type weighting for gas generation sources
-# ---------------------------------------------------------------------------
 SURFACE_TYPE_WEIGHTS: dict = {
     "core": 1.0,
     "mold_wall": 0.6,
@@ -29,10 +12,6 @@ SURFACE_TYPE_WEIGHTS: dict = {
     "chill": 0.0,
 }
 
-# Mapping from part-type integer to surface-type key string
-# 0 = cast -> mold_wall,  1 = riser -> open_riser,
-# 2 = chill -> chill, 3 = riser_post -> open_riser,
-# 4 = core -> core
 PART_TYPE_SURFACE_MAP: dict = {
     0: "mold_wall",
     1: "open_riser",
@@ -41,7 +20,6 @@ PART_TYPE_SURFACE_MAP: dict = {
     4: "core",
 }
 
-# Binder decomposition gas yields (cm³ of gas per gram of binder at STP)
 BINDER_GAS_YIELDS: dict = {
     "phenolic_urethane": 12.0,
     "furan": 10.0,
@@ -49,10 +27,6 @@ BINDER_GAS_YIELDS: dict = {
     "sodium_silicate": 2.0,
     "clay_green_sand": 3.0,
 }
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 def compute_surface_gas_generation(
     surface_indices: np.ndarray,
@@ -64,36 +38,6 @@ def compute_surface_gas_generation(
     binder_content: float = 1.5,
     core_venting_effectiveness: float = 0.5,
 ) -> np.ndarray:
-    """
-    Compute SGI₀ (surface gas generation index) for each surface voxel.
-
-    SGI₀ integrates binder decomposition + moisture gas over the local
-    solidification time, weighted by surface type.
-
-    Parameters
-    ----------
-    surface_indices : (S,) int array
-        Indices of surface voxels in the full mesh.
-    voxel_part_types : (N,) int array or None
-        Part-type label per voxel (0=cast, 1=riser, 2=chill, 3=riser_post, 4=core).
-        If None, all surfaces are treated as mold_wall.
-    local_solidification_times : (N,) float array
-        Local solidification time (liquidus -> solidus) per voxel in seconds.
-    humidity : float
-        Ambient relative humidity 0-1 (default 0.5).
-    binder_type : str
-        Binder chemistry key (see BINDER_GAS_YIELDS).
-    binder_content : float
-        Weight-percent binder in the sand mix (default 1.5 %).
-    core_venting_effectiveness : float
-        0-1 factor for how well core gas can vent (1=perfect venting, 0=no venting,
-        effective gas kept low when venting is good).
-
-    Returns
-    -------
-    sgi0 : (S,) float32 array
-        Per-surface-voxel SGI₀ values (0-1 range).
-    """
     n_voxels = len(local_solidification_times)
     if voxel_part_types is None:
         voxel_part_types = np.zeros(n_voxels, dtype=np.int32)
@@ -102,11 +46,8 @@ def compute_surface_gas_generation(
     )
 
     gas_yield = BINDER_GAS_YIELDS.get(binder_type, 10.0)
-    # base gas generation rate: binder decomposition + moisture
-    # moisture contribution: humidity * 2.0 cm³/g equivalent
     base_rate = binder_content * gas_yield + humidity * 2.0
 
-    # normalize to a 0-1 target using reference: ~20 cm³/g yields max SGI₀ ≈ 1.0
     reference_yield = 20.0
     source_scale = min(base_rate / reference_yield, 2.0)
 
@@ -122,8 +63,6 @@ def compute_surface_gas_generation(
         weight = SURFACE_TYPE_WEIGHTS.get(stype, 0.6)
         sgi0[idx] = source_scale * weight * time_factor[idx]
 
-    # Core venting reduces the gas a core surface retains, wherever the core
-    # entries sit in ``surface_indices``.
     core_mask = surface_types == "core"
     if np.any(core_mask):
         sgi0_core = source_scale * SURFACE_TYPE_WEIGHTS["core"] * time_factor[core_mask]
@@ -132,18 +71,15 @@ def compute_surface_gas_generation(
 
     return np.clip(sgi0, 0.0, 1.0).astype(np.float32)
 
-
 def _classify_surface_types(
     surface_indices: np.ndarray,
     voxel_part_types: np.ndarray,
 ) -> np.ndarray:
-    """Map part-type integers to surface-type strings."""
     types = np.empty(len(surface_indices), dtype=object)
     for i, si in enumerate(surface_indices):
         pt = int(voxel_part_types[si])
         types[i] = PART_TYPE_SURFACE_MAP.get(pt, "mold_wall")
     return types
-
 
 def propagate_gas_to_interior(
     voxel_centers: np.ndarray,
@@ -152,29 +88,6 @@ def propagate_gas_to_interior(
     *,
     gas_penetration_depth: float = 3.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Propagate surface gas generation to all voxels via exponential distance decay.
-
-    Uses scipy's KDTree for O(N log S) nearest-surface queries.
-
-    Parameters
-    ----------
-    voxel_centers : (N, 3) float array
-        Coordinates of every voxel center (inches).
-    surface_indices : (S,) int array
-        Indices of surface voxels.
-    surface_sgi0 : (S,) float32 array
-        Per-surface-voxel SGI₀ values.
-    gas_penetration_depth : float
-        λ — characteristic penetration depth (inches, default 3.0 in ≈ 76 mm).
-
-    Returns
-    -------
-    gas_generation : (N,) float32 array
-        SGI(d) = SGI₀ · e^(-d/λ)  for every voxel.
-    nearest_surface_map : (N,) int32 array
-        Index into surface_indices of the nearest surface voxel for each voxel.
-    """
     from scipy.spatial import cKDTree
 
     surface_centers = np.asarray(voxel_centers[surface_indices], dtype=np.float64)
@@ -195,7 +108,6 @@ def propagate_gas_to_interior(
     )
     return gas_generation, nearest_idx
 
-
 @jit(nopython=True, parallel=True, fastmath=True, cache=True)
 def _propagate_sgi_numba(
     distances: np.ndarray,
@@ -209,7 +121,6 @@ def _propagate_sgi_numba(
         sgi[i] = nearest_sgi0[i] * np.exp(-distances[i] * inv_lambda)
     return sgi
 
-
 def compute_combined_risk(
     gas_generation: np.ndarray,
     local_solidification_time: np.ndarray,
@@ -218,15 +129,6 @@ def compute_combined_risk(
     gas_entrapment_exponent: float = 2.0,
     niyama_coupling_alpha: float = 0.5,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Compute entrapment factor, Niyama coupling, and final combined risk.
-
-    Returns
-    -------
-    gas_entrapment : (N,) float32    E(i) = (local_st / max_st)^n
-    niyama_coupling : (N,) float32   F_niyama(i)
-    gas_porosity_risk : (N,) float32 R_gas(i)
-    """
     n = gas_generation.shape[0]
     if niyama_risk is None or len(niyama_risk) != n:
         niyama_risk = np.full(n, 0.0, dtype=np.float32)
@@ -241,7 +143,6 @@ def compute_combined_risk(
         np.float32(gas_entrapment_exponent),
         np.float32(niyama_coupling_alpha),
     )
-
 
 @jit(nopython=True, parallel=True, fastmath=True, cache=True)
 def _compute_combined_risk_numba(
@@ -282,10 +183,8 @@ def _compute_combined_risk_numba(
 
     return entrapment, niyama_coupling, risk
 
-
 def compute_hotspots(
     gas_porosity_risk: np.ndarray,
     threshold: float = 0.65,
 ) -> np.ndarray:
-    """Threshold the continuous risk field to produce discrete hotspot markers."""
     return np.asarray(gas_porosity_risk >= threshold, dtype=bool)

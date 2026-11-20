@@ -15,11 +15,9 @@ for ax, lo, hi, ln, hn in pairs:
             print(f"    {ln}:{k[0]:7s} <-> {hn}:{k[1]:7s}   {v} cells")
         ii,jj = np.nonzero(both)
         print(f"    coords bbox: [{ii.min()},{ii.max()}] x [{jj.min()},{jj.max()}]")
-    # one-sided: part on hi face, mold on lo -> wrap sees mold(obstacle) = safe
     only_hi = (hi>=0) & (lo<0); only_lo=(lo>=0)&(hi<0)
     print(f"    part only on {hn}: {int(only_hi.sum())}, part only on {ln}: {int(only_lo.sum())}")
 
-# specifically: RISER at z=93 whose z=0 counterpart is CAST
 riser_top = t[:,:,nz-1]==1
 cast_bot  = t[:,:,0]==0
 ov = riser_top & cast_bot
@@ -27,7 +25,6 @@ print(f"\n*** RISER cells on z=93 whose (x,y) column has CAST on z=0: {int(ov.su
 if ov.sum():
     ii,jj=np.nonzero(ov); print("    bbox x[%d,%d] y[%d,%d]"%(ii.min(),ii.max(),jj.min(),jj.max()))
     print("    sample:", list(zip(ii[:10].tolist(), jj[:10].tolist())))
-# and RUNNER/GATE y-wrap
 print("\n*** y=0 <-> y=134 detail")
 lo=t[:,0,:]; hi=t[:,ny-1,:]
 b=(lo>=0)&(hi>=0)

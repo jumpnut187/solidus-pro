@@ -1,27 +1,3 @@
-"""Mechanism-1 probe: per-operation mass ledger for the over-full cells at the
-filter's bottom plane (Test 2, 4.3 mm grid).
-
-Answers, by instrumented simulation:
-
-  A. Is the Koerner mass exchange antisymmetric across the porous boundary?
-     -> per-step global sum of (mass_out - mass_in) from free_surface_kernel,
-        plus an explicit pair-by-pair audit (dm_AB + dm_BA) over every
-        straddling pair of every watched cell.
-
-  B. Which OPERATION moves mass into these cells, and does anything ever take
-     it back out?
-     -> per-step dm attributed to: exchange, apply_transitions (+_redistribute),
-        heal_submerged_interface, and everything outside step() (inlet pin,
-        top-up).
-
-  C. How much of the exchange delta is *amplification*?
-     -> the same direction sum recomputed at weight 1, which is what a
-        non-porous FLUID cell gets and what makes dm == drho.
-
-Nothing in the repo is modified; every hook is a monkeypatch installed here.
-
-  START=8000 STOP=12500 ./venv/bin/python filter_mass_ledger.py
-"""
 from __future__ import annotations
 
 import collections
@@ -32,7 +8,7 @@ import time
 sys.path.insert(0, "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-import numpy as np  # noqa: E402
+import numpy as np
 
 START = int(os.environ.get("START", "8000"))
 STOP = int(os.environ.get("STOP", "12500"))
@@ -43,32 +19,22 @@ OUT = os.environ.get("OUT", "fml")
 
 S = {}
 
-
 def log(m):
     print(f"[{time.strftime('%H:%M:%S')}] {m}", flush=True)
 
-
-# ---------------------------------------------------------------------------
-# weight rule, replicated from free_surface_kernel (fluid_flow.py ~1586-1620)
-# ---------------------------------------------------------------------------
 def _eps_raw(mass, rho32, por, idx):
     den = np.float64(rho32[idx]) * por[idx]
     return mass[idx] / den if den > 0.0 else 0.0
 
-
 def _clamp01(v):
     return 0.0 if v < 0.0 else (1.0 if v > 1.0 else v)
 
-
 def pair_weight(flag_a, flag_b, por_a, por_b, eps_a, eps_b, FLUID):
-    """Weight cell A uses for its pair with B. Must equal B's for its pair
-    with A, or the exchange creates/destroys mass pairwise."""
     if por_a < 1.0 or por_b < 1.0:
         return 0.5 * (eps_a + eps_b), "porous"
     if flag_a == FLUID or flag_b == FLUID:
         return 1.0, "fluid"
     return 0.5 * (_clamp01(eps_a) + _clamp01(eps_b)), "iface"
-
 
 def install(fs):
     import physics.filling as pf
@@ -111,8 +77,6 @@ def install(fs):
     )
 
     def watch_indices(state):
-        """FLUID/INTERFACE cells low in the domain that are porous or touch a
-        porous cell and are already over-full. Fixed once, then followed."""
         por = np.asarray(state.porous.porosity) < 1.0
         adj = np.zeros_like(por)
         for i in range(1, 19):
@@ -127,7 +91,6 @@ def install(fs):
             idx = idx[order]
         return idx
 
-    # ------------------------------------------------------------------
     def fsk(post, streamed, flags, rho, u, porosity, entry_offset, primed,
             C, Cii, W, Op, gas_density, mass_in, mass_out, f_out):
         orig_fsk(post, streamed, flags, rho, u, porosity, entry_offset,
@@ -188,7 +151,6 @@ def install(fs):
         S["pair_resid"] = resid_max
         S["pair_n"] = npairs
 
-    # ------------------------------------------------------------------
     def trans(state, time_s, **kw):
         i = n["i"] + 1
         idx = S.get("watch")
@@ -211,7 +173,6 @@ def install(fs):
         S["dm_heal"] = state.mass[wx, wy, wz] - pre
         return out
 
-    # ------------------------------------------------------------------
     def step(state, units, **kw):
         i = n["i"] + 1
         idx = S.get("watch")
@@ -267,9 +228,6 @@ def install(fs):
             dm_tr = S.get("dm_trans", np.zeros(len(wx)))
             dm_he = S.get("dm_heal", np.zeros(len(wx)))
             mass_pre = S.get("mass_pre", post_m)
-            # Everything that touched these cells OUTSIDE step(): the inlet pin
-            # and the metered top-up in core/filling_stage.py, which run between
-            # the previous step's exit and this step's entry.
             prev = S.get("prev_post")
             dm_ext = (entry - prev) if (entry is not None and prev is not None
                                         and prev.shape == entry.shape) \
@@ -306,7 +264,6 @@ def install(fs):
     log(f"instrumentation installed: START={START} STOP={STOP} "
         f"LOG_EVERY={LOG_EVERY} AUDIT_EVERY={AUDIT_EVERY}")
 
-
 def main():
     import scipy.spatial as ss
     o = ss.cKDTree
@@ -333,7 +290,7 @@ def main():
                     if p.suffix.lower() in (".stl", ".step", ".stp")):
         try:
             pm.load_assembly_parts(str(f))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log(f"skip {f.name}: {e}")
     sprue = next(p for p in pm.get_all_parts() if p.part_type is PartType.SPRUE)
     b = sprue.get_bounds()
@@ -357,7 +314,6 @@ def main():
                              progress_message_callback=lambda m: log(f"FILL: {m}"))
     except SystemExit:
         log("probe stop")
-
 
 if __name__ == "__main__":
     import threading

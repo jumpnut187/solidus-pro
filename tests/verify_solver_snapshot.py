@@ -1,40 +1,3 @@
-"""Bit-identity check for solver changes that must not move results.
-
-A performance change to the thermal solver, the mesh build or the time loop
-should give the same numbers, not close ones. This script runs a fixed set of
-cases through ``run_pipeline`` and saves every numeric array the engine, the
-mesh and the heat model end up with. Run it before and after a change and
-compare the two folders:
-
-    python tests/verify_solver_snapshot.py save /tmp/before
-    ... change the code ...
-    python tests/verify_solver_snapshot.py save /tmp/warmup    # see below
-    python tests/verify_solver_snapshot.py save /tmp/after
-    python tests/verify_solver_snapshot.py compare /tmp/before /tmp/after
-
-``compare`` exits 0 when every array is equal bit for bit (NaN equals NaN).
-With ``--rtol`` it accepts float arrays that agree to that relative tolerance
-(float32 arrays to no better than 1e-6, a few of their last bits), still
-requires integer and boolean arrays to be equal, and prints the largest
-relative gap of each case. Use it for a change that is meant to move the last
-digits, such as the fused kernels (``CASTSIM_FUSED_KERNELS=0`` is the
-bit-for-bit path they are compared with).
-
-Run the save twice after editing a file that holds Numba kernels. Numba
-recompiles the kernels of an edited file, and a kernel compiled in the running
-process does not always give the last bit a kernel loaded from the cache gives
-(seen on ``plate_riser_015``: final temperatures 1.6e-11 degC apart, every
-other array equal, with no code change at all). The first save after an edit
-refills the cache; compare the second.
-
-The cases cover: graded and uniform explicit mold, the boundary path with no
-mold, cut cells on and off, a chill, a sand core, and a riser. They are the
-CI models, so the script runs on a clean checkout. ``plate_riser_015`` has
-100k voxels and takes about half a minute; the rest take seconds.
-
-Standalone script, not part of the unittest suite. Method and results: implementation.md.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -59,10 +22,8 @@ ANALYSES = {
 NO_MOLD = {"mold": {"auto_mold": 0, "auto_cores": 0}}
 UNIFORM_MOLD = {"mold": {"mold_grading_levels": 0}}
 
-#: A part is (CI model file, part type) or (file, type, (x, y, z) position in inches).
 Part = Tuple[Any, ...]
 
-#: name -> (parts, voxel size in inches, solidification params, cut cells or None for the default)
 CASES: Dict[str, Tuple[Sequence[Part], float, Dict[str, Any], Optional[bool]]] = {
     "plate_riser_030": ([("cast.stl", "cast"), ("riser.stl", "riser")], 0.30, {}, None),
     "plate_riser_015": ([("cast.stl", "cast"), ("riser.stl", "riser")], 0.15, {}, None),
@@ -70,7 +31,6 @@ CASES: Dict[str, Tuple[Sequence[Part], float, Dict[str, Any], Optional[bool]]] =
     "plate_riser_030_nocut": ([("cast.stl", "cast"), ("riser.stl", "riser")], 0.30, {}, False),
     "lbracket_020_uniform_mold": ([("l_bracket.stl", "cast")], 0.20, UNIFORM_MOLD, None),
     "thickthin_020_boundary_nocut": ([("thick_thin_test.stl", "cast")], 0.20, NO_MOLD, False),
-    # 2 in block, chill on the +x face, sand core on the -x face, riser on top.
     "block_chill_core_riser_010": (
         [
             ("block_2inch.stl", "cast"),
@@ -110,9 +70,7 @@ CASES: Dict[str, Tuple[Sequence[Part], float, Dict[str, Any], Optional[bool]]] =
     ),
 }
 
-
 def _numeric_arrays(obj: Any, prefix: str) -> Dict[str, np.ndarray]:
-    """Every non-empty numeric array attribute of ``obj``."""
     found: Dict[str, np.ndarray] = {}
     for name, value in vars(obj).items():
         if not (hasattr(value, "dtype") and hasattr(value, "shape")):
@@ -121,7 +79,6 @@ def _numeric_arrays(obj: Any, prefix: str) -> Dict[str, np.ndarray]:
         if array.dtype.kind in "fiub" and array.size > 0:
             found[f"{prefix}.{name}"] = np.array(array)
     return found
-
 
 def save(out_dir: str, names: Sequence[str]) -> int:
     from core.part_manager import build_part_manager
@@ -179,16 +136,13 @@ def save(out_dir: str, names: Sequence[str]) -> int:
         )
     return 0
 
-
 def _relative_gap(x: np.ndarray, y: np.ndarray) -> float:
-    """Largest |x - y| / max(|x|, |y|) over the entries that are finite in both."""
     x64, y64 = x.astype(np.float64), y.astype(np.float64)
     finite = np.isfinite(x64) & np.isfinite(y64)
     if not np.any(finite):
         return 0.0
     scale = np.maximum(np.maximum(np.abs(x64[finite]), np.abs(y64[finite])), 1e-300)
     return float(np.max(np.abs(x64[finite] - y64[finite]) / scale))
-
 
 def compare(dir_a: str, dir_b: str, rtol: float = 0.0, atol: float = 0.0) -> int:
     files_a = {f for f in os.listdir(dir_a) if f.endswith(".npz")}
@@ -218,7 +172,6 @@ def compare(dir_a: str, dir_b: str, rtol: float = 0.0, atol: float = 0.0) -> int
                     if gap > worst_gap:
                         worst_gap, worst_key = gap, key
                     allowed = max(rtol, 1e-6) if x.dtype == np.float32 else rtol
-                    # Same NaN and inf pattern, and the finite entries within tolerance.
                     if np.array_equal(np.isfinite(x), np.isfinite(y)) and np.allclose(
                         x.astype(np.float64), y.astype(np.float64), rtol=allowed, atol=atol, equal_nan=True
                     ):
@@ -238,9 +191,8 @@ def compare(dir_a: str, dir_b: str, rtol: float = 0.0, atol: float = 0.0) -> int
     print(f"RESULT: {passed}" if differences == 0 else f"RESULT: {differences} DIFFERENCES")
     return 0 if differences == 0 else 1
 
-
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description="Bit-identity check for solver changes that must not move results.")
     commands = parser.add_subparsers(dest="command", required=True)
     save_parser = commands.add_parser("save", help="run the cases and save their arrays")
     save_parser.add_argument("out_dir")
@@ -254,7 +206,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.command == "save":
         return save(args.out_dir, args.cases)
     return compare(args.dir_a, args.dir_b, rtol=args.rtol, atol=args.atol)
-
 
 if __name__ == "__main__":
     sys.exit(main())

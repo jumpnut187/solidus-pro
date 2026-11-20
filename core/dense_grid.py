@@ -1,29 +1,3 @@
-"""
-Uniform dense lattice built from the engine's sparse voxel result.
-
-The engine hands both front ends a *sparse* result: occupied voxel centers
-plus one value per voxel per mode. Anything smoother than drawing a cube per
-voxel -- painting the field on the casting's own surface, contouring a
-threshold envelope, cutting a section cap -- needs the values on a dense,
-uniform lattice. This module is that conversion, shared by the web sidecar
-(``web/fields.py``) and the desktop result renderer (``ui/result_surface.py``).
-
-Layout contract, relied on by both clients:
-
-1. The lattice is uniform: every cell is ``spacing`` on a side, so ``dims``,
-   ``origin`` and ``spacing`` fully describe it.
-2. Cells are indexed x-fastest: ``index = ix + nx * (iy + ny * iz)``. Reshape
-   a flat grid as ``(nz, ny, nx)`` for numpy, or hand it to VTK in Fortran
-   order for a ``vtkImageData`` of dimensions ``(nx, ny, nz)``.
-3. Scalar grids are *hole-filled*: a cell outside the metal carries the value
-   of the nearest cell inside it (see :func:`scatter_and_fill`). Leaving them
-   at zero makes trilinear sampling fade every surface toward the bottom of
-   the colormap -- the blue halo of naive volume painting. The occupancy mask,
-   not the scalar grid, says where metal actually is.
-
-``origin`` is the world position of the **center** of cell ``(0, 0, 0)``.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -32,22 +6,9 @@ from typing import List, Optional, Tuple
 import numpy as np
 from scipy import ndimage
 
-#: Largest lattice this module will build, in cells.
-#:
-#: The lattice is derived from the extent of the voxel centers, so a run whose
-#: voxels lie on a long diagonal at a fine voxel size implies a box far larger
-#: than the metal in it. 64 million cells is about 64 MB for the mask and
-#: 256 MB of transient EDT indices -- past any real casting on this hardware,
-#: and short of the runs that cannot work at all.
 MAX_LATTICE_CELLS = 64_000_000
 
-
 class LatticeTooLargeError(ValueError):
-    """The derived lattice is larger than this module will build.
-
-    Carries the numbers the message needs so a front end can turn it into
-    something a user can act on, rather than a stack trace.
-    """
 
     def __init__(self, dims: Tuple[int, int, int], spacing: float) -> None:
         self.dims = dims
@@ -59,10 +20,8 @@ class LatticeTooLargeError(ValueError):
             f"the limit is {MAX_LATTICE_CELLS:,}."
         )
 
-
 @dataclass(frozen=True)
 class Lattice:
-    """The uniform voxel lattice a run was solved on."""
 
     dims: Tuple[int, int, int]
     origin: Tuple[float, float, float]
@@ -74,12 +33,10 @@ class Lattice:
         return int(nx) * int(ny) * int(nz)
 
     def to_volume(self, flat: np.ndarray) -> np.ndarray:
-        """View a flat x-fastest grid as ``[ix, iy, iz]``."""
         nx, ny, nz = self.dims
         return np.asarray(flat).reshape((nz, ny, nx)).transpose(2, 1, 0)
 
     def world_to_cell(self, points: np.ndarray) -> np.ndarray:
-        """Flat cell index of the cell whose center is nearest each world point."""
         pts = np.atleast_2d(np.asarray(points, dtype=np.float64))
         nx, ny, nz = self.dims
         ijk = np.rint((pts - np.asarray(self.origin)) / self.spacing).astype(np.int64)
@@ -88,22 +45,7 @@ class Lattice:
         iz = np.clip(ijk[:, 2], 0, nz - 1)
         return ix + nx * (iy + ny * iz)
 
-
 def derive_lattice(centers: np.ndarray, sizes: Optional[np.ndarray] = None) -> Lattice:
-    """
-    Recover the uniform lattice the sparse centers were sampled from.
-
-    Raises :class:`LatticeTooLargeError` when the extent and the voxel size
-    imply more than :data:`MAX_LATTICE_CELLS`. The check is on the cell count
-    computed from the dimensions, before anything is allocated, because the
-    failure this guards against is an allocation.
-
-    The spacing is taken from the per-voxel size when it is uniform (it always
-    is for a run at ``base_voxel_size``) and from the smallest inter-plane gap
-    otherwise, and ``dims`` comes from the extent rather than the number of
-    unique values -- an axis can have an entirely empty plane in the middle of
-    the casting, and counting occupied planes would silently shear the grid.
-    """
     if centers.size == 0:
         return Lattice(dims=(1, 1, 1), origin=(0.0, 0.0, 0.0), spacing=1.0)
 
@@ -143,9 +85,7 @@ def derive_lattice(centers: np.ndarray, sizes: Optional[np.ndarray] = None) -> L
         spacing=float(spacing),
     )
 
-
 def flat_indices(centers: np.ndarray, lattice: Lattice) -> np.ndarray:
-    """Map voxel centers onto flat, x-fastest cell indices."""
     nx, ny, nz = lattice.dims
     ox, oy, oz = lattice.origin
     spacing = lattice.spacing
@@ -154,17 +94,7 @@ def flat_indices(centers: np.ndarray, lattice: Lattice) -> np.ndarray:
     iz = np.clip(np.rint((centers[:, 2].astype(np.float64) - oz) / spacing), 0, nz - 1).astype(np.int64)
     return ix + nx * (iy + ny * iz)
 
-
 def nearest_known_map(known: np.ndarray, lattice: Lattice) -> np.ndarray:
-    """
-    For every cell, the flat index of the nearest cell where ``known`` is true.
-
-    ``known`` is a flat, x-fastest boolean grid. The Euclidean distance
-    transform is the expensive part of building a dense grid, so the map
-    derived from the occupancy mask is computed once and reused for every
-    scalar field; only a mode defined on a strict subset of the metal pays
-    for a second one.
-    """
     nx, ny, nz = lattice.dims
     volume = np.asarray(known, dtype=bool).reshape((nz, ny, nx))
     unknown = ~volume
@@ -173,14 +103,10 @@ def nearest_known_map(known: np.ndarray, lattice: Lattice) -> np.ndarray:
     if np.all(unknown):
         return np.zeros(lattice.cell_count, dtype=np.int64)
 
-    # distance_transform_edt measures distance to the nearest ZERO of its
-    # input, so the "unknown" grid is what goes in: the feature it walks
-    # towards is a known cell.
     indices = ndimage.distance_transform_edt(unknown, return_distances=False, return_indices=True)
-    kz, ky, kx = indices  # each (nz, ny, nx)
+    kz, ky, kx = indices
     flat = kx.astype(np.int64) + nx * (ky.astype(np.int64) + ny * kz.astype(np.int64))
     return np.asarray(flat, dtype=np.int64).reshape(-1)
-
 
 def scatter_and_fill(
     values: np.ndarray,
@@ -189,15 +115,6 @@ def scatter_and_fill(
     nearest: np.ndarray,
     lattice: Lattice,
 ) -> np.ndarray:
-    """
-    Scatter sparse per-voxel values onto the dense lattice, then fill the rest.
-
-    ``sample_mask`` selects which voxels carry a usable value (a misrun voxel
-    in ``fill_time`` does not). Cells with no value take the value of the
-    nearest cell that has one -- via ``nearest``, which is computed once
-    against the occupancy mask, plus a second, mode-specific pass in the rarer
-    case where a mode is undefined on some *occupied* cells.
-    """
     cell_count = lattice.cell_count
     dense = np.zeros(cell_count, dtype=np.float32)
     known = np.zeros(cell_count, dtype=bool)

@@ -1,5 +1,3 @@
-"""Tests for core.orientation (casting orientation and parting line math)."""
-
 import unittest
 
 import numpy as np
@@ -8,12 +6,10 @@ import trimesh
 from core import orientation as ori
 from core.part_manager import Part, PartType
 
-
 def _box(extents=(4.0, 2.0, 1.0)):
     mesh = trimesh.creation.box(extents=extents)
-    mesh.apply_translation(np.array(extents) / 2.0)  # min corner at origin
+    mesh.apply_translation(np.array(extents) / 2.0)
     return mesh
-
 
 class EulerRoundTrip(unittest.TestCase):
     def test_round_trip(self):
@@ -31,7 +27,6 @@ class EulerRoundTrip(unittest.TestCase):
         got = ori.world_bounds(mesh, (30, -20, 75), (1, 2, 3))
         np.testing.assert_allclose(got, expected, atol=1e-9)
 
-
 class WorldAxisRotation(unittest.TestCase):
     def test_compound_turns_compose_in_world(self):
         rot, pos = (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)
@@ -48,18 +43,15 @@ class WorldAxisRotation(unittest.TestCase):
         rot, pos = ori.rotate_about_world_axis(rot, pos, "y", 90, center)
         b1 = ori.world_bounds(mesh, rot, pos)
         np.testing.assert_allclose(b1.mean(axis=0), center, atol=1e-9)
-        # 4 x 2 x 1 box turned about Y becomes 1 x 2 x 4
         np.testing.assert_allclose(b1[1] - b1[0], [1, 2, 4], atol=1e-9)
 
     def test_angles_are_clean(self):
         rot, _ = ori.rotate_about_world_axis((0, 0, 0), (0, 0, 0), "x", 90, (0, 0, 0))
         self.assertEqual(rot, (90.0, 0.0, 0.0))
 
-
 class FaceDown(unittest.TestCase):
     def test_face_down(self):
         mesh = _box()
-        # +X face down: the 4" long axis becomes vertical
         rot, pos = ori.face_to_direction((0, 0, 0), (0, 0, 0), (1, 0, 0), (2, 1, 0.5))
         b = ori.world_bounds(mesh, rot, pos)
         np.testing.assert_allclose(b[1] - b[0], [1, 2, 4], atol=1e-9)
@@ -67,7 +59,6 @@ class FaceDown(unittest.TestCase):
     def test_opposite_normal(self):
         m = ori.align_vector_matrix((0, 0, 1), (0, 0, -1))
         np.testing.assert_allclose(m @ [0, 0, 1], [0, 0, -1], atol=1e-9)
-
 
 class PartingLine(unittest.TestCase):
     def test_snap(self):
@@ -77,7 +68,6 @@ class PartingLine(unittest.TestCase):
         self.assertAlmostEqual(ori.drop_to_floor_dz(b), -2.0)
 
     def test_suggest_on_flanged_part(self):
-        # Wide flange (6x6x1) at z 0..1 with a 2x2x3 boss on top: widest section is the flange.
         flange = _box((6, 6, 1))
         boss = _box((2, 2, 3))
         boss.apply_translation([2, 2, 1])
@@ -97,7 +87,6 @@ class PartingLine(unittest.TestCase):
     def test_snap_angle(self):
         self.assertEqual(ori.snap_angle(44, 15), 45.0)
         self.assertEqual(ori.snap_angle(181, 90), 180.0)
-
 
 if __name__ == "__main__":
     unittest.main()

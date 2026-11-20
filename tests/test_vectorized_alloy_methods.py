@@ -1,5 +1,3 @@
-"""Tests for the vectorized alloy property methods."""
-
 from __future__ import annotations
 
 import unittest
@@ -8,9 +6,7 @@ import numpy as np
 
 from core.materials import ALLOY_DATABASE
 
-
 class VectorizedAlloyMethodsTests(unittest.TestCase):
-    """Compare vectorized implementations against the scalar originals."""
 
     def setUp(self) -> None:
         self.alloy = ALLOY_DATABASE["WCB"]
@@ -93,24 +89,19 @@ class VectorizedAlloyMethodsTests(unittest.TestCase):
         )
 
         self.assertEqual(vectorized.shape, (self.n,))
-        # Allow a small relative tolerance — both formulas handle the
-        # K -> 0 / 1e10 sentinel via slightly different code paths.
         np.testing.assert_allclose(vectorized, scalar, rtol=1e-5, atol=1.0)
 
     def test_vectorized_methods_handle_extreme_values(self) -> None:
-        # All fully solid (fs = 1.0): permeability should clamp to a very low value
         fss = np.ones(10, dtype=np.float64)
         sdas = np.full(10, 100.0)
         perm = self.alloy.vectorized_permeability(fss, sdas)
         self.assertTrue(np.all(perm > 0.0))
         self.assertTrue(np.all(perm < 1e-9))
 
-        # Very high cooling rates
         rates = np.full(5, 10000.0)
         sdas = self.alloy.vectorized_sdas(rates)
         self.assertTrue(np.all(sdas <= 500.0))
         self.assertTrue(np.all(sdas >= 10.0))
-
 
 if __name__ == "__main__":
     unittest.main()

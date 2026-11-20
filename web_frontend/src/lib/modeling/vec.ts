@@ -1,5 +1,3 @@
-/** Small vector helpers for the modeling code; plain tuples, no Babylon. */
-
 export type Vec2 = [number, number];
 export type Vec3 = [number, number, number];
 
@@ -44,7 +42,6 @@ export function distance2(a: Vec2, b: Vec2): number {
   return Math.hypot(a[0] - b[0], a[1] - b[1]);
 }
 
-/** Angle between two directions, in degrees, 0..180. */
 export function angleBetween3(a: Vec3, b: Vec3): number {
   const cos = dot3(normalize3(a), normalize3(b));
   return (Math.acos(Math.min(Math.max(cos, -1), 1)) * 180) / Math.PI;

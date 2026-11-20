@@ -1,5 +1,3 @@
-"""Mold & Cores dialog: the explicit sand mold, automatic mold box and cores, and the sands."""
-
 from __future__ import annotations
 
 from typing import Any, Dict
@@ -24,19 +22,15 @@ from ui.qt import (
 
 from .base import DraggableDialog
 
-
 def _sand_tooltip(code: int) -> str:
     sand = SAND_MATERIALS.get(code)
     if sand is None:
         return "Constant properties from the Thermal tab of the solidification parameters."
     return f"{sand.uses}\n\n{sand.notes}"
 
-
 class MoldDialog(DraggableDialog):
-    """Edits ``SolidificationParameters.mold``; emits the group as a dict on Confirm."""
 
     params_changed = Signal(dict)
-    #: Emitted on any edit, so the main window can redraw the preview live.
     preview_requested = Signal(dict)
 
     def __init__(self, parent=None):
@@ -196,7 +190,6 @@ class MoldDialog(DraggableDialog):
         self._select(self.core_sand_combo, params.core_material_code)
         self._select(self.core_rule_combo, params.core_rule_code)
         self.grading_check.setChecked(params.mold_grading_levels > 0)
-        # Levels the checkbox turns on: the loaded value, else the default.
         self._grading_levels = params.mold_grading_levels or MoldParams().mold_grading_levels
         self._extra = {
             k: getattr(params, k)

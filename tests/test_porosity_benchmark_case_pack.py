@@ -16,10 +16,8 @@ from tests.test_simulation_scenarios import (
     _single_cast_manager,
 )
 
-
 def _build_single_block_2in():
     return _single_cast_manager(ci_model("block_2inch.stl"))
-
 
 CASE_BUILDERS: Dict[str, Callable[[], object]] = {
     "single_block_2in": _build_single_block_2in,
@@ -27,7 +25,6 @@ CASE_BUILDERS: Dict[str, Callable[[], object]] = {
     "cast_with_chill": _cast_with_chill_manager,
     "cast_with_two_risers": _cast_with_two_risers_manager,
 }
-
 
 def _collect_case_metrics(engine: object) -> Dict[str, float]:
     part_types = np.asarray(engine.mesh.voxel_part_types, dtype=np.int32)
@@ -58,7 +55,6 @@ def _collect_case_metrics(engine: object) -> Dict[str, float]:
     )
     return metrics
 
-
 class PorosityBenchmarkCasePackTests(unittest.TestCase):
     def _load_case_pack(self) -> dict:
         return json.loads(Path("tests/data/porosity_benchmark_case_pack.json").read_text(encoding="utf-8"))
@@ -71,9 +67,6 @@ class PorosityBenchmarkCasePackTests(unittest.TestCase):
         for case in case_pack["cases"]:
             builder_name = case["builder"]
             self.assertIn(builder_name, CASE_BUILDERS)
-            # Plain voxels on the sand boundary: the case-pack thresholds and
-            # reference targets were calibrated on old-voxel results without
-            # the explicit sand mold.
             engine = _run_pipeline_with_patched_memory(
                 CASE_BUILDERS[builder_name](),
                 voxel_cut_cells=False,
@@ -172,9 +165,6 @@ class PorosityBenchmarkCasePackTests(unittest.TestCase):
                 target = float(target_value)
                 tol = float(tolerance[metric_name])
                 error = abs(predicted - target)
-                # subTest so a single drifted metric does not abort the loop and
-                # hide the others. Without it this test reports only the first
-                # out-of-tolerance metric, which previously masked three more.
                 with self.subTest(case=case_id, metric=metric_name):
                     self.assertLessEqual(
                         error,
@@ -193,7 +183,6 @@ class PorosityBenchmarkCasePackTests(unittest.TestCase):
             0.55,
             msg=f"Mean relative error too high: {mean_relative_error:.3f}",
         )
-
 
 if __name__ == "__main__":
     unittest.main()

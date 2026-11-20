@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""
-Launch script for Casting Solidification Simulator Web Application.
-Default: gunicorn (production WSGI server).
-Use --dev for the Werkzeug development server.
-"""
 
 from __future__ import annotations
 
@@ -15,7 +10,6 @@ from pathlib import Path
 
 MIN_PYTHON = (3, 9)
 
-
 def check_python_version() -> bool:
     if sys.version_info < MIN_PYTHON:
         print(f"❌ Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+ required")
@@ -23,7 +17,6 @@ def check_python_version() -> bool:
         return False
     print(f"✓ Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
     return True
-
 
 def check_dependencies() -> list[str]:
     required = {
@@ -46,18 +39,12 @@ def check_dependencies() -> list[str]:
             print(f"✗ {name} - not installed")
             missing.append(name)
 
-    # Optional: cascadio for STEP file support. Failing here is OK —
-    # STL-only users can still run; only STEP uploads will be rejected.
     try:
         __import__('cascadio')
         print("✓ cascadio (STEP support enabled)")
     except ImportError:
         print("○ cascadio (STEP support disabled — install with `pip install cascadio` for STEP files)")
 
-    # Strongly recommended: embreex gives trimesh.contains() a C ray-casting
-    # BVH. Without it trimesh falls back to a pure-numpy path that peaked at
-    # ~5 GB per 2,500-point batch on a 500k-face mesh and, fanned out across
-    # 17 workers, swapped a 48 GB machine into a kernel panic.
     try:
         __import__('embreex')
         print("✓ embreex (Embree ray casting for part assignment)")
@@ -66,7 +53,6 @@ def check_dependencies() -> list[str]:
               "pure-Python ray caster. Install with `pip install embreex`.")
 
     return missing
-
 
 def install_dependencies(missing: list[str]) -> bool:
     if not missing:
@@ -93,9 +79,7 @@ def install_dependencies(missing: list[str]) -> bool:
             subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg])
     return True
 
-
 def _resolve_numba_threads() -> tuple[int, int, int, int]:
-    """Resolve Numba thread targets for startup banner."""
     try:
         from config.hardware_config import hardware
         logical = int(getattr(hardware, "logical_cores", 0) or (os.cpu_count() or 1))
@@ -121,9 +105,7 @@ def _resolve_numba_threads() -> tuple[int, int, int, int]:
     target = max(1, min(target, logical))
     return target, logical, physical
 
-
 def _print_startup_banner(port: int, app_module: str, worker_count: int, thread_count: int) -> None:
-    """Print the startup banner with resolved hardware and thread info."""
     numba_target, logical, physical = _resolve_numba_threads()
 
     try:
@@ -164,15 +146,10 @@ def _print_startup_banner(port: int, app_module: str, worker_count: int, thread_
         )
     print("=" * 60 + "\n")
 
-
 def _is_apple_system_python() -> bool:
-    """Detect Apple's Xcode-bundled Python, which cannot fork safely on
-    modern macOS (gunicorn workers segfault in CoreFoundation after fork)."""
     return "Xcode.app" in str(sys.executable) or getattr(sys, "_framework", "") == "Python3"
 
-
 def _run_gunicorn(port: int, project_dir: Path) -> None:
-    """Launch gunicorn production server."""
     os.environ.setdefault("CASTSIM_NUMBA_THREADS", "all")
 
     if _is_apple_system_python():
@@ -214,18 +191,11 @@ def _run_gunicorn(port: int, project_dir: Path) -> None:
     _print_startup_banner(port, app_module, worker_count=1, thread_count=8)
 
     os.chdir(project_dir)
-    # execvp replaces this process image, and anything still sitting in
-    # Python's stdout buffer dies with it. On a terminal that buffer is flushed
-    # per line and the banner survives by luck; redirected to a file or a pipe
-    # -- which is exactly what scripts/web_start.sh does -- it is block
-    # buffered, and the entire banner, addresses included, was silently lost.
     sys.stdout.flush()
     sys.stderr.flush()
     os.execvp(gunicorn_args[0], gunicorn_args)
 
-
 def _run_dev_server(port: int, project_dir: Path) -> None:
-    """Launch the Flask development server (Werkzeug)."""
     if sys.platform == 'darwin':
         import multiprocessing
         multiprocessing.set_start_method('spawn', force=True)
@@ -260,7 +230,6 @@ def _run_dev_server(port: int, project_dir: Path) -> None:
 
     os.chdir(project_dir)
     app.run(debug=False, host="0.0.0.0", port=port, threaded=True)
-
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -314,7 +283,6 @@ Examples:
         print("Starting gunicorn production server...")
         print("-" * 60 + "\n")
         _run_gunicorn(args.port, project_dir)
-
 
 if __name__ == "__main__":
     main()

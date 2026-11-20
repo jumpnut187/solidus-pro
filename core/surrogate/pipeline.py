@@ -1,18 +1,3 @@
-"""Surrogate simulation pipeline.
-
-This pipeline replaces the traditional time-integration loop with a single
-neural/inference forward pass.  It reuses the exact geometry preparation and
-result packaging from ``core.simulation_pipeline`` and drives the *same*
-post-analysis engine, so the surrogate produces a fully compatible
-:class:`PipelineResult` with all core defect analyses (shrinkage, porosity,
-hotspot, Niyama, sand burn-in, gas porosity, fraction-liquid playback).
-
-The surrogate only predicts the solidification *schedule* fields
-(start/end/local times); the final ``voxel_states`` and fraction-liquid
-history are synthesized with the existing schedule machinery, and
-``run_post_analyses`` derives every downstream field from them.
-"""
-
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, Sequence, Tuple
@@ -42,9 +27,7 @@ from config.exceptions import SimulationError
 
 UNSUPPORTED_ANALYSES: Tuple[str, ...] = ("hot_tear", "feeding_path", "stress_analysis", "microstructure")
 
-
 def _build_config(inputs: PipelineInputs, bounds_to_use: Any, analysis_options: Any) -> Dict[str, float]:
-    """Extract the conditioning config scalars from pipeline inputs."""
     bounds = np.asarray(bounds_to_use, dtype=np.float64)
     if bounds.ndim == 2 and bounds.shape[1] == 2:
         max_dim = float(np.max(bounds[:, 1] - bounds[:, 0]))
@@ -71,13 +54,11 @@ def _build_config(inputs: PipelineInputs, bounds_to_use: Any, analysis_options: 
         "max_simulation_time": _g(timing, "max_simulation_time", DEFAULT_MAX_SIMULATION_TIME_S),
     }
 
-
 def _apply_schedule_to_engine(
     engine: SolidificationEngine,
     start: np.ndarray,
     local: np.ndarray,
 ) -> None:
-    """Write the predicted schedule into the engine and synthesize states."""
     n_voxels = len(start)
     part_types = getattr(engine.mesh, "voxel_part_types", None)
     if part_types is None:
@@ -95,11 +76,6 @@ def _apply_schedule_to_engine(
     engine.mesh.voxel_states[chill_mask] = 1.0
 
     if np.any(active):
-        # The timeline is defined by the schedule itself (start + local),
-        # matching how every fraction-solid computation and the traditional
-        # pipeline derive completion.  Trusting the predicted end field
-        # directly lets a stray end head inflate the fraction-liquid window
-        # (and solidification_times) far past the true completion time.
         completion = start + local
         final_time = float(np.max(completion[active]))
     else:
@@ -133,16 +109,13 @@ def _apply_schedule_to_engine(
         engine.fraction_liquid_history = history
         engine.fraction_liquid_times = times
 
-
 def _disable_unsupported_analyses(analysis_options: Any) -> list:
-    """Force unsupported analyses off and report which were disabled."""
     disabled = []
     for name in UNSUPPORTED_ANALYSES:
         if getattr(analysis_options, name, False):
             setattr(analysis_options, name, False)
             disabled.append(name)
     return disabled
-
 
 def run_surrogate_pipeline(
     inputs: PipelineInputs,
@@ -154,16 +127,6 @@ def run_surrogate_pipeline(
     detailed_progress_callback=None,
     cancel_callback=None,
 ) -> PipelineResult:
-    """
-    Execute the surrogate solidification pipeline.
-
-    Args:
-        inputs: Same :class:`PipelineInputs` used by the traditional pipeline.
-        model: A loaded :class:`SurrogateModel` (required).
-
-    Returns:
-        A fully compatible :class:`PipelineResult`.
-    """
     if model is None:
         raise SimulationError(
             "No surrogate model loaded",
@@ -198,7 +161,6 @@ def run_surrogate_pipeline(
     analysis_options.solver_mode = SOLVER_MODE_SCHEDULE_LEGACY
     disabled_analyses = _disable_unsupported_analyses(analysis_options)
 
-
     filling_result = maybe_run_filling(
         voxel_mesh,
         alloy,
@@ -218,9 +180,7 @@ def run_surrogate_pipeline(
             fill_arrival_times=filling_result.fill_time_s,
         )
 
-    # Geometry-derived input channels (no physics loop required).
     engine._calculate_feeding_distances()
-    # Same t=0 geometry-only field ``capture_run`` records at training time.
     chill_boost = engine.compute_initial_chill_influence()
     riser_slowdown = engine._calculate_riser_influence()
     engine._chill_boost = chill_boost

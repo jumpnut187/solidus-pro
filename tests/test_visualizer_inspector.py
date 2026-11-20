@@ -1,10 +1,3 @@
-"""VTK-stubbed tests for the result-mode click inspector.
-
-Covers the click routing, cell-id -> voxel-index mapping, leader
-text formatting, and threshold-change clearing without requiring a
-real VTK render window.
-"""
-
 from __future__ import annotations
 
 import importlib
@@ -24,14 +17,10 @@ from tests.helpers.module_stubs import (
     snapshot_modules,
 )
 
-# Captured before any stub is installed, so tearDownModule can hand the real
-# vtk/Qt modules back to whatever runs next in this process.
 _MODULE_SNAPSHOT = snapshot_modules()
-
 
 def tearDownModule() -> None:
     restore_modules(_MODULE_SNAPSHOT)
-
 
 class _RecordingActor:
     def __init__(self) -> None:
@@ -43,7 +32,6 @@ class _RecordingActor:
 
     def SetVisibility(self, value: bool) -> None:
         self.visibility = bool(value)
-
 
 class _RecordingRenderer:
     def __init__(self) -> None:
@@ -63,7 +51,6 @@ class _RecordingRenderer:
     def GetActors(self):
         return self
 
-
 class _TrackingCamera:
     def __init__(self) -> None:
         self.position = (0.0, 0.0, 0.0)
@@ -81,9 +68,7 @@ class _TrackingCamera:
     def __getattr__(self, name):
         return lambda *a, **k: None
 
-
 class _RecordingPicker:
-    """Stand-in for vtkCellPicker that returns a programmed cell id."""
 
     def __init__(self, cell_id: int) -> None:
         self._cell_id = cell_id
@@ -111,13 +96,11 @@ class _RecordingPicker:
     def GetPickPosition(self):
         return self.picked_pos
 
-
 class _StubSurface:
-    """Stand-in for ResultSurfaceRenderer: one pick actor, a programmed voxel hit."""
 
     def __init__(self, actor, voxel_index: int = 0) -> None:
         self.actor = actor
-        self.view = object()          # "a result is loaded"
+        self.view = object()
         self.voxel_index = voxel_index
         self.style = "envelope"
         self.hidden = set()
@@ -134,7 +117,6 @@ class _StubSurface:
     def painted_part_ids(self):
         return set()
 
-
 class _RecordingInteractor:
     def __init__(self) -> None:
         self.event_pos = (0, 0)
@@ -147,14 +129,12 @@ class _RecordingInteractor:
     def GetInteractorStyle(self):
         return self.style
 
-
 class _RecordingStyle:
     def __init__(self) -> None:
         self.abort = 0
 
     def SetAbortFlag(self, value: int) -> None:
         self.abort = int(value)
-
 
 class _ImmediateExecutor:
     def submit(self, fn, *args, **kwargs):
@@ -165,7 +145,6 @@ class _ImmediateExecutor:
         except BaseException as e:
             f.set_exception(e)
         return f
-
 
 def _install_stubs() -> None:
     vtk_module = types.ModuleType("vtk")
@@ -183,9 +162,6 @@ def _install_stubs() -> None:
     numpy_support_module.numpy_to_vtk = lambda *args, **kwargs: _DummyVTKClass()
     vtk_util_module.numpy_support = numpy_support_module
 
-    # Forced, not setdefault: the stub must win even if an earlier test
-    # already imported the real module, or this module's behavior would
-    # depend on test execution order. tearDownModule puts them back.
     install_stub_modules({
         "vtk": vtk_module,
         "vtk.util": vtk_util_module,
@@ -193,7 +169,6 @@ def _install_stubs() -> None:
         **make_vtk_qt_stub_modules(_DummyVTKClass),
         **make_qt_stub_modules(_DummyVTKClass, lambda *args, **kwargs: _DummySignal()),
     })
-
 
 class _DummyVTKClass:
     def __init__(self, *args, **kwargs):
@@ -204,14 +179,11 @@ class _DummyVTKClass:
             return None
         return _method
 
-
 class _DummySignal:
     def emit(self, *args, **kwargs):
         return None
 
-
 class _StubFeedModulusLeader:
-    """Records the last callout text + anchor for assertions."""
 
     def __init__(self, renderer) -> None:
         self.renderer = renderer
@@ -238,23 +210,19 @@ class _StubFeedModulusLeader:
         )
         self.is_empty_flag = False
 
-
 class _StubVisualizerModule:
-    """Install a stub ``FeedModulusLeaderTool`` before the visualizer is imported."""
 
     pass
-
 
 class InspectorRoutingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         _install_stubs()
-        # Replace the FeedModulusLeaderTool with a stub so we can capture callouts.
         ui_module = sys.modules.get("ui")
         if ui_module is None:
-            import ui  # noqa: F401
+            import ui
         viz_module = importlib.import_module("ui.visualizer")
-        viz_module.FeedModulusLeaderTool = _StubFeedModulusLeader  # type: ignore[misc]
+        viz_module.FeedModulusLeaderTool = _StubFeedModulusLeader
         cls.viz = importlib.reload(viz_module)
 
     def _bare_visualizer(self):
@@ -285,7 +253,6 @@ class InspectorRoutingTests(unittest.TestCase):
         return viz
 
     def _install_layer(self, viz, *, voxel_index: int, label: str, anchor=(1.0, 2.0, 3.0)):
-        """Install an InspectorLayer whose resolver returns a fixed callout."""
         from ui.visualizer import InspectorLayer, LeaderCallout
 
         seen_voxel_indices: list[int] = []
@@ -311,7 +278,6 @@ class InspectorRoutingTests(unittest.TestCase):
             label="Shrink pocket: 0.125 in^3",
             anchor=(2.0, 0.0, 0.0),
         )
-        # Any cell hit resolves through the surface's world position -> voxel map.
         picker = _RecordingPicker(cell_id=12)
         with mock.patch.object(self.viz.vtk, "vtkCellPicker", lambda: picker):
             viz.interactor.event_pos = (123, 456)
@@ -328,7 +294,6 @@ class InspectorRoutingTests(unittest.TestCase):
         picker = _RecordingPicker(cell_id=0)
         with mock.patch.object(self.viz.vtk, "vtkCellPicker", lambda: picker):
             viz._on_left_button_press(None, None)
-        # No layer, no leader update, but the handler should not crash.
         self.assertIsNone(viz.feed_modulus_leader.last_callout)
 
     def test_click_outside_glyphs_clears_leader(self) -> None:
@@ -338,11 +303,10 @@ class InspectorRoutingTests(unittest.TestCase):
             voxel_index=10,
             label="Shrink pocket: 0.5 in^3",
         )
-        # Pre-render a leader so we can see it gets cleared
         viz.feed_modulus_leader.last_callout = types.SimpleNamespace(
             text="previous", anchor_position=(0, 0, 0),
         )
-        picker = _RecordingPicker(cell_id=-1)  # no hit
+        picker = _RecordingPicker(cell_id=-1)
         with mock.patch.object(self.viz.vtk, "vtkCellPicker", lambda: picker):
             viz._on_left_button_press(None, None)
         self.assertEqual(viz.feed_modulus_leader.cleared, 1)
@@ -364,7 +328,7 @@ class InspectorRoutingTests(unittest.TestCase):
         viz.feed_modulus_leader.last_callout = types.SimpleNamespace(
             text="stale", anchor_position=(0, 0, 0),
         )
-        picker = _RecordingPicker(cell_id=0)  # any hit -> voxel 7
+        picker = _RecordingPicker(cell_id=0)
         with mock.patch.object(self.viz.vtk, "vtkCellPicker", lambda: picker):
             viz._on_left_button_press(None, None)
         self.assertIsNone(viz.feed_modulus_leader.last_callout)
@@ -384,16 +348,15 @@ class InspectorRoutingTests(unittest.TestCase):
         self.assertIsNone(viz._inspector_layer)
         self.assertIsNone(viz.feed_modulus_leader.last_callout)
 
-
 class ShrinkInspectorLifecycleTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         _install_stubs()
         ui_module = sys.modules.get("ui")
         if ui_module is None:
-            import ui  # noqa: F401
+            import ui
         viz_module = importlib.import_module("ui.visualizer")
-        viz_module.FeedModulusLeaderTool = _StubFeedModulusLeader  # type: ignore[misc]
+        viz_module.FeedModulusLeaderTool = _StubFeedModulusLeader
         cls.viz = importlib.reload(viz_module)
 
     def _bare_visualizer(self):
@@ -454,13 +417,10 @@ class ShrinkInspectorLifecycleTests(unittest.TestCase):
         )
         self.assertIsNotNone(viz._inspector_layer)
         self.assertEqual(viz._inspector_layer.mode, "shrinkage")
-        # Resolver invoked on voxel 2 should report the pocket volume.
         callout = viz._inspector_layer.resolver(2)
         self.assertIsNotNone(callout)
         self.assertIn("1.000 in^3", callout.text)
-        # Anchor should be the pocket's centroid, not the picked position.
         self.assertAlmostEqual(callout.anchor_position[0], 2.0, places=6)
-        # Resolver invoked on a voxel below threshold returns None.
         self.assertIsNone(viz._inspector_layer.resolver(0))
 
     def test_shrink_resolver_uses_live_threshold(self) -> None:
@@ -474,10 +434,8 @@ class ShrinkInspectorLifecycleTests(unittest.TestCase):
             porosity_risk=None,
             threshold=0.5,
         )
-        # Picked voxel 1 -> 1 above 0.5; voxel 0 below; one-voxel pocket.
         callout = viz._inspector_layer.resolver(1)
         self.assertIsNotNone(callout)
-        # Now raise the threshold to 0.7; voxel 1 is below so resolver returns None.
         viz._shrink_inspector_data["threshold"] = 0.7
         self.assertIsNone(viz._inspector_layer.resolver(1))
 
@@ -523,7 +481,6 @@ class ShrinkInspectorLifecycleTests(unittest.TestCase):
         callout1 = viz._inspector_layer.resolver(1)
         self.assertIsNotNone(callout1)
         self.assertEqual(callout1.text, "FM: 0.50 in")
-
 
 if __name__ == "__main__":
     unittest.main()

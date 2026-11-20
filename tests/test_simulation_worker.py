@@ -6,7 +6,6 @@ from PySide6.QtCore import QCoreApplication
 from core.simulation_pipeline import SimulationCancelledError
 from ui.workers import SimulationWorker
 
-
 class SimulationWorkerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -32,7 +31,6 @@ class SimulationWorkerTests(unittest.TestCase):
         self.assertIn("Simulation cancelled", progress_messages)
 
     def test_use_gpu_option_reaches_pipeline_inputs(self) -> None:
-        """performance_options={'use_gpu': True} must reach PipelineInputs.use_gpu=True."""
         worker = SimulationWorker(
             MagicMock(), "WCB", 0.1, 3, performance_options={"use_gpu": True}
         )
@@ -49,7 +47,6 @@ class SimulationWorkerTests(unittest.TestCase):
         self.assertTrue(captured["inputs"].use_gpu)
 
     def test_use_gpu_defaults_to_false_when_option_missing(self) -> None:
-        """Callers that omit use_gpu must keep the existing default of False."""
         worker = SimulationWorker(MagicMock(), "WCB", 0.1, 3)
         captured = {}
 
@@ -62,7 +59,6 @@ class SimulationWorkerTests(unittest.TestCase):
 
         self.assertIsNotNone(captured.get("inputs"))
         self.assertFalse(captured["inputs"].use_gpu)
-
 
 if __name__ == "__main__":
     unittest.main()

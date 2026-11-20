@@ -9,25 +9,12 @@ export type ModalProps = {
   subtitle?: string;
   size?: 'sm' | 'md' | 'lg';
   onClose: () => void;
-  /** Rendered between the header and the footer, inside the scroll region. */
   children: ReactNode;
-  /** Buttons for the footer. Omit for a modal with no actions. */
   footer?: ReactNode;
-  /** Extra content between the header and the body, outside the scroll area. */
   toolbar?: ReactNode;
-  /** Body without padding, for a modal whose content is a full-bleed table. */
   flush?: boolean;
 };
 
-/**
- * A real dialog: labelled, modal to assistive technology, focus moved in on
- * open and restored on close, Tab cycling inside, Escape and backdrop-click to
- * dismiss.
- *
- * The old "drawers" were none of these things — they were divs that slid in,
- * left focus behind them on the page, and offered a Cancel button that did not
- * cancel anything.
- */
 export function Modal({ title, subtitle, size = 'md', onClose, children, footer, toolbar, flush }: ModalProps) {
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const titleId = useId();
@@ -37,8 +24,6 @@ export function Modal({ title, subtitle, size = 'md', onClose, children, footer,
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
     const dialog = dialogRef.current;
-    // Prefer the first real control; fall back to the dialog itself so focus
-    // is never left outside the trap.
     const first = dialog?.querySelector<HTMLElement>(FOCUSABLE);
     (first ?? dialog)?.focus();
 

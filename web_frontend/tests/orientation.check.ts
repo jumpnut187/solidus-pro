@@ -1,15 +1,3 @@
-/**
- * Checks the browser's orientation math and part placement against the engine.
- *
- *   npm run check:orientation
- *
- * `orientation.fixture.json` holds cases computed by `core/orientation.py`
- * (written by `python -m tests.test_web_orientation --write-fixture`, and
- * checked to be current by that test). Every function of
- * `src/lib/orientation.ts` must reproduce them, and a Babylon node placed by
- * `applyPartTransform` must put the fixture's vertices exactly where
- * `core.orientation.world_bounds` puts them.
- */
 import { NullEngine } from '@babylonjs/core/Engines/nullEngine';
 import { Vector3 } from '@babylonjs/core/Maths/math.vector';
 import { TransformNode } from '@babylonjs/core/Meshes/transformNode';
@@ -48,7 +36,6 @@ function close(a: unknown, b: unknown, tol = 1e-6): boolean {
   return a === b;
 }
 
-/** Euler triples are equal when they name the same angles, 180 and -180 included. */
 function sameAngles(a: Vec3, b: number[]): boolean {
   return a.every((value, i) => Math.abs(cleanAngle(value - b[i])) <= 1e-5);
 }
@@ -92,8 +79,6 @@ for (const item of fixture.face_to_direction) {
     item.target as Vec3
   );
   const [rotation, position] = item.result;
-  // The fixture's own matrix is the reference: two Euler triples can name
-  // the same turn, so compare what they do rather than how they are spelled.
   const same = close(eulerToMatrix(got.rotation), eulerToMatrix(rotation as Vec3), 1e-6);
   check(`normal ${item.normal} -> ${item.target}`, same && close(got.position, position, 1e-9), JSON.stringify(got));
 }
@@ -136,7 +121,6 @@ console.log('world_bounds (Babylon node placed by applyPartTransform)');
       for (let axis = 0; axis < 3; axis += 1) {
         min[axis] = Math.min(min[axis], xyz[axis]);
         max[axis] = Math.max(max[axis], xyz[axis]);
-        // Vertex by vertex too: equal boxes could still hide a mirrored part.
         const expected =
           item.scale * (r[axis][0] * local.x + r[axis][1] * local.y + r[axis][2] * local.z) + item.position[axis];
         vertexError = Math.max(vertexError, Math.abs(expected - xyz[axis]));
@@ -149,8 +133,6 @@ console.log('world_bounds (Babylon node placed by applyPartTransform)');
       `${JSON.stringify(bounds)} vertex error ${vertexError}`
     );
   }
-  // The old `mesh.rotation` path, for the record: it must NOT agree on a
-  // compound rotation, or this check is not testing anything.
   const legacy = new TransformNode('legacy', scene);
   legacy.rotation.set((30 * Math.PI) / 180, (-20 * Math.PI) / 180, (75 * Math.PI) / 180);
   legacy.position.set(1, 2, 3);

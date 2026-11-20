@@ -1,5 +1,3 @@
-"""Core package initialization"""
-
 from core.memory_limits import (
     get_max_voxels_for_system,
     get_hard_voxel_limit,
@@ -19,7 +17,6 @@ from core.part_manager import (
     infer_part_type_from_filename,
 )
 
-# Performance optimization modules (optional imports)
 try:
     from core.gpu_compute import (
         GPUComputeManager,
@@ -67,7 +64,6 @@ __all__ = [
     'PART_TYPE_COLORS',
     'PART_TYPE_KEYWORDS',
     'infer_part_type_from_filename',
-    # Performance modules
     'GPU_AVAILABLE',
     'OCTREE_AVAILABLE',
     'INCREMENTAL_AVAILABLE',

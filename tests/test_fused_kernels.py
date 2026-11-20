@@ -1,11 +1,3 @@
-"""The fused step kernels against the bit-for-bit path they replace.
-
-``physics.kernel_dispatch.FUSED_KERNELS`` (``CASTSIM_FUSED_KERNELS``) switches
-between the two. The fused kernels do the same arithmetic in fewer passes, in
-a different order in places and without ``fastmath``, so they agree with the
-reference path to rounding. Each test states how closely.
-"""
-
 from __future__ import annotations
 
 import unittest
@@ -35,9 +27,7 @@ ALLOY = SimpleNamespace(
     latent_heat=270000.0,
 )
 
-
 def lattice_neighbors(shape: tuple[int, int, int]) -> np.ndarray:
-    """26-slot neighbour array of a box lattice, in the mesh's slot order."""
     nx, ny, nz = shape
     index = np.arange(nx * ny * nz).reshape(shape)
     offsets = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
@@ -53,11 +43,9 @@ def lattice_neighbors(shape: tuple[int, int, int]) -> np.ndarray:
         neighbors[index[ok], slot] = index[i2[ok], j2[ok], k2[ok]]
     return neighbors
 
-
 def lattice_centers(shape: tuple[int, int, int], pitch: float) -> np.ndarray:
     grid = np.stack(np.meshgrid(*[np.arange(n) for n in shape], indexing="ij"), axis=-1).reshape(-1, 3)
     return (grid * pitch).astype(np.float32)
-
 
 @unittest.skipUnless(NUMBA, "numba not installed")
 class CutCellFluxKernelTests(unittest.TestCase):
@@ -97,10 +85,8 @@ class CutCellFluxKernelTests(unittest.TestCase):
             heat_transfer.cut_cell_flux_parallel(
                 T, nb, alpha, rho_cp, w, f, ap, inv_dx2, hdx, False, inv_dx2, True, dt, source, direct
             )
-            # A step moves a cell by a few K at most; the two kernels differ in the last bit or two.
             np.testing.assert_allclose(direct, expected, rtol=1e-13, atol=0.0)
 
-            # Flux now, step later (the first substep) is the same expression: same bits.
             flux = np.empty(len(T))
             rates = np.empty(len(T))
             heat_transfer.cut_cell_flux_parallel(
@@ -111,7 +97,6 @@ class CutCellFluxKernelTests(unittest.TestCase):
                 apply_kernel(T, flux, rho_cp, w, source, dt, later)
                 np.testing.assert_array_equal(later, direct)
 
-            # The serial twin, too.
             twin = np.empty(len(T))
             heat_transfer.cut_cell_flux_serial(
                 T, nb, alpha, rho_cp, w, f, ap, inv_dx2, hdx, False, inv_dx2, True, dt, source, twin
@@ -128,7 +113,6 @@ class CutCellFluxKernelTests(unittest.TestCase):
         np.testing.assert_array_equal(out[empty], T[empty])
         np.testing.assert_array_equal(rates[empty], 0.0)
 
-
 @unittest.skipUnless(NUMBA, "numba not installed")
 class InvertAndCommitKernelTests(unittest.TestCase):
     def test_matches_capacity_then_inversion_then_commit(self) -> None:
@@ -138,7 +122,6 @@ class InvertAndCommitKernelTests(unittest.TestCase):
         l_vol = ALLOY.latent_heat * (ALLOY.density_liquid + ALLOY.density_solid) / 2.0
         T_post = rng.uniform(1380.0, 1560.0, n)
         fs0 = np.clip(rng.uniform(-0.3, 1.3, n), 0.0, 1.0)
-        # A fifth of the cells carry a heat-capacity override (chill, sand).
         override_cells = np.sort(rng.choice(n, n // 5, replace=False))
         override_values = rng.uniform(1.5e6, 3.0e6, len(override_cells))
         positions = np.full(n, -1, dtype=np.int64)
@@ -146,7 +129,6 @@ class InvertAndCommitKernelTests(unittest.TestCase):
 
         for use_curve in (True, False):
             for use_overrides in (True, False):
-                # Reference: the three steps of the bit-for-bit path.
                 if use_curve:
                     rho_cp = heat_transfer.interpolate_curve_parallel(T_post, CURVES["temp_points"], capacity_curve)
                 else:
@@ -189,7 +171,6 @@ class InvertAndCommitKernelTests(unittest.TestCase):
                         np.testing.assert_array_equal(serial, parallel)
 
     def test_model_method_matches_update(self) -> None:
-        """``finish_step_from_enthalpy`` leaves the model where inversion + ``update`` leaves it."""
         rng = np.random.default_rng(12)
         neighbors = lattice_neighbors((7, 6, 5))
         n = len(neighbors)
@@ -204,14 +185,12 @@ class InvertAndCommitKernelTests(unittest.TestCase):
         for step in range(6):
             T_post = rng.uniform(1400.0, 1540.0, n) - 12.0 * step
             heat.set_initial_temperature(T_post)
-            # reference
             T_ref = np.empty(n)
             solidification_loop._invert_enthalpy_numpy(
                 T_post, np.asarray(models[0].fraction_solid, dtype=np.float64).copy(), T_ref,
                 ALLOY.liquidus_temp, ALLOY.solidus_temp, l_vol / heat.volumetric_heat_capacity(),
             )
             models[0].update(T_ref, 0.5)
-            # fused
             T = T_post.copy()
             self.assertTrue(models[1].can_finish_step_from_enthalpy())
             models[1].finish_step_from_enthalpy(
@@ -225,7 +204,6 @@ class InvertAndCommitKernelTests(unittest.TestCase):
         np.testing.assert_array_equal(models[1]._solidification_end, models[0]._solidification_end)
         self.assertEqual(models[1].time, models[0].time)
 
-
 @unittest.skipUnless(NUMBA, "numba not installed")
 class LeastSquaresGradientKernelTests(unittest.TestCase):
     def _compare(self, shape, keep, seed, rtol):
@@ -233,7 +211,6 @@ class LeastSquaresGradientKernelTests(unittest.TestCase):
         centers_all = lattice_centers(shape, 0.15)
         neighbors_all = lattice_neighbors(shape)
         kept = rng.random(len(centers_all)) < keep
-        # Drop cells: re-index the neighbours of the kept ones.
         new_index = np.full(len(centers_all), -1, dtype=np.int32)
         new_index[kept] = np.arange(int(kept.sum()), dtype=np.int32)
         centers = centers_all[kept]
@@ -256,15 +233,12 @@ class LeastSquaresGradientKernelTests(unittest.TestCase):
         return reference
 
     def test_full_lattice_and_lattice_with_gaps(self) -> None:
-        # float32 results: one unit in the last place is 1.2e-7 relative.
         self._compare((9, 8, 7), 1.0, 0, 5e-7)
         self._compare((10, 9, 8), 0.6, 1, 5e-7)
 
     def test_flat_and_sparse_stencils_go_to_the_reference(self) -> None:
-        """One layer of voxels: no stencil spans three directions, so every value is the reference's."""
         reference = self._compare((12, 11, 1), 1.0, 2, 0.0)
         self.assertTrue(np.all(reference[1][reference[0] > 0] == 1))
-        # Very sparse: isolated voxels and collinear pairs.
         self._compare((8, 8, 8), 0.12, 3, 5e-7)
 
     def test_no_exclusion_mask(self) -> None:
@@ -284,10 +258,8 @@ class LeastSquaresGradientKernelTests(unittest.TestCase):
         np.testing.assert_array_equal(fused[1], reference[1])
         np.testing.assert_allclose(fused[0], reference[0], rtol=5e-7)
 
-
 @unittest.skipUnless(NUMBA, "numba not installed")
 class CoupleKernelTests(unittest.TestCase):
-    """``CoupledMoldSolver._couple`` through the kernel and through NumPy."""
 
     def _solver(self, seed: int, stencil_contact: float) -> mold_coupling.CoupledMoldSolver:
         rng = np.random.default_rng(seed)
@@ -339,10 +311,8 @@ class CoupleKernelTests(unittest.TestCase):
                 np.testing.assert_allclose(fused.casting._sink_G, reference.casting._sink_G, rtol=1e-13)
                 np.testing.assert_allclose(fused.casting._sink_T, reference.casting._sink_T, rtol=1e-13)
 
-
 @unittest.skipUnless(NUMBA, "numba not installed")
 class FusedRunTests(unittest.TestCase):
-    """A whole run with the fused kernels against the same run on the bit-for-bit path."""
 
     def _run(self, fused: bool):
         from core.part_manager import build_part_manager
@@ -382,12 +352,10 @@ class FusedRunTests(unittest.TestCase):
         self.assertEqual(fused["time"], reference["time"])
         np.testing.assert_allclose(fused["temperatures"], reference["temperatures"], rtol=1e-9)
         np.testing.assert_allclose(fused["mold"], reference["mold"], rtol=1e-9)
-        # Times are whole steps, stored as float32.
         np.testing.assert_array_equal(fused["end"], reference["end"])
         np.testing.assert_array_equal(fused["start"], reference["start"])
         np.testing.assert_allclose(fused["states"], reference["states"], rtol=1e-6, atol=1e-7)
         np.testing.assert_allclose(fused["niyama_gradient"], reference["niyama_gradient"], rtol=1e-5, atol=1e-7)
-
 
 if __name__ == "__main__":
     unittest.main()

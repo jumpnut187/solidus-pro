@@ -1,29 +1,3 @@
-"""MECHANISM 3 discriminating fixture: a sustained jet into a porous face.
-
-Reproduces, on ~2,000 cells, the one configuration Test 2 dies in: metal
-driven from a clear channel into a ceramic-filter band, using the REAL Test 2
-lattice (dx = 4.3 mm, WCB, u_max 2.8 m/s -> tau = 0.50001) and the REAL drag
-coefficients the stage computes for its filters (c0 = 0.500022828579,
-c1 = 1.381721139, porosity 0.85).
-
-No GAS and no INTERFACE cell anywhere, so the free-surface bookkeeping is inert
-by construction and only the momentum path is under test.
-
-Variants, all monkeypatches in this file -- the repo is not touched:
-
-  stock        as committed (fe866cf)
-  drag_off     c1 = 0 in the band, Smagorinsky STILL suppressed there
-               -> isolates the explicit Guo-Zhao drag  (tests H1)
-  drag_half    c1 / 2, suppression unchanged            (tests H1)
-  drag_x2      c1 * 2, suppression unchanged            (tests H1)
-  smag_on      stock drag, Smagorinsky NOT suppressed in the band (tests H2/H3
-               via the eddy-viscosity route)
-  taum_clamp   stock drag and suppression, but tau_minus clamped to <= 5
-               -> tests H3 (frozen odd moments) with nothing else changed
-  no_filter    porosity 1 everywhere, no drag (control)
-
-  ./venv/bin/python jet_fixture.py
-"""
 from __future__ import annotations
 
 import os
@@ -32,13 +6,12 @@ import sys
 sys.path.insert(0, "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-import physics.filling as pf  # noqa: E402
-from physics.filling import PorousZone, FLAG_FLUID, FLAG_INTERFACE, FLAG_GAS  # noqa: E402
-from physics.fluid_flow import lattice_units, equilibrium  # noqa: E402
+import physics.filling as pf
+from physics.filling import PorousZone, FLAG_FLUID, FLAG_INTERFACE, FLAG_GAS
+from physics.fluid_flow import lattice_units, equilibrium
 
-# --- the real Test 2 lattice and the real filter drag -----------------------
 DX_M = 0.0043
 NU = 0.006 / 7200.0
 C0 = 0.500022828579
@@ -47,27 +20,14 @@ POR = 0.85
 
 NZ = int(os.environ.get("NZ", "44"))
 W = int(os.environ.get("W", "5"))
-BAND = (22, 27)                       # inclusive
+BAND = (22, 27)
 STEPS = int(os.environ.get("STEPS", "2000"))
 TAUM_MAX = float(os.environ.get("TAUM_MAX", "5.0"))
-
 
 def units():
     return lattice_units(DX_M, NU, u_max_physical_m_s=2.8)
 
-
 def build(c1_scale=1.0, porous=True, geom="full"):
-    """geom: how the porous band cuts the channel.
-
-      full     the band spans the whole cross-section -- the porous/clear
-               interface is PERPENDICULAR to the flow only
-      lateral  the band covers half the y-range -- a porous/clear interface
-               runs ALONG the flow, which is the configuration Test 2 dies in
-               (the fatal pocket straddles the filter/runner boundary within
-               the plane: at padded x=117, y=49-50 are FILTER and y=51-52 are
-               RUNNER)
-      corner   the band covers a quarter (half in y AND half in x)
-    """
     n = W + 2
     shape = (n, n, NZ)
     ob = np.zeros(shape, dtype=bool)
@@ -96,49 +56,29 @@ def build(c1_scale=1.0, porous=True, geom="full"):
     assert int((st.flags == FLAG_GAS).sum()) == 0
     return st, u, band
 
-
-# --- the two relaxation monkeypatches --------------------------------------
 _orig_smag = pf.smagorinsky_relaxation
 
-
 def smag_no_suppress(f, feq, rho, tau, **kw):
-    """Let the eddy viscosity act inside the filter too (drops `suppress`)."""
     kw.pop("suppress", None)
     return _orig_smag(f, feq, rho, tau, **kw)
 
-
 def smag_clamp_taum(f, feq, rho, tau, **kw):
-    """Stock Smagorinsky, then clamp tau_minus <= TAUM_MAX.
-
-    tau_minus = magic/(tau_plus - 1/2) + 1/2 (physics/fluid_flow.py:239-252).
-    At tau_plus = 0.50001 that is 18,750 -- the odd, momentum-carrying moments
-    have a ~19,000-step relaxation time. The clamp binds only where
-    tau_plus < magic/(TAUM_MAX - 1/2) + 1/2 = 0.5417, so anything running at a
-    larger tau is untouched.
-    """
     op, om = _orig_smag(f, feq, rho, tau, **kw)
     om = np.asarray(om, dtype=np.float64)
     floor = 1.0 / TAUM_MAX
     return op, np.maximum(om, floor)
 
-
 def smag_plus_only(f, feq, rho, tau, **kw):
-    """Eddy viscosity in omega_plus ONLY; omega_minus stays at the stock
-    (suppressed) value. Isolates the eddy-viscosity route."""
     kw2 = dict(kw); kw2.pop("suppress", None)
     op_free, _om_free = _orig_smag(f, feq, rho, tau, **kw2)
     _op_sup, om_sup = _orig_smag(f, feq, rho, tau, **kw)
     return op_free, om_sup
 
-
 def smag_minus_only(f, feq, rho, tau, **kw):
-    """omega_minus from the un-suppressed computation; omega_plus stays at the
-    stock (suppressed) value. Isolates the odd-moment-relaxation route."""
     kw2 = dict(kw); kw2.pop("suppress", None)
     _op_free, om_free = _orig_smag(f, feq, rho, tau, **kw2)
     op_sup, _om_sup = _orig_smag(f, feq, rho, tau, **kw)
     return op_sup, om_free
-
 
 VARIANTS = {
     "stock":      dict(c1=1.0, porous=True,  smag=None),
@@ -148,19 +88,13 @@ VARIANTS = {
     "lat_dragx2": dict(c1=2.0, porous=True,  smag=None,     geom="lateral"),
     "lat_smagP":  dict(c1=1.0, porous=True,  smag="plus",   geom="lateral"),
     "lat_smagM":  dict(c1=1.0, porous=True,  smag="minus",  geom="lateral"),
-    # full-cross-section band, no filter, Smagorinsky suppressed: does the
-    # geometry matter, or is `stock`'s survival purely the drag?
     "full_supOnly": dict(c1=1.0, porous=False, smag=None, geom="full",
                          keep_suppress=True),
     "full_porSup":  dict(c1=0.0, porous=True,  smag=None, geom="full",
                          keep_suppress=True),
-    # --- controls isolating porosity vs suppression ---
-    # no filter at all, but Smagorinsky suppressed on the same band footprint
     "lat_supOnly": dict(c1=1.0, porous=False, smag=None, geom="lateral",
                         keep_suppress=True),
-    # porosity 0.85 band with NO drag, Smagorinsky ACTIVE everywhere
     "lat_porOnly": dict(c1=0.0, porous=True,  smag="nosup", geom="lateral"),
-    # porosity 0.85 band with NO drag, Smagorinsky suppressed on the band
     "lat_porSup":  dict(c1=0.0, porous=True,  smag=None, geom="lateral",
                         keep_suppress=True),
     "cor_stock":  dict(c1=1.0, porous=True,  smag=None,     geom="corner"),
@@ -173,12 +107,8 @@ VARIANTS = {
     "no_filter":  dict(c1=1.0, porous=False, smag=None),
 }
 
-
 def run(name, U, cfg):
     st, un, band = build(cfg["c1"], cfg["porous"], cfg.get("geom", "full"))
-    # `drag_off` sets c1 = 0, which would ALSO un-suppress Smagorinsky in the
-    # band (the suppression keys on drag_c1 > 0). Force the suppression back on
-    # so the variant changes one thing only.
     orig = pf.smagorinsky_relaxation
     if cfg.get("keep_suppress"):
         def keep(f, feq, rho, tau, **kw):
@@ -202,7 +132,6 @@ def run(name, U, cfg):
         umax_hist = []
         bad = None
         for s in range(1, STEPS + 1):
-            # sustained velocity inlet: pin the two bottom planes each step
             st.f[:, inlet[0], inlet[1], inlet[2]] = feq_in.astype(np.float32)
             pf.step(st, un, use_numba=False)
             with np.errstate(over="ignore", invalid="ignore"):
@@ -216,7 +145,6 @@ def run(name, U, cfg):
         return bad, umax_hist
     finally:
         pf.smagorinsky_relaxation = orig
-
 
 def main():
     only = os.environ.get("ONLY", "")
@@ -244,7 +172,6 @@ def main():
         print(f"{name:<12}" + "".join(cells), flush=True)
     print("\ncell = max|u| reached over the run (survived), or DIED@step "
           "(non-finite f/mass/u).")
-
 
 if __name__ == "__main__":
     main()

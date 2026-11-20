@@ -1,8 +1,3 @@
-"""
-Tests for the GPU-aware performance summary label and the GPU toggle in
-the Performance dialog (regression: sidebar used to hard-code "GPU: Off"
-even when GPU was detected).
-"""
 from __future__ import annotations
 
 import os
@@ -16,9 +11,7 @@ from PySide6.QtWidgets import QApplication, QLabel
 from ui.main_window import MainWindow, PerformanceDialog
 from core.gpu_compute import GPUBackend
 
-
 class _StubHost:
-    """Minimal host object exposing only what _update_performance_summary touches."""
 
     def __init__(self, options: dict, label: QLabel) -> None:
         self._performance_options = options
@@ -26,7 +19,6 @@ class _StubHost:
 
     def _update_performance_summary(self) -> None:
         pass
-
 
 def _make_gpu_manager(available: bool, backend_name: str = "METAL",
                      device_name: str = "Apple Silicon GPU (Metal via MLX + Taichi)"):
@@ -36,17 +28,9 @@ def _make_gpu_manager(available: bool, backend_name: str = "METAL",
     mgr.device_name = device_name
     return mgr
 
-
-#: ``gpu_distance_chunk_size`` value that suppresses the ", DistChunk N"
-#: suffix in _update_performance_summary. These tests assert the GPU portion
-#: of the label exactly, so the suffix is pinned off rather than hard-coded --
-#: the setting is user/env-configurable and would otherwise make the expected
-#: text machine-dependent.
 _DIST_CHUNK_SUPPRESSED = 10000
 
-
 class PerformanceSummaryLabelTests(unittest.TestCase):
-    """Sidebar label must reflect live GPUComputeManager + use_gpu toggle."""
 
     def setUp(self) -> None:
         if QApplication.instance() is None:
@@ -126,9 +110,7 @@ class PerformanceSummaryLabelTests(unittest.TestCase):
             "GPU: CUDA (NVIDIA GeForce RTX 4090)",
         )
 
-
 class PerformanceDialogUseGpuRoundTripTests(unittest.TestCase):
-    """Dialog get/set/store/restore must carry use_gpu."""
 
     def setUp(self) -> None:
         if QApplication.instance() is None:
@@ -173,9 +155,7 @@ class PerformanceDialogUseGpuRoundTripTests(unittest.TestCase):
             dlg.close()
             dlg.deleteLater()
 
-
 class OnPerformanceOptionsConfirmedTests(unittest.TestCase):
-    """_on_performance_options_confirmed must update internal dict and persist to settings."""
 
     def setUp(self) -> None:
         if QApplication.instance() is None:
@@ -219,9 +199,7 @@ class OnPerformanceOptionsConfirmedTests(unittest.TestCase):
         self.assertTrue(host._performance_options["chunked_voxelization"])
         self.assertTrue(host._performance_options["incremental_solidification"])
 
-
 class HardwareInfoStatusBarTests(unittest.TestCase):
-    """_show_hardware_info must respect the use_gpu toggle."""
 
     def setUp(self) -> None:
         if QApplication.instance() is None:
@@ -260,7 +238,6 @@ class HardwareInfoStatusBarTests(unittest.TestCase):
 
         msg = host.statusBar().showMessage.call_args[0][0]
         self.assertIn("GPU: METAL", msg)
-
 
 if __name__ == "__main__":
     unittest.main()

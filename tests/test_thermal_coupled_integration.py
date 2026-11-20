@@ -14,11 +14,9 @@ from core.solidification_loop import (
 from core.solidification_params import SolidificationParameters
 from physics.solidification_physics import SolidificationModel
 
-
 class _DummyLogger:
     def info(self, _message: str, context=None) -> None:
         self.context = context
-
 
 class _DummyAlloy:
     name = "DUMMY"
@@ -30,7 +28,6 @@ class _DummyAlloy:
     specific_heat = 1.0
     critical_fraction_solid = 0.5
 
-
 class _FakeTemperatureField:
     def __init__(self, values: np.ndarray) -> None:
         self.values = values
@@ -38,7 +35,6 @@ class _FakeTemperatureField:
     def get_gradient_magnitude(self, neighbors: np.ndarray, voxel_size: float) -> np.ndarray:
         del neighbors, voxel_size
         return np.array([2000.0, 1000.0], dtype=np.float32)
-
 
 class _FakeHeatModel:
     def __init__(self) -> None:
@@ -64,12 +60,10 @@ class _FakeHeatModel:
     def set_heat_source(self, source: np.ndarray) -> None:
         self.last_source = np.asarray(source, dtype=np.float64).copy()
 
-
 class _SlowHeatModel(_FakeHeatModel):
     def step(self, dt: float) -> None:
         self._temperatures -= np.array([5.0, 5.0], dtype=np.float64)
         self.time += dt
-
 
 class _DummyEngine:
     def __init__(self) -> None:
@@ -103,7 +97,6 @@ class _DummyEngine:
         self._thermal_latest_temperatures = None
         self._thermal_latest_gradients = None
         self._thermal_voxel_size_m = 0.00254
-
 
 class ThermalCoupledIntegrationTests(unittest.TestCase):
     def test_niyama_gradient_uses_voxel_offsets_in_mm(self) -> None:
@@ -155,10 +148,6 @@ class ThermalCoupledIntegrationTests(unittest.TestCase):
         self.assertTrue(np.all(engine.solidification_end_times >= engine.solidification_start_times))
         self.assertTrue(np.all(engine.local_solidification_time >= 0.0))
         self.assertTrue(np.all(np.isfinite(engine.feeding_fraction_solid)))
-        # The same-step implicit enthalpy solve releases latent heat in the
-        # mushy zone, offsetting part of the diffusion drop, so the observed
-        # peak cooling rate reflects the net (corrected) temperature change
-        # of each step, not the raw diffusion-only drop.
         np.testing.assert_allclose(engine.cooling_rates, np.array([39.090908, 35.0], dtype=np.float32), atol=1e-4)
         np.testing.assert_allclose(engine.thermal_gradients, np.array([2.0, 1.0], dtype=np.float32), atol=1e-6)
         self.assertGreaterEqual(len(engine.fraction_liquid_history), 2)
@@ -181,11 +170,7 @@ class ThermalCoupledIntegrationTests(unittest.TestCase):
         self.assertEqual(engine.fraction_liquid_times[-1], engine.time)
         np.testing.assert_allclose(engine.fraction_liquid_history[-1], engine.mesh.voxel_states, atol=1e-6)
 
-
 class _Uniform5DropHeatModel:
-    """Uniform 5 degC-per-step heat model for bias tests so all voxels share
-    the same thermal trajectory and only the directional-solidification bias
-    differentiates them."""
 
     def __init__(self, n_voxels: int, drop_per_step: float = 5.0) -> None:
         self._temperatures = np.full(n_voxels, 100.0, dtype=np.float64)
@@ -210,16 +195,7 @@ class _Uniform5DropHeatModel:
     def set_heat_source(self, source: np.ndarray) -> None:
         del source
 
-
 def _build_bias_engine(*, feeding_bias: float, with_risers: bool) -> SimpleNamespace:
-    """Build a 4-voxel test engine exercising the feeding-zone bias.
-
-    Voxel layout:
-        0 = CAST bottom (in feeding zone when a riser exists)
-        1 = RISER bottom (when ``with_risers``)
-        2 = CAST top    (in feeding zone when a riser exists)
-        3 = RISER top   (when ``with_risers``)
-    """
     n_voxels = 4
     neighbors = np.full((n_voxels, 26), -1, dtype=np.int32)
     neighbors[0, 0] = 1
@@ -291,20 +267,10 @@ def _build_bias_engine(*, feeding_bias: float, with_risers: bool) -> SimpleNames
     def _normalized_heights() -> np.ndarray:
         return heights
 
-    engine._get_normalized_heights = _normalized_heights  # type: ignore[attr-defined]
+    engine._get_normalized_heights = _normalized_heights
     return engine
 
-
 class FeedingZoneBiasTests(unittest.TestCase):
-    """Regression tests for feeding_zone_vertical_bias in the thermal_coupled
-    path.
-
-    The thermal-coupled loop is purely temperature-driven: the heuristic
-    vertical solidification bias is DISABLED there, so results must be
-    identical for any slider value. The bias helpers themselves
-    (``_apply_feeding_zone_bias`` and friends) still apply the legacy
-    directional bias and are exercised directly by the helper tests below.
-    """
 
     def test_compute_feeding_zone_mask_flags_riser_and_neighbors(self) -> None:
         part_types = np.array([0, 1, 0, 1], dtype=np.int32)
@@ -317,14 +283,12 @@ class FeedingZoneBiasTests(unittest.TestCase):
 
         mask = _compute_feeding_zone_mask(states, neighbors, part_types)
 
-        self.assertTrue(bool(mask[0]))  # cast_bottom neighbor of riser_bottom
-        self.assertTrue(bool(mask[1]))  # riser_bottom is a riser
-        self.assertTrue(bool(mask[2]))  # cast_top neighbor of riser_top
-        self.assertTrue(bool(mask[3]))  # riser_top is a riser
+        self.assertTrue(bool(mask[0]))
+        self.assertTrue(bool(mask[1]))
+        self.assertTrue(bool(mask[2]))
+        self.assertTrue(bool(mask[3]))
 
     def test_compute_feeding_zone_mask_ignores_solid_riser_neighbors(self) -> None:
-        # Voxel 0 (cast) has only one neighbor: voxel 1 (riser, solid).
-        # The feeding-zone rule should not propagate through a solid riser.
         part_types = np.array([0, 1], dtype=np.int32)
         neighbors = np.full((2, 26), -1, dtype=np.int32)
         neighbors[0, 0] = 1
@@ -333,17 +297,11 @@ class FeedingZoneBiasTests(unittest.TestCase):
         mask = _compute_feeding_zone_mask(states, neighbors, part_types)
 
         self.assertFalse(bool(mask[0]))
-        self.assertTrue(bool(mask[1]))  # riser voxel itself
+        self.assertTrue(bool(mask[1]))
 
     def test_thermal_mode_ignores_feeding_zone_bias_slider(self) -> None:
-        """Thermal-coupled results are IDENTICAL whether the
-        feeding_zone_vertical_bias slider is 0.0 or 2.0: the temperature-driven
-        solver no longer applies the heuristic vertical solidification bias."""
         weak_engine = _build_bias_engine(feeding_bias=0.0, with_risers=True)
         strong_engine = _build_bias_engine(feeding_bias=2.0, with_risers=True)
-        # Drop 15 degC/step and stop after 3 iterations so the simulation
-        # ends mid-solidification and any (removed) bias delta would have
-        # accumulated visibly instead of saturating at 1.0 for every voxel.
         for engine in (weak_engine, strong_engine):
             engine._thermal_heat_model = _Uniform5DropHeatModel(
                 n_voxels=4, drop_per_step=15.0
@@ -391,9 +349,6 @@ class FeedingZoneBiasTests(unittest.TestCase):
         )
 
     def test_thermal_mode_bias_slider_ignored_without_risers(self) -> None:
-        """The feeding_zone_vertical_bias slider must not change the simulation
-        even when no RISER voxels are present: thermal-coupled mode is purely
-        temperature-driven and applies no heuristic vertical bias."""
         zero_engine = _build_bias_engine(feeding_bias=0.0, with_risers=False)
         max_engine = _build_bias_engine(feeding_bias=2.0, with_risers=False)
         for engine in (zero_engine, max_engine):
@@ -418,8 +373,6 @@ class FeedingZoneBiasTests(unittest.TestCase):
             progress_callback=None,
         )
 
-        # Thermal-coupled mode ignores the bias slider entirely; both engines
-        # must show identical state.
         np.testing.assert_allclose(
             max_engine.solidification_end_times,
             zero_engine.solidification_end_times,
@@ -437,10 +390,6 @@ class FeedingZoneBiasTests(unittest.TestCase):
     def test_apply_feeding_zone_bias_helper_returns_true_with_default_baseline(
         self,
     ) -> None:
-        """Even with feeding_bias == 0.0 the helper applies the baseline
-        directional bias, so it must return True when there is at least one
-        non-solid voxel to nudge.
-        """
         engine = _build_bias_engine(feeding_bias=0.0, with_risers=False)
         solidification_model = engine._thermal_solidification_model
         solidification_model._fraction_solid[:] = np.array([0.5, 0.5, 0.5, 0.5])
@@ -450,7 +399,6 @@ class FeedingZoneBiasTests(unittest.TestCase):
 
         self.assertTrue(applied)
         states = np.asarray(solidification_model._fraction_solid, dtype=np.float64)
-        # Baseline advances bottom voxels; top voxels stay put.
         self.assertGreater(float(states[0]), 0.5)
         self.assertAlmostEqual(float(states[2]), 0.5, places=6)
         self.assertAlmostEqual(float(states[3]), 0.5, places=6)
@@ -458,7 +406,6 @@ class FeedingZoneBiasTests(unittest.TestCase):
     def test_apply_feeding_zone_bias_helper_advances_bottom_only(self) -> None:
         engine = _build_bias_engine(feeding_bias=2.0, with_risers=True)
         solidification_model = engine._thermal_solidification_model
-        # Pretend the thermal model advanced to a moderately liquid state.
         solidification_model._fraction_solid[:] = np.array([0.2, 0.2, 0.2, 0.2])
         solidification_model._fraction_solid_prev[:] = np.array([0.2, 0.2, 0.2, 0.2])
         solidification_model._solidification_start[:] = 1.0
@@ -469,19 +416,14 @@ class FeedingZoneBiasTests(unittest.TestCase):
 
         self.assertTrue(applied)
         states = np.asarray(solidification_model._fraction_solid, dtype=np.float64)
-        # Bottom CAST voxel (0) and bottom RISER (1) advance; top voxels do not.
         self.assertGreater(float(states[0]), 0.2)
         self.assertGreater(float(states[1]), 0.2)
         self.assertAlmostEqual(float(states[2]), 0.2, places=6)
         self.assertAlmostEqual(float(states[3]), 0.2, places=6)
 
     def test_baseline_bias_makes_casting_solidify_bottom_up(self) -> None:
-        """The constant 0.3 baseline must produce non-zero bottom-up progression
-        outside the feeding zone (matching the legacy
-        ``vertical_factor = 1 + (1 - height) * 0.3`` rule)."""
         engine = _build_bias_engine(feeding_bias=0.0, with_risers=False)
         solidification_model = engine._thermal_solidification_model
-        # Two bottom CAST voxels and two top CAST voxels (no riser).
         solidification_model._fraction_solid[:] = np.array([0.4, 0.4, 0.4, 0.4])
         solidification_model._fraction_solid_prev[:] = np.array([0.4, 0.4, 0.4, 0.4])
         solidification_model._solidification_start[:] = 1.0
@@ -491,14 +433,10 @@ class FeedingZoneBiasTests(unittest.TestCase):
 
         self.assertTrue(applied)
         states = np.asarray(solidification_model._fraction_solid, dtype=np.float64)
-        # Baseline (0.3) applied at h=0; no risers means no extra feeding-zone boost.
-        # dt=1.0, DVR_RATE=0.02 → extra = (1 - 0) * 0.3 * 0.02 * 1 = 0.006
         self.assertAlmostEqual(float(states[0]), 0.406, places=6)
         self.assertAlmostEqual(float(states[1]), 0.406, places=6)
-        # Top voxels (h=1) gain nothing from the height factor.
         self.assertAlmostEqual(float(states[2]), 0.4, places=6)
         self.assertAlmostEqual(float(states[3]), 0.4, places=6)
-
 
 if __name__ == "__main__":
     unittest.main()

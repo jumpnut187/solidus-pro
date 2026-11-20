@@ -1,11 +1,3 @@
-/**
- * A minimal binary-STL reader for the viewport bench.
- *
- * The shell keeps a part's triangles in memory from the moment it was
- * uploaded, so the real application never re-reads an STL. The bench starts
- * from a project id and nothing else, so it has to. Fifty lines of
- * `DataView` beats wiring a scene loader in for a development-only page.
- */
 import type { MeshData } from '../../lib/api';
 
 const HEADER_BYTES = 80;
@@ -24,8 +16,6 @@ export function parseBinaryStl(buffer: ArrayBuffer): MeshData {
   let max = [-Infinity, -Infinity, -Infinity];
 
   for (let triangle = 0; triangle < triangleCount; triangle += 1) {
-    // Skip the facet normal; normals are recomputed from the triangles so a
-    // file with wrong or zeroed normals still shades correctly.
     let offset = HEADER_BYTES + 4 + triangle * TRIANGLE_BYTES + 12;
     for (let corner = 0; corner < 3; corner += 1) {
       const base = triangle * 9 + corner * 3;

@@ -1,16 +1,3 @@
-/**
- * The parting line, drawn as the mold sees it.
- *
- * A flat parting line is the horizontal plane `z = partingZ`: the cope above
- * it, the drag below. It is drawn as a large translucent sheet spanning the
- * assembly (so a riser or runner can be judged against it at a glance), a
- * rectangle around that sheet, the line where it cuts each casting, and a
- * billboard label with its height. Small COPE and DRAG tags sit above and
- * below the sheet's edge so the two halves are named where they are.
- *
- * Nothing here is pickable: a click on the model through the sheet must still
- * land on the model.
- */
 import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial';
 import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture';
 import { Color3 } from '@babylonjs/core/Maths/math.color';
@@ -27,7 +14,6 @@ const SHEET_COLOR = new Color3(1.0, 0.62, 0.18);
 const SHEET_ALPHA = 0.16;
 const RIM_COLOR = new Color3(1.0, 0.7, 0.25);
 const CUT_COLOR = new Color3(1.0, 0.45, 0.05);
-/** How far past the assembly the sheet reaches, as a fraction of its size. */
 const SHEET_MARGIN = 0.25;
 
 const LABEL_WIDTH = 1024;
@@ -76,7 +62,6 @@ function disposeLabel(label: Label): void {
   label.material.dispose();
 }
 
-/** World-space segments where the plane `z` crosses a mesh's triangles, flat `[x0,y0,z0,x1,y1,z1,...]`. */
 export function planeCutSegments(mesh: Mesh, z: number): number[] {
   const positions = mesh.getVerticesData('position');
   const indices = mesh.getIndices();
@@ -88,7 +73,6 @@ export function planeCutSegments(mesh: Mesh, z: number): number[] {
     const x = positions[i * 3];
     const y = positions[i * 3 + 1];
     const zz = positions[i * 3 + 2];
-    // Babylon's row-vector convention: p * M.
     wp[i * 3] = x * world[0] + y * world[4] + zz * world[8] + world[12];
     wp[i * 3 + 1] = x * world[1] + y * world[5] + zz * world[9] + world[13];
     wp[i * 3 + 2] = x * world[2] + y * world[6] + zz * world[10] + world[14];
@@ -102,7 +86,6 @@ export function planeCutSegments(mesh: Mesh, z: number): number[] {
       const b = indices[t + ((e + 1) % 3)];
       const za = wp[a * 3 + 2] - z;
       const zb = wp[b * 3 + 2] - z;
-      // Half-open test, so a vertex exactly on the plane counts once.
       if ((za > 0) === (zb > 0)) continue;
       const s = za / (za - zb);
       crossing.push(
@@ -127,7 +110,6 @@ export class PartingPlane {
   private _label: Label | null = null;
   private _cope: Label | null = null;
   private _drag: Label | null = null;
-  /** Corners of the assembly's box at the plane's height; the labels sit on the one nearest the eye. */
   private _anchors: Vector3[] = [];
   private _labelHeight = 1;
   private _anchorIndex = -1;
@@ -138,11 +120,6 @@ export class PartingPlane {
     scene.onBeforeRenderObservable.add(this._placeLabels);
   }
 
-  /**
-   * Keep the labels on the assembly corner nearest the camera: a corner of the
-   * casting's own box is always in frame, where a corner of the oversized
-   * sheet often is not.
-   */
   private _followCamera(): void {
     const camera = this._scene.activeCamera;
     if (!camera || !this._label || !this._label.plane.isEnabled() || !this._anchors.length) return;
@@ -165,10 +142,6 @@ export class PartingPlane {
     this._drag?.plane.position.set(corner.x, corner.y, corner.z - h * 0.7);
   }
 
-  /**
-   * Show the plane at `state.z` across `bounds`, outlining where it cuts
-   * `castings`; hide everything for a null or hidden state.
-   */
   update(state: PartingPlaneState | null, bounds: Bounds | null, castings: Mesh[]): void {
     if (!state || !state.visible || !bounds) {
       this._setEnabled(false);
@@ -193,12 +166,10 @@ export class PartingPlane {
       material.specularColor = Color3.Black();
       material.alpha = SHEET_ALPHA;
       material.backFaceCulling = false;
-      // Translucent: it must not hide the casting behind it in the depth buffer.
       material.disableDepthWrite = true;
       this._sheet.material = material;
       this._sheetMaterial = material;
     }
-    // CreatePlane builds in the XY plane, which in this Z-up scene is horizontal.
     this._sheet.scaling.set(width, depth, 1);
     this._sheet.position.set(cx, cy, z);
 

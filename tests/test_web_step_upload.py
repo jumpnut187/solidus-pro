@@ -1,10 +1,3 @@
-"""STEP handling in the web upload path (web.payloads.upload_cad_file).
-
-Covers the tessellation tolerance a STEP upload is loaded at, the optional
-``voxel_size_in`` upload form field, removal of the original STEP after
-fan-out, the inch scale of the Test_Model files, and single-body naming.
-"""
-
 from __future__ import annotations
 
 import io
@@ -25,36 +18,27 @@ from web.payloads import upload_cad_file, upload_voxel_size_in
 from web.routes import api_bp
 from web.services.simulation_queue import SimulationQueueManager
 
-
 FILLING_TEST_DIR = Path(__file__).resolve().parent.parent / "Test_Model" / "Filling_Test"
 RISER_STEP = FILLING_TEST_DIR / "Feeding Distance Test - Riser.step"
 CASTING_STEP = FILLING_TEST_DIR / "Feeding Distance Test - Casting.step"
-# Local-only CAD (not tracked, see tests/ci_models/README.md): skip without it.
 HAVE_STEP_FIXTURES = RISER_STEP.exists() and CASTING_STEP.exists()
 
 DEFAULT_TOL_MM = tessellation_tolerance_mm(repo.DEFAULT_VOXEL_SIZE_IN)
 
-# Any bytes do for a STEP whose load is mocked; the unit check only logs.
 _FAKE_STEP_BYTES = b"ISO-10303-21;\nEND-ISO-10303-21;\n"
-
 
 def _stl_bytes() -> bytes:
     return bytes(trimesh.creation.box(extents=(1.0, 2.0, 3.0)).export(file_type="stl"))
 
-
 def _fake_step_scene(*_args: Any, **_kwargs: Any) -> trimesh.Scene:
-    """What trimesh returns for a one-body STEP: a Scene in meters."""
     return trimesh.Scene(geometry={"Body": trimesh.creation.box(extents=(0.0254, 0.0254, 0.0254))})
-
 
 def _upload(folder: Path, data: bytes, filename: str, **kwargs: Any) -> List[Dict[str, Any]]:
     return upload_cad_file(FileStorage(stream=io.BytesIO(data), filename=filename), folder, **kwargs)
 
-
 def _extents(entry: Dict[str, Any]) -> np.ndarray:
     bounds = entry["mesh_data"]["bounds"]
     return np.array([bounds[axis][1] - bounds[axis][0] for axis in ("x", "y", "z")])
-
 
 class UploadVoxelSizeTests(unittest.TestCase):
     def test_positive_finite_values_are_used(self) -> None:
@@ -66,10 +50,8 @@ class UploadVoxelSizeTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(upload_voxel_size_in(value), repo.DEFAULT_VOXEL_SIZE_IN)
 
-
 @patch("web.payloads.STEP_SUPPORTED", True)
 class UploadLoadArgumentsTests(unittest.TestCase):
-    """The arguments upload_cad_file hands trimesh.load, with the load mocked."""
 
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -105,9 +87,7 @@ class UploadLoadArgumentsTests(unittest.TestCase):
         self.assertEqual(entries[0]["body_name"], "Feeding_Distance_Test_-_Down_Sprue")
         self.assertEqual(entries[0]["part_type"], "sprue")
 
-
 class UploadRouteVoxelSizeTests(unittest.TestCase):
-    """The ``voxel_size_in`` form field reaches the STEP load."""
 
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -146,7 +126,6 @@ class UploadRouteVoxelSizeTests(unittest.TestCase):
     def test_missing_form_voxel_size_uses_the_default(self) -> None:
         self.assertEqual(self._post_step({}), DEFAULT_TOL_MM)
 
-
 class UploadFilesOnDiskTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -174,11 +153,9 @@ class UploadFilesOnDiskTests(unittest.TestCase):
         self.assertEqual(remaining, [Path(entries[0]["filepath"])])
         self.assertEqual(Path(entries[0]["filepath"]).suffix, ".stl")
 
-
 @unittest.skipUnless(STEP_SUPPORTED, "cascadio not installed")
 @unittest.skipUnless(HAVE_STEP_FIXTURES, "STEP fixture not available")
 class InchStepUploadTests(unittest.TestCase):
-    """Inch-authored Test_Model STEP files, uploaded for real."""
 
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -204,10 +181,8 @@ class InchStepUploadTests(unittest.TestCase):
         )
         entry = _upload(self.folder, RISER_STEP.read_bytes(), RISER_STEP.name)[0]
         self.assertLess(entry["mesh_data"]["face_count"], default_faces / 2)
-        # The exported STL carries the coarser tessellation too.
         exported = trimesh.load(entry["filepath"], force="mesh")
         self.assertEqual(len(exported.faces), entry["mesh_data"]["face_count"])
-
 
 if __name__ == "__main__":
     unittest.main()

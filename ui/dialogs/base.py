@@ -1,5 +1,3 @@
-"""Base dialog building blocks for movable non-modal dialogs."""
-
 from __future__ import annotations
 
 from typing import Any, Dict
@@ -16,9 +14,7 @@ from ui.qt import (
     Qt,
 )
 
-
 class DraggableDialog(QDialog):
-    """Base class for draggable modal dialogs with Confirm/Cancel buttons."""
 
     def __init__(self, parent=None, title: str = "Dialog") -> None:
         super().__init__(parent)

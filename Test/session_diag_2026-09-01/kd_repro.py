@@ -1,4 +1,3 @@
-"""Reproduce the trimesh proximity cKDTree stack death on a STEP body."""
 import sys, numpy as np, trimesh
 sys.path.insert(0, "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim")
 from core.part_manager import PartManager

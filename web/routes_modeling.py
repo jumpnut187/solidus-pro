@@ -1,21 +1,3 @@
-"""Routes for bodies modeled in the browser (sketch + extrude features).
-
-The geometry kernel runs in the browser (Manifold, in a web worker), because a
-sketch has to preview at interactive speed against the uploaded castings the
-client already holds. The server's part is storage: it receives the finished,
-watertight triangle mesh with the parametric definition that produced it,
-writes the mesh as an STL in the upload folder -- which is all the simulation
-engine ever reads -- and keeps the definition on the part row so the body can
-be edited and rebuilt later.
-
-An extrude cut is stored in two halves. Its definition is one entry of the
-project's ``ui_state["cut_features"]``; what it did is the STL of every body
-it cut. A cut body's row keeps the STL it had before its first cut as
-``base_filepath``, so editing or deleting a cut rebuilds the body from that
-base and gives back the material. The simulation still reads ``filepath``
-only.
-"""
-
 from __future__ import annotations
 
 import json
@@ -34,29 +16,21 @@ from web.payloads import _build_mesh_data, _sanitize_body_name, load_part_mesh_d
 
 modeling_bp = Blueprint("web_modeling", __name__, url_prefix="/api")
 
-#: Feature definitions are a few kilobytes of numbers; anything near this is
-#: not a sketch.
 MAX_FEATURE_BYTES = 256 * 1024
-#: A conforming riser or chill on a fine casting skin can carry a few hundred
-#: thousand triangles; ten times that is not a modeled body.
 MAX_MODELED_VERTICES = 2_000_000
 MAX_MODELED_FACES = 4_000_000
 
 FEATURE_KINDS = frozenset({"extrude"})
 PART_TYPE_VALUES = frozenset(part_type.value for part_type in PartType)
 
-
 class ModelingRequestError(ValueError):
-    """A request the client must fix; reported as a 400 with this message."""
-
+    pass
 
 def _database_path() -> Path:
     return Path(current_app.config["DATABASE"])
 
-
 def _upload_folder() -> Path:
     return Path(current_app.config["UPLOAD_FOLDER"])
-
 
 def _checked_feature(raw: Any) -> Dict[str, Any]:
     if not isinstance(raw, dict):
@@ -67,14 +41,7 @@ def _checked_feature(raw: Any) -> Dict[str, Any]:
         raise ModelingRequestError("The feature definition is too large.")
     return raw
 
-
 def _checked_mesh(raw: Any) -> trimesh.Trimesh:
-    """Validate the client's triangle mesh and build it.
-
-    The arrays are untrusted input: every coordinate must be finite and every
-    index must name a vertex, or the STL written from them would carry NaNs or
-    crash the voxelizer much later and far from the cause.
-    """
     if not isinstance(raw, dict):
         raise ModelingRequestError("A modeled body needs its mesh.")
     vertices_raw = raw.get("vertices")
@@ -99,10 +66,6 @@ def _checked_mesh(raw: Any) -> trimesh.Trimesh:
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=True)
     if len(mesh.faces) == 0:
         raise ModelingRequestError("The modeled body has no volume.")
-    # The STL is welded by position wherever it is read -- here, by the
-    # voxelizer and by the browser's next build -- so this weld is the one that
-    # counts. A body that is not closed after it cannot be voxelized: its
-    # containment test has no inside, and the part silently loses voxels.
     if not (mesh.is_watertight and mesh.is_winding_consistent):
         raise ModelingRequestError(
             "The modeled body is not a closed solid, so the simulation cannot voxelize it."
@@ -110,7 +73,6 @@ def _checked_mesh(raw: Any) -> trimesh.Trimesh:
     if not math.isfinite(float(mesh.volume)) or float(mesh.volume) <= 0:
         raise ModelingRequestError("The modeled body has no volume.")
     return mesh
-
 
 def _checked_body_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
     part_type = str(payload.get("part_type") or "cast")
@@ -120,40 +82,27 @@ def _checked_body_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
     fields = {
         "name": name,
         "part_type": part_type,
-        # Open-top is a riser property; see lib/partTypes.ts supportsOpenTop.
         "is_open_top": bool(payload.get("is_open_top")) and part_type == "riser",
         "visible": bool(payload.get("visible", True)),
     }
-    # The sleeve is set in the Parts panel, not the model panel: a rebuild that
-    # does not send it keeps the stored choice, and a body that is no longer a
-    # riser drops back to the default.
     if part_type != "riser":
         fields["riser_sleeve"] = "insulating"
     elif "riser_sleeve" in payload:
         fields["riser_sleeve"] = riser_sleeve_from_value(payload["riser_sleeve"])
     return fields
 
-
 def _write_body(mesh: trimesh.Trimesh, name: str) -> Path:
     upload_folder = _upload_folder()
     upload_folder.mkdir(parents=True, exist_ok=True)
-    # The display name is user text; only its sanitized stem reaches the disk,
-    # behind a random prefix, so two bodies never share a file.
     stem = _sanitize_body_name(name)[:60]
     filepath = upload_folder / f"{os.urandom(4).hex()}_b0_{stem}.stl"
     repo.resolve_upload_path(str(filepath), upload_folder)
     mesh.export(str(filepath))
     return filepath
 
-
 def _parse(
     payload: Any,
 ) -> Tuple[Dict[str, Any], Dict[str, Any], trimesh.Trimesh, Optional[trimesh.Trimesh]]:
-    """The feature, body fields, mesh and optional ``cut_mesh`` of a body request.
-
-    ``cut_mesh`` is the body after the extrude cuts that apply to it; when it
-    is sent, ``mesh`` is stored as the body's pre-cut base.
-    """
     if not isinstance(payload, dict):
         raise ModelingRequestError("Send the body as a JSON object.")
     feature = _checked_feature(payload.get("feature"))
@@ -162,11 +111,9 @@ def _parse(
     cut_mesh = _checked_mesh(payload["cut_mesh"]) if payload.get("cut_mesh") is not None else None
     return feature, fields, mesh, cut_mesh
 
-
 def _write_geometry(
     mesh: trimesh.Trimesh, cut_mesh: Optional[trimesh.Trimesh], name: str
 ) -> Tuple[Path, Optional[Path]]:
-    """Write a body's STL and, when it is cut, its base. Returns ``(filepath, base)``."""
     base = _write_body(mesh, name)
     if cut_mesh is None:
         return base, None
@@ -176,7 +123,6 @@ def _write_geometry(
         base.unlink(missing_ok=True)
         raise
 
-
 def _part_response(project_id: str, part_id: str, mesh: trimesh.Trimesh) -> Optional[Dict[str, Any]]:
     part = repo.get_part(_database_path(), project_id, part_id)
     if part is None:
@@ -185,10 +131,8 @@ def _part_response(project_id: str, part_id: str, mesh: trimesh.Trimesh) -> Opti
     part["watertight"] = bool(mesh.is_watertight)
     return part
 
-
 @modeling_bp.route("/projects/<project_id>/features", methods=["POST"])
 def create_feature_body(project_id: str):
-    """Store a body modeled in the browser as a new part."""
     if repo.get_project(_database_path(), project_id) is None:
         return jsonify({"error": "Project not found"}), 404
     try:
@@ -216,15 +160,8 @@ def create_feature_body(project_id: str):
     shown = cut_mesh if cut_mesh is not None else mesh
     return jsonify({"id": part_id, "part": _part_response(project_id, part_id, shown)}), 201
 
-
 @modeling_bp.route("/projects/<project_id>/features/<part_id>", methods=["PUT"])
 def update_feature_body(project_id: str, part_id: str):
-    """Replace a modeled body's geometry, definition and body properties.
-
-    The new mesh goes to a new file rather than over the old one: the viewport
-    keys a part's triangles on its file path, so an edit that kept the path
-    and the vertex count would never be redrawn.
-    """
     database_path = _database_path()
     current = repo.get_part(database_path, project_id, part_id)
     if current is None:
@@ -260,9 +197,7 @@ def update_feature_body(project_id: str, part_id: str):
     shown = cut_mesh if cut_mesh is not None else mesh
     return jsonify({"part": _part_response(project_id, part_id, shown)})
 
-
 def _discard_file(filepath: str) -> None:
-    """Delete a superseded body file unless another part still uses it."""
     if not filepath:
         return
     try:
@@ -273,26 +208,11 @@ def _discard_file(filepath: str) -> None:
         return
     resolved.unlink(missing_ok=True)
 
-
-# ---------------------------------------------------------------------------
-# Extrude cuts
-# ---------------------------------------------------------------------------
-
-#: A project carries a handful of cuts; each is a sketch and a few numbers.
 MAX_CUT_FEATURES = 200
 MAX_CUT_LIST_BYTES = 4 * MAX_FEATURE_BYTES
 
-
 @modeling_bp.route("/projects/<project_id>/parts/<part_id>/cut", methods=["PUT"])
 def put_part_cut(project_id: str, part_id: str):
-    """Store a body as the extrude cuts left it, or restore it uncut.
-
-    ``{"mesh": {...}}`` is the body after every cut that applies to it, in the
-    part's own frame, computed in the browser from the body's base. The STL
-    the body had before its first cut becomes its base and is kept; a later
-    cut replaces only the cut file. ``{"mesh": null}`` points the body back at
-    its base, for a body no cut reaches any more.
-    """
     database_path = _database_path()
     current = repo.get_part(database_path, project_id, part_id)
     if current is None:
@@ -325,15 +245,12 @@ def put_part_cut(project_id: str, part_id: str):
         written.unlink(missing_ok=True)
         current_app.logger.exception("Storing a cut body failed")
         return jsonify({"error": "Could not store the cut body."}), 500
-    # The previous cut file; the uncut file is the base and stays.
     if base:
         _discard_file(filepath)
     return jsonify({"part": _part_response(project_id, part_id, mesh)})
 
-
 @modeling_bp.route("/projects/<project_id>/parts/<part_id>/base-mesh")
 def part_base_mesh(project_id: str, part_id: str):
-    """The body's geometry before any extrude cut: its base, or its STL if uncut."""
     part = repo.get_part(_database_path(), project_id, part_id)
     if part is None:
         return jsonify({"error": "Part not found"}), 404
@@ -342,14 +259,8 @@ def part_base_mesh(project_id: str, part_id: str):
         return jsonify({"error": "Part geometry is unavailable"}), 404
     return jsonify({"mesh_data": mesh_data})
 
-
 @modeling_bp.route("/projects/<project_id>/cuts", methods=["PUT"])
 def put_cut_features(project_id: str):
-    """Replace the project's extrude cut definitions (``ui_state["cut_features"]``).
-
-    Only the definitions: the bodies each cut changes are stored through
-    :func:`put_part_cut`, one by one, by the browser that computed them.
-    """
     database_path = _database_path()
     if repo.get_project(database_path, project_id) is None:
         return jsonify({"error": "Project not found"}), 404
@@ -376,20 +287,10 @@ def put_cut_features(project_id: str):
     repo.set_ui_state_key(database_path, project_id, "cut_features", cuts)
     return jsonify({"cuts": cuts})
 
-
-#: A project carries a few reference planes, not thousands.
 MAX_REFERENCE_PLANES = 200
-
 
 @modeling_bp.route("/projects/<project_id>/reference-planes", methods=["PUT"])
 def put_reference_planes(project_id: str):
-    """Replace the project's reference planes (SOLIDWORKS-style offset planes).
-
-    They live in the project's ``ui_state`` JSON under ``reference_planes``,
-    next to the pour location, so duplicate, export and import carry them
-    without a schema change. A dedicated route rather than the project PUT:
-    the shell's settings autosave does not hold them and must not clear them.
-    """
     database_path = _database_path()
     project = repo.get_project(database_path, project_id)
     if project is None:

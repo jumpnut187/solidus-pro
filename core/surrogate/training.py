@@ -1,16 +1,3 @@
-"""Programmatic training entry points for surrogate models.
-
-Shared by the desktop UI (Surrogate > Retrain Surrogate Model) and the CLI
-(``tools/train_surrogate_model.py``).
-
-Two data sources feed training:
-
-* ``generate_dataset`` — run the full solver over synthetic geometries x
-  catalog alloys (offline batch), used to seed a dataset from scratch.
-* ``retrain_from_dataset`` — fit on records captured from real simulations
-  (``surrogate.auto_capture``), optionally generating a starter dataset first.
-"""
-
 from __future__ import annotations
 
 import contextlib
@@ -43,23 +30,19 @@ ProgressCallback = Optional[Callable[[str], None]]
 DetailedProgressCallback = Optional[Callable[[int, int], None]]
 CancelCallback = Optional[Callable[[], bool]]
 
-
 class TrainingCancelledError(RuntimeError):
-    """Raised when the user requests cancellation during training."""
-
+    pass
 
 def _check_cancel(cancel: CancelCallback) -> None:
     if cancel is not None and cancel():
         raise TrainingCancelledError("Training cancelled")
 
-
 def _loader_for_trimesh(mesh):
-    """Wrap a trimesh object as a minimal stl_loader for the pipeline."""
     bounds = np.stack([mesh.bounds[0], mesh.bounds[1]], axis=1)
 
     class _Loader:
         trimesh_obj = mesh
-        is_valid = lambda self: True  # noqa: E731
+        is_valid = lambda self: True
         volume = float(getattr(mesh, "volume", 0.0) or 0.0)
 
         def get_bounds_array(self):
@@ -67,30 +50,14 @@ def _loader_for_trimesh(mesh):
 
     return _Loader()
 
-
 def synthetic_geometries():
-    """Return a list of (name, trimesh mesh) pairs covering basic shapes.
-
-    Delegates to ``core.surrogate.geometries.named_catalog`` (one fixed shape
-    per family: box, cylinder, plate with boss, T, L, stepped plate, hollow
-    and flanged cylinders, framed box, tapered bar, wedge).
-    """
     from core.surrogate.geometries import named_catalog
 
     return [spec.as_pair() for spec in named_catalog().values()]
 
-
-#: Stack size for the solver thread in ``generate_dataset``.  SciPy's default
-#: median-split ``cKDTree`` (``core/solidification.py`` surface-distance query)
-#: recurses past the 8 MB macOS main-thread stack on some voxel clouds and
-#: kills the process with SIGSEGV; ``core/voxel_mesh.py:_build_kdtree``
-#: documents the same crash.  A 256 MB thread stack was verified to survive
-#: every failing synthetic geometry.
 SOLVER_THREAD_STACK_BYTES = 256 * 1024 * 1024
 
-
 def _run_on_large_stack(fn: Callable[[], Any]) -> Any:
-    """Run ``fn`` on a worker thread with ``SOLVER_THREAD_STACK_BYTES`` stack."""
     import threading
 
     result: Dict[str, Any] = {}
@@ -98,7 +65,7 @@ def _run_on_large_stack(fn: Callable[[], Any]) -> Any:
     def _target() -> None:
         try:
             result["value"] = fn()
-        except BaseException as exc:  # re-raised on the caller thread
+        except BaseException as exc:
             result["error"] = exc
 
     previous = threading.stack_size()
@@ -113,7 +80,6 @@ def _run_on_large_stack(fn: Callable[[], Any]) -> Any:
         raise result["error"]
     return result["value"]
 
-
 def generation_plan_key(
     geometry_name: str,
     alloy: str,
@@ -121,18 +87,10 @@ def generation_plan_key(
     voxel_size: float,
     grid: int,
 ) -> str:
-    """Deterministic key for one (geometry, alloy, mold constant) run.
-
-    Plans may also hold keys ending in ``|mesh=tet`` from removed tet runs,
-    or keys without ``|mold=sand`` from runs on the sand boundary before the
-    explicit sand mold became the default; they never match and are left
-    alone.
-    """
     return (
         f"{geometry_name}|{alloy}|mc={float(mold_constant):.1f}|vs={float(voxel_size):.3f}"
         f"|grid={int(grid)}|mold=sand"
     )
-
 
 def _load_plan(plan_path: Optional[str]) -> Dict[str, Dict[str, Any]]:
     if not plan_path or not os.path.exists(plan_path):
@@ -141,7 +99,6 @@ def _load_plan(plan_path: Optional[str]) -> Dict[str, Dict[str, Any]]:
 
     with open(plan_path) as fh:
         return json.load(fh)
-
 
 def _save_plan(plan_path: Optional[str], plan: Dict[str, Dict[str, Any]]) -> None:
     if not plan_path:
@@ -153,18 +110,13 @@ def _save_plan(plan_path: Optional[str], plan: Dict[str, Dict[str, Any]]) -> Non
         json.dump(plan, fh, indent=1, sort_keys=True)
     os.replace(tmp, plan_path)
 
-
 def _plan_record_exists(entry: Dict[str, Any], out_dir: str) -> bool:
-    """True when the record a plan entry points at is still on disk (the plan
-    stores absolute paths; a moved dataset directory is resolved by basename)."""
     path = str(entry.get("path", ""))
     if not path:
         return False
     return os.path.exists(path) or os.path.exists(os.path.join(out_dir, os.path.basename(path)))
 
-
 def _part_manager_for(spec: Any, work_dir: str):
-    """``PartManager`` holding ``spec.parts``, each written to an STL in ``work_dir`` and loaded in place."""
     from core.part_manager import CODE_TO_PART_TYPE, PartManager
 
     manager = PartManager()
@@ -177,13 +129,7 @@ def _part_manager_for(spec: Any, work_dir: str):
         manager.get_part(part_id).set_part_type(CODE_TO_PART_TYPE[int(code)])
     return manager
 
-
 def alloys_for_geometry(name: str, alloys: List[str], per_geometry: Optional[int]) -> List[str]:
-    """The alloys one geometry runs with: all of them, or a subset of ``per_geometry`` seeded by its name.
-
-    A subset spreads a fixed solver budget over more shapes; seeding by name
-    keeps a resumed batch on the same combinations.
-    """
     if per_geometry is None or per_geometry >= len(alloys):
         return list(alloys)
     import hashlib
@@ -192,9 +138,7 @@ def alloys_for_geometry(name: str, alloys: List[str], per_geometry: Optional[int
     picks = np.random.default_rng(seed).choice(len(alloys), size=max(1, int(per_geometry)), replace=False)
     return [alloys[i] for i in sorted(picks)]
 
-
 def _as_geometry_specs(geometries) -> List[Any]:
-    """Accept ``GeometrySpec`` objects or ``(name, mesh)`` pairs."""
     from core.surrogate.geometries import GeometrySpec
 
     specs = []
@@ -212,7 +156,6 @@ def _as_geometry_specs(geometries) -> List[Any]:
                 )
             )
     return specs
-
 
 def generate_dataset(
     alloys: Optional[List[str]] = None,
@@ -234,46 +177,6 @@ def generate_dataset(
     retry_failed: bool = True,
     alloys_per_geometry: Optional[int] = None,
 ) -> int:
-    """Run the full solver over geometries x alloys x mold constants and capture runs.
-
-    Args:
-        alloys: Alloy names (default: whole catalog).
-        out_dir: Record directory.
-        grid: Encoding resolution per axis.
-        geometries: ``GeometrySpec`` objects or ``(name, mesh)`` pairs.  When
-            ``None``: ``count`` seeded geometries from
-            ``core.surrogate.geometries.iter_geometries`` if ``count`` is set,
-            otherwise the fixed ``synthetic_geometries`` catalog.
-        count / seed: Seeded geometry family parameters (see above).
-        voxel_size: Fixed voxel size in inches, or ``None`` to apply
-            ``core.surrogate.geometries.voxel_size_for`` (about ``target_voxels``
-            solver cells, at least three across the thinnest section).
-        mold_constants: ``chvorinov_mold_constant`` values swept per run via
-            ``PipelineInputs.solidification_params["timing"]`` (default
-            ``[280.0]``).  In the
-            thermal_coupled solver this only sets the simulation horizon
-            (``max_time``) and the conditioning vector; the reference schedule
-            changes only when the horizon truncates it.
-        plan_path: Optional JSON sidecar keyed by ``generation_plan_key``.
-            Runs recorded there as ``done`` (record file still present) or
-            ``invalid`` are skipped, which makes a batch resumable even though
-            ``capture_run`` names files from a time hash.
-        retry_failed: Re-run combinations the plan marks ``failed``.
-        alloys_per_geometry: Run each geometry with this many of ``alloys``
-            (``alloys_for_geometry``) instead of all of them.
-
-    A ``GeometrySpec`` with ``parts`` (``core.surrogate.assemblies``) runs as
-    a multi-part job: casting, riser, chill and core loaded into a
-    ``PartManager`` with their part types. Such a run whose casting freezes
-    after its last riser (``design_rules.unfed_metal``) is marked ``invalid``
-    in the plan and no record is written.
-
-    Every run executes on a 256 MB-stack thread (``_run_on_large_stack``) and
-    inside ``try/except`` so one failure does not stop the batch.
-
-    Returns:
-        Number of records generated in this call.
-    """
     from core.surrogate.dataset import load_record, validate_record
     from core.surrogate.geometries import iter_geometries, voxel_size_for
 
@@ -284,8 +187,6 @@ def generate_dataset(
         if count is not None:
             geometries = list(iter_geometries(int(count), seed=seed))
         else:
-            # Keep the GeometrySpec (family, min_thickness) so the voxel-size
-            # rule's thin-section clause works; (name, mesh) pairs lose it.
             from core.surrogate.geometries import named_catalog
 
             geometries = list(named_catalog().values())
@@ -341,8 +242,6 @@ def generate_dataset(
 
                     result = _run_on_large_stack(_solve)
                     entry["voxels"] = int(len(result.engine.mesh.voxel_centers))
-                    # Train only on sound rigging: a design the rules passed
-                    # can still leave metal freezing after its risers.
                     unsound = None if spec.parts is None else design_rules.unfed_metal(
                         result.engine.mesh.voxel_part_types, result.engine.solidification_times
                     )
@@ -390,21 +289,7 @@ def generate_dataset(
         progress_cb(f"Generated {generated} sample records into {out_dir}")
     return generated
 
-
 def train_numpy(records: List[Dict[str, Any]], grid: int) -> Dict[str, Any]:
-    """Fit the linear-log surrogate and return its manifest metadata + weights.
-
-    Records are split by geometry group (``core.surrogate.split``); both heads
-    are fit on the train side only and scored on the validation side over
-    active, non-chill cells with a positive reference end time.  When every
-    record shares one geometry there is no validation side: ``metrics`` is
-    empty, every headline number is NaN and ``val_records`` is 0.
-
-    Returns:
-        Dict with ``weights``, ``local_weights``, ``train_records``,
-        ``val_records`` (also as ``test_records``), ``train_groups``,
-        ``val_groups``, ``val_cells``, ``metrics`` and ``headline``.
-    """
     train_idx, val_idx = grouped_train_val_indices(records, val_fraction=0.2, seed=0)
     train_groups = len({geometry_group_key(records[i]) for i in train_idx})
     val_groups = len({geometry_group_key(records[i]) for i in val_idx})
@@ -442,7 +327,6 @@ def train_numpy(records: List[Dict[str, Any]], grid: int) -> Dict[str, Any]:
             np.concatenate(locals_),
             val_mask,
         )
-        # Baseline: the constant fit on TRAIN end times, scored on val cells.
         train_end = np.concatenate([
             np.asarray(records[i]["end"]).reshape(-1)[
                 schedule_evaluation_mask(records[i]["channels"], records[i]["end"])
@@ -472,16 +356,13 @@ def train_numpy(records: List[Dict[str, Any]], grid: int) -> Dict[str, Any]:
         "headline": headline,
     }
 
-
 def _manifest_number(value: Any, digits: int) -> Optional[float]:
-    """Round for the manifest; NaN becomes ``None`` so the JSON stays standard."""
     if value is None:
         return None
     f = float(value)
     if not np.isfinite(f):
         return None
     return round(f, digits)
-
 
 def save_trained(
     weights: np.ndarray,
@@ -494,13 +375,6 @@ def save_trained(
     local_weights: Optional[np.ndarray] = None,
     split_info: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Persist the trained weights + manifest.
-
-    ``split_info`` carries record / geometry-group counts from ``train_numpy``
-    (``train_records``, ``val_records``, ``train_groups``, ``val_groups``,
-    ``val_cells``); they are written into ``accuracy`` alongside the metrics
-    so the manifest states what the numbers were measured on.
-    """
     os.makedirs(output_dir, exist_ok=True)
     split_info = split_info or {}
     accuracy: Dict[str, Any] = {
@@ -553,7 +427,6 @@ def save_trained(
     np.savez_compressed(os.path.join(output_dir, "weights.npz"), **arrays)
     return output_dir
 
-
 def retrain_from_dataset(
     data_dir: str = DEFAULT_DATASET_DIR,
     output_dir: str = DEFAULT_MODEL_OUTPUT,
@@ -565,18 +438,6 @@ def retrain_from_dataset(
     detailed_cb: DetailedProgressCallback = None,
     cancel_cb: CancelCallback = None,
 ) -> Dict[str, Any]:
-    """Fit a surrogate model from captured records and persist it.
-
-    Returns:
-        Dict with ``records``, ``train``, ``test``, ``train_groups``,
-        ``val_groups``, ``headline``, ``saved_to``, and ``alloys``.  ``test``
-        is the geometry-grouped validation record count; when it is 0 the
-        headline numbers are NaN.
-
-    Raises:
-        ValueError: When no usable training records are available.
-        TrainingCancelledError: When cancellation is requested.
-    """
     if generate_first:
         _check_cancel(cancel_cb)
         generate_dataset(
@@ -586,8 +447,6 @@ def retrain_from_dataset(
             progress_cb=progress_cb,
             detailed_cb=detailed_cb,
             cancel_cb=cancel_cb,
-            # Resumable: a second "generate starter data" click must not
-            # re-solve and duplicate every catalog x alloy record.
             plan_path=os.path.join(data_dir, "generation_plan.json"),
         )
 

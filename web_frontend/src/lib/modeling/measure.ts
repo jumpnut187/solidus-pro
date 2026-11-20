@@ -1,12 +1,3 @@
-/**
- * The Measure tool's arithmetic (SOLIDWORKS' Tools > Evaluate > Measure).
- *
- * The viewport turns a click into a `MeasurePick` -- a vertex, an edge (a
- * straight line or a circular arc, recovered from the tessellation), a face
- * (flat or curved), or a bare point -- and this file says what to report for
- * one pick or a pair. The result also names the two points the viewport
- * draws its dimension line between.
- */
 import {
   add3,
   angleBetween3,
@@ -28,11 +19,9 @@ export type MeasurePick =
       kind: 'face';
       point: Vec3;
       normal: Vec3;
-      /** False for a facet of a curved face, whose plane is only a tangent plane. */
       planar: boolean;
       area: number;
       centroid: Vec3;
-      /** World-space triangles for the highlight, nine floats each. */
       triangles: Float32Array;
       partName: string | null;
     }
@@ -42,7 +31,6 @@ export type MeasurePick =
       center: Vec3;
       axis: Vec3;
       radius: number;
-      /** True when the edge closes on itself (a full circle). */
       full: boolean;
       length: number;
       points: Vec3[];
@@ -54,7 +42,6 @@ export type MeasureRow = { label: string; value: string };
 export type MeasureResult = {
   title: string;
   rows: MeasureRow[];
-  /** Where the viewport draws its dimension line, and the text on it. */
   line: { from: Vec3; to: Vec3; label: string } | null;
 };
 
@@ -76,11 +63,9 @@ export function pickLabel(pick: MeasurePick): string {
 
 const inch = (value: number) => `${value.toFixed(4)} in`;
 const deg = (value: number) => `${value.toFixed(2)}°`;
-/** Three places, with a rounded-away negative zero shown as 0. */
 const coord = (value: number) => (Math.abs(value) < 5e-4 ? 0 : value).toFixed(3);
 const vec = (value: Vec3) => `${coord(value[0])}, ${coord(value[1])}, ${coord(value[2])}`;
 
-/** The point a pick stands for when it has to be one point. */
 function anchor(pick: MeasurePick): Vec3 {
   switch (pick.kind) {
     case 'vertex':
@@ -102,7 +87,6 @@ function closestOnSegment(p: Vec3, a: Vec3, b: Vec3): Vec3 {
   return add3(a, scale3(ab, t));
 }
 
-/** Closest points between two segments (clamped), by alternating projection. */
 function closestBetweenSegments(a0: Vec3, a1: Vec3, b0: Vec3, b1: Vec3): [Vec3, Vec3] {
   let p = lerp3(a0, a1, 0.5);
   let q = closestOnSegment(p, b0, b1);
@@ -165,7 +149,6 @@ function single(pick: MeasurePick): MeasureResult {
 function pair(a: MeasurePick, b: MeasurePick): MeasureResult {
   const title = `${pickLabel(a)} → ${pickLabel(b)}`;
 
-  // Two flat faces: parallel ones have a normal distance, others an angle.
   if (a.kind === 'face' && b.kind === 'face' && a.planar && b.planar) {
     const angle = angleBetween3(a.normal, b.normal);
     const parallel = angle < 0.05 || angle > 179.95;
@@ -193,7 +176,6 @@ function pair(a: MeasurePick, b: MeasurePick): MeasureResult {
     };
   }
 
-  // A point (or vertex, or circle centre) and a flat face: the normal distance.
   const asPoint = (pick: MeasurePick): Vec3 | null =>
     pick.kind === 'vertex' || pick.kind === 'point' ? pick.point : pick.kind === 'circle' ? pick.center : null;
   for (const [p, f] of [
@@ -212,7 +194,6 @@ function pair(a: MeasurePick, b: MeasurePick): MeasureResult {
     }
   }
 
-  // Two straight edges: angle between them and the closest distance.
   if (a.kind === 'line' && b.kind === 'line') {
     const angle = angleBetween3(sub3(a.b, a.a), sub3(b.b, b.a));
     const [p, q] = closestBetweenSegments(a.a, a.b, b.a, b.b);
@@ -225,7 +206,6 @@ function pair(a: MeasurePick, b: MeasurePick): MeasureResult {
     return { title, rows, line: { from: p, to: q, label: parallel ? inch(distance3(p, q)) : deg(acute) } };
   }
 
-  // A straight edge and a flat face: angle, and the distance if parallel.
   for (const [l, f] of [
     [a, b],
     [b, a]
@@ -242,7 +222,6 @@ function pair(a: MeasurePick, b: MeasurePick): MeasureResult {
     }
   }
 
-  // A point and a straight edge: the perpendicular distance.
   for (const [p, l] of [
     [a, b],
     [b, a]
@@ -258,7 +237,6 @@ function pair(a: MeasurePick, b: MeasurePick): MeasureResult {
     }
   }
 
-  // Two circles: the distance between centres, and whether they share an axis.
   if (a.kind === 'circle' && b.kind === 'circle') {
     const between = distance3(a.center, b.center);
     const coaxial =
@@ -273,7 +251,6 @@ function pair(a: MeasurePick, b: MeasurePick): MeasureResult {
     return { title, rows, line: { from: a.center, to: b.center, label: inch(between) } };
   }
 
-  // Anything else: the distance between the points the picks stand for.
   const from = anchor(a);
   const to = anchor(b);
   return {

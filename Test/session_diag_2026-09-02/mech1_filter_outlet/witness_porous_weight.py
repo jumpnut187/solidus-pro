@@ -1,26 +1,3 @@
-"""Minimal NumPy-path witness for MECHANISM 1.
-
-Fixture: the closed, all-FLUID box that
-tests/test_filling_stability.py::FluidMassTracksDensityTests uses to assert
-|mass - rho*porosity| stays at ~1e-4 forever, with ONE change -- a porosity
-band laid across the middle.  There is no GAS and no INTERFACE cell anywhere,
-so apply_transitions / heal_submerged_interface / _redistribute are all no-ops
-by construction and the ONLY thing that touches state.mass is
-physics.filling.advance_mass.
-
-Variants
-  plain     porosity 1.0 everywhere            -> the existing test's control
-  por       porosity 0.85 in z-band, drag off  -> isolates the WEIGHT branch
-  por_drag  porosity 0.85 + real Guo-Zhao drag -> what Test 2 actually runs
-  por_fix   porosity 0.85, drag off, advance_mass patched to Koerner Table 1
-            unconditionally (weight 1 whenever either cell is FLUID)
-  por_fixd  porosity 0.85 + real drag + the same patch
-
-Reports, per sample: total mass (conservation), and max over FLUID cells of
-|mass - rho*porosity| / (rho*porosity) == |eps - 1|.
-
-  ./venv/bin/python witness_porous_weight.py
-"""
 from __future__ import annotations
 
 import os
@@ -29,11 +6,11 @@ import sys
 sys.path.insert(0, "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-import physics.filling as pf  # noqa: E402
-from physics.filling import PorousZone, FLAG_FLUID, FLAG_INTERFACE, FLAG_GAS  # noqa: E402
-from physics.fluid_flow import (  # noqa: E402
+import physics.filling as pf
+from physics.filling import PorousZone, FLAG_FLUID, FLAG_INTERFACE, FLAG_GAS
+from physics.fluid_flow import (
     lattice_units, lattice_tables, porous_drag_coefficients, LATTICE_VELOCITIES, Q,
     OPPOSITE,
 )
@@ -47,10 +24,8 @@ STEPS = int(os.environ.get("STEPS", "4000"))
 SAMPLE = int(os.environ.get("SAMPLE", "500"))
 POROSITY = 0.85
 
-
 def units():
     return lattice_units(DX_M, NU, u_max_physical_m_s=2.8)
-
 
 def build(porous_band: bool, drag: bool, seed_eps=None):
     n = W + 2
@@ -66,9 +41,6 @@ def build(porous_band: bool, drag: bool, seed_eps=None):
         band[1:W + 1, 1:W + 1, BAND[0]:BAND[1] + 1] = True
         zone.porosity[band] = np.float32(POROSITY)
         if drag:
-            # The same coefficients build_porous_zone stamps for a real
-            # ceramic foam filter (10 ppi-ish): k1 and inv_k2 from the
-            # Ergun/Forchheimer closure the stage uses.
             c0, c1 = porous_drag_coefficients(
                 POROSITY, 1.0e-8, 1.0e4, nu_lattice=u.nu_lattice, dx_m=DX_M
             )
@@ -80,19 +52,11 @@ def build(porous_band: bool, drag: bool, seed_eps=None):
     assert int((state.flags == FLAG_INTERFACE).sum()) == 0
     assert int((state.flags == FLAG_GAS).sum()) == 0
     if seed_eps is not None:
-        # create_state seeds mass[fluid] = REFERENCE_DENSITY with NO porosity
-        # factor, so a porous cell starts at eps = 1/porosity.  Re-seed it to
-        # the requested eps so "does the drift self-start from eps == 1" can be
-        # asked separately from "does it amplify a pre-existing error".
         full = state.rho.astype(np.float64) * state.porous.porosity_f64
         band = state.porous.porosity_f64 < 1.0
         state.mass[band] = full[band] * seed_eps
     return state, u
 
-
-# ---------------------------------------------------------------------------
-# the patched exchange: Koerner Table 1 unconditionally (no porous override)
-# ---------------------------------------------------------------------------
 def advance_mass_table1(state, f_post_collision, f_streamed):
     outgoing = np.asarray(f_post_collision, dtype=np.float64)
     incoming = np.asarray(f_streamed, dtype=np.float64)
@@ -115,7 +79,6 @@ def advance_mass_table1(state, f_post_collision, f_streamed):
         exchange = (incoming[ibar] - outgoing[i]) * weight
         delta += np.where(wet & neighbour_wet, exchange, 0.0)
     return state.mass + delta
-
 
 def run(name, porous_band, drag, patch, seed_eps=None):
     orig = pf.advance_mass
@@ -157,7 +120,6 @@ def run(name, porous_band, drag, patch, seed_eps=None):
     finally:
         pf.advance_mass = orig
 
-
 def main():
     res = {}
     only = os.environ.get("ONLY", "")
@@ -167,11 +129,9 @@ def main():
         ("por_fix",   dict(porous_band=True,  drag=False, patch=True)),
         ("por_drag",  dict(porous_band=True,  drag=True,  patch=False)),
         ("por_fixd",  dict(porous_band=True,  drag=True,  patch=True)),
-        # eps seeded to exactly 1: does the drift START on its own?
         ("por_e1",    dict(porous_band=True,  drag=False, patch=False, seed_eps=1.0)),
         ("por_e1_d",  dict(porous_band=True,  drag=True,  patch=False, seed_eps=1.0)),
         ("por_e1_fix",dict(porous_band=True,  drag=False, patch=True,  seed_eps=1.0)),
-        # eps seeded 5% high: the amplifier's gain on a small pre-existing error
         ("por_e105",  dict(porous_band=True,  drag=False, patch=False, seed_eps=1.05)),
         ("por_e105f", dict(porous_band=True,  drag=False, patch=True,  seed_eps=1.05)),
     ]
@@ -188,7 +148,6 @@ def main():
                   f"total_mass {mt:.10g}", flush=True)
         else:
             print(f"  {k:>9}  (no samples)", flush=True)
-
 
 if __name__ == "__main__":
     main()

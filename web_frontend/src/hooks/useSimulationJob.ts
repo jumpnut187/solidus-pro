@@ -13,24 +13,14 @@ export type JobState = {
 
 const IDLE: JobState = { phase: 'idle', progress: 0, message: 'Ready', queuePosition: null };
 
-/** Poll fast while a solve is running, slowly while it waits in the queue. */
 const POLL_RUNNING_MS = 650;
 const POLL_QUEUED_MS = 1500;
 
 export type SimulationJobOptions = {
-  /** Called once when a run reaches `completed`, so the shell can load results. */
   onCompleted: (projectId: string) => void;
   onError: (message: string) => void;
 };
 
-/**
- * Owns the lifecycle of one simulation run: submit, poll, report.
- *
- * This used to be a `setTimeout` chain inside `App` that kept calling itself
- * after the component moved on, so switching projects mid-run left an orphan
- * poller writing another project's status into the UI. The effect here cancels
- * on unmount and whenever the polled project changes.
- */
 export function useSimulationJob({ onCompleted, onError }: SimulationJobOptions) {
   const [job, setJob] = useState<JobState>(IDLE);
   const [pollingId, setPollingId] = useState<string | null>(null);
@@ -127,7 +117,6 @@ export function useSimulationJob({ onCompleted, onError }: SimulationJobOptions)
     }
   }, []);
 
-  /** Drop any in-flight polling and status, e.g. when opening another project. */
   const reset = useCallback((message = 'Ready') => {
     setPollingId(null);
     setJob({ ...IDLE, message });

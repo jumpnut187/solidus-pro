@@ -9,7 +9,6 @@ from core.solidification_params import (
     SolidificationParameters,
 )
 
-
 class SolidificationParametersTests(unittest.TestCase):
     def test_shrink_scalar_default_and_serialization(self) -> None:
         params = SolidificationParameters()
@@ -100,8 +99,6 @@ class SolidificationParametersTests(unittest.TestCase):
         )
 
     def test_feeding_zone_vertical_bias_strengthens_directional_solidification(self) -> None:
-        """Higher bias should make bottom-feeding-zone voxels solidify faster
-        while leaving feeding-zone voxels at the top of the casting unchanged."""
         try:
             import numpy as np
         except ImportError:
@@ -114,14 +111,9 @@ class SolidificationParametersTests(unittest.TestCase):
         initial = np.zeros(n_voxels, dtype=np.float32)
         initial[3] = 1.0
         neighbors = np.full((n_voxels, n_neighbors), -1, dtype=np.int32)
-        # Voxel 0 (CAST, in feeding zone via riser neighbor, height varies)
-        # needs both a riser neighbor (1) AND a solid neighbor (3) to trigger
-        # the solidification-update branch.
         neighbors[0, 0] = 1
         neighbors[0, 1] = 3
-        # Voxel 1 (RISER) neighbors the solid voxel (3).
         neighbors[1, 0] = 3
-        # Voxel 2 (CAST, outside feeding zone) neighbors the solid voxel.
         neighbors[2, 0] = 3
         moduli = np.full(n_voxels, 1.0, dtype=np.float32)
         heights_bottom = np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32)
@@ -231,8 +223,6 @@ class SolidificationParametersTests(unittest.TestCase):
     def test_filling_defaults_present(self) -> None:
         params = SolidificationParameters()
 
-        # 0 = derive from the square-root rule against the casting's own
-        # weight, not a fixed rate that suits one size of casting.
         self.assertAlmostEqual(params.filling.pour_rate_lb_s, 0.0)
         self.assertAlmostEqual(params.filling.pour_time_s, 0.0)
         self.assertAlmostEqual(params.filling.pour_temperature_c, 0.0)
@@ -274,12 +264,9 @@ class SolidificationParametersTests(unittest.TestCase):
             }
         )
 
-        # The overridden values took effect.
         self.assertAlmostEqual(params.filling.pour_rate_lb_s, 8.0)
         self.assertAlmostEqual(params.filling.filter.porosity, 0.7)
 
-        # Sibling fields on FillingParams, and sibling fields on the nested
-        # FilterParams, are untouched by the partial update.
         self.assertAlmostEqual(params.filling.pour_time_s, 0.0)
         self.assertAlmostEqual(params.filling.initial_head_in, 4.0)
         self.assertEqual(params.filling.vent_risers, 1)
@@ -287,7 +274,6 @@ class SolidificationParametersTests(unittest.TestCase):
         self.assertAlmostEqual(params.filling.filter.ergun_prefactor, 2.2)
         self.assertEqual(params.filling.filter.drag_enabled, 1)
 
-        # Untouched sibling top-level groups are also unaffected.
         self.assertAlmostEqual(params.feeding.base_feeding_distance, 3.0)
         self.assertAlmostEqual(params.thermal_boundary.htc_gating, 400.0)
 
@@ -369,19 +355,12 @@ class SolidificationParametersTests(unittest.TestCase):
         self.assertAlmostEqual(high_case.filling.max_fill_time_s, 600.0)
 
     def test_all_leaves_are_float_or_int(self) -> None:
-        """Every leaf value in to_dict() must be a plain float or int (not
-        bool, not str) because both the desktop and web settings UIs only
-        render numeric slider/spinbox fields. This guards that constraint
-        for all present and future parameter groups.
-        """
 
         def check(node, path: str) -> None:
             if isinstance(node, dict):
                 for key, value in node.items():
                     check(value, f"{path}.{key}")
                 return
-            # bool is a subclass of int in Python, so exclude it explicitly:
-            # a bool leaf would silently fail to render as a numeric field.
             self.assertIsInstance(
                 node, (int, float),
                 f"Leaf at {path} is {type(node).__name__}, expected float or int",
@@ -393,7 +372,6 @@ class SolidificationParametersTests(unittest.TestCase):
 
         params = SolidificationParameters()
         check(params.to_dict(), "root")
-
 
 if __name__ == "__main__":
     unittest.main()

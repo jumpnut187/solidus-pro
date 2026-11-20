@@ -1,11 +1,3 @@
-"""Shrink / Microporosity result naming, back-compat, and result help coverage.
-
-"Shrink" (mode ``shrinkage``) is shrinkage_probability with chills at 0, and
-"Microporosity" (mode ``porosity``) is porosity_probability with chills at 0,
-on both apps. Projects saved with the old "Shrinkage/Porosity" result type
-open as Shrink. ``core/result_help.json`` holds the help text both apps show.
-"""
-
 from __future__ import annotations
 
 import os
@@ -39,10 +31,9 @@ ROOT = Path(__file__).resolve().parent.parent
 VIEW_STATE_TS = ROOT / "web_frontend" / "src" / "lib" / "viewState.ts"
 MAIN_WINDOW_PY = ROOT / "ui" / "main_window.py"
 
-PART_TYPES = np.array([0, 1, 3, 2], dtype=np.int32)  # cast, riser, riser post, chill
+PART_TYPES = np.array([0, 1, 3, 2], dtype=np.int32)
 SHRINK = np.array([0.9, 0.2, 0.3, 0.7], dtype=np.float32)
 POROSITY = np.array([0.4, 0.8, 0.1, 0.6], dtype=np.float32)
-
 
 def _engine() -> SolidificationEngine:
     engine = SolidificationEngine.__new__(SolidificationEngine)
@@ -51,20 +42,17 @@ def _engine() -> SolidificationEngine:
     engine.porosity_probability = POROSITY.copy()
     return engine
 
-
 def _web_mode_ids() -> list[str]:
     source = VIEW_STATE_TS.read_text(encoding="utf-8")
     block = re.search(r"RESULT_MODE_IDS = \[(.*?)\] as const", source, re.S)
     assert block is not None
     return re.findall(r"'([a-z_]+)'", block.group(1))
 
-
 def _web_mode_labels() -> dict[str, str]:
     source = VIEW_STATE_TS.read_text(encoding="utf-8")
     block = re.search(r"RESULT_MODE_LABELS: Record<ResultModeId, string> = \{(.*?)\};", source, re.S)
     assert block is not None
     return dict(re.findall(r"^\s*([a-z_]+): '([^']*)'", block.group(1), re.M))
-
 
 class ShrinkMicroporosityArrayTests(unittest.TestCase):
     def test_shrink_is_shrinkage_only_with_chills_zeroed(self) -> None:
@@ -73,7 +61,6 @@ class ShrinkMicroporosityArrayTests(unittest.TestCase):
 
     def test_shrink_no_longer_includes_porosity(self) -> None:
         display = _engine().get_shrink_display_intensity()
-        # The riser point has porosity 0.8 > shrink 0.2; Shrink keeps 0.2.
         self.assertAlmostEqual(float(display[1]), 0.2, places=6)
 
     def test_microporosity_is_porosity_with_chills_zeroed(self) -> None:
@@ -88,7 +75,6 @@ class ShrinkMicroporosityArrayTests(unittest.TestCase):
         engine = _engine()
         engine.porosity_probability = None
         self.assertEqual(engine.get_microporosity_display_intensity().size, 0)
-
 
 class WebFieldArrayTests(unittest.TestCase):
     def test_grid_source_uses_desktop_display_arrays(self) -> None:
@@ -113,7 +99,6 @@ class WebFieldArrayTests(unittest.TestCase):
             self.assertIsNone(
                 re.search(r"Shrinkage\s*/\s*Porosity", text, re.I), f"old label in {path}"
             )
-
 
 class DesktopNamingTests(unittest.TestCase):
     def test_desktop_labels_map_to_web_mode_ids(self) -> None:
@@ -157,7 +142,6 @@ class DesktopNamingTests(unittest.TestCase):
         self.assertEqual(offered - set(RESULT_TYPE_MODES), set())
         self.assertNotIn("Shrinkage/Porosity Risk", source)
         self.assertNotIn('"Shrinkage/Porosity":', source)
-
 
 class DesktopViewTests(unittest.TestCase):
     @classmethod
@@ -243,7 +227,6 @@ class DesktopViewTests(unittest.TestCase):
             result_type_help_html("Microporosity", with_title=True),
         )
 
-
 class ResultHelpCoverageTests(unittest.TestCase):
     def test_help_covers_every_web_mode_exactly(self) -> None:
         self.assertEqual(set(load_result_help()), set(_web_mode_ids()))
@@ -274,7 +257,6 @@ class ResultHelpCoverageTests(unittest.TestCase):
         self.assertIn("Microporosity", result_help_text("porosity"))
         self.assertIn("70 %", result_help_text("shrinkage"))
         self.assertIn("70 %", result_help_text("porosity"))
-
 
 if __name__ == "__main__":
     unittest.main()

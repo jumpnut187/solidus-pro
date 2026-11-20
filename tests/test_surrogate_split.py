@@ -1,5 +1,3 @@
-"""Tests for geometry-grouped train/val splitting (core/surrogate/split.py)."""
-
 from __future__ import annotations
 
 import unittest
@@ -12,7 +10,6 @@ from core.surrogate.split import (
     split_records,
 )
 
-
 def _record(seed: int, resolution: int = 8) -> dict:
     rng = np.random.default_rng(seed)
     channels = np.zeros((7, resolution, resolution, resolution), dtype=np.float32)
@@ -20,22 +17,19 @@ def _record(seed: int, resolution: int = 8) -> dict:
     channels[3] = rng.uniform(size=(resolution,) * 3).astype(np.float32)
     return {"channels": channels, "alloy_name": f"alloy{seed}"}
 
-
 class GroupKeyTests(unittest.TestCase):
     def test_same_geometry_different_channels_share_key(self):
         a = _record(1)
         b = _record(1)
-        b["channels"][3] += 0.1  # modulus differs, occupancy identical
+        b["channels"][3] += 0.1
         b["alloy_name"] = "other"
         self.assertEqual(geometry_group_key(a), geometry_group_key(b))
 
     def test_different_geometry_differs(self):
         self.assertNotEqual(geometry_group_key(_record(1)), geometry_group_key(_record(2)))
 
-
 class GroupedSplitTests(unittest.TestCase):
     def test_no_group_straddles_split(self):
-        # 6 geometries x 4 alloys = 24 records.
         records = []
         for g in range(6):
             for a in range(4):
@@ -70,7 +64,6 @@ class GroupedSplitTests(unittest.TestCase):
 
     def test_empty(self):
         self.assertEqual(grouped_train_val_indices([]), ([], []))
-
 
 if __name__ == "__main__":
     unittest.main()

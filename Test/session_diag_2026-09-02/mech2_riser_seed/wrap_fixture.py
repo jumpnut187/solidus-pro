@@ -1,15 +1,3 @@
-"""Minimal proof of the z-face wrap on BOTH step paths.
-
-Mirrors Test 2's geometry defect exactly: a channel walled in x and y by
-obstacle cells but with NO obstacle plane at z=0 or z=nz-1 -- which is what
-``build_grid_mapping`` produces whenever the geometry is flush with its own
-bounding box (see core/filling_stage._domain_boundary_mask's docstring:
-"nothing is modelled beyond it, and no wall was ever asserted there either").
-
-Metal is seeded at the BOTTOM (z<=1). The top plane (z=nz-1) stands for the
-riser top: it is far above the metal and must stay GAS. Control run adds an
-obstacle floor and lid.
-"""
 import sys, os
 sys.path.insert(0, "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -21,7 +9,6 @@ from physics.fluid_flow import lattice_units
 FN = {0: "OBST", 1: "GAS", 2: "IFACE", 3: "FLUID"}
 DX_M = 0.004
 NU = 6.5e-7
-
 
 def build(nz=14, width=3, lid=False, floor=False):
     n = width + 2
@@ -35,7 +22,6 @@ def build(nz=14, width=3, lid=False, floor=False):
     zlo = 1 if floor else 0
     fluid[1:1 + width, 1:1 + width, zlo:zlo + 2] = True
     return obstacle, fluid
-
 
 def run(label, use_numba, lid, floor, nsteps=40, nz=14):
     obstacle, fluid = build(nz=nz, lid=lid, floor=floor)
@@ -69,7 +55,6 @@ def run(label, use_numba, lid, floor, nsteps=40, nz=14):
           f"finite={bool(np.isfinite(st.mass).all())} "
           f"first_top_wet_step={first[0] if first else None}")
     return first
-
 
 print("=== A. OPEN z faces (Test 2's real condition: no floor, no lid) ===")
 a_np = run("NumPy   open", False, lid=False, floor=False)

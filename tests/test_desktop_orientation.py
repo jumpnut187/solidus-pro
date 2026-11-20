@@ -1,11 +1,3 @@
-"""Desktop "Orient & Parting Line" tool: controller, persistence and dialog.
-
-The controller (``ui/orientation_tool.py``) is Qt-free and tested directly.
-The dialog is a real PySide6 widget under ``QT_QPA_PLATFORM=offscreen`` -- it
-has no VTK, so it needs no stubs. The full MainWindow + viewport path is in
-``tests/test_desktop_orientation_smoke.py``.
-"""
-
 from __future__ import annotations
 
 import os
@@ -13,29 +5,27 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-import numpy as np  # noqa: E402
-import trimesh  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+import numpy as np
+import trimesh
+from PySide6.QtWidgets import QApplication
 
-from core import orientation  # noqa: E402
-from core.part_manager import Part, PartManager, PartType  # noqa: E402
-from ui.dialogs.orientation_dialog import (  # noqa: E402
+from core import orientation
+from core.part_manager import Part, PartManager, PartType
+from ui.dialogs.orientation_dialog import (
     PICK_FACE_DOWN,
     PICK_PARTING_HEIGHT,
     OrientationDialog,
 )
-from ui.orientation_tool import (  # noqa: E402
+from ui.orientation_tool import (
     OrientationController,
     PartingLine,
     default_seat_side,
     outward_face_normal,
     part_world_bounds,
 )
-from ui.project_state import build_project_state, load_project_state, normalize_parting_line  # noqa: E402
-
+from ui.project_state import build_project_state, load_project_state, normalize_parting_line
 
 def _add_box(manager: PartManager, name: str, extents, part_type=PartType.CAST, position=(0.0, 0.0, 0.0)) -> Part:
-    """Register a box part without touching disk; corner at ``position``."""
     mesh = trimesh.creation.box(extents=extents)
     mesh.apply_translation(np.asarray(extents, dtype=float) / 2.0)
     part = Part(id=name, name=name, filepath=f"{name}.stl", trimesh_obj=mesh)
@@ -45,9 +35,7 @@ def _add_box(manager: PartManager, name: str, extents, part_type=PartType.CAST, 
     manager._part_order.append(name)
     return part
 
-
 def _flange_casting(manager: PartManager) -> Part:
-    """A 6x6x1 flange on the floor with a 2x2x3 boss on top (widest section at z=1)."""
     flange = trimesh.creation.box(extents=(6.0, 6.0, 1.0))
     flange.apply_translation((3.0, 3.0, 0.5))
     boss = trimesh.creation.box(extents=(2.0, 2.0, 3.0))
@@ -59,14 +47,12 @@ def _flange_casting(manager: PartManager) -> Part:
     manager._part_order.append("casting")
     return part
 
-
 class SelectionStub:
     def __init__(self) -> None:
         self.part_id = None
 
     def __call__(self):
         return self.part_id
-
 
 class OrientationControllerTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -96,8 +82,6 @@ class OrientationControllerTests(unittest.TestCase):
         self.controller.rotate("x", 90)
         expected = orientation.axis_rotation_matrix("x", 90) @ orientation.axis_rotation_matrix("y", 90)
         np.testing.assert_allclose(orientation.euler_to_matrix(part.rotation), expected, atol=1e-9)
-        # Adding to the Euler fields would give (90, 90, 0), which applies X
-        # before Y -- a different pose from what was clicked.
         self.assertFalse(
             np.allclose(orientation.euler_to_matrix((90.0, 90.0, 0.0)), expected, atol=1e-9)
         )
@@ -122,12 +106,10 @@ class OrientationControllerTests(unittest.TestCase):
 
     def test_face_down_and_up(self) -> None:
         part = _add_box(self.manager, "casting", (4, 2, 1))
-        # Lay the +X end face on the floor: the part stands 4 in tall.
         self.assertTrue(self.controller.face_to((1.0, 0.0, 0.0), "down"))
         bounds = part_world_bounds(part)
         self.assertAlmostEqual(bounds[1, 2] - bounds[0, 2], 4.0)
         self.assertAlmostEqual(bounds[0, 2], 0.0)
-        # The picked face now points -Z.
         np.testing.assert_allclose(
             orientation.euler_to_matrix(part.rotation) @ (1.0, 0.0, 0.0), (0.0, 0.0, -1.0), atol=1e-9
         )
@@ -210,7 +192,7 @@ class OrientationControllerTests(unittest.TestCase):
         riser = _add_box(self.manager, "riser", (1, 1, 2), PartType.RISER, position=(0, 0, 5))
         runner = _add_box(self.manager, "runner", (3, 0.5, 0.5), PartType.RUNNER)
         self.selection.part_id = "riser"
-        self.assertFalse(self.controller.seat_target("above"))  # no parting line yet
+        self.assertFalse(self.controller.seat_target("above"))
         self.controller.set_parting_z(1.0)
         self.assertEqual(self.controller.suggested_seat_side(), "above")
         self.assertTrue(self.controller.seat_target("above"))
@@ -220,7 +202,7 @@ class OrientationControllerTests(unittest.TestCase):
         self.assertTrue(self.controller.seat_target("below"))
         self.assertAlmostEqual(part_world_bounds(runner)[1, 2], 1.0)
         self.selection.part_id = None
-        self.assertFalse(self.controller.seat_target("above"))  # never seats the casting
+        self.assertFalse(self.controller.seat_target("above"))
 
     def test_default_seat_side(self) -> None:
         for part_type in (PartType.RISER, PartType.SPRUE, PartType.POUR_CUP, PartType.RISER_POST):
@@ -258,7 +240,6 @@ class OrientationControllerTests(unittest.TestCase):
         np.testing.assert_allclose(outward_face_normal(tri, (0, 0, 5)), (0, 0, 1))
         np.testing.assert_allclose(outward_face_normal(tri, (0, 0, -5)), (0, 0, -1))
         self.assertIsNone(outward_face_normal([(0, 0, 0), (1, 0, 0), (2, 0, 0)], (0, 0, 1)))
-
 
 class PartingLinePersistenceTests(unittest.TestCase):
     def _payload(self, ui_state):
@@ -298,7 +279,6 @@ class PartingLinePersistenceTests(unittest.TestCase):
             normalize_parting_line({"z": 2}), {"z": 2.0, "visible": True, "locked_to_casting": True}
         )
 
-
 class OrientationDialogTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -335,7 +315,7 @@ class OrientationDialogTests(unittest.TestCase):
         np.testing.assert_allclose(self.casting.rotation, (90.0, 0.0, 0.0))
         self.assertEqual(len(self.geometry_events), 1)
         self.assertIn("6.00 x 4.00 x 6.00", self.dialog.size_label.text())
-        self.dialog.rotation_step_combo.setCurrentIndex(1)  # 45 degrees
+        self.dialog.rotation_step_combo.setCurrentIndex(1)
         self.dialog.rotate_buttons["Rotate X -"].click()
         np.testing.assert_allclose(self.casting.rotation, (45.0, 0.0, 0.0))
         self.assertIn("45", self.dialog.rotate_buttons["Rotate Z +"].toolTip())
@@ -347,7 +327,7 @@ class OrientationDialogTests(unittest.TestCase):
         self.assertAlmostEqual(self.dialog.parting_z_spin.value(), 1.0)
         self.assertIn("Cope depth: 3.00 in", self.dialog.split_label.text())
         self.assertEqual(len(self.parting_events), 1)
-        self.dialog.raise_parting_btn.click()  # default height step 0.25 in
+        self.dialog.raise_parting_btn.click()
         self.assertAlmostEqual(self.controller.parting.z, 1.25)
         self.dialog.parting_z_spin.setValue(2.0)
         self.assertAlmostEqual(self.controller.parting.z, 2.0)
@@ -368,7 +348,6 @@ class OrientationDialogTests(unittest.TestCase):
         self.assertEqual(self.picks, [(PICK_FACE_DOWN, ["casting"])])
         self.assertTrue(self.dialog.face_down_btn.isChecked())
         self.assertFalse(self.dialog.pick_row_widget.isHidden())
-        # A click on the flange's +X side face, seen from +X.
         self.dialog.handle_pick(
             {
                 "point": (6.0, 3.0, 0.5),
@@ -403,7 +382,6 @@ class OrientationDialogTests(unittest.TestCase):
         self.dialog.restore_original_values()
         np.testing.assert_allclose(self.casting.rotation, (0.0, 0.0, 0.0))
         self.assertIsNone(self.controller.parting)
-
 
 if __name__ == "__main__":
     unittest.main()

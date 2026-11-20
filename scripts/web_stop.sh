@@ -1,7 +1,3 @@
-#!/usr/bin/env bash
-#
-# Stop the Solidus web app started by scripts/web_start.sh.
-#
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

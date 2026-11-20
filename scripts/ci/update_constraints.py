@@ -1,18 +1,3 @@
-"""Regenerate constraints-ci.txt from the packages installed in this venv.
-
-CI installs `requirements-ci.txt` pinned by `constraints-ci.txt`, so the
-runner tests the same versions the developer runs locally. After upgrading
-a package in the venv, run:
-
-    venv/bin/python scripts/ci/update_constraints.py
-
-The script walks the dependency closure of requirements-ci.txt (following
-`-r` includes) through the installed distributions' metadata. Environment
-markers are evaluated for the CI target (Linux x86_64, CPython 3.13), so
-macOS-only dependencies are left out and Linux-only ones are flagged as
-missing. Extras are not followed, which matches a plain `pip install`.
-"""
-
 from __future__ import annotations
 
 import sys
@@ -38,7 +23,6 @@ CI_MARKER_ENV = {
     "extra": "",
 }
 
-
 def read_requirements(path: Path) -> list[Requirement]:
     reqs: list[Requirement] = []
     for raw in path.read_text().splitlines():
@@ -53,10 +37,8 @@ def read_requirements(path: Path) -> list[Requirement]:
             reqs.append(Requirement(line))
     return reqs
 
-
 def applies(req: Requirement) -> bool:
     return req.marker is None or req.marker.evaluate(CI_MARKER_ENV)
-
 
 def main() -> int:
     pins: dict[str, str] = {}
@@ -95,7 +77,6 @@ def main() -> int:
     OUT_FILE.write_text(header + body)
     print(f"Wrote {len(pins)} pins to {OUT_FILE.relative_to(REPO)}")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

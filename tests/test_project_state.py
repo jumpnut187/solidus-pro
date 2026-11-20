@@ -12,7 +12,6 @@ from ui.project_state import (
     load_project_state,
 )
 
-
 class ProjectStateTests(unittest.TestCase):
     def test_round_trip_preserves_part_transforms_and_settings(self) -> None:
         manager = PartManager()
@@ -93,7 +92,7 @@ class ProjectStateTests(unittest.TestCase):
             loaded = load_project_state(payload).to_dict()
             self.assertEqual(loaded["parts"][0]["riser_sleeve"], "insulating")
 
-            payload["parts"][0]["riser_sleeve"] = "exothermic"  # not an option: default
+            payload["parts"][0]["riser_sleeve"] = "exothermic"
             self.assertEqual(load_project_state(payload).to_dict()["parts"][0]["riser_sleeve"], "insulating")
 
     def test_round_trip_preserves_pour_location(self) -> None:
@@ -144,7 +143,6 @@ class ProjectStateTests(unittest.TestCase):
         self.assertIsNone(loaded["simulation"]["pour_location"])
 
     def test_load_defaults_pour_location_to_none_for_older_project_files(self) -> None:
-        """A project saved before pour locations existed has no such key."""
         loaded = load_project_state(
             {
                 "schema_version": 1,
@@ -176,21 +174,7 @@ class ProjectStateTests(unittest.TestCase):
         self.assertEqual(loaded_part["rotation"], [2.0, 3.0, 0.0])
         self.assertEqual(loaded_part["color"], [0.8, 0.7, 0.7])
 
-
 class LegacyPourRateMigrationTests(unittest.TestCase):
-    """
-    A stored pour rate of exactly 5 lb/s is the old fixed default.
-
-    It is right only near a 25 lb casting -- the rate follows sqrt(W) -- so an
-    untouched project carrying it pours at a rate that was chosen for no
-    casting in particular. 0 means "derive from the square-root rule", which
-    is what those projects should have had all along.
-
-    The migration is gated on the schema version rather than run on every
-    load, because 5.0 typed deliberately looks identical to 5.0 inherited.
-    Saving stamps the current version, so a re-set 5.0 survives; that is the
-    half of this behaviour the version bump exists for.
-    """
 
     def _loaded_rate(self, rate, *, version=1):
         payload = {
@@ -209,7 +193,6 @@ class LegacyPourRateMigrationTests(unittest.TestCase):
         self.assertEqual(self._loaded_rate(5.0), 0.0)
 
     def test_a_rate_just_below_is_left_alone(self) -> None:
-        """Only the exact old default is suspect; 4.9 was typed by someone."""
         self.assertEqual(self._loaded_rate(4.9), 4.9)
 
     def test_a_rate_just_above_is_left_alone(self) -> None:
@@ -219,7 +202,6 @@ class LegacyPourRateMigrationTests(unittest.TestCase):
         self.assertEqual(self._loaded_rate(0.0), 0.0)
 
     def test_a_current_project_keeps_a_deliberate_five(self) -> None:
-        """The whole point of the version gate: 5 lb/s must be settable."""
         self.assertEqual(self._loaded_rate(5.0, version=PROJECT_SCHEMA_VERSION), 5.0)
 
     def test_a_project_with_no_filling_block_loads(self) -> None:
@@ -229,7 +211,6 @@ class LegacyPourRateMigrationTests(unittest.TestCase):
         self.assertEqual(loaded["simulation"]["solidification_params"], {})
 
     def test_the_stored_payload_is_not_mutated(self) -> None:
-        """Migrating must not reach back into the caller's parsed file."""
         payload = {
             "schema_version": 1,
             "simulation": {
@@ -246,7 +227,6 @@ class LegacyPourRateMigrationTests(unittest.TestCase):
         )
 
     def test_an_older_project_is_reported_at_the_current_version(self) -> None:
-        """It has been migrated forward, so it must not still claim to be v1."""
         loaded = load_project_state(
             {"schema_version": 1, "simulation": {}, "parts": []}
         ).to_dict()
@@ -257,7 +237,6 @@ class LegacyPourRateMigrationTests(unittest.TestCase):
             load_project_state(
                 {"schema_version": 99, "simulation": {}, "parts": []}
             )
-
 
 if __name__ == "__main__":
     unittest.main()

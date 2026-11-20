@@ -1,11 +1,3 @@
-"""Chill faces must never read as shrinkage risk.
-
-A chill produces the steepest thermal gradient and the fastest local freeze in
-the casting, so the metal against it is the safest region there is. These tests
-guard the three places the risk analysis used to lose track of that: the Niyama
-gradient stencil, the surface guardrail, and the modulus/thickness terms.
-"""
-
 from __future__ import annotations
 
 import unittest
@@ -24,13 +16,9 @@ from tests.test_simulation_scenarios import (
 CAST = 0
 CHILL = 2
 
-
 class NiyamaGradientStencilTests(unittest.TestCase):
-    """The gradient must see the chill's temperature, not just the hot side."""
 
     def test_chill_neighbor_dominates_the_gradient(self) -> None:
-        # A 1-D line along x: chill at -1 (cold), cast at 0 and 1 (nearly
-        # isothermal). Voxel 1 is the evaluated cast voxel touching the chill.
         centers = np.array(
             [[-1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
             dtype=np.float64,
@@ -50,9 +38,6 @@ class NiyamaGradientStencilTests(unittest.TestCase):
             cast_mask=cast_mask,
         )
 
-        # Chill side carries 1250 C over 25.4 mm; the cast side carries 5 C.
-        # Averaging both directions still leaves a steep gradient, and it must
-        # be far above the cast-only value the old stencil produced.
         cast_only_gradient = 5.0 / 25.4
         self.assertGreater(float(gradients[0]), 10.0 * cast_only_gradient)
 
@@ -76,13 +61,10 @@ class NiyamaGradientStencilTests(unittest.TestCase):
             cast_mask=cast_mask,
         )
 
-        # Voxel 0 is the chill itself - never scored.
         self.assertEqual(float(gradients[0]), 0.0)
         self.assertEqual(int(quality[0]), 0)
 
     def test_one_sided_stencil_reports_the_sampled_slope(self) -> None:
-        # Rank-deficient (single neighbour) case: the minimum-norm lstsq answer
-        # must not under-report the slope we actually sampled.
         centers = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=np.float64)
         temperatures = np.array([1450.0, 200.0], dtype=np.float64)
         neighbors = np.array([[1, -1], [0, -1]], dtype=np.int32)
@@ -98,9 +80,7 @@ class NiyamaGradientStencilTests(unittest.TestCase):
         self.assertAlmostEqual(float(gradients[0]), 1250.0 / 25.4, places=3)
         self.assertEqual(int(quality[0]), 1)
 
-
 def _index_chill_bands(cls) -> None:
-    """Split the cast voxels into a chill-adjacent band and a far-side band."""
     part_types = np.asarray(cls.engine.mesh.voxel_part_types)
     cls.part_types = part_types
 
@@ -112,15 +92,11 @@ def _index_chill_bands(cls) -> None:
     voxel_size = float(np.max(cls.engine.mesh.voxel_sizes))
     distances, _ = cKDTree(centers[chill_indices]).query(centers[cast_indices], k=1)
 
-    # Cast voxels sharing a face with the chill.
     cls.chill_adjacent = cast_indices[distances <= voxel_size * 1.05]
     assert len(cls.chill_adjacent) > 0, "no cast voxels adjacent to the chill"
-    # Cast voxels on the far side of the block, for a directional comparison.
     cls.far_side = cast_indices[distances >= np.percentile(distances, 75)]
 
-
 class ChillInterfaceRiskTests(unittest.TestCase):
-    """End-to-end: no shrink rind on the metal touching the chill."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -143,7 +119,6 @@ class ChillInterfaceRiskTests(unittest.TestCase):
         raw = np.asarray(self.engine.mesh.voxel_moduli, dtype=np.float32)
         risk = self.engine._get_risk_moduli()
         self.assertTrue(np.all(risk <= raw + 1e-6))
-        # A voxel against the chill is at a boundary, not deep in a section.
         self.assertLess(float(np.max(risk[self.chill_adjacent])), 0.3)
 
     def test_no_niyama_risk_at_the_chill_face(self) -> None:
@@ -175,20 +150,10 @@ class ChillInterfaceRiskTests(unittest.TestCase):
 
     def test_display_intensity_is_clear_around_the_chill(self) -> None:
         display = np.asarray(self.engine.get_shrinkage_display_intensity())
-        # Chills themselves stay masked out entirely.
         np.testing.assert_array_equal(display[self.part_types == CHILL], 0.0)
         self.assertLess(float(np.max(display[self.chill_adjacent])), 0.30)
 
-
 class FeedingHistoryScoringTests(unittest.TestCase):
-    """Feeding history must score a voxel only while it still needs feed.
-
-    A voxel that jumps past coherency between two snapshots (fast freeze
-    against a chill) was fed the whole time it was liquid - it must not be
-    scored "blocked/never open" just because the snapshot after its crossing
-    cannot reach it. A voxel cut off while still BELOW coherency is a genuine
-    isolated pocket and must still be flagged.
-    """
 
     @staticmethod
     def _line_analyzer():
@@ -210,7 +175,7 @@ class FeedingHistoryScoringTests(unittest.TestCase):
             voxel_neighbors=neighbors,
             get_voxel_count=lambda: n,
         )
-        return FeedingPathAnalyzer(mesh, alloy=None)  # critical_fs = 0.52
+        return FeedingPathAnalyzer(mesh, alloy=None)
 
     def _analyze(self, history, reference_times):
         analyzer = self._line_analyzer()
@@ -225,8 +190,6 @@ class FeedingHistoryScoringTests(unittest.TestCase):
         )
 
     def test_fast_freeze_past_coherency_is_not_blocked(self) -> None:
-        # Voxel 3 (chill side) jumps 0.0 -> 0.95 between snapshots; it was
-        # open at every snapshot where it still needed feed.
         history = [
             [0.0, 0.0, 0.0, 0.0],
             [0.0, 0.3, 0.3, 0.95],
@@ -238,8 +201,6 @@ class FeedingHistoryScoringTests(unittest.TestCase):
         self.assertGreaterEqual(float(result.history_open_fraction[3]), 0.99)
 
     def test_genuine_isolated_pocket_is_still_blocked(self) -> None:
-        # Voxel 3 stays liquid (fs=0.3 < coherency) but voxel 2 freezes solid
-        # at t=10, cutting its only path to the riser: a real isolated pocket.
         history = [
             [0.0, 0.0, 0.0, 0.0],
             [0.0, 0.3, 0.97, 0.3],
@@ -250,15 +211,7 @@ class FeedingHistoryScoringTests(unittest.TestCase):
         self.assertTrue(bool(result.blocked_voxels[3]))
         self.assertLess(float(result.history_open_fraction[3]), 0.5)
 
-
 class OrphanMetalPocketTests(unittest.TestCase):
-    """Phantom metal voxels enclosed by chills must not be defect-scored.
-
-    Voxelizing the combined assembly fills gaps and notches around chills with
-    voxels that default to CAST. They have no metal connection to the casting,
-    so the feeding trace correctly calls them unreachable - and the blocked
-    floor then paints a bright plate on the chill face. They are not metal.
-    """
 
     @staticmethod
     def _fake_engine(part_types, neighbors, centers=None, metal_part_bounds=None):
@@ -279,8 +232,6 @@ class OrphanMetalPocketTests(unittest.TestCase):
         return engine
 
     def test_enclosed_pocket_is_orphaned(self) -> None:
-        # 0-1-2: connected casting. 3: chill. 4: phantom cast voxel whose only
-        # neighbor is the chill (a gap-fill voxel on the chill's outer face).
         part_types = [0, 0, 0, 2, 0]
         neighbors = [
             [1, -1, -1],
@@ -314,7 +265,6 @@ class OrphanMetalPocketTests(unittest.TestCase):
         self.assertAlmostEqual(float(display[1]), 0.2, places=5)
 
     def test_riser_connected_through_casting_is_kept(self) -> None:
-        # A riser (1) attached to the casting chain stays scored.
         part_types = [0, 0, 0, 1]
         neighbors = [
             [1, -1],
@@ -329,9 +279,6 @@ class OrphanMetalPocketTests(unittest.TestCase):
         self.assertFalse(bool(np.any(orphan)))
 
     def test_outside_metal_boxes_is_flagged_even_when_connected(self) -> None:
-        # Voxel 4 sits outside every metal part's bounding box but is linked
-        # into the main metal chain by a gap-fill bridge - connectivity alone
-        # would keep it, the bbox layer must not.
         part_types = [0, 0, 0, 0, 0]
         neighbors = [
             [1, -1],
@@ -341,7 +288,6 @@ class OrphanMetalPocketTests(unittest.TestCase):
             [3, -1],
         ]
         centers = [[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0], [10, 0, 0]]
-        # One metal part covering voxels 0-3 (with the half-voxel pad).
         bounds = [[[-0.5, -0.5, -0.5], [3.5, 0.5, 0.5]]]
         engine = self._fake_engine(part_types, neighbors, centers=centers,
                                    metal_part_bounds=bounds)
@@ -351,8 +297,6 @@ class OrphanMetalPocketTests(unittest.TestCase):
         np.testing.assert_array_equal(orphan, [False, False, False, False, True])
 
     def test_chill_smothered_voxel_is_flagged_even_when_connected(self) -> None:
-        # Voxel 0 is real casting; voxel 1 is a sliver with 8 chill neighbors
-        # and only 1 metal neighbor - smothered, flagged despite connectivity.
         part_types = [0, 0] + [2] * 8
         nbr_row_1 = [0] + list(range(2, 10))
         neighbors = [
@@ -367,8 +311,6 @@ class OrphanMetalPocketTests(unittest.TestCase):
         self.assertTrue(bool(orphan[1]))
 
     def test_flat_chill_face_voxel_is_not_smothered(self) -> None:
-        # A cast voxel with a full 26-neighborhood where one face (9 voxels)
-        # is chill: normal chill contact, must never be flagged.
         part_types = [0] + [0] * 17 + [2] * 9
         neighbors = [list(range(1, 27))] + [[0] + [-1] * 25 for _ in range(26)]
         engine = self._fake_engine(part_types, neighbors)
@@ -378,9 +320,6 @@ class OrphanMetalPocketTests(unittest.TestCase):
         self.assertFalse(bool(orphan[0]))
 
     def test_fraction_liquid_view_hides_orphans_and_chills(self) -> None:
-        # Phantom gap-fill voxels are simulated as poured metal, so they read
-        # fully liquid - but they are not real metal and must never render as
-        # liquid in the Fraction Liquid view.
         part_types = [0, 0, 0, 2, 0]
         neighbors = [
             [1, -1, -1],
@@ -394,17 +333,11 @@ class OrphanMetalPocketTests(unittest.TestCase):
 
         masked = engine._mask_non_cast_fraction_liquid(raw)
 
-        self.assertEqual(float(masked[3]), 0.0)  # chill
-        self.assertEqual(float(masked[4]), 0.0)  # orphan phantom voxel
-        self.assertEqual(float(masked[0]), 1.0)  # real casting stays liquid
-
+        self.assertEqual(float(masked[3]), 0.0)
+        self.assertEqual(float(masked[4]), 0.0)
+        self.assertEqual(float(masked[0]), 1.0)
 
 class ChillInterfaceWithRiserTests(unittest.TestCase):
-    """With a riser present the feeding-path trace runs.
-
-    Fast freeze against the chill must not read as a feeding defect: the metal
-    there was fed the whole time it was liquid and then stopped needing feed.
-    """
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -412,8 +345,6 @@ class ChillInterfaceWithRiserTests(unittest.TestCase):
         _index_chill_bands(cls)
 
     def test_trace_is_connected_to_the_casting(self) -> None:
-        # Guard against the fixture itself regressing into a disconnected
-        # assembly, which would silently bypass the feeding-history checks.
         result = self.engine.feeding_path_result
         self.assertIsNotNone(result)
         reached_cast = (result.path_length >= 0.0) & (self.part_types == CAST)
@@ -425,7 +356,6 @@ class ChillInterfaceWithRiserTests(unittest.TestCase):
         self.assertFalse(bool(np.any(blocked[self.chill_adjacent])))
 
     def test_chill_face_open_fraction_is_full(self) -> None:
-        # Fed while liquid, then finished - never "cut off".
         open_fraction = np.asarray(self.engine.feeding_open_fraction)
         self.assertGreaterEqual(float(np.min(open_fraction[self.chill_adjacent])), 0.99)
 
@@ -436,14 +366,10 @@ class ChillInterfaceWithRiserTests(unittest.TestCase):
         self.assertLess(float(np.max(porosity)), 0.30)
 
     def test_blocked_floor_does_not_fire_at_the_chill_face(self) -> None:
-        # The 0.35-0.95 blocked floor is the mechanism that painted the rind;
-        # a chill face must never trip it.
         display = np.asarray(self.engine.get_shrinkage_display_intensity())
         self.assertLess(float(np.max(display[self.chill_adjacent])), 0.35)
 
-
 class ChillInterfaceRiskLegacySolverTests(ChillInterfaceRiskTests):
-    """Same guarantees on the schedule-legacy path used by surrogate runs."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -452,7 +378,6 @@ class ChillInterfaceRiskLegacySolverTests(ChillInterfaceRiskTests):
             extra_analysis_options={"solver_mode": SOLVER_MODE_SCHEDULE_LEGACY},
         )
         _index_chill_bands(cls)
-
 
 if __name__ == "__main__":
     unittest.main()

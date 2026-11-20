@@ -1,16 +1,3 @@
-"""The part-type channel encoding is versioned in the model manifest.
-
-``core/surrogate/fields.py`` encodes voxel part-type codes into channel 1 as
-``code / PART_TYPE_DIVISOR``, and ``core/deep_model/dataset.py`` recovers chill
-voxels by testing that value. Nothing recorded which divisor an artifact was
-trained under, so changing the part-type set -- which a mold-filling stage will
-do, adding SPRUE/RUNNER/GATE/POUR_CUP -- would have shifted every channel-1 value
-and silently degraded every existing model rather than failing.
-
-These tests pin the contract: the divisor is recorded, old manifests without the
-field still load, and a mismatch is refused with an actionable message.
-"""
-
 from __future__ import annotations
 
 import json
@@ -22,7 +9,6 @@ from core.part_manager import PART_TYPE_CHILL
 from core.surrogate.fields import PART_TYPE_DIVISOR
 from core.surrogate.model import ModelManifest, load_model
 
-
 def _write_manifest(directory: Path, **overrides) -> None:
     manifest = {
         "name": "gate-test",
@@ -32,7 +18,6 @@ def _write_manifest(directory: Path, **overrides) -> None:
     }
     manifest.update(overrides)
     (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-
 
 class ManifestFieldTests(unittest.TestCase):
     def test_divisor_defaults_to_the_current_encoding(self) -> None:
@@ -48,12 +33,10 @@ class ManifestFieldTests(unittest.TestCase):
         self.assertEqual(ModelManifest.from_dict(manifest.to_dict()).part_type_divisor, 7.0)
 
     def test_manifest_without_the_field_is_accepted(self) -> None:
-        """Artifacts trained before this field existed must keep working."""
         legacy = {"name": "old", "version": "1", "kind": "numpy_demo", "backend": "numpy"}
         self.assertEqual(
             ModelManifest.from_dict(legacy).part_type_divisor, PART_TYPE_DIVISOR
         )
-
 
 class LoadGateTests(unittest.TestCase):
     def test_legacy_manifest_loads(self) -> None:
@@ -72,7 +55,6 @@ class LoadGateTests(unittest.TestCase):
             self.assertFalse(result.error, msg=f"unexpected load error: {result.error}")
 
     def test_mismatched_divisor_is_refused(self) -> None:
-        """A model trained under a different encoding must not load silently."""
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             _write_manifest(directory, part_type_divisor=PART_TYPE_DIVISOR + 2.0)
@@ -83,13 +65,7 @@ class LoadGateTests(unittest.TestCase):
             self.assertIn("part_type_divisor", result.error)
             self.assertIn("Retrain", result.error)
 
-
 class GatingAliasTests(unittest.TestCase):
-    """
-    Existing models were trained on codes 0-4 only. The gating codes must not
-    reach the encoder raw, or channel 1 carries values the network has never
-    seen -- with no divisor mismatch to make the problem loud.
-    """
 
     def test_every_code_encodes_in_distribution(self) -> None:
         import numpy as np
@@ -129,7 +105,6 @@ class GatingAliasTests(unittest.TestCase):
         self.assertEqual(codes[0], PART_TYPE_SPRUE)
 
     def test_filter_is_not_aliased_into_the_chill_window(self) -> None:
-        """dataset.py pulls chill cells with a +/-0.05 window around 2/3."""
         import numpy as np
 
         from core.deep_model.dataset import CHILL_CHANNEL_TOL
@@ -143,10 +118,8 @@ class GatingAliasTests(unittest.TestCase):
         chill_value = PART_TYPE_CHILL / PART_TYPE_DIVISOR
         self.assertGreater(abs(encoded - chill_value), CHILL_CHANNEL_TOL)
 
-
 class ChillDecodingTests(unittest.TestCase):
     def test_chill_encoding_is_recoverable(self) -> None:
-        """deep_model recovers chill from channel 1; the two must agree."""
         from core.deep_model.dataset import CHILL_CHANNEL_TOL, CHILL_PART_TYPE
 
         self.assertEqual(CHILL_PART_TYPE, PART_TYPE_CHILL)
@@ -154,7 +127,6 @@ class ChillDecodingTests(unittest.TestCase):
         self.assertLess(abs(encoded - CHILL_PART_TYPE / PART_TYPE_DIVISOR), CHILL_CHANNEL_TOL)
 
     def test_tolerance_does_not_span_adjacent_codes(self) -> None:
-        """The chill window must not also capture RISER_POST or RISER."""
         from core.deep_model.dataset import CHILL_CHANNEL_TOL
 
         spacing = 1.0 / PART_TYPE_DIVISOR
@@ -163,7 +135,6 @@ class ChillDecodingTests(unittest.TestCase):
             spacing / 2.0,
             msg="chill detection tolerance overlaps a neighbouring part-type code",
         )
-
 
 if __name__ == "__main__":
     unittest.main()

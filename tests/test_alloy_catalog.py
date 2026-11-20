@@ -5,7 +5,6 @@ import unittest
 from core.materials import get_all_alloy_names, get_alloy
 from core.solidification import NIYAMA_THRESHOLDS
 
-
 class AlloyCatalogTests(unittest.TestCase):
     added_alloys = ("C964", "MONEL400", "IN625", "CA6NM")
 
@@ -69,7 +68,6 @@ class AlloyCatalogTests(unittest.TestCase):
             with self.subTest(alloy=code):
                 alloy = get_alloy(code)
                 self.assertLess(alloy.surface_tension, min_steel_surface_tension)
-
 
 if __name__ == "__main__":
     unittest.main()

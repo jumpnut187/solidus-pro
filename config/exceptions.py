@@ -1,42 +1,9 @@
-"""
-Custom Exception Hierarchy for Casting Solidification Simulator
-
-Provides user-friendly error messages with suggested fixes.
-All exceptions inherit from CastSimError for easy catching.
-
-Usage:
-    from config.exceptions import ValidationError, ConfigurationError
-    
-    if voxel_size <= 0:
-        raise ValidationError(
-            "Voxel size must be positive",
-            parameter="voxel_size",
-            value=voxel_size,
-            suggestion="Use a value between 0.02 and 0.5 inches"
-        )
-"""
-
 from typing import Optional, Any, Dict, List
 
-
 class CastSimError(Exception):
-    """
-    Base exception for all Casting Simulator errors.
-    
-    Provides structured error information including:
-    - User-friendly message
-    - Technical details for debugging
-    - Suggested fixes
-    
-    Attributes:
-        message: Human-readable error description
-        details: Technical details dict for debugging
-        suggestion: Suggested fix or action
-        error_code: Optional error code for categorization
-    """
-    
+
     def __init__(
-        self, 
+        self,
         message: str,
         details: Optional[Dict[str, Any]] = None,
         suggestion: Optional[str] = None,
@@ -46,21 +13,19 @@ class CastSimError(Exception):
         self.details = details or {}
         self.suggestion = suggestion
         self.error_code = error_code
-        
-        # Build full error message
+
         full_message = message
         if suggestion:
             full_message += f"\n💡 Suggestion: {suggestion}"
         if error_code:
             full_message = f"[{error_code}] {full_message}"
-            
+
         super().__init__(full_message)
-    
+
     def __str__(self) -> str:
         return self.message
-    
+
     def to_dict(self) -> Dict[str, Any]:
-        """Convert exception to dictionary for logging/serialization"""
         return {
             "error_type": self.__class__.__name__,
             "error_code": self.error_code,
@@ -69,21 +34,8 @@ class CastSimError(Exception):
             "details": self.details
         }
 
-
-# ============================================================================
-# Validation Errors (Invalid input data)
-# ============================================================================
-
 class ValidationError(CastSimError):
-    """
-    Raised when input validation fails.
-    
-    Use for:
-    - Invalid parameter values
-    - Missing required data
-    - Data format issues
-    """
-    
+
     def __init__(
         self,
         message: str,
@@ -99,10 +51,10 @@ class ValidationError(CastSimError):
             details["received_value"] = repr(value)
         if expected:
             details["expected"] = expected
-            
+
         if not suggestion and expected:
             suggestion = f"Expected: {expected}"
-            
+
         super().__init__(
             message,
             details=details,
@@ -113,10 +65,8 @@ class ValidationError(CastSimError):
         self.value = value
         self.expected = expected
 
-
 class BoundsError(ValidationError):
-    """Raised when a value is outside acceptable bounds"""
-    
+
     def __init__(
         self,
         parameter: str,
@@ -131,7 +81,7 @@ class BoundsError(ValidationError):
             bounds_str = f">= {min_val}"
         elif max_val is not None:
             bounds_str = f"<= {max_val}"
-            
+
         super().__init__(
             f"Parameter '{parameter}' value {value} is out of bounds",
             parameter=parameter,
@@ -142,10 +92,8 @@ class BoundsError(ValidationError):
         self.min_val = min_val
         self.max_val = max_val
 
-
 class MissingDataError(ValidationError):
-    """Raised when required data is missing"""
-    
+
     def __init__(
         self,
         data_name: str,
@@ -157,21 +105,8 @@ class MissingDataError(ValidationError):
             suggestion=suggestion or f"Provide {data_name} before proceeding"
         )
 
-
-# ============================================================================
-# Configuration Errors (Settings and setup issues)
-# ============================================================================
-
 class ConfigurationError(CastSimError):
-    """
-    Raised when configuration is invalid or incomplete.
-    
-    Use for:
-    - Invalid config file format
-    - Missing required settings
-    - Incompatible configuration combinations
-    """
-    
+
     def __init__(
         self,
         message: str,
@@ -184,7 +119,7 @@ class ConfigurationError(CastSimError):
             details["config_key"] = config_key
         if config_file:
             details["config_file"] = config_file
-            
+
         super().__init__(
             message,
             details=details,
@@ -194,10 +129,8 @@ class ConfigurationError(CastSimError):
         self.config_key = config_key
         self.config_file = config_file
 
-
 class ConfigFileError(ConfigurationError):
-    """Raised when config file cannot be read or parsed"""
-    
+
     def __init__(
         self,
         filepath: str,
@@ -210,14 +143,8 @@ class ConfigFileError(ConfigurationError):
             suggestion=suggestion or "Check file exists and has valid YAML/TOML format"
         )
 
-
-# ============================================================================
-# File/IO Errors
-# ============================================================================
-
 class FileError(CastSimError):
-    """Base class for file-related errors"""
-    
+
     def __init__(
         self,
         message: str,
@@ -227,7 +154,7 @@ class FileError(CastSimError):
         details = {}
         if filepath:
             details["filepath"] = filepath
-            
+
         super().__init__(
             message,
             details=details,
@@ -236,10 +163,8 @@ class FileError(CastSimError):
         )
         self.filepath = filepath
 
-
 class MeshError(FileError):
-    """Raised when mesh processing fails"""
-    
+
     def __init__(
         self,
         message: str,
@@ -253,9 +178,7 @@ class MeshError(FileError):
         if mesh_info:
             self.details.update(mesh_info)
 
-
 class InvalidMeshError(MeshError):
-    """Raised when mesh geometry is invalid"""
 
     def __init__(
         self,
@@ -275,15 +198,7 @@ class InvalidMeshError(MeshError):
             suggestion="Try repairing the mesh with a tool like MeshLab or Blender"
         )
 
-
 class CADLoadError(InvalidMeshError):
-    """Raised when a CAD file (STL, STEP, OBJ, ...) cannot be loaded.
-
-    Covers both file-format errors and missing-optional-dependency
-    errors for backend-specific formats (e.g. STEP requires the
-    optional ``cascadio`` package). When raised from the part loader,
-    the message directs the user to the right install command.
-    """
 
     def __init__(
         self,
@@ -291,10 +206,6 @@ class CADLoadError(InvalidMeshError):
         filepath: Optional[str] = None,
         suggestion: Optional[str] = None,
     ):
-        # Skip InvalidMeshError.__init__'s "Invalid mesh geometry: "
-        # prefix — CADLoadError has its own domain (file loading), not
-        # mesh-repair semantics. Bypass the parent constructor and
-        # populate MeshError's state directly.
         self.message = f"CAD load failed: {reason}"
         self.details: dict = {"filepath": filepath} if filepath else {}
         self.suggestion = suggestion or (
@@ -303,21 +214,8 @@ class CADLoadError(InvalidMeshError):
         )
         self.original_error: Optional[BaseException] = None
 
-
-# ============================================================================
-# Simulation Errors
-# ============================================================================
-
 class SimulationError(CastSimError):
-    """
-    Raised when simulation encounters an error.
-    
-    Use for:
-    - Physics calculation failures
-    - Convergence issues
-    - Invalid simulation state
-    """
-    
+
     def __init__(
         self,
         message: str,
@@ -330,7 +228,7 @@ class SimulationError(CastSimError):
             details["phase"] = phase
         if iteration is not None:
             details["iteration"] = iteration
-            
+
         super().__init__(
             message,
             details=details,
@@ -340,10 +238,8 @@ class SimulationError(CastSimError):
         self.phase = phase
         self.iteration = iteration
 
-
 class MeshGenerationError(SimulationError):
-    """Raised when voxel mesh generation fails"""
-    
+
     def __init__(
         self,
         reason: str,
@@ -355,7 +251,7 @@ class MeshGenerationError(SimulationError):
             details_dict["voxel_size"] = voxel_size
         if estimated_voxels:
             details_dict["estimated_voxels"] = estimated_voxels
-            
+
         super().__init__(
             f"Mesh generation failed: {reason}",
             phase="mesh_generation",
@@ -363,14 +259,8 @@ class MeshGenerationError(SimulationError):
         )
         self.details.update(details_dict)
 
-
-# ============================================================================
-# Resource Errors (Memory, GPU, etc.)
-# ============================================================================
-
 class ResourceError(CastSimError):
-    """Base class for resource-related errors"""
-    
+
     def __init__(
         self,
         message: str,
@@ -380,7 +270,7 @@ class ResourceError(CastSimError):
         details = {}
         if resource_type:
             details["resource_type"] = resource_type
-            
+
         super().__init__(
             message,
             details=details,
@@ -389,10 +279,8 @@ class ResourceError(CastSimError):
         )
         self.resource_type = resource_type
 
-
 class MemoryError(ResourceError):
-    """Raised when memory limits are exceeded"""
-    
+
     def __init__(
         self,
         required_mb: float,
@@ -407,10 +295,8 @@ class MemoryError(ResourceError):
         self.details["required_mb"] = required_mb
         self.details["available_mb"] = available_mb
 
-
 class GPUError(ResourceError):
-    """Raised when GPU acceleration fails"""
-    
+
     def __init__(
         self,
         message: str,
@@ -425,14 +311,8 @@ class GPUError(ResourceError):
         if backend:
             self.details["backend"] = backend
 
-
-# ============================================================================
-# Material Errors
-# ============================================================================
-
 class MaterialError(CastSimError):
-    """Raised for material-related errors"""
-    
+
     def __init__(
         self,
         message: str,
@@ -442,7 +322,7 @@ class MaterialError(CastSimError):
         details = {}
         if material_name:
             details["material_name"] = material_name
-            
+
         super().__init__(
             message,
             details=details,
@@ -451,14 +331,8 @@ class MaterialError(CastSimError):
         )
         self.material_name = material_name
 
-
-# ============================================================================
-# Plugin Errors
-# ============================================================================
-
 class PluginError(CastSimError):
-    """Base class for plugin-related errors"""
-    
+
     def __init__(
         self,
         message: str,
@@ -471,7 +345,7 @@ class PluginError(CastSimError):
             details["plugin_name"] = plugin_name
         if plugin_type:
             details["plugin_type"] = plugin_type
-            
+
         super().__init__(
             message,
             details=details,
@@ -479,10 +353,8 @@ class PluginError(CastSimError):
             error_code="PLG001"
         )
 
-
 class PluginLoadError(PluginError):
-    """Raised when plugin fails to load"""
-    
+
     def __init__(
         self,
         plugin_name: str,
@@ -494,14 +366,8 @@ class PluginLoadError(PluginError):
             suggestion="Check plugin is installed correctly and compatible with current version"
         )
 
-
-# ============================================================================
-# Report Errors
-# ============================================================================
-
 class ReportError(CastSimError):
-    """Raised when report generation fails"""
-    
+
     def __init__(
         self,
         message: str,
@@ -511,15 +377,10 @@ class ReportError(CastSimError):
         details = {}
         if report_type:
             details["report_type"] = report_type
-            
+
         super().__init__(
             message,
             details=details,
             suggestion=suggestion,
             error_code="RPT001"
         )
-
-
-# ============================================================================
-# Utility Functions
-# ============================================================================

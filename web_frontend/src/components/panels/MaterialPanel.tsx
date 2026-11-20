@@ -6,14 +6,12 @@ export type MaterialPanelProps = {
   alloy: string;
   materials: MaterialInfo[];
   onSelectAlloy: (alloy: string) => void;
-  /** The API is unreachable, so "loading" would be a lie. */
   offline?: boolean;
   onClose: () => void;
 };
 
 type Row = { label: string; value: string };
 
-/** The read-only property sheet the desktop Material dialog shows, in sections. */
 function sections(material: MaterialInfo): { title: string; rows: Row[] }[] {
   return [
     {

@@ -12,14 +12,10 @@ from tests.helpers.module_stubs import (
     snapshot_modules,
 )
 
-# Captured before any stub is installed, so tearDownModule can hand the real
-# vtk/Qt modules back to whatever runs next in this process.
 _MODULE_SNAPSHOT = snapshot_modules()
-
 
 def tearDownModule() -> None:
     restore_modules(_MODULE_SNAPSHOT)
-
 
 class _DummyVTKClass:
     def __init__(self, *args, **kwargs):
@@ -29,7 +25,6 @@ class _DummyVTKClass:
         def _method(*args, **kwargs):
             return None
         return _method
-
 
 class _TrackingCamera:
     def __init__(self):
@@ -71,7 +66,6 @@ class _TrackingCamera:
             return None
         return _method
 
-
 class _ImmediateExecutor:
     def submit(self, fn, *args, **kwargs):
         import threading as _t
@@ -82,11 +76,9 @@ class _ImmediateExecutor:
             f.set_exception(e)
         return f
 
-
 class _DummySignal:
     def emit(self, *args, **kwargs):
         return None
-
 
 def _install_stubs() -> None:
     vtk_module = types.ModuleType("vtk")
@@ -105,9 +97,6 @@ def _install_stubs() -> None:
     numpy_support_module.numpy_to_vtk = lambda *args, **kwargs: _DummyVTKClass()
     vtk_util_module.numpy_support = numpy_support_module
 
-    # Forced, not setdefault: the stub must win even if an earlier test
-    # already imported the real module, or this module's behavior would
-    # depend on test execution order. tearDownModule puts them back.
     install_stub_modules({
         "vtk": vtk_module,
         "vtk.util": vtk_util_module,
@@ -115,7 +104,6 @@ def _install_stubs() -> None:
         **make_vtk_qt_stub_modules(_DummyVTKClass),
         **make_qt_stub_modules(_DummyVTKClass, lambda *args, **kwargs: _DummySignal()),
     })
-
 
 class VisualizerProjectionModeTests(unittest.TestCase):
     @classmethod
@@ -157,7 +145,6 @@ class VisualizerProjectionModeTests(unittest.TestCase):
         viz._active_camera = _TrackingCamera()
         viz.renderer = _DummyVTKClass()
         viz.render_window = _DummyVTKClass()
-        # Attach a persistent tracking camera
         viz.renderer.GetActiveCamera = lambda: viz._active_camera
         viz.render_window.Render = lambda: None
         return viz
@@ -211,7 +198,6 @@ class VisualizerProjectionModeTests(unittest.TestCase):
         viz._update_parallel_scale()
         expected = max(10, 10, 10, 1) * 1.15
         self.assertAlmostEqual(viz._active_camera._parallel_scale, expected)
-
 
 if __name__ == "__main__":
     unittest.main()

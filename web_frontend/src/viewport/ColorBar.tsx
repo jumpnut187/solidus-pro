@@ -1,17 +1,3 @@
-/**
- * The result legend.
- *
- * A color ramp is only as useful as its numbers: "red" means nothing until it
- * means 2.01 inches of feed modulus or 731 seconds to solidify. So the bar
- * carries real ticks in field units, the unit itself, and the mode's name,
- * and its end labels are editable when the shell passes `onScaleChange` --
- * clamping the scale is how you get contrast out of a field where one hot
- * spot pins the top of the range.
- *
- * Vertical by default: it sits beside a 3D view whose width is worth more
- * than its height, and vertical is what an operator reading a casting report
- * expects.
- */
 import { useEffect, useState } from 'react';
 
 import './viewport.css';
@@ -30,7 +16,6 @@ import {
 
 const TICK_COUNT = 6;
 
-/** End labels for the modes where the number matters less than the meaning. */
 const SEMANTIC_ENDS: Partial<Record<ResultModeId, [string, string]>> = {
   fraction_liquid: ['Solid', 'Liquid'],
   fill_animation: ['Empty', 'Full'],
@@ -68,8 +53,6 @@ function EditableEnd({ value, auto, unit, onCommit, label }: EditableEndProps) {
 
   const commit = () => {
     const trimmed = draft.trim();
-    // An emptied box means "go back to the data's own range", which is the
-    // only way out of a scale the user has pinned.
     if (trimmed === '') {
       onCommit(null);
     } else {
@@ -99,11 +82,6 @@ export function ColorBar({ view, meta, orientation = 'vertical', onScaleChange }
   const vertical = orientation !== 'horizontal';
   const mode = view.mode;
   const range = meta?.ranges[mode];
-  // The server's unit table wins outright when it is present, including when
-  // it says a mode has *no* unit. `RESULT_MODE_UNITS` is a static fallback for
-  // before a run has loaded, and it still lists a unit for fill animation,
-  // whose values are a 0..1 fraction and not the seconds its frames are
-  // stamped with.
   const unit = meta?.units ? (meta.units[mode] ?? '') : (RESULT_MODE_UNITS[mode] ?? '');
 
   const autoMin = range?.min ?? 0;
@@ -115,10 +93,6 @@ export function ColorBar({ view, meta, orientation = 'vertical', onScaleChange }
   const semantic = SEMANTIC_ENDS[mode];
   const timeMode = isTimeMode(mode) || isSweepMode(mode);
 
-  // Ticks are listed low to high and reversed for the vertical bar, so the
-  // top of the ramp is the top of the list either way. A constant field has no
-  // span to divide, and six identical numbers down the side of a ramp read as
-  // a broken legend rather than as "this value, everywhere", so it gets one.
   const ticks =
     span > 0
       ? Array.from({ length: TICK_COUNT }, (_, index) => {
@@ -187,16 +161,7 @@ export function ColorBar({ view, meta, orientation = 'vertical', onScaleChange }
   );
 }
 
-/** Seconds at the current scrubber position, for the time modes. */
 function TimeReadout({ view, meta }: Pick<ColorBarProps, 'view'> & { meta: NonNullable<ColorBarProps['meta']> }) {
-  // Only the modes that really are a stack of frames get a clock. Fill time
-  // is listed as a time mode because the shell's transport bar owns it, but
-  // it is one static map whose *colour* is the time; borrowing the fill
-  // animation's clock for it put a running second count next to a picture
-  // that never changes.
-  //
-  // A sweep mode has no frames entry at all: its own values are the seconds,
-  // so its clock runs from zero to the last cell to freeze.
   let start: number;
   let end: number;
   if (isSweepMode(view.mode)) {
@@ -216,8 +181,6 @@ function TimeReadout({ view, meta }: Pick<ColorBarProps, 'view'> & { meta: NonNu
     start = times[0];
     end = times[times.length - 1];
   }
-  // The same clock and the same formatter as the transport bar, so the two
-  // readouts of one instant cannot disagree in value or in style.
   const seconds = playbackSeconds(view.timePercent / 100, start, end);
   return (
     <p className="vp-colorbar-time">

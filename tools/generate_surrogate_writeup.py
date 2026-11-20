@@ -1,5 +1,3 @@
-"""Generate a PDF write-up of the Solidus Pro Surrogate backend."""
-
 import os
 import sys
 from datetime import date
@@ -20,7 +18,6 @@ from reportlab.platypus import (
     Table,
     TableStyle,
 )
-
 
 def _styles():
     base = getSampleStyleSheet()
@@ -117,9 +114,7 @@ def _styles():
     )
     return styles
 
-
 def _table_cell(styles, text, size=9, color="#222222", bold=False):
-    """Return a wrapped Paragraph for a table cell (string cells don't wrap)."""
     return Paragraph(
         str(text),
         ParagraphStyle(
@@ -136,9 +131,7 @@ def _table_cell(styles, text, size=9, color="#222222", bold=False):
         ),
     )
 
-
 def _wrapped_table(data, styles, size=9, header_color="#0b3d91"):
-    """Convert a 2D string table into Paragraph cells (header bold/white)."""
     return [
         [
             _table_cell(
@@ -151,7 +144,6 @@ def _wrapped_table(data, styles, size=9, header_color="#0b3d91"):
         for row_idx, row in enumerate(data)
     ]
 
-
 def _header_footer(canvas, doc):
     canvas.saveState()
     canvas.setFont("Helvetica", 8.5)
@@ -163,7 +155,6 @@ def _header_footer(canvas, doc):
     canvas.setStrokeColor(colors.HexColor("#d0d0d0"))
     canvas.line(0.75 * inch, 0.7 * inch, LETTER[0] - 0.75 * inch, 0.7 * inch)
     canvas.restoreState()
-
 
 def _title_page(styles, story):
     story.append(Spacer(1, 1.4 * inch))
@@ -205,7 +196,6 @@ def _title_page(styles, story):
     story.append(Paragraph(blurb, styles["body"]))
     story.append(PageBreak())
 
-
 def _section_executive_summary(styles, story):
     story.append(Paragraph("1. Executive summary", styles["h1"]))
     story.append(Paragraph(
@@ -232,7 +222,6 @@ def _section_executive_summary(styles, story):
         "On Apple silicon the ANE delivers this in milliseconds while drawing "
         "negligibly from CPU/GPU, leaving system resources available for other work.",
         styles["body"]))
-
 
 def _section_background(styles, story):
     story.append(Paragraph("2. Background", styles["h1"]))
@@ -274,7 +263,6 @@ def _section_background(styles, story):
         "with an ANE-friendly surrogate, while keeping the existing physics-grade "
         "post-analysis intact?&rdquo;",
         styles["body"]))
-
 
 def _section_architecture(styles, story):
     story.append(Paragraph("3. Architecture", styles["h1"]))
@@ -400,7 +388,6 @@ def _section_architecture(styles, story):
     ]:
         story.append(Paragraph(line, styles["bullet"], bulletText="\u2022"))
 
-
 def _section_models(styles, story):
     story.append(Paragraph("4. Model architectures", styles["h1"]))
 
@@ -451,7 +438,6 @@ def _section_models(styles, story):
         "imported lazily) and is exported to three NPU targets &mdash; Apple ANE, "
         "Google Tensor, Snapdragon &mdash; from a single set of trained weights.",
         styles["body"]))
-
 
 def _section_training(styles, story):
     story.append(Paragraph("5. Training pipeline", styles["h1"]))
@@ -532,7 +518,6 @@ def _section_training(styles, story):
         "trained/</font> and logs progress to the UI.",
         styles["body"]))
 
-
 def _section_ui(styles, story):
     story.append(Paragraph("6. User-facing flow", styles["h1"]))
     story.append(Paragraph(
@@ -600,7 +585,6 @@ def _section_ui(styles, story):
         "exclusion, and exports pause auto-training while they run.",
         styles["body"]))
 
-
 def _section_verification(styles, story):
     story.append(Paragraph("7. Verification", styles["h1"]))
     story.append(Paragraph(
@@ -656,7 +640,6 @@ def _section_verification(styles, story):
         "changes &mdash; it is a pre-existing macOS multiprocessing fragility, "
         "unrelated to the surrogate feature.",
         styles["body"]))
-
 
 def _section_deep_model(styles, story):
     story.append(Paragraph("8. Deep learning module (3D U-Net + FiLM)", styles["h1"]))
@@ -780,7 +763,6 @@ def _section_deep_model(styles, story):
     ]:
         story.append(Paragraph(line, styles["bullet"], bulletText="\u2022"))
 
-
 def _section_future(styles, story):
     story.append(Paragraph("9. Current limitations and future work", styles["h1"]))
     for line in [
@@ -801,7 +783,6 @@ def _section_future(styles, story):
     ]:
         story.append(Paragraph(line, styles["bullet"], bulletText="\u2022"))
 
-
 def _section_novelty(styles, story):
     story.append(Paragraph("10. Novelty note", styles["h1"]))
     story.append(Paragraph(
@@ -813,7 +794,6 @@ def _section_novelty(styles, story):
         "to a small number of derived fields is a candidate for the same ANE "
         "acceleration.",
         styles["body"]))
-
 
 def _section_appendix(styles, story):
     story.append(Paragraph("Appendix A. Module layout", styles["h1"]))
@@ -897,7 +877,6 @@ def _section_appendix(styles, story):
     ]
     story.append(Preformatted("\n".join(code_lines), styles["code"]))
 
-
 def build(out_path: str) -> None:
     doc = BaseDocTemplate(
         out_path,
@@ -938,7 +917,6 @@ def build(out_path: str) -> None:
     _section_appendix(styles, story)
 
     doc.build(story)
-
 
 if __name__ == "__main__":
     desktop = os.path.expanduser("~/Desktop")
