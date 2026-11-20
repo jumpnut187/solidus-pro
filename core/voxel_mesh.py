@@ -12,6 +12,7 @@ Performance Optimizations:
 - GPU acceleration: Uses GPU when available for distance computations
 """
 
+import itertools
 import numpy as np
 import os
 from typing import Tuple, List, Dict, Optional, Union, Sequence
@@ -474,6 +475,36 @@ def _part_assignment_contains_worker(part_key: str, mesh_path: str,
     inside_mask = _robust_contains_check_impl(mesh, chunk_points, tolerance)
     return chunk_idx, chunk_indices[inside_mask]
 
+
+
+def _direction_slot(sx: int, sy: int, sz: int) -> int:
+    """Neighbor slot of the direction with signs ``(sx, sy, sz)``; -1 for no direction.
+
+    The slot table of ``AdaptiveVoxelMesh._canonicalize_neighbor_order``:
+    faces 0-5 (+X -X +Y -Y +Z -Z), edges 6-17, corners 18-25.
+    """
+    if sx == 0 and sy == 0 and sz == 0:
+        return -1
+    if sx != 0 and sy == 0 and sz == 0:
+        return 0 if sx > 0 else 1
+    if sx == 0 and sy != 0 and sz == 0:
+        return 2 if sy > 0 else 3
+    if sx == 0 and sy == 0 and sz != 0:
+        return 4 if sz > 0 else 5
+    if sx != 0 and sy != 0 and sz == 0:
+        return 6 + ((0 if sx > 0 else 2) | (0 if sy > 0 else 1))
+    if sx != 0 and sy == 0 and sz != 0:
+        return 10 + ((0 if sx > 0 else 2) | (0 if sz > 0 else 1))
+    if sx == 0 and sy != 0 and sz != 0:
+        return 14 + ((0 if sy > 0 else 2) | (0 if sz > 0 else 1))
+    return 18 + ((0 if sx > 0 else 4) | (0 if sy > 0 else 2) | (0 if sz > 0 else 1))
+
+
+#: ``_direction_slot`` as a table indexed by ``[sx + 1, sy + 1, sz + 1]``.
+_DIRECTION_SLOTS = np.array(
+    [[[_direction_slot(sx, sy, sz) for sz in (-1, 0, 1)] for sy in (-1, 0, 1)] for sx in (-1, 0, 1)],
+    dtype=np.int64,
+)
 
 
 def _build_kdtree(points, **kwargs):
@@ -1786,30 +1817,83 @@ class AdaptiveVoxelMesh:
             voxel_sizes_array = np.asarray(self.voxel_sizes)
             
             print(f"  Finding neighbors (2.0x radius for interface connectivity)...")
-            BATCH_SIZE = 5000
+            # One tree query and one slot assignment per batch of voxels, in
+            # place of one of each per voxel (the per-voxel loop was 3.8 s of
+            # a 5.4 s mesh build at 100k voxels). The batch bounds the pair
+            # arrays: about 33 candidates per voxel at the 2.0x radius.
+            BATCH_SIZE = 50000
             n_batches = (n_voxels + BATCH_SIZE - 1) // BATCH_SIZE
-            
+
             for batch_idx in range(n_batches):
                 start = batch_idx * BATCH_SIZE
                 end = min(start + BATCH_SIZE, n_voxels)
-                
-                for i in range(start, end):
-                    center = voxel_centers_array[i]
-                    size = voxel_sizes_array[i]
-                    # Increased from 1.5x to 2.0x to ensure part interface connectivity
-                    local_search_radius = size * 2.0
-                    
-                    neighbor_indices = tree.query_ball_point(center, local_search_radius)
-                    neighbor_indices = [idx for idx in neighbor_indices if idx != i]
 
-                    if neighbor_indices:
-                        canonical = self._canonicalize_neighbor_order(
-                            i, center, neighbor_indices
-                        )
-                        self.voxel_neighbors[i, :canonical.shape[0]] = canonical
-                
+                # Increased from 1.5x to 2.0x to ensure part interface connectivity
+                radii = voxel_sizes_array[start:end] * 2.0
+                candidate_lists = tree.query_ball_point(voxel_centers_array[start:end], radii)
+                counts = np.fromiter(
+                    (len(candidates) for candidates in candidate_lists),
+                    dtype=np.int64,
+                    count=end - start,
+                )
+                total = int(counts.sum())
+                if total > 0:
+                    cand = np.fromiter(
+                        itertools.chain.from_iterable(candidate_lists), dtype=np.int64, count=total
+                    )
+                    own = np.repeat(np.arange(start, end, dtype=np.int64), counts)
+                    self.voxel_neighbors[start:end] = self._canonicalize_pairs(own, cand, start, end)
+
                 if (batch_idx + 1) % 10 == 0 or end == n_voxels:
                     print(f"    Processed {end:,}/{n_voxels:,} voxels...", flush=True)
+
+    def _canonicalize_pairs(
+        self,
+        own: np.ndarray,
+        cand: np.ndarray,
+        start: int,
+        end: int,
+    ) -> np.ndarray:
+        """Slot every candidate pair ``(own[p], cand[p])`` of voxels ``start..end``.
+
+        Array form of ``_canonicalize_neighbor_order``, which stays as the
+        reference (``tests/test_neighbor_canonicalization.py`` compares the
+        two): same sign tolerance, same slot table, nearest candidate per
+        slot. Two candidates of one slot at exactly the same distance go to
+        the lower index. The reference takes whichever the tree returned
+        first, so the two can differ only on such a tie, and a voxel lattice
+        has none (each direction holds one candidate per distance).
+
+        Returns the ``(end - start, 26)`` int32 rows, -1 where a slot is empty.
+        """
+        rows = np.full((end - start, 26), -1, dtype=np.int32)
+        keep = cand != own
+        own = own[keep]
+        cand = cand[keep]
+        if own.size == 0:
+            return rows
+
+        centers_arr = np.asarray(self.voxel_centers)
+        diff = centers_arr[cand].astype(np.float64) - centers_arr[own].astype(np.float64)
+        tolerance = max(self.base_voxel_size * 0.25, 1e-6)
+        signs = np.where(diff > tolerance, 1, np.where(diff < -tolerance, -1, 0))
+        slot = _DIRECTION_SLOTS[signs[:, 0] + 1, signs[:, 1] + 1, signs[:, 2] + 1]
+        # Same summation order as the reference: (dx^2 + dy^2) + dz^2.
+        dist = diff[:, 0] * diff[:, 0] + diff[:, 1] * diff[:, 1] + diff[:, 2] * diff[:, 2]
+
+        placed = slot >= 0
+        if not np.any(placed):
+            return rows
+        key = (own[placed] - start) * 26 + slot[placed]
+        cand = cand[placed]
+        dist = dist[placed]
+        # Nearest first within each (voxel, slot); the first entry of a group wins.
+        order = np.lexsort((cand, dist, key))
+        key = key[order]
+        first = np.ones(key.size, dtype=bool)
+        first[1:] = key[1:] != key[:-1]
+        rows.reshape(-1)[key[first]] = cand[order][first].astype(np.int32)
+        return rows
 
     def _canonicalize_neighbor_order(
         self,

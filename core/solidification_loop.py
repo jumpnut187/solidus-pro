@@ -11,7 +11,8 @@ from config.hardware_config import hardware
 from core.thread_budget import resolve_thread_budget
 from core.stepping import should_capture_fraction_history
 from core.part_manager import PART_TYPE_CORE, PART_TYPE_RISER
-from physics.units import inches_to_mm
+from physics import kernel_dispatch
+from physics.units import IN_TO_MM, inches_to_mm
 
 try:
     from numba import get_num_threads, jit, prange, set_num_threads
@@ -22,7 +23,10 @@ except ImportError:
     prange = range  # type: ignore[assignment]
 
 try:
-    from physics.solidification_physics import apply_enthalpy_correction_parallel
+    from physics.solidification_physics import (
+        apply_enthalpy_correction,
+        apply_enthalpy_correction_parallel,  # noqa: F401  (import proves the Numba kernels exist)
+    )
 
     ENTHALPY_KERNEL_AVAILABLE = True
 except ImportError:
@@ -189,6 +193,160 @@ def _least_squares_gradients_c_per_mm(
             gradients[out_i] = float(np.max(slopes)) if len(slopes) else 0.0
             quality[out_i] = 1
 
+    return gradients, quality
+
+
+def _least_squares_gradients_kernel_py(
+    centers_in: np.ndarray,
+    temperatures: np.ndarray,
+    neighbors: np.ndarray,
+    target_indices: np.ndarray,
+    cast_mask: np.ndarray,
+    excluded_neighbor_mask: np.ndarray,
+    use_excluded: bool,
+    in_to_mm: float,
+    gradients: np.ndarray,
+    quality: np.ndarray,
+    needs_reference: np.ndarray,
+) -> None:  # pragma: no cover - numba
+    """``_least_squares_gradients_c_per_mm`` for the voxels whose neighbours span three directions.
+
+    Same neighbour selection, then the 3x3 normal equations solved by
+    Cholesky in place of ``np.linalg.lstsq``. For a well-conditioned stencil
+    the two agree to rounding. A voxel whose stencil does not span three
+    directions (too few neighbours, or all in one plane or on one line) is
+    not solved here: its ``needs_reference`` entry is set and the caller
+    sends it to ``_least_squares_gradients_c_per_mm``, which keeps the
+    minimum-norm solution and the steepest-slope fallback for that case.
+    """
+    n_centers = centers_in.shape[0]
+    for out_i in range(len(target_indices)):
+        voxel = target_indices[out_i]
+        needs_reference[out_i] = False
+        if not cast_mask[voxel]:
+            continue
+        cx = np.float64(centers_in[voxel, 0])
+        cy = np.float64(centers_in[voxel, 1])
+        cz = np.float64(centers_in[voxel, 2])
+        t0 = temperatures[voxel]
+        a00 = 0.0
+        a01 = 0.0
+        a02 = 0.0
+        a11 = 0.0
+        a12 = 0.0
+        a22 = 0.0
+        b0 = 0.0
+        b1 = 0.0
+        b2 = 0.0
+        count = 0
+        for slot in range(neighbors.shape[1]):
+            other = neighbors[voxel, slot]
+            if other < 0 or other >= n_centers:
+                continue
+            if use_excluded and excluded_neighbor_mask[other]:
+                continue
+            dx = (np.float64(centers_in[other, 0]) - cx) * in_to_mm
+            dy = (np.float64(centers_in[other, 1]) - cy) * in_to_mm
+            dz = (np.float64(centers_in[other, 2]) - cz) * in_to_mm
+            if not (np.sqrt(dx * dx + dy * dy + dz * dz) > 1e-9):
+                continue
+            delta_t = temperatures[other] - t0
+            a00 += dx * dx
+            a01 += dx * dy
+            a02 += dx * dz
+            a11 += dy * dy
+            a12 += dy * dz
+            a22 += dz * dz
+            b0 += dx * delta_t
+            b1 += dy * delta_t
+            b2 += dz * delta_t
+            count += 1
+        if count == 0:
+            continue
+        # Cholesky of the normal matrix. A pivot that is tiny against the
+        # largest diagonal entry means the offsets do not span that
+        # direction. On a voxel lattice the two cases are far apart: a
+        # stencil that spans three directions has pivots of the order of
+        # the diagonal, a flat one has a pivot of rounding size.
+        scale = max(a00, max(a11, a22))
+        floor = 1e-9 * scale
+        if count < 3 or not (a00 > floor):
+            needs_reference[out_i] = True
+            continue
+        l00 = np.sqrt(a00)
+        l10 = a01 / l00
+        l20 = a02 / l00
+        d1 = a11 - l10 * l10
+        if not (d1 > floor):
+            needs_reference[out_i] = True
+            continue
+        l11 = np.sqrt(d1)
+        l21 = (a12 - l20 * l10) / l11
+        d2 = a22 - l20 * l20 - l21 * l21
+        if not (d2 > floor):
+            needs_reference[out_i] = True
+            continue
+        l22 = np.sqrt(d2)
+        y0 = b0 / l00
+        y1 = (b1 - l10 * y0) / l11
+        y2 = (b2 - l20 * y0 - l21 * y1) / l22
+        g2 = y2 / l22
+        g1 = (y1 - l21 * g2) / l11
+        g0 = (y0 - l10 * g1 - l20 * g2) / l00
+        gradients[out_i] = np.sqrt(g0 * g0 + g1 * g1 + g2 * g2)
+        quality[out_i] = 2 if count >= 4 else 1
+
+
+if NUMBA_THREADING_AVAILABLE:
+    _least_squares_gradients_kernel = jit(nopython=True, cache=True, error_model="numpy")(
+        _least_squares_gradients_kernel_py
+    )
+
+
+def _least_squares_gradients_fused(
+    *,
+    centers: np.ndarray,
+    temperatures: np.ndarray,
+    neighbors: np.ndarray,
+    target_indices: np.ndarray,
+    cast_mask: np.ndarray,
+    excluded_neighbor_mask: Optional[np.ndarray] = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """``_least_squares_gradients_c_per_mm`` through the compiled kernel.
+
+    ``centers`` is taken in its own dtype (the kernel widens each
+    coordinate it reads), so the whole array is not converted on every call.
+    Voxels the kernel does not solve go to the reference function.
+    """
+    gradients = np.zeros(len(target_indices), dtype=np.float32)
+    quality = np.zeros(len(target_indices), dtype=np.int8)
+    needs_reference = np.zeros(len(target_indices), dtype=np.bool_)
+    use_excluded = excluded_neighbor_mask is not None
+    _least_squares_gradients_kernel(
+        centers,
+        temperatures,
+        neighbors,
+        target_indices,
+        cast_mask,
+        excluded_neighbor_mask if use_excluded else cast_mask,
+        use_excluded,
+        float(IN_TO_MM),
+        gradients,
+        quality,
+        needs_reference,
+    )
+    left = np.flatnonzero(needs_reference)
+    if left.size:
+        ref_gradients, ref_quality = _least_squares_gradients_c_per_mm(
+            centers_in=np.asarray(centers, dtype=np.float64),
+            temperatures=temperatures,
+            neighbors=neighbors,
+            target_indices=target_indices[left],
+            cast_mask=cast_mask,
+            excluded_neighbor_mask=excluded_neighbor_mask,
+        )
+        gradients[left] = ref_gradients
+        quality[left] = ref_quality
     return gradients, quality
 
 
@@ -425,6 +583,9 @@ def _capture_niyama_history_step(
 
     eval_fs = float(getattr(engine, "niyama_eval_fraction_solid", NIYAMA_EVAL_FRACTION_SOLID))
     crossed = (~sampled) & (previous_states < eval_fs) & (current_states >= eval_fs)
+    if not crossed.any():
+        # Most steps: nothing crossed, so the part-type masks below are not needed.
+        return
     part_types = getattr(engine.mesh, "voxel_part_types", None)
     core_mask: Optional[np.ndarray] = None
     if part_types is not None and len(part_types) == len(crossed):
@@ -447,14 +608,24 @@ def _capture_niyama_history_step(
     ) * step_fraction
     eval_times = (engine.time - engine.time_step) + engine.time_step * step_fraction
 
-    gradients, quality = _least_squares_gradients_c_per_mm(
-        centers_in=np.asarray(engine.mesh.voxel_centers, dtype=np.float64),
-        temperatures=np.asarray(temperatures, dtype=np.float64),
-        neighbors=np.asarray(engine.mesh.voxel_neighbors, dtype=np.int32),
-        target_indices=target_indices,
-        cast_mask=cast_mask,
-        excluded_neighbor_mask=core_mask,
-    )
+    if NUMBA_THREADING_AVAILABLE and kernel_dispatch.fused_kernels_enabled():
+        gradients, quality = _least_squares_gradients_fused(
+            centers=np.asarray(engine.mesh.voxel_centers),
+            temperatures=np.asarray(temperatures, dtype=np.float64),
+            neighbors=np.asarray(engine.mesh.voxel_neighbors, dtype=np.int32),
+            target_indices=target_indices,
+            cast_mask=cast_mask,
+            excluded_neighbor_mask=core_mask,
+        )
+    else:
+        gradients, quality = _least_squares_gradients_c_per_mm(
+            centers_in=np.asarray(engine.mesh.voxel_centers, dtype=np.float64),
+            temperatures=np.asarray(temperatures, dtype=np.float64),
+            neighbors=np.asarray(engine.mesh.voxel_neighbors, dtype=np.int32),
+            target_indices=target_indices,
+            cast_mask=cast_mask,
+            excluded_neighbor_mask=core_mask,
+        )
     rates = np.maximum(np.asarray(cooling_rate_step[target_indices], dtype=np.float32), 1e-6)
     niyama = gradients / np.sqrt(rates)
 
@@ -940,6 +1111,71 @@ def _invert_enthalpy_kernel(
                 T_final[i] = (t * dT + b * t_p) / (dT + b)
 
 
+def _write_final_thermal_products(
+    engine: Any,
+    heat_model: Any,
+    solidification_model: Any,
+    *,
+    n_voxels: int,
+    needs_thermal_history: bool,
+) -> None:
+    """Write the engine arrays that describe the state after the last step.
+
+    The thermal-coupled loop used to rewrite all of these every step. Nothing
+    reads them while the loop runs (the progress callback carries no engine,
+    and the Niyama capture takes its own arguments), and each is a function
+    of the fields the last step leaves, so one write after the loop gives the
+    same arrays.
+    """
+    start_times = np.asarray(solidification_model.solidification_time, dtype=np.float64)
+    end_times = np.asarray(solidification_model._solidification_end, dtype=np.float64)
+
+    finite_start = np.isfinite(start_times)
+    finite_end = np.isfinite(end_times)
+    # Same value as the model's local_solidification_time property, built
+    # from the arrays already in hand instead of re-deriving them. The
+    # masked subtract leaves unfinished voxels at inf without evaluating
+    # inf - inf for them.
+    finite_local = finite_start & finite_end
+    local_times = np.full_like(start_times, np.inf)
+    np.subtract(end_times, start_times, out=local_times, where=finite_local)
+
+    engine.solidification_start_times[:] = np.where(finite_start, start_times, 0.0).astype(np.float32)
+    # Unfinished voxels get NaN (not 0.0) so they cannot collide with
+    # chill/pre-solid semantics downstream.
+    engine.solidification_end_times[:] = np.where(finite_end, end_times, np.nan).astype(np.float32)
+    engine.local_solidification_time[:] = np.where(
+        finite_local,
+        local_times,
+        np.where(finite_start, np.maximum(engine.time - start_times, engine.time_step), np.nan),
+    ).astype(np.float32)
+    engine.solidification_times[:] = engine.solidification_end_times
+
+    if getattr(engine, "_thermal_peak_cooling_rates", None) is not None:
+        engine.cooling_rates = np.asarray(engine._thermal_peak_cooling_rates, dtype=np.float32).copy()
+
+    temperatures = np.array(heat_model.temperatures[:n_voxels], dtype=np.float64)
+    engine._thermal_latest_temperatures = temperatures.astype(np.float32, copy=True)
+    if (
+        needs_thermal_history
+        and getattr(engine, "_thermal_heat_model", None) is not None
+        and getattr(engine, "_thermal_voxel_size_m", None)
+    ):
+        neighbor_map = np.asarray(engine.mesh.voxel_neighbors, dtype=np.int32)
+        if hasattr(heat_model, "get_gradient_magnitude"):
+            gradients_m = heat_model.get_gradient_magnitude(
+                neighbor_map,
+                float(engine._thermal_voxel_size_m),
+            )
+        else:
+            gradients_m = heat_model.temperature_field.get_gradient_magnitude(
+                neighbor_map,
+                float(engine._thermal_voxel_size_m),
+            )
+        engine._thermal_latest_gradients = (gradients_m / 1000.0).astype(np.float32)
+        engine.thermal_gradients = engine._thermal_latest_gradients.copy()
+
+
 def _run_thermal_coupled_integration(
     engine: Any,
     *,
@@ -989,6 +1225,15 @@ def _run_thermal_coupled_integration(
     fs_prev = np.empty(n_voxels, dtype=np.float64)
     # Voxel cut cells (core/cut_cells.py) take the exact enthalpy inversion.
     cut_cell_mode = getattr(engine, "_cut_cell_merge", None) is not None
+    # Cut cells with the lever rule: capacity, inversion and the
+    # solidification update in one kernel (physics.kernel_dispatch).
+    fused_finish = bool(
+        cut_cell_mode
+        and kernel_dispatch.fused_kernels_enabled()
+        and callable(getattr(heat_model, "heat_capacity_lookup", None))
+        and callable(getattr(solidification_model, "can_finish_step_from_enthalpy", None))
+        and solidification_model.can_finish_step_from_enthalpy()
+    )
 
     while iteration < max_iterations:
         previous_states = np.asarray(engine.mesh.voxel_states, dtype=np.float32).copy()
@@ -1014,7 +1259,8 @@ def _run_thermal_coupled_integration(
         # with branch handling when T_final leaves the mushy zone. This is
         # the classic apparent-heat-capacity formulation: oscillation-free,
         # energy-conserving, and the plateau proceeds at the physical rate.
-        np.copyto(fs_prev, np.asarray(solidification_model.fraction_solid, dtype=np.float64))
+        if not fused_finish:
+            np.copyto(fs_prev, np.asarray(solidification_model.fraction_solid, dtype=np.float64))
         T_post = heat_model.temperatures[:n_voxels]
         T_liq = float(engine.alloy.liquidus_temp)
         T_sol = float(engine.alloy.solidus_temp)
@@ -1027,7 +1273,13 @@ def _run_thermal_coupled_integration(
         )
         beta = l_vol / rho_cp  # K of recalescence per unit fraction solid
 
-        if cut_cell_mode:
+        if fused_finish:
+            # The same inversion and update as the two branches below, in one pass.
+            solidification_model.finish_step_from_enthalpy(
+                T_post, heat_model.heat_capacity_lookup(), T_liq, T_sol, l_vol, engine.time_step
+            )
+            T_final = T_post
+        elif cut_cell_mode:
             # Cut cells: exact inversion with beta_i = L_vol / rho_cp_i(T_post)
             # (rho(T)*cp(T) on curve runs). The heat step used rho_cp at the
             # pre-step temperature; the lag is O(dt) (tests/test_cut_cells.py
@@ -1039,18 +1291,19 @@ def _run_thermal_coupled_integration(
             else:
                 _invert_enthalpy_numpy(T_post, fs_prev, T_final, T_liq, T_sol, beta_cells)
         elif ENTHALPY_KERNEL_AVAILABLE:
-            apply_enthalpy_correction_parallel(
+            apply_enthalpy_correction(
                 T_post, fs_prev, T_final, T_liq, T_sol, dT, beta
             )
         else:
             _apply_enthalpy_correction_numpy(
                 T_post, fs_prev, T_final, T_liq, T_sol, dT, beta
             )
-        heat_model.temperatures[:n_voxels] = T_final
+        if not fused_finish:
+            heat_model.temperatures[:n_voxels] = T_final
 
-        # Fraction solid and solidification-time tracking from the corrected
-        # field; update() keeps fs monotone (irreversible).
-        latent_heat_rate = solidification_model.update(T_final, engine.time_step)
+            # Fraction solid and solidification-time tracking from the corrected
+            # field; update() keeps fs monotone (irreversible).
+            solidification_model.update(T_final, engine.time_step)
 
         # Re-read AFTER the correction so cooling rate, Niyama capture,
         # gradients, and progress all use the corrected field.
@@ -1064,29 +1317,10 @@ def _run_thermal_coupled_integration(
 
         # thermal-coupled mode is purely temperature-driven; no heuristic vertical solidification bias
 
-        start_times = np.asarray(solidification_model.solidification_time, dtype=np.float64)
-        end_times = np.asarray(solidification_model._solidification_end, dtype=np.float64)
-
-        finite_start = np.isfinite(start_times)
-        finite_end = np.isfinite(end_times)
-        # Same value as the model's local_solidification_time property, built
-        # from the arrays already in hand instead of re-deriving them. The
-        # masked subtract leaves unfinished voxels at inf without evaluating
-        # inf - inf for them.
-        finite_local = finite_start & finite_end
-        local_times = np.full_like(start_times, np.inf)
-        np.subtract(end_times, start_times, out=local_times, where=finite_local)
-
-        engine.solidification_start_times[:] = np.where(finite_start, start_times, 0.0).astype(np.float32)
-        # Unfinished voxels get NaN (not 0.0) so they cannot collide with
-        # chill/pre-solid semantics downstream.
-        engine.solidification_end_times[:] = np.where(finite_end, end_times, np.nan).astype(np.float32)
-        engine.local_solidification_time[:] = np.where(
-            finite_local,
-            local_times,
-            np.where(finite_start, np.maximum(engine.time - start_times, engine.time_step), np.nan),
-        ).astype(np.float32)
-        engine.solidification_times[:] = engine.solidification_end_times
+        # The start/end/local time arrays, the latest temperature and gradient
+        # fields and the cooling-rate copy are read only after the loop, and
+        # each is a function of the state the last step leaves. They are
+        # written once, by _write_final_thermal_products below.
 
         if getattr(engine, "feeding_fraction_solid", None) is not None:
             critical_fs = float(getattr(engine.alloy, "critical_fraction_solid", 1.0))
@@ -1108,12 +1342,12 @@ def _run_thermal_coupled_integration(
                 current_states[crossed_feeding_limit & ~full_solid_crossing]
             )
 
-        if getattr(engine, "_thermal_peak_cooling_rates", None) is not None:
-            engine._thermal_peak_cooling_rates[:] = np.maximum(
-                np.asarray(engine._thermal_peak_cooling_rates, dtype=np.float32),
+        peak_cooling_rates = getattr(engine, "_thermal_peak_cooling_rates", None)
+        if peak_cooling_rates is not None:
+            peak_cooling_rates[:] = np.maximum(
+                np.asarray(peak_cooling_rates, dtype=np.float32),
                 cooling_rate_step.astype(np.float32),
             )
-            engine.cooling_rates = np.asarray(engine._thermal_peak_cooling_rates, dtype=np.float32).copy()
 
         if needs_thermal_history:
             _capture_niyama_history_step(
@@ -1124,26 +1358,6 @@ def _run_thermal_coupled_integration(
                 temperatures=temperatures,
                 cooling_rate_step=cooling_rate_step,
             )
-
-        engine._thermal_latest_temperatures = temperatures.astype(np.float32, copy=True)
-        if (
-            needs_thermal_history
-            and getattr(engine, "_thermal_heat_model", None) is not None
-            and getattr(engine, "_thermal_voxel_size_m", None)
-        ):
-            neighbor_map = np.asarray(engine.mesh.voxel_neighbors, dtype=np.int32)
-            if hasattr(heat_model, "get_gradient_magnitude"):
-                gradients_m = heat_model.get_gradient_magnitude(
-                    neighbor_map,
-                    float(engine._thermal_voxel_size_m),
-                )
-            else:
-                gradients_m = heat_model.temperature_field.get_gradient_magnitude(
-                    neighbor_map,
-                    float(engine._thermal_voxel_size_m),
-                )
-            engine._thermal_latest_gradients = (gradients_m / 1000.0).astype(np.float32)
-            engine.thermal_gradients = engine._thermal_latest_gradients.copy()
 
         current_progress_pct = float(np.mean(current_states) * 100.0)
         if capture_fraction_history and current_progress_pct - last_snapshot_progress >= progress_interval:
@@ -1164,6 +1378,15 @@ def _run_thermal_coupled_integration(
         if time.monotonic() - last_budget_check >= THREAD_BUDGET_CHECK_INTERVAL:
             last_budget_check = time.monotonic()
             _apply_live_thread_budget(engine)
+
+    if iteration > 0:
+        _write_final_thermal_products(
+            engine,
+            heat_model,
+            solidification_model,
+            n_voxels=n_voxels,
+            needs_thermal_history=needs_thermal_history,
+        )
 
     if capture_fraction_history:
         engine.fraction_liquid_history.append(np.asarray(engine.mesh.voxel_states, dtype=np.float32).copy())
