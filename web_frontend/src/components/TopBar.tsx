@@ -176,8 +176,7 @@ export function TopBar({
             { label: 'Help Guide', onSelect: () => onHelp('guide'), shortcut: shortcutFor('Help guide') },
             { label: 'Keyboard Shortcuts', onSelect: () => onHelp('shortcuts'), shortcut: shortcutFor('This cheat sheet') },
             { label: 'Hardware Info', onSelect: () => onHelp('hardware') },
-            { label: 'About Solidus Pro', onSelect: () => onHelp('about') },
-            { label: 'Source Code (AGPL-3.0)', onSelect: () => window.open('https://github.com/jumpnut187/solidus-pro', '_blank', 'noopener') }
+            { label: 'About Solidus Pro', onSelect: () => onHelp('about') }
           ]}
         />
       </div>

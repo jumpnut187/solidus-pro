@@ -153,7 +153,7 @@ def init_db(database_path: Path) -> None:
 
 
 #: Mirrors core.part_manager.RISER_SLEEVE_CHOICES; this module stays free of core imports.
-RISER_SLEEVES = ("insulating", "none")
+RISER_SLEEVES = ("insulating", "adiabatic", "none")
 
 
 def _riser_sleeve(value: Any) -> str:

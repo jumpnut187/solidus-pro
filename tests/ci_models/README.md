@@ -1,7 +1,7 @@
 # CI test models
 
 These STL files are for CI testing only. They let the regression suite run on a
-clean checkout (GitHub Actions). Do not put customer, production or
+clean checkout (GitLab CI, GitHub Actions). Do not put customer, production or
 working models here.
 
 This folder is the only place CAD files may be committed. `.gitignore` ignores

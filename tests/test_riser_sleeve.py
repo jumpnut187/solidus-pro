@@ -12,12 +12,13 @@ import trimesh
 from core.part_manager import (
     PART_TYPE_CAST,
     PART_TYPE_RISER,
+    RISER_SLEEVE_ADIABATIC,
     RISER_SLEEVE_INSULATING,
     RISER_SLEEVE_NONE,
     build_part_manager,
     riser_sleeve_from_value,
 )
-from core.riser_sleeve import bare_riser_mask
+from core.riser_sleeve import bare_riser_mask, riser_sleeve_masks
 
 
 def _grid(nx: int):
@@ -40,6 +41,7 @@ class RiserSleeveValueTests(unittest.TestCase):
         self.assertEqual(riser_sleeve_from_value(None), RISER_SLEEVE_INSULATING)
         self.assertEqual(riser_sleeve_from_value("exothermic"), RISER_SLEEVE_INSULATING)
         self.assertEqual(riser_sleeve_from_value(" None "), RISER_SLEEVE_NONE)
+        self.assertEqual(riser_sleeve_from_value("Adiabatic"), RISER_SLEEVE_ADIABATIC)
 
     def test_part_default_payload_override_and_riser_only_listing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -86,6 +88,39 @@ class BareRiserMaskTests(unittest.TestCase):
         self.assertIsNone(bare_riser_mask(centers, types, neighbors, parts))
 
 
+class NoHeatLossRiserMaskTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Voxels 0-1 cast, 2-3 one riser, 4 cast, 5-6 a second riser.
+        self.centers, self.neighbors = _grid(7)
+        self.types = np.array([PART_TYPE_CAST] * 2 + [PART_TYPE_RISER] * 2 + [PART_TYPE_CAST] + [PART_TYPE_RISER] * 2)
+
+    def test_nothing_is_marked_when_every_riser_is_insulating(self) -> None:
+        parts = [(_box(2, 4), RISER_SLEEVE_INSULATING), (_box(5, 7), RISER_SLEEVE_INSULATING)]
+        self.assertEqual(riser_sleeve_masks(self.centers, self.types, self.neighbors, parts), (None, None))
+
+    def test_each_riser_takes_its_own_sleeve(self) -> None:
+        parts = [(_box(2, 4), RISER_SLEEVE_ADIABATIC), (_box(5, 7), RISER_SLEEVE_NONE)]
+        bare, adiabatic = riser_sleeve_masks(self.centers, self.types, self.neighbors, parts)
+        self.assertEqual(adiabatic.tolist(), [False, False, True, True, False, False, False])
+        self.assertEqual(bare.tolist(), [False, False, False, False, False, True, True])
+        # One no-heat-loss riser beside an insulating one: no bare mask at all.
+        parts = [(_box(2, 4), RISER_SLEEVE_ADIABATIC), (_box(5, 7), RISER_SLEEVE_INSULATING)]
+        bare, adiabatic = riser_sleeve_masks(self.centers, self.types, self.neighbors, parts)
+        self.assertIsNone(bare)
+        self.assertEqual(adiabatic.tolist(), [False, False, True, True, False, False, False])
+
+    def test_component_spanning_parts_takes_the_most_voxels_and_ties_are_insulating(self) -> None:
+        centers, neighbors = _grid(5)
+        types = np.full(5, PART_TYPE_RISER)
+        parts = [(_box(0, 3), RISER_SLEEVE_ADIABATIC), (_box(3, 4), RISER_SLEEVE_NONE), (_box(4, 5), RISER_SLEEVE_INSULATING)]
+        bare, adiabatic = riser_sleeve_masks(centers, types, neighbors, parts)
+        self.assertIsNone(bare)
+        self.assertTrue(adiabatic.all())
+        # Two no-heat-loss, two bare, one insulating: nobody has the most, so the component is insulating.
+        parts = [(_box(0, 2), RISER_SLEEVE_ADIABATIC), (_box(2, 4), RISER_SLEEVE_NONE), (_box(4, 5), RISER_SLEEVE_INSULATING)]
+        self.assertEqual(riser_sleeve_masks(centers, types, neighbors, parts), (None, None))
+
+
 try:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication
@@ -112,8 +147,12 @@ class PartsDialogSleeveTests(unittest.TestCase):
         self.assertFalse(table.cellWidget(1, 3).isEnabled())
         self.assertEqual(changes, [])  # populating the table announces nothing
 
-        table.cellWidget(2, 3).setCurrentIndex(1)
+        combo = table.cellWidget(2, 3)
+        self.assertEqual([combo.itemData(i) for i in range(combo.count())], ["insulating", "adiabatic", "none"])
+        combo.setCurrentIndex(combo.findData("none"))
         self.assertEqual(changes, [("c", "none")])
+        combo.setCurrentIndex(combo.findData("adiabatic"))
+        self.assertEqual(changes[-1], ("c", "adiabatic"))
         # Retyping a riser away from Riser puts its sleeve back to the default.
         table.cellWidget(2, 1).setCurrentText("Cast")
         self.assertEqual(changes[-1], ("c", "insulating"))

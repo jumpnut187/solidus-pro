@@ -325,6 +325,60 @@ class SolidificationModel:
 
         return latent_heat_rate
 
+    def can_finish_step_from_enthalpy(self) -> bool:
+        """True when ``finish_step_from_enthalpy`` applies: Numba present and the lever rule in use."""
+        return bool(NUMBA_AVAILABLE and self.method == SolidificationMethod.LEVER_RULE)
+
+    def finish_step_from_enthalpy(
+        self,
+        temperatures: FloatArray,
+        heat_capacity: tuple,
+        alloy_T_liq: float,
+        alloy_T_sol: float,
+        latent_per_volume: float,
+        dt: float,
+    ) -> None:
+        """Enthalpy inversion and ``update`` in one pass (cut cells, lever rule).
+
+        ``temperatures`` is the post-diffusion field of this model's voxels
+        and is overwritten with the inverted field. ``heat_capacity`` is
+        ``HeatTransferModel.heat_capacity_lookup()``. Equivalent to inverting
+        with beta = latent_per_volume / volumetric_heat_capacity() and then
+        calling ``update(inverted, dt)``; see
+        ``invert_enthalpy_and_commit_parallel``.
+        """
+        use_curve, curve_temp, capacity_curve, rho_cp_scalar, use_overrides, positions, values = heat_capacity
+        self.time += dt
+        kernel = (
+            invert_enthalpy_and_commit_serial
+            if runs_serial(len(self._fraction_solid), _COST_INVERT_AND_COMMIT_NS)
+            else invert_enthalpy_and_commit_parallel
+        )
+        kernel(
+            temperatures,
+            self._fraction_solid,
+            self._fraction_solid_prev,
+            self._solidification_start,
+            self._solidification_end,
+            self._last_latent_heat_rate,
+            float(alloy_T_liq),
+            float(alloy_T_sol),
+            float(latent_per_volume),
+            use_curve,
+            curve_temp,
+            capacity_curve,
+            float(rho_cp_scalar),
+            use_overrides,
+            positions,
+            values,
+            float(self.T_liq),
+            float(self.dT),
+            float(self.time),
+            float(dt),
+            float(self.L_vol),
+        )
+        self._last_dt = dt
+
     def _update_parallel(self, temperatures: FloatArray, dt: float) -> FloatArray:
         """
         Numba-parallel equivalent of ``update``.
@@ -349,7 +403,12 @@ class SolidificationModel:
             fs_new = np.ascontiguousarray(self._lever_rule(temperatures), dtype=np.float64)
 
         self.time += dt
-        commit_solidification_update_parallel(
+        commit_kernel = (
+            commit_solidification_update_serial
+            if runs_serial(len(T), _COST_COMMIT_NS)
+            else commit_solidification_update_parallel
+        )
+        commit_kernel(
             fs_new,
             T,
             self._fraction_solid,
@@ -687,6 +746,106 @@ if NUMBA_AVAILABLE:
             latent_rate[i] = L_vol * dfs / dt
 
     @njit(parallel=True, cache=True)
+    def invert_enthalpy_and_commit_parallel(
+        T: FloatArray,
+        fs: FloatArray,
+        fs_prev: FloatArray,
+        sol_start: FloatArray,
+        sol_end: FloatArray,
+        latent_rate: FloatArray,
+        alloy_T_liq: float,
+        alloy_T_sol: float,
+        latent_per_volume: float,
+        use_curve: bool,
+        curve_temp: FloatArray,
+        capacity_curve: FloatArray,
+        rho_cp_scalar: float,
+        use_overrides: bool,
+        override_positions: IntArray,
+        override_values: FloatArray,
+        T_liq: float,
+        dT: float,
+        time_now: float,
+        dt: float,
+        L_vol: float,
+    ) -> None:
+        """End of a thermal-coupled step for cut cells, in one pass and in place.
+
+        Per cell, what the loop otherwise does in three kernels: rho*cp at
+        the post-diffusion temperature (``HeatTransferModel
+        .volumetric_heat_capacity``: the capacity curve or the scalar, then
+        the override), the exact enthalpy inversion of
+        ``core.solidification_loop._invert_enthalpy_kernel`` with
+        beta = latent_per_volume / rho_cp, written back into ``T``, and
+        ``commit_solidification_update_parallel`` with the lever rule at the
+        inverted temperature.
+
+        ``alloy_T_liq`` / ``alloy_T_sol`` / ``latent_per_volume`` are the
+        inversion's (the loop takes them from the alloy); ``T_liq`` / ``dT``
+        / ``L_vol`` are the solidification model's, as in the commit kernel.
+        ``time_now`` is the model time after the step.
+        """
+        n = len(fs)
+        m = len(curve_temp)
+        inversion_dT = max(alloy_T_liq - alloy_T_sol, 1e-6)
+        for i in prange(n):
+            t = T[i]
+            # rho*cp at t
+            if use_overrides and override_positions[i] >= 0:
+                rho_cp = override_values[override_positions[i]]
+            elif use_curve:
+                if t <= curve_temp[0]:
+                    rho_cp = capacity_curve[0]
+                elif t >= curve_temp[m - 1]:
+                    rho_cp = capacity_curve[m - 1]
+                else:
+                    j = 0
+                    for s in range(m - 1):
+                        if t < curve_temp[s + 1]:
+                            j = s
+                            break
+                    x0 = curve_temp[j]
+                    inv_dx = 1.0 / (curve_temp[j + 1] - x0)
+                    rho_cp = (capacity_curve[j + 1] - capacity_curve[j]) * inv_dx * (t - x0) + capacity_curve[j]
+            else:
+                rho_cp = rho_cp_scalar
+            beta = latent_per_volume / rho_cp
+
+            # exact enthalpy inversion
+            prev = fs[i]
+            clipped = min(max(prev, 0.0), 1.0)
+            t_p = alloy_T_liq - clipped * inversion_dT
+            if t >= t_p:
+                t_final = t
+            else:
+                h = t + beta * (1.0 - clipped)
+                if h < alloy_T_sol:
+                    t_final = h
+                else:
+                    t_final = (t * inversion_dT + beta * t_p) / (inversion_dT + beta)
+            T[i] = t_final
+
+            # commit, lever rule at the inverted temperature
+            fs_prev[i] = prev
+            candidate = (T_liq - t_final) / dT
+            if candidate < 0.0:
+                candidate = 0.0
+            elif candidate > 1.0:
+                candidate = 1.0
+            f = prev if prev > candidate else candidate
+            fs[i] = f
+            starting = prev < 0.01 and f >= 0.01
+            ending = prev < 0.99 and f >= 0.99
+            if starting:
+                sol_start[i] = time_now - dt if ending else time_now
+            if ending:
+                sol_end[i] = time_now
+            dfs = f - prev
+            if dfs < 0.0:
+                dfs = 0.0
+            latent_rate[i] = L_vol * dfs / dt
+
+    @njit(parallel=True, cache=True)
     def apply_enthalpy_correction_parallel(
         T_post: FloatArray,
         fs_prev: FloatArray,
@@ -753,4 +912,36 @@ if NUMBA_AVAILABLE:
                 T_out[i] = t_post
 
 
+# ============================================================================
+# Serial twins (see physics/kernel_dispatch.py)
+# ============================================================================
 
+#: Serial cost (ns per cell): measured 1.2 and 0.7 on Apple silicon, raised by a quarter.
+_COST_COMMIT_NS = 1.5
+_COST_ENTHALPY_CORRECTION_NS = 1.0
+_COST_INVERT_AND_COMMIT_NS = 4.0
+
+if NUMBA_AVAILABLE:
+    from physics.kernel_dispatch import runs_serial, serial_twin
+
+    commit_solidification_update_serial = serial_twin(commit_solidification_update_parallel)
+    apply_enthalpy_correction_serial = serial_twin(apply_enthalpy_correction_parallel)
+    invert_enthalpy_and_commit_serial = serial_twin(invert_enthalpy_and_commit_parallel)
+
+
+    def apply_enthalpy_correction(
+        T_post: FloatArray,
+        fs_prev: FloatArray,
+        T_out: FloatArray,
+        T_liq: float,
+        T_sol: float,
+        dT: float,
+        beta: float,
+    ) -> None:
+        """``apply_enthalpy_correction_parallel``, on the calling thread when the field is small."""
+        kernel = (
+            apply_enthalpy_correction_serial
+            if runs_serial(len(T_post), _COST_ENTHALPY_CORRECTION_NS)
+            else apply_enthalpy_correction_parallel
+        )
+        kernel(T_post, fs_prev, T_out, T_liq, T_sol, dT, beta)

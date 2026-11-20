@@ -262,9 +262,10 @@ class MoldParams:
     Coefficients follow the MAGMASOFT practice used in steel validation work
     (Beckermann group, SFSA): ``htc_cast_mold`` above the solidus falling
     along the measured steel-sand air-gap curve (``interface_htc_curve``),
-    sand to chill ``htc_chill_mold``. A riser in a sleeve exchanges no heat
-    with the sand (``riser_sleeve_adiabatic``), and a sand core meets the mold
-    through htc_core_contact.
+    sand to chill ``htc_chill_mold``. A riser in an insulating sleeve leaks
+    into the sand at ``riser_sleeve_htc``, one set to the no-heat-loss sleeve
+    (``Part.riser_sleeve`` "adiabatic") exchanges none, and a sand core meets
+    the mold through htc_core_contact.
 
     Flags and choices are ints (0/1 flags, documented codes), like the other
     groups: both settings UIs render numeric leaves only.
@@ -301,24 +302,20 @@ class MoldParams:
     interface_htc_curve: int = 1
     # W/(m^2 K) chill to mold sand.
     htc_chill_mold: float = 1500.0
-    # 0/1: an insulating sleeve cuts its riser off from the sand (owner,
-    # 2026-11-11: the mold and the cores must not change how fast a riser
-    # freezes). 1: a sleeved riser passes no heat to the mold sand or to a sand
-    # core, on the explicit mold and on the sand boundary alike. It cools
-    # through the metal it feeds and, when its top is open in an explicit mold,
-    # to the air. 0: the sleeve leaks into the mold at riser_sleeve_htc below
-    # (htc_riser on the sand boundary), and a core touching the riser takes
-    # heat through htc_core_contact. A riser set to no sleeve
-    # (Part.riser_sleeve "none") stands in bare sand either way.
-    riser_sleeve_adiabatic: int = 1
-    # Used only with riser_sleeve_adiabatic = 0. Insulating riser sleeve
+    # Insulating riser sleeve (Part.riser_sleeve "insulating", the default)
     # against the mold, per riser: h = riser_sleeve_htc
     # * M^-RISER_SLEEVE_EXPONENT, M the riser's modulus in inches. A sleeve wall
     # thickens with the riser, so its resistance grows with size; a constant
     # contact coefficient gave modulus extension factors of 1.31 on a 2 x 3 in
     # riser but 1.15 at 6 x 9 in. 61.7 holds MEF at 1.30-1.31 from M = 0.375 to
     # 1.125 in (the 1.3 core/surrogate/design_rules.py sizes risers for;
-    # measured insulating sleeves 1.07-1.28, Williams et al. 2016).
+    # measured insulating sleeves 1.07-1.28, Williams et al. 2016). On the
+    # sand boundary the same riser takes htc_riser, and a core touching it
+    # takes heat through htc_core_contact. How a riser cools is chosen per
+    # riser: "adiabatic" passes no heat to the mold or core sand (the model
+    # every sleeved riser had from 2026-11-11 to 2026-11-19 under the removed
+    # switch riser_sleeve_adiabatic; a saved project that still carries that
+    # key loads and ignores it), "none" stands in bare sand.
     riser_sleeve_htc: float = 61.7
     # Air side: convective h (W/(m^2 K)), the air temperature, and the
     # emissivities of the mold sand and of an open metal surface (oxidized
@@ -353,7 +350,6 @@ class MoldParams:
         self.htc_cast_mold = _clamp_float(self.htc_cast_mold, 1.0, 1e5, 1000.0)
         self.interface_htc_curve = _clamp_int(self.interface_htc_curve, 0, 1, 1)
         self.htc_chill_mold = _clamp_float(self.htc_chill_mold, 1.0, 1e5, 1500.0)
-        self.riser_sleeve_adiabatic = _clamp_int(self.riser_sleeve_adiabatic, 0, 1, 1)
         self.riser_sleeve_htc = _clamp_float(self.riser_sleeve_htc, 1.0, 1e5, 61.7)
         self.ambient_temperature = _clamp_float(self.ambient_temperature, -40.0, 400.0, 21.0)
         self.air_htc = _clamp_float(self.air_htc, 0.0, 1000.0, 10.0)
@@ -790,7 +786,6 @@ class SolidificationParameters:
                 'htc_cast_mold': self.mold.htc_cast_mold,
                 'interface_htc_curve': self.mold.interface_htc_curve,
                 'htc_chill_mold': self.mold.htc_chill_mold,
-                'riser_sleeve_adiabatic': self.mold.riser_sleeve_adiabatic,
                 'riser_sleeve_htc': self.mold.riser_sleeve_htc,
                 'ambient_temperature': self.mold.ambient_temperature,
                 'air_htc': self.mold.air_htc,

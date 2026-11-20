@@ -46,7 +46,7 @@ export function simulatedPartsKey(parts: SimulatedPart[]): string {
         part.visible === false ? 0 : 1,
         part.is_open_top ? 1 : 0,
         // Runs recorded before the sleeve choice are insulating.
-        part.riser_sleeve === 'none' ? 'none' : 'insulating',
+        part.riser_sleeve === 'none' || part.riser_sleeve === 'adiabatic' ? part.riser_sleeve : 'insulating',
         round(part.position_x, 0),
         round(part.position_y, 0),
         round(part.position_z, 0),

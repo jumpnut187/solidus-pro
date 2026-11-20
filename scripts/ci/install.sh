@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # CI install: system libraries for Qt/VTK, then the pinned Python set.
 #
-# CI-provider neutral. GitHub Actions calls it from .github/workflows/ci.yml.
-# Assumes a Debian/Ubuntu image with
+# CI-provider neutral. GitHub Actions calls it from .github/workflows/tests.yml;
+# a GitLab job can call the same script. Assumes a Debian/Ubuntu image with
 # glibc >= 2.34 (PySide6 6.11 ships manylinux_2_34 wheels only) and the
 # target Python already on PATH as `python`.
 #

@@ -620,15 +620,16 @@ def _prepare_mold_stage(
 
 
 def _prepare_riser_sleeves(voxel_mesh: AdaptiveVoxelMesh, part_manager: Optional[PartManager]) -> None:
-    """Mark the voxels of risers set to no sleeve (``Part.riser_sleeve``), for the thermal setup."""
-    from core.riser_sleeve import bare_riser_mask
+    """Mark the voxels of risers set to no sleeve or to a no-heat-loss sleeve (``Part.riser_sleeve``)."""
+    from core.riser_sleeve import riser_sleeve_masks
 
     voxel_mesh.voxel_riser_bare = None
+    voxel_mesh.voxel_riser_adiabatic = None
     if part_manager is None or part_manager.get_part_count() == 0:
         return
     if voxel_mesh.voxel_part_types is None or voxel_mesh.voxel_neighbors is None:
         return
-    voxel_mesh.voxel_riser_bare = bare_riser_mask(
+    voxel_mesh.voxel_riser_bare, voxel_mesh.voxel_riser_adiabatic = riser_sleeve_masks(
         np.asarray(voxel_mesh.voxel_centers),
         np.asarray(voxel_mesh.voxel_part_types),
         np.asarray(voxel_mesh.voxel_neighbors),

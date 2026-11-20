@@ -268,6 +268,16 @@ class WebApiTests(unittest.TestCase):
         stored = self.client.get(f"/api/projects/{project_id}").get_json()["parts"]
         self.assertEqual(stored[0]["riser_sleeve"], "none")
         self.assertTrue(stored[0]["is_open_top"])
+        # The no-heat-loss sleeve is a stored choice too; an unknown one falls back to insulating.
+        for posted, kept in (("adiabatic", "adiabatic"), ("exothermic", "insulating")):
+            response = self.client.put(
+                f"/api/projects/{project_id}/parts/{part_payload['id']}",
+                json={"riser_sleeve": posted},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json()["part"]["riser_sleeve"], kept)
+            stored = self.client.get(f"/api/projects/{project_id}").get_json()["parts"]
+            self.assertEqual(stored[0]["riser_sleeve"], kept)
 
     def test_pour_location_round_trips_through_project_api(self) -> None:
         """A pour location set via PUT persists and reads back through GET.

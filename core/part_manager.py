@@ -662,12 +662,18 @@ def part_type_from_display_name(
     return _PART_TYPE_BY_DISPLAY_NAME.get(str(text).strip(), default)
 
 
-#: Riser sleeve choices (``Part.riser_sleeve``). ``insulating`` is the sleeved
-#: riser every riser has always been; ``none`` is a bare sand riser that cools
-#: through the same metal-to-sand contact as the casting.
+#: Riser sleeve choices (``Part.riser_sleeve``), one per riser. ``insulating``
+#: (the default) is a sleeve that slows the riser's heat loss to the sand
+#: (MoldParams.riser_sleeve_htc, modulus extension about 1.3): a skin grows on
+#: the riser wall and the pipe is a funnel. ``adiabatic`` passes no heat to the
+#: mold or core sand at all, for an exothermic or hot-topped riser: the riser
+#: cools only through the metal it feeds and through an open top, and its pipe
+#: is a level drop. ``none`` is a bare sand riser that cools through the same
+#: metal-to-sand contact as the casting.
 RISER_SLEEVE_INSULATING = "insulating"
+RISER_SLEEVE_ADIABATIC = "adiabatic"
 RISER_SLEEVE_NONE = "none"
-RISER_SLEEVE_CHOICES = (RISER_SLEEVE_INSULATING, RISER_SLEEVE_NONE)
+RISER_SLEEVE_CHOICES = (RISER_SLEEVE_INSULATING, RISER_SLEEVE_ADIABATIC, RISER_SLEEVE_NONE)
 
 
 def riser_sleeve_from_value(value: Any) -> str:
@@ -888,7 +894,7 @@ class Part:
     # This property only has effect when part_type == RISER.
     is_open_top: bool = False
 
-    # Riser-specific property: insulating sleeve or bare sand (RISER_SLEEVE_*).
+    # Riser-specific property: insulating sleeve, no-heat-loss sleeve or bare sand (RISER_SLEEVE_*).
     # Read by the thermal setup of both the explicit-mold and the boundary
     # path; only has effect when part_type == RISER.
     riser_sleeve: str = RISER_SLEEVE_INSULATING

@@ -199,14 +199,6 @@ export function AboutModal({ onClose }: { onClose: () => void }) {
           <dd>{appVersion}</dd>
           <dt>Interface</dt>
           <dd>Web</dd>
-          <dt>License</dt>
-          <dd>AGPL-3.0-or-later</dd>
-          <dt>Source</dt>
-          <dd>
-            <a href="https://github.com/jumpnut187/solidus-pro" target="_blank" rel="noreferrer">
-              github.com/jumpnut187/solidus-pro
-            </a>
-          </dd>
         </dl>
       </div>
     </Modal>
