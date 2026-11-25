@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 try:
     from core.error_logger import logger
 except ImportError:
-    from core.error_logger_dummy import logger
+    from core.error_logger_dummy import logger  # type: ignore[assignment]
 
 STEEL_CARBON_LOW_ALLOY = "carbon_low_alloy"
 STEEL_HIGH_ALLOY_STAINLESS = "high_alloy_stainless"

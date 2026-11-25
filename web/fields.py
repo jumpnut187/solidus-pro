@@ -404,7 +404,9 @@ def save_sidecar(path: Path, grids: FieldGrids) -> None:
     temporary = Path(temporary_name)
     try:
         with os.fdopen(handle_fd, "wb") as handle:
-            np.savez_compressed(handle, **payload)
+            # numpy's stub types **kwds poorly; the arrays are the archive members.
+            arrays: Dict[str, Any] = payload
+            np.savez_compressed(handle, **arrays)
         os.replace(temporary, path)
     except BaseException:
         temporary.unlink(missing_ok=True)
@@ -418,7 +420,11 @@ def load_sidecar(path: Path) -> Optional[FieldGrids]:
             dims = tuple(int(v) for v in data["dims"])
             lattice = Lattice(
                 dims=(dims[0], dims[1], dims[2]),
-                origin=tuple(float(v) for v in data["origin"]),
+                origin=(
+                    float(data["origin"][0]),
+                    float(data["origin"][1]),
+                    float(data["origin"][2]),
+                ),
                 spacing=float(data["spacing"][0]),
             )
             counts = data["counts"]

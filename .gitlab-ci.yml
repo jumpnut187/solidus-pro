@@ -89,10 +89,10 @@ python-mypy:
   stage: lint
   needs: []
   script:
-    - pip install mypy
+    # Version comes from constraints-ci.txt so a new mypy release can't turn
+    # the job red on unchanged code.
+    - pip install -c constraints-ci.txt mypy
     - python -m mypy --config-file mypy.ini
-  # Not yet verified green on a clean runner. Remove once the first run passes.
-  allow_failure: true
 
 frontend-lint:
   extends: .frontend-base

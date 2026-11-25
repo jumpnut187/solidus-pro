@@ -10,7 +10,7 @@ from core.filling_stage import maybe_run_filling
 try:
     from core.error_logger import logger as _error_logger
 except ImportError:
-    from core.error_logger_dummy import logger as _error_logger
+    from core.error_logger_dummy import logger as _error_logger  # type: ignore[assignment]
 from core.materials import get_alloy
 from core.part_manager import (
     PartManager,
