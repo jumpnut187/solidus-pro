@@ -1,12 +1,3 @@
-"""Which weight for a porous pair involving a FLUID cell: 1.0 (plain Koerner
-Table 1) or the porosity average (0.5*(p_A+p_B))?  Both are eps-free, so both
-remove the feedback; they differ in which invariant they preserve.
-
-One fixture, five variants, 6000 steps, fully submerged filter seeded 5% over
-full (the case where _redistribute has no INTERFACE recipient and so cannot
-repair anything).  Reports max|eps-1| in the band and, separately, whether
-mass tracks rho (weight-1's invariant) or rho*porosity (the physical one).
-"""
 import os, sys
 sys.path.insert(0, "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -15,7 +6,6 @@ import physics.filling as pf
 from physics.filling import PorousZone, FLAG_FLUID, FLAG_INTERFACE
 from physics.fluid_flow import lattice_units, LATTICE_VELOCITIES, Q, OPPOSITE
 NU, DX_M = 0.006 / 7200.0, 0.0152
-
 
 def mk_advance(mode):
     def am(state, fp, fs):
@@ -44,9 +34,7 @@ def mk_advance(mode):
         return state.mass + delta
     return am
 
-
 orig_trans = pf.apply_transitions
-
 
 def repin(state, time_s, **kw):
     por = state.porous.porosity_f64
@@ -57,7 +45,6 @@ def repin(state, time_s, **kw):
         state.mass[m] = full[m]
         pf._redistribute(state, ex, use_numba=False)
     return orig_trans(state, time_s, **kw)
-
 
 def build():
     n = 5; shape = (n, n, 16)
@@ -72,7 +59,6 @@ def build():
     full = st.rho.astype(np.float64) * st.porous.porosity_f64
     st.mass[b] = (full * 1.05)[b]
     return st, u, b
-
 
 print(f"{'variant':<22} {'max|eps-1|':>11} {'|m-rho*p|max':>13} {'|m-rho|max':>11} "
       f"{'rho band':>18} {'dM/M0':>10}")

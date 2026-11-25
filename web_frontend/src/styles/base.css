@@ -1,5 +1,3 @@
-/* Reset, typography and the focus treatment shared by every control. */
-
 *,
 *::before,
 *::after {
@@ -41,8 +39,6 @@ textarea {
   color: inherit;
 }
 
-/* One focus treatment everywhere. Keyboard users get a visible ring; mouse
- * users do not get a ring they did not ask for. */
 :focus {
   outline: none;
 }
@@ -53,7 +49,6 @@ textarea {
   border-radius: var(--radius-sm);
 }
 
-/* Scrollbars inside panels: present but quiet. */
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--border-strong) transparent;

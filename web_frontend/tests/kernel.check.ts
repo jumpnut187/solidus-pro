@@ -1,13 +1,3 @@
-/**
- * Checks the modeling kernel against Manifold in Node.
- *
- *   npm run check:kernel
- *
- * A casting stand-in (a cylinder with a dome on top) and the features a
- * foundry engineer draws against it: a riser extruded Up To Next onto the
- * dome, a chill trimmed to the casting, drafts, mid plane, through all, and
- * the failures SOLIDWORKS also refuses.
- */
 import Module from 'manifold-3d';
 
 import {
@@ -58,11 +48,9 @@ const wasm = await Module();
 wasm.setup();
 const { Manifold } = wasm;
 
-// Casting: cylinder r=5, z 0..4, with a dome (sphere r=5 at z=4) on top.
 const dome = Manifold.sphere(5, 96).translate([0, 0, 4]).trimByPlane([0, 0, 1], 4);
 const castSolid = Manifold.cylinder(4, 5, 5, 96).add(dome);
 const castMesh = castSolid.getMesh();
-// Re-expand to an STL-style soup so bodyFromMesh has to weld it.
 const soup = new Float32Array(castMesh.triVerts.length * 3);
 const soupIdx = new Uint32Array(castMesh.triVerts.length);
 for (let i = 0; i < castMesh.triVerts.length; i += 1) {
@@ -94,20 +82,17 @@ console.log('blind');
 console.log('up to next (riser onto the dome)');
 {
   const out = buildExtrude(wasm, feature(top(12), [circle(2, 0, 3)], { endCondition: 'upToNext', reverse: true }), [cast]);
-  // Dome surface under the riser: z = 4 + sqrt(25 - r^2) for r in 0.5..3.5.
   check('top stays on the sketch plane', near(out.bbox.max[2], 12, 1e-4));
   check('bottom conforms to the dome', near(out.bbox.min[2], 4 + Math.sqrt(25 - 3.5 * 3.5), 0.05), String(out.bbox.min[2]));
   const lowest = 4 + Math.sqrt(25 - 3.5 * 3.5);
   const highest = 4 + Math.sqrt(25 - 0.5 * 0.5);
   check('volume between the bounds', out.volume > Math.PI * 2.25 * (12 - highest) && out.volume < Math.PI * 2.25 * (12 - lowest));
-  // The riser and the casting must touch and not overlap.
   const riser = new wasm.Manifold(new wasm.Mesh({ numProp: 3, vertProperties: out.positions, triVerts: out.indices }));
   const overlap = riser.intersect(cast.manifold!).volume();
   check('no overlap with the casting', overlap < 1e-3, String(overlap));
   riser.delete();
 }
 {
-  // Upward from below: a chill under the casting's flat bottom.
   const below: SketchPlane = { kind: 'standard', id: 'top', offset: -2 };
   const out = buildExtrude(wasm, feature(below, [{ id: 'r', type: 'rectangle', cx: 0, cy: 0, w: 4, h: 2, angle: 0 }], { endCondition: 'upToNext' }), [cast]);
   check('chill stops at the bottom face', near(out.bbox.max[2], 0, 1e-4) && near(out.volume, 16, 1e-3), `${out.bbox.max[2]} ${out.volume}`);
@@ -133,14 +118,12 @@ try {
 console.log('up to next with draft');
 {
   const out = buildExtrude(wasm, feature(top(12), [circle(0, 0, 4)], { endCondition: 'upToNext', reverse: true, draftDeg: 5, draftOutward: true }), [cast]);
-  const run = 12 - (4 + Math.sqrt(25 - 4)); // where the widened edge meets the dome, roughly
+  const run = 12 - (4 + Math.sqrt(25 - 4));
   check('outward draft widens toward the casting', out.bbox.max[0] > 2.1 && out.bbox.max[0] < 2 + run * Math.tan((5 * Math.PI) / 180) + 0.05, String(out.bbox.max[0]));
 }
 
 console.log('watertight once stored (bodies across a seam between two bodies)');
 {
-  // What the server, the STL file and the voxelizer do to a body: weld
-  // positions equal to 8 decimals. Every edge must then be on two triangles.
   const weldProblem = (positions: Float32Array, indices: Uint32Array): string | null => {
     const ids = new Map<string, number>();
     const remap = new Uint32Array(positions.length / 3);
@@ -164,9 +147,6 @@ console.log('watertight once stored (bodies across a seam between two bodies)');
   const stored = (name: string, out: { positions: Float32Array; indices: Uint32Array }) =>
     bodyFromMesh(wasm, name, name, out.positions, out.indices, identity);
 
-  // A riser stored before bodies were finished for storage: the dome's shape
-  // cut exactly, then rounded to float32, so it meets the dome at a seam of
-  // sub-micron gaps. Riser 2 in the report sat on the pipe beside one of these.
   const legacyCut = wasm.CrossSection.circle(1.25, 64).translate([-0.75, 0.25]).extrude(10).translate([0, 0, 1]);
   const legacyPieces = legacyCut.subtract(cast.manifold!).decompose();
   const legacyTop = legacyPieces.find((piece) => piece.boundingBox().max[2] > 10.9)!;
@@ -262,7 +242,6 @@ console.log('mid plane, through all, polygon, slot, polyline, hole');
   check('nested circle is a hole', near(out.volume, Math.PI * 3, 0.02), String(out.volume));
 }
 {
-  // Front plane: normal -Y, so a blind extrude goes toward -Y.
   const front: SketchPlane = { kind: 'standard', id: 'front', offset: 10 };
   const out = buildExtrude(wasm, feature(front, [circle(0, 8, 2)], { depth: 2 }), [cast]);
   check('front plane sits at y = -10 and grows to -12', near(out.bbox.max[1], -10, 1e-4) && near(out.bbox.min[1], -12, 1e-4), JSON.stringify(out.bbox));
@@ -271,7 +250,6 @@ console.log('mid plane, through all, polygon, slot, polyline, hole');
 
 console.log('transforms');
 {
-  // The same casting moved up 10 in and turned 90 degrees about X.
   const moved = bodyFromMesh(wasm, 'm', 'Moved', soup, soupIdx, partWorldMatrix([0, 0, 10], [90, 0, 0], 1));
   check('moved body box', moved.bbox !== null && near(moved.bbox.min[2], 5, 0.01) && near(moved.bbox.max[2], 15, 0.01), JSON.stringify(moved.bbox));
   moved.manifold?.delete();
@@ -296,7 +274,6 @@ console.log('lines, arcs and profiles');
   const out = buildExtrude(wasm, feature(top(20), square, { depth: 2 }), [cast]);
   check('four-line rectangle extrudes', near(out.volume, 24, 1e-4), String(out.volume));
 
-  // Split by a line into two regions: still the whole rectangle.
   const split = [...square, line('e', 2, 0, 2, 3)];
   const splitProfiles = sketchProfiles(split);
   check('a dividing line makes two regions', splitProfiles.loops.length === 2, String(splitProfiles.loops.length));
@@ -311,7 +288,6 @@ console.log('lines, arcs and profiles');
   const dangling = [...square, line('g', 4, 3, 6, 5)];
   check('a stray line is an open contour', /open contour/.test(sketchProblem(dangling) ?? ''));
 
-  // A slot drawn as two lines and two arcs.
   const arcR = arcThrough([4, 1], [4, -1], [5, 0], 'r')!;
   const arcL = arcThrough([0, -1], [0, 1], [-1, 0], 'l')!;
   const slot = [line('t', 0, 1, 4, 1), arcR, line('u', 4, -1, 0, -1), arcL];
@@ -320,7 +296,6 @@ console.log('lines, arcs and profiles');
   const slotOut = buildExtrude(wasm, feature(top(20), slot, { depth: 1 }), [cast]);
   check('line-and-arc slot area', near(slotOut.volume, 8 + Math.PI, 0.01), String(slotOut.volume));
 
-  // Coincident ends follow: move a corner, both lines there move.
   const moved = moveEnd(square, 'a', 1, [5, -1]);
   const b2 = moved.find((e) => e.id === 'b') as Extract<SketchEntity, { type: 'line' }>;
   check('dragging a corner drags the joined line', near(b2.x1, 5, 1e-12) && near(b2.y1, -1, 1e-12));
@@ -328,7 +303,6 @@ console.log('lines, arcs and profiles');
   const longer = withDimension(square[0], 'lineLength', 6) as Extract<SketchEntity, { type: 'line' }>;
   check('line length dimension moves the second end', near(longer.x2, 6, 1e-12) && near(longer.y2, 0, 1e-12));
 
-  // Horizontal/vertical relations survive a dimension change.
   const hv = [
     { ...line('a', 0, 0, 4, 0), relation: 'horizontal' as const },
     { ...line('b', 4, 0, 4, 3), relation: 'vertical' as const },
@@ -362,7 +336,6 @@ console.log('reference planes');
   check('three offset planes', referencePlanePreview({ kind: 'offset', base, distance: 2, flip: false }, 3, 'P').map((p) => p.offset).join() === '2,4,6');
   const tilted: SketchPlane = { kind: 'custom', normal: [1, 0, 1], offset: 0, label: 't' };
   check('non-parallel mid plane refused', resolveReferencePlane({ id: 'x', name: 'x', source: { kind: 'mid', a: base, b: tilted } }) === null);
-  // A feature on the offset plane builds there.
   const out = buildExtrude(wasm, feature(plane!, [circle(20, 0, 2)], { depth: 1 }), [cast]);
   check('extrude on an offset plane starts on it', near(out.bbox.min[2], 3, 1e-4));
 }
@@ -392,7 +365,6 @@ console.log('sketch regions');
 {
   const plane = top(0);
   const sketchOf = (entities: SketchEntity[]) => ({ plane, entities });
-  // Two overlapping circles: two crescents and the lens between them.
   const pair: SketchEntity[] = [
     { id: 'a', type: 'circle', cx: 0, cy: 0, d: 4 },
     { id: 'b', type: 'circle', cx: 2, cy: 0, d: 4 }
@@ -418,7 +390,6 @@ console.log('sketch regions');
     check('refuses: picks outside every region', error instanceof FeatureBuildError && /picked regions/.test((error as Error).message), String(error));
   }
 
-  // A circle in a rectangle: the ring and the disc, the disc a hole by default.
   const ring = sketchRegions(wasm, sketchOf([
     { id: 'r', type: 'rectangle', cx: 0, cy: 0, w: 6, h: 6, angle: 0 },
     { id: 'c', type: 'circle', cx: 0, cy: 0, d: 2 }
@@ -427,7 +398,6 @@ console.log('sketch regions');
   const ringRegion = ring.find((region) => region.inDefault)!;
   check('the ring keeps its hole', ringRegion.contours.length === 2 && !pointInContours(ringRegion.contours, [0, 0]));
 
-  // Lines: a square drawn with lines and split by a line across it.
   const lines: SketchEntity[] = [
     { id: 'l1', type: 'line', x1: 0, y1: 0, x2: 4, y2: 0 },
     { id: 'l2', type: 'line', x1: 4, y1: 0, x2: 4, y2: 4 },
@@ -441,7 +411,6 @@ console.log('sketch regions');
   const stripOnly = buildExtrude(wasm, feature(plane, lines, { depth: 2, regions: [strip.seed] }), []);
   check('one of the two extrudes alone', near(stripOnly.volume, 8, 1e-4), String(stripOnly.volume));
 
-  // A cut takes its regions the same way.
   const slab = Manifold.cube([10, 10, 1]).translate([-5, -5, 0]);
   const slabMesh = slab.getMesh();
   const cutTarget: CutTarget = { name: 'Slab', positions: slabMesh.vertProperties, indices: slabMesh.triVerts, matrix: identity };
@@ -477,7 +446,6 @@ console.log('extrude cut');
     }
   };
 
-  // A d=2 hole straight down through the dome and the cylinder.
   const hole = cutOf(top(12), [circle(0, 0, 2)], { endCondition: 'throughAll', reverse: true });
   const expected = 2 * Math.PI * (2 + (125 - Math.pow(24, 1.5)) / 3);
   const preview = previewCut(wasm, hole, [cast]);
@@ -490,8 +458,6 @@ console.log('extrude cut');
     check('cut body keeps its outline', near(holed.bbox.min[2], 0, 1e-6) && near(holed.bbox.max[0] - holed.bbox.min[0], 10, 1e-3));
   }
 
-  // The same hole on a casting placed and turned: the result stays in the
-  // casting's own frame, so the stored STL is the uploaded one, holed.
   const moved = partWorldMatrix([10, -3, 2], [0, 0, 90], 1);
   const movedHole = cutOf({ kind: 'standard', id: 'top', offset: 14 }, [circle(10, -3, 2)], { endCondition: 'throughAll', reverse: true });
   const movedOut = applyCuts(wasm, target(moved), [movedHole]);
@@ -508,33 +474,28 @@ console.log('extrude cut');
     scaledOut.changed ? String(scaledOut.volume) : 'unchanged'
   );
 
-  // Blind pocket up from the flat bottom: 2 x 2 x 1.
   const pocket = applyCuts(wasm, target(), [cutOf(top(0), [{ id: 'r', type: 'rectangle', cx: 0, cy: 0, w: 2, h: 2, angle: 0 }], { endCondition: 'blind', depth: 1, reverse: false })]);
   check('blind pocket removes w*h*d', pocket.changed && near(castVolume - pocket.volume, 4, 1e-3), pocket.changed ? String(castVolume - pocket.volume) : 'unchanged');
 
-  // Mid plane and Through All - Both from a plane inside the cylinder.
   const cylinder = Manifold.cylinder(4, 5, 5, 96);
   const cylMesh = cylinder.getMesh();
   const cylTarget: CutTarget = { name: 'Cylinder', positions: cylMesh.vertProperties, indices: cylMesh.triVerts, matrix: identity };
   const cylVolume = cylinder.volume();
   const mid = applyCuts(wasm, cylTarget, [cutOf(top(2), [circle(0, 0, 2)], { endCondition: 'midplane', depth: 2 })]);
-  const holeArea = cylVolume / 4 / 25; // the tessellated circle's area per unit r^2
+  const holeArea = cylVolume / 4 / 25;
   check('mid plane cuts both ways from the sketch', mid.changed && near(cylVolume - mid.volume, holeArea * 2, 0.02), mid.changed ? String(cylVolume - mid.volume) : 'unchanged');
   check('a cut that stops inside leaves a void, and says so', mid.changed && closed(mid) && mid.warnings.some((w) => /enclosed void/.test(w)), JSON.stringify(mid.warnings));
   const both = applyCuts(wasm, cylTarget, [cutOf(top(2), [circle(0, 0, 2)], { endCondition: 'throughAllBoth' })]);
   check('through all both cuts the whole height', both.changed && near(cylVolume - both.volume, holeArea * 4, 0.03), both.changed ? String(cylVolume - both.volume) : 'unchanged');
   const drafted = applyCuts(wasm, cylTarget, [cutOf(top(4), [circle(0, 0, 4)], { endCondition: 'blind', depth: 2, reverse: true, draftDeg: 10 })]);
-  // Inward draft: a cone frustum r 2 -> 2 - 2 tan(10 deg).
   const r2 = 2 - 2 * Math.tan((10 * Math.PI) / 180);
   const frustum = (Math.PI * 2 * (4 + 2 * r2 + r2 * r2)) / 3;
   check('drafted cut tapers inward', drafted.changed && near(cylVolume - drafted.volume, frustum, frustum * 0.02), drafted.changed ? `${cylVolume - drafted.volume} vs ${frustum}` : 'unchanged');
 
-  // Flip side: keep only a d=4 core.
   const flipped = applyCuts(wasm, cylTarget, [cutOf(top(2), [circle(0, 0, 4)], { endCondition: 'throughAllBoth', flipSide: true })]);
   check('flip side keeps the inside of the profile', flipped.changed && near(flipped.volume, holeArea * 4 * 4, 0.1), flipped.changed ? String(flipped.volume) : 'unchanged');
   if (flipped.changed) check('flipped cut is closed once stored', closed(flipped));
 
-  // Two cuts in history order, and cuts that miss.
   const twice = applyCuts(wasm, cylTarget, [
     cutOf(top(2), [circle(0, 0, 2)], { endCondition: 'throughAllBoth', seq: 7 }),
     cutOf(top(2), [circle(3, 0, 1)], { endCondition: 'throughAllBoth', seq: 6 })

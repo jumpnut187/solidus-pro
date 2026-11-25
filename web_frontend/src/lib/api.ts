@@ -1,7 +1,5 @@
-/** Typed client for the Solidus Pro HTTP API. */
 import type { CutFeature, ExtrudeFeature, ReferencePlane } from './modeling/types';
 
-/** The part types the engine understands (`core/part_manager.py`). */
 export type PartType =
   | 'cast'
   | 'riser'
@@ -15,7 +13,6 @@ export type PartType =
   | 'gate'
   | 'mold';
 
-/** `GET /api/sands`: the mold and core sands (`core/mold_materials.py`). Code 0 is the custom sand. */
 export type SandInfo = {
   code: number;
   label: string;
@@ -24,7 +21,6 @@ export type SandInfo = {
   bulk_density: number | null;
 };
 
-/** One display mesh from `POST /api/projects/<id>/mold-preview`. */
 export type PreviewMesh = {
   vertices: number[];
   faces: number[];
@@ -38,7 +34,6 @@ export type MoldPreview = {
   summary: {
     pitch_in: number;
     mold_cells: number;
-    /** The preview's mold graded like the run's (`mold_grading_levels` > 0); absent on a uniform mold. */
     graded_mold_cells?: number;
     max_cell_span?: number;
     auto_core_cells: number;
@@ -63,7 +58,6 @@ export type MeshData = {
 export type UploadedFile = {
   file_id: string;
   filename: string;
-  /** Original file (or CAD body) stem, free of the storage prefix. */
   display_name?: string;
   filepath: string;
   source_file?: string;
@@ -96,16 +90,9 @@ export type ProjectPart = {
   scale: number;
   visible: boolean;
   is_open_top: boolean;
-  /** Riser only: an insulating sleeve (default) or none, a bare sand riser. */
   riser_sleeve: RiserSleeve;
   meshData?: MeshData;
-  /** The sketch and extrude that made this body, for a body modeled in the browser. */
   feature?: ExtrudeFeature | null;
-  /**
-   * The body's STL before any extrude cut, kept by the server while a cut is
-   * applied so editing or deleting the cut can restore material. Null when
-   * the body is uncut.
-   */
   base_filepath?: string | null;
 };
 
@@ -148,25 +135,15 @@ export type ProjectSettings = {
   performance_options: PerformanceOptions;
   solidification_params: SolidificationParams;
   ui_state?: Record<string, unknown>;
-  // The pour point clicked on the 3D assembly, or null when none has been set
-  // yet. The mold-filling analysis is gated on this being non-null. Persisted
-  // server-side inside the project's existing `ui_state` JSON blob.
   pour_location?: PourLocationPayload | null;
 };
 
-/**
- * The flat parting line: the horizontal plane `z` (inches, world), cope above
- * and drag below. Stored in the project's `ui_state.parting_line`; a project
- * without it has no parting line yet.
- */
 export type PartingLine = {
   z: number;
   visible: boolean;
-  /** Move the plane with the casting when the casting is raised or lowered. */
   locked_to_casting: boolean;
 };
 
-/** `GET /api/projects/<id>/parting-line`: suggestions and the cope/drag split for the casting. */
 export type PartingLineInfo = {
   parting_line: PartingLine | null;
   part_id: string | null;
@@ -176,7 +153,6 @@ export type PartingLineInfo = {
   bounds: [[number, number, number], [number, number, number]];
 };
 
-/** A stored `ui_state.parting_line`, or null when absent or malformed. */
 export function parsePartingLine(raw: unknown): PartingLine | null {
   if (typeof raw !== 'object' || raw === null) return null;
   const record = raw as Record<string, unknown>;
@@ -189,7 +165,6 @@ export function parsePartingLine(raw: unknown): PartingLine | null {
   };
 }
 
-/** A row of `GET /api/projects`. */
 export type ProjectSummary = {
   id: string;
   name: string;
@@ -204,7 +179,6 @@ export type ProjectSummary = {
   summary: Record<string, unknown>;
 };
 
-/** `GET /api/projects/<id>`: the stored project row. */
 export type ProjectRecord = ProjectSettings & {
   id: string;
   status: string;
@@ -214,20 +188,16 @@ export type ProjectRecord = ProjectSettings & {
   summary: Record<string, unknown>;
 };
 
-/** What the modeling routes take: the body's properties, its feature and its triangles. */
 export type FeatureBodyRequest = {
   name: string;
   part_type: PartType;
   is_open_top: boolean;
   visible: boolean;
   feature: ExtrudeFeature;
-  /** The body as extruded; its pre-cut base when `cut_mesh` is sent. */
   mesh: { vertices: number[]; faces: number[] };
-  /** The body after the extrude cuts that apply to it. */
   cut_mesh?: { vertices: number[]; faces: number[] } | null;
 };
 
-/** A part as the server stores it — `mesh_data` only when it was requested. */
 type StoredPart = Omit<ProjectPart, 'meshData'> & { mesh_data?: MeshData };
 
 export type JobStatus = {
@@ -261,7 +231,6 @@ export type HardwareInfo = {
   logical_cores: number | null;
   performance_cores: number | null;
   efficiency_cores: number | null;
-  /** CPU core tiers under the names the OS reports, e.g. Performance / Efficiency. */
   core_tiers: { name: string; cores: number }[];
   total_memory_gb: number | null;
   available_memory_gb: number | null;
@@ -285,8 +254,6 @@ export type AlloyGuideRow = {
   niyama_threshold: number;
 };
 
-// --- Reports ---------------------------------------------------------------
-
 export type ReportFormat = {
   id: 'html' | 'markdown' | 'pdf';
   label: string;
@@ -301,18 +268,13 @@ export type ReportSectionToggles = {
   screenshot: boolean;
 };
 
-// --- Job log ---------------------------------------------------------------
-
 export type JobLog = {
   lines: string[];
-  /** Monotonic cursor to pass as `since` on the next poll. */
   next: number;
-  /** Lines that rolled off the ring buffer before the client asked for them. */
   dropped: number;
   available: boolean;
 };
 
-/** A file the server sent as an attachment, with the name it chose. */
 export type DownloadedFile = { blob: Blob; filename: string };
 
 function filenameFrom(response: Response, fallback: string): string {
@@ -324,8 +286,6 @@ function filenameFrom(response: Response, fallback: string): string {
 async function requestFile(url: string, init: RequestInit, fallback: string): Promise<DownloadedFile> {
   const response = await fetch(url, init);
   if (!response.ok) {
-    // An error comes back as JSON even on a download route, so read it as
-    // text and surface the server's reason rather than "500".
     const text = await response.text().catch(() => '');
     let message = `Request failed: ${response.status}`;
     try {
@@ -334,7 +294,6 @@ async function requestFile(url: string, init: RequestInit, fallback: string): Pr
         message = (parsed as { error: string }).error;
       }
     } catch {
-      /* not JSON; keep the status message */
     }
     throw new Error(message);
   }
@@ -362,7 +321,6 @@ function jsonBody(payload: unknown): RequestInit {
   };
 }
 
-/** Move the server's `mesh_data` onto the camelCase key the viewport reads. */
 function adoptPart(part: StoredPart): ProjectPart {
   const { mesh_data: meshData, ...rest } = part;
   return meshData ? { ...rest, meshData } : { ...rest };
@@ -371,7 +329,6 @@ function adoptPart(part: StoredPart): ProjectPart {
 export const api = {
   materials: () => requestJson<MaterialInfo[]>('/api/materials'),
 
-  // --- Projects ------------------------------------------------------------
   listProjects: () => requestJson<ProjectSummary[]>('/api/projects'),
   createProject: (settings: ProjectSettings) =>
     requestJson<{ id: string; project: ProjectRecord }>('/api/projects', jsonBody(settings)),
@@ -397,8 +354,6 @@ export const api = {
   deleteProject: (projectId: string) =>
     requestJson<{ status: string }>(`/api/projects/${projectId}`, { method: 'DELETE' }),
 
-  // --- Parts ---------------------------------------------------------------
-  // voxelSize (inches) sets the server's STEP tessellation tolerance.
   uploadFiles: (files: File[], voxelSize: number) => {
     const form = new FormData();
     for (const file of files) form.append('files', file);
@@ -421,7 +376,6 @@ export const api = {
   },
   deletePart: (projectId: string, partId: string) =>
     requestJson<{ status: string }>(`/api/projects/${projectId}/parts/${partId}`, { method: 'DELETE' }),
-  /** Store a body modeled in the browser: its triangles and the feature that made them. */
   createFeatureBody: async (projectId: string, body: FeatureBodyRequest) => {
     const payload = await requestJson<{ id: string; part: StoredPart }>(
       `/api/projects/${projectId}/features`,
@@ -429,7 +383,6 @@ export const api = {
     );
     return { id: payload.id, part: adoptPart(payload.part) };
   },
-  /** Replace a modeled body after its sketch or extrude changed. */
   updateFeatureBody: async (projectId: string, partId: string, body: FeatureBodyRequest) => {
     const payload = await requestJson<{ part: StoredPart }>(`/api/projects/${projectId}/features/${partId}`, {
       ...jsonBody(body),
@@ -437,22 +390,16 @@ export const api = {
     });
     return { part: adoptPart(payload.part) };
   },
-  /** Replace the project's reference planes (kept in its ui_state). */
   saveReferencePlanes: (projectId: string, planes: ReferencePlane[]) =>
     requestJson<{ planes: ReferencePlane[] }>(`/api/projects/${projectId}/reference-planes`, {
       ...jsonBody({ planes }),
       method: 'PUT'
     }),
-  /** Replace the project's extrude cut definitions (kept in its ui_state). */
   saveCutFeatures: (projectId: string, cuts: CutFeature[]) =>
     requestJson<{ cuts: CutFeature[] }>(`/api/projects/${projectId}/cuts`, {
       ...jsonBody({ cuts }),
       method: 'PUT'
     }),
-  /**
-   * Store a body as its extrude cuts left it (in its own frame), or with
-   * `null` point it back at its pre-cut base.
-   */
   storeCutBody: async (projectId: string, partId: string, mesh: { vertices: number[]; faces: number[] } | null) => {
     const payload = await requestJson<{ part: StoredPart }>(`/api/projects/${projectId}/parts/${partId}/cut`, {
       ...jsonBody({ mesh }),
@@ -460,23 +407,15 @@ export const api = {
     });
     return { part: adoptPart(payload.part) };
   },
-  /** A cut body's geometry before any cut. */
   partBaseMesh: (projectId: string, partId: string) =>
     requestJson<{ mesh_data: MeshData }>(`/api/projects/${projectId}/parts/${partId}/base-mesh`).then(
       (payload) => payload.mesh_data
     ),
-  /** Triangle geometry for a stored part, used to restore a reloaded project. */
   partMesh: (projectId: string, partId: string) =>
     requestJson<{ mesh_data: MeshData }>(`/api/projects/${projectId}/parts/${partId}/mesh`).then(
       (payload) => payload.mesh_data
     ),
 
-  // --- Orient & Parting Line -------------------------------------------------
-  /**
-   * Parting-line suggestions and the cope/drag split for a body (the casting by
-   * default), measured at the placement passed rather than the stored one, so
-   * the answer never lags a part write still in flight.
-   */
   partingLineInfo: (
     projectId: string,
     query: { partId?: string; rotation?: number[]; position?: number[]; scale?: number; z?: number | null },
@@ -490,18 +429,15 @@ export const api = {
     if (query.z !== undefined && query.z !== null) params.set('z', String(query.z));
     return requestJson<PartingLineInfo>(`/api/projects/${projectId}/parting-line?${params.toString()}`, { signal });
   },
-  /** Store the parting line, or remove it with null. */
   savePartingLine: (projectId: string, line: PartingLine | null) =>
     requestJson<{ parting_line: PartingLine | null }>(`/api/projects/${projectId}/parting-line`, {
       ...jsonBody(line ?? { parting_line: null }),
       method: 'PUT'
     }),
 
-  // --- Mesh ----------------------------------------------------------------
   meshPreview: (projectId: string, voxelSize: number) =>
     requestJson<MeshPreview>(`/api/projects/${projectId}/mesh-preview`, jsonBody({ voxel_size: voxelSize })),
 
-  // --- Mold and cores ------------------------------------------------------
   sands: () => requestJson<SandInfo[]>('/api/sands'),
   moldPreview: (projectId: string, mold: Record<string, number>, voxelSize: number) =>
     requestJson<MoldPreview>(`/api/projects/${projectId}/mold-preview`, jsonBody({ mold, voxel_size: voxelSize })),
@@ -511,30 +447,21 @@ export const api = {
       jsonBody(targetAccuracy === undefined ? {} : { target_accuracy: targetAccuracy })
     ),
 
-  // --- Runs ----------------------------------------------------------------
   runProject: (projectId: string) =>
     requestJson<{ status: string; sim_id: string }>(`/api/projects/${projectId}/run`, { method: 'POST' }),
   cancelProject: (projectId: string) =>
     requestJson<{ status: string }>(`/api/projects/${projectId}/cancel`, { method: 'POST' }),
   status: (projectId: string) => requestJson<JobStatus>(`/api/jobs/${projectId}/status`),
 
-  // There is no results fetcher here: the viewport reads dense grids from the
-  // binary sidecar through `lib/gridApi.ts`, and the statistics panel reads
-  // `GridMeta.stats`. The sampled-field, surface and volume routes that these
-  // used to call have been removed from the server as well.
-
-  /** Progress lines for a run; `since` returns only what is new. */
   projectLog: (projectId: string, since = 0) =>
     requestJson<JobLog>(`/api/projects/${projectId}/log?since=${since}`),
 
-  // --- Reports -------------------------------------------------------------
   reportFormats: () => requestJson<{ formats: ReportFormat[] }>('/api/report/formats'),
   generateReport: (
     projectId: string,
     body: { format: string; sections: ReportSectionToggles; screenshot?: string }
   ) => requestFile(`/api/projects/${projectId}/report`, jsonBody(body), 'report.html'),
 
-  // --- Project files -------------------------------------------------------
   exportProjectFile: (projectId: string) =>
     requestFile(`/api/projects/${projectId}/export`, { method: 'GET' }, 'project.solidus-project.json'),
   importProjectFile: (projectFile: File, cadFiles: File[]) => {
@@ -549,12 +476,10 @@ export const api = {
     }>('/api/projects/import', { method: 'POST', body: form });
   },
 
-  // --- Environment ---------------------------------------------------------
   hardware: () => requestJson<HardwareInfo>('/api/hardware'),
   helpAlloys: () => requestJson<{ alloys: AlloyGuideRow[] }>('/api/help/alloys')
 };
 
-/** Hand a fetched attachment to the browser as a download. */
 export function saveFile({ blob, filename }: DownloadedFile): void {
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
@@ -563,6 +488,5 @@ export function saveFile({ blob, filename }: DownloadedFile): void {
   document.body.appendChild(link);
   link.click();
   link.remove();
-  // Revoking synchronously can beat the download in some browsers.
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

@@ -1,24 +1,3 @@
-"""Graded sand mold against the uniform lattice mold (MoldParams.mold_grading_levels).
-
-Standalone verification script (not a unittest suite):
-
-    venv/bin/python tests/verify_graded_mold.py            # the case table
-    venv/bin/python tests/verify_graded_mold.py --sweep    # band x levels sweep
-    venv/bin/python tests/verify_graded_mold.py --only cube_2in_wall4_0.1
-
-Every case runs the full pipeline twice or more on the explicit auto mold:
-once on the uniform lattice (``mold_grading_levels = 0``) and once per
-grading. Per run it prints the mold sand cells (lattice and graded), the
-wall time of the thermal solve (every ``CoupledMoldSolver.step``, casting
-and mold) and of the mold model alone (``flush``), the total freeze time, and
-the per-voxel solidification end-time difference from the uniform run (max
-and mean of |dt|, in seconds and in % of the uniform total). Voxels that
-froze in one run and not in the other (a sleeved riser still liquid at the
-horizon) are counted apart.
-
-Cases use only tests/ci_models (CI-safe geometry).
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -36,20 +15,18 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tests.helpers.ci_models import ci_model  # noqa: E402
-from core.part_manager import build_part_manager  # noqa: E402
-from core.simulation_pipeline import PipelineInputs, run_pipeline  # noqa: E402
-from physics.mold_coupling import CoupledMoldSolver  # noqa: E402
-from tests.test_simulation_scenarios import _memory_monitor_check, _ok_validation  # noqa: E402
-
+from tests.helpers.ci_models import ci_model
+from core.part_manager import build_part_manager
+from core.simulation_pipeline import PipelineInputs, run_pipeline
+from physics.mold_coupling import CoupledMoldSolver
+from tests.test_simulation_scenarios import _memory_monitor_check, _ok_validation
 
 @dataclass
 class Case:
     name: str
-    parts: Sequence[Tuple[str, str]]  # (ci model, part type)
+    parts: Sequence[Tuple[str, str]]
     voxel_in: float
-    wall_in: float  # 0: automatic
-
+    wall_in: float
 
 CASES: List[Case] = [
     Case("cube_2in_wall2_0.2", [("block_2inch.stl", "cast")], 0.2, 2.0),
@@ -61,12 +38,9 @@ CASES: List[Case] = [
     Case("thick_thin_auto_0.1", [("thick_thin_test.stl", "cast")], 0.1, 0.0),
 ]
 
-#: (levels, band) runs per case in the default table.
 DEFAULT_GRADINGS = [(3, 4)]
-#: The sweep (run on SWEEP_CASES).
 SWEEP_GRADINGS = [(levels, band) for band in (2, 4, 8) for levels in (1, 2, 3, 4)]
 SWEEP_CASES = ["plate_riser_auto_0.2", "l_bracket_auto_0.1"]
-
 
 @dataclass
 class RunResult:
@@ -77,7 +51,6 @@ class RunResult:
     solve_s: float
     mold_s: float
     total_s: float
-
 
 def run(case: Case, levels: int, band: int) -> RunResult:
     with contextlib.redirect_stdout(io.StringIO()):
@@ -128,7 +101,6 @@ def run(case: Case, levels: int, band: int) -> RunResult:
         total_s=total,
     )
 
-
 def compare(reference: RunResult, other: RunResult) -> Dict[str, float]:
     a, b = reference.end, other.end
     both = np.isfinite(a) & np.isfinite(b)
@@ -142,13 +114,11 @@ def compare(reference: RunResult, other: RunResult) -> Dict[str, float]:
         "unmatched": int(np.count_nonzero(np.isfinite(a) != np.isfinite(b))),
     }
 
-
 HEADER = (
     f"{'case':24s} {'L':>2s} {'band':>4s} {'lattice':>10s} {'graded':>10s} {'cut':>6s} {'span':>4s} "
     f"{'solve s':>8s} {'mold s':>7s} {'run s':>7s} {'freeze s':>9s} {'max|dt| s':>9s} {'%':>6s} "
     f"{'mean s':>7s} {'%':>6s} {'unm':>4s}"
 )
-
 
 def row(name: str, levels: int, band: int, res: RunResult, cmp: Optional[Dict[str, float]]) -> str:
     cut = res.lattice_cells / max(res.mold_cells, 1)
@@ -163,9 +133,8 @@ def row(name: str, levels: int, band: int, res: RunResult, cmp: Optional[Dict[st
         f"{cmp['unmatched']:4d}"
     )
 
-
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description="Graded sand mold against the uniform lattice mold (MoldParams.mold_grading_levels).")
     parser.add_argument("--sweep", action="store_true", help="band x levels sweep on SWEEP_CASES")
     parser.add_argument("--only", nargs="*", help="case names to run")
     parser.add_argument("--transition", type=int, default=None,
@@ -193,7 +162,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             graded = run(case, levels, band)
             print(row(name, levels, band, graded, compare(uniform, graded)), flush=True)
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

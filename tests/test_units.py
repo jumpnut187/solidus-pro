@@ -1,12 +1,3 @@
-"""Tests for the length-unit conversions in physics/units.py.
-
-The project has three length zones (inches for geometry, metres inside
-physics/heat_transfer, mm for Niyama output) and material properties are SI
-regardless. Mixing them silently produces a plausible wrong number rather than
-an error, which is why these conversions live in one module with tests rather
-than as scattered 0.0254 / 25.4 literals.
-"""
-
 from __future__ import annotations
 
 import unittest
@@ -25,7 +16,6 @@ from physics.units import (
     mm_to_inches,
 )
 
-
 class UnitConstantTests(unittest.TestCase):
     def test_inch_is_exactly_25_4_mm(self) -> None:
         self.assertEqual(IN_TO_MM, 25.4)
@@ -36,9 +26,7 @@ class UnitConstantTests(unittest.TestCase):
         self.assertAlmostEqual(IN_TO_MM * MM_TO_IN, 1.0, places=15)
 
     def test_metre_and_millimetre_factors_agree(self) -> None:
-        """1 in -> m -> mm must equal 1 in -> mm."""
         self.assertAlmostEqual(IN_TO_M * 1000.0, IN_TO_MM, places=12)
-
 
 class ScalarConversionTests(unittest.TestCase):
     def test_known_values(self) -> None:
@@ -55,7 +43,6 @@ class ScalarConversionTests(unittest.TestCase):
         for value in (0.0, 1e-6, 0.1, 2.0, 137.5):
             self.assertAlmostEqual(mm_to_inches(inches_to_mm(value)), value, places=12)
 
-
 class ArrayConversionTests(unittest.TestCase):
     def test_arrays_convert_elementwise(self) -> None:
         inches = np.array([0.0, 0.5, 1.0, 4.0], dtype=np.float64)
@@ -70,31 +57,22 @@ class ArrayConversionTests(unittest.TestCase):
         centers = np.zeros((7, 3), dtype=np.float64)
         self.assertEqual(inches_to_meters(centers).shape, (7, 3))
 
-
 class GravityPairingTests(unittest.TestCase):
-    """Gravity is SI, so it must only ever multiply a metre-valued length.
-
-    This is the specific mistake a filling solver would make: a ferrostatic or
-    velocity head computed as g * h with h still in inches is wrong by 39x and
-    still looks like a plausible number.
-    """
 
     def test_gravity_is_si(self) -> None:
         self.assertAlmostEqual(GRAVITY_M_S2, 9.81, places=6)
 
     def test_head_pressure_requires_metre_height(self) -> None:
-        density = 7200.0          # kg/m^3, as core/materials.py stores it
+        density = 7200.0
         height_inches = 10.0
 
         correct = density * GRAVITY_M_S2 * inches_to_meters(height_inches)
         unconverted = density * GRAVITY_M_S2 * height_inches
 
         self.assertAlmostEqual(correct, 7200.0 * 9.81 * 0.254, places=6)
-        # The unconverted form is off by exactly 1/IN_TO_M, i.e. ~39x.
         self.assertAlmostEqual(unconverted / correct, M_TO_IN, places=9)
 
     def test_cfl_length_must_match_gravity_units(self) -> None:
-        """dt = h / |u| is only dimensionally sound with h in metres."""
         spacing_inches = 0.25
         velocity_m_s = 0.5
 
@@ -103,7 +81,6 @@ class GravityPairingTests(unittest.TestCase):
 
         self.assertAlmostEqual(dt_correct, 0.00635 / 0.5, places=9)
         self.assertGreater(dt_wrong / dt_correct, 39.0)
-
 
 if __name__ == "__main__":
     unittest.main()

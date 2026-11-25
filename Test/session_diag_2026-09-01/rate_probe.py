@@ -1,10 +1,7 @@
-"""Does Full_Gating_Test's endgame stall come from the new boundary, or just
-from pouring faster? Same build, same mesh, target rate swept."""
 import sys, os, time
 sys.path.insert(0, "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
-
 
 def main():
     import scipy.spatial as ss
@@ -49,7 +46,6 @@ def main():
         print(f"RESULT rate={rate:5.1f} status={r.status:12s} steps={r.steps:>7,} "
               f"filled={r.filled_fraction:.3f} poured={r.delivered_lb:6.2f} lb "
               f"peak_delivery={peak:5.2f} lb/s wall={time.time()-t0:.0f}s", flush=True)
-
 
 if __name__ == "__main__":
     import threading

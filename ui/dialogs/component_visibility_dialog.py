@@ -1,5 +1,3 @@
-"""Popup window for showing/hiding individual components during review."""
-
 from __future__ import annotations
 
 from ui.qt import (
@@ -14,15 +12,7 @@ from ui.qt import (
 
 from .base import DraggableDialog
 
-
 class ComponentVisibilityDialog(DraggableDialog):
-    """Checklist of components with live show/hide.
-
-    Toggles apply immediately to the 3D view, so this dialog has no
-    Confirm/Cancel pair: the only exit is Close. The main window owns the
-    check-state logic and connects to ``components_list`` / ``show_all_btn``
-    directly, which keeps a single source of truth for the hidden set.
-    """
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent, "Components")
@@ -57,11 +47,9 @@ class ComponentVisibilityDialog(DraggableDialog):
         button_row.addStretch()
         self.content_layout.addLayout(button_row)
 
-        # Live toggles make Confirm/Cancel meaningless; Close is the only exit.
         self.button_box.clear()
         close_btn = self.button_box.addButton(QDialogButtonBox.Close)
         close_btn.clicked.connect(self.close)
 
     def set_empty_state(self, has_parts: bool) -> None:
-        """Grey out the list when there is nothing to toggle."""
         self.components_list.setEnabled(has_parts)

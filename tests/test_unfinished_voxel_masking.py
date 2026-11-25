@@ -11,13 +11,7 @@ from tests.test_simulation_scenarios import (
     _single_cast_manager,
 )
 
-
 def _build_engine_with_nan_voxels() -> object:
-    """
-    Run the standard tiny cast pipeline and mark interior cast voxels as
-    unfinished by writing np.nan into ``solidification_times`` (the thermal
-    loop's representation of "still liquid when the max_time cap was hit").
-    """
     engine = _run_pipeline_with_patched_memory(
         _single_cast_manager(ci_model("small_block.stl"))
     )
@@ -29,19 +23,15 @@ def _build_engine_with_nan_voxels() -> object:
     interior = cast_indices[surface_distances[cast_indices] > 0.0]
     if len(interior) == 0:
         interior = cast_indices
-    # Prefer the deepest (last-to-freeze) interior voxels, at most two.
     interior = interior[np.argsort(surface_distances[interior])[-2:]]
     times[interior] = np.nan
     engine.solidification_times = times
     engine._unfinished_voxels = np.asarray(interior, dtype=np.int64)
     return engine
 
-
 def _sanitized_times(engine: object) -> np.ndarray:
-    """Reference sanitize: NaN -> max_time (last-to-freeze substitution)."""
     times = np.asarray(engine.solidification_times, dtype=np.float32)
     return np.where(np.isnan(times), float(engine.max_time), times)
-
 
 class UnfinishedVoxelMaskingTests(unittest.TestCase):
     def test_isolation_score_masks_nan_as_last_to_freeze(self) -> None:
@@ -53,7 +43,6 @@ class UnfinishedVoxelMaskingTests(unittest.TestCase):
 
         self.assertTrue(np.all(np.isfinite(result)))
 
-        # Reference: compute with NaN replaced by max_time first.
         times = _sanitized_times(engine)
         neighbors = np.ascontiguousarray(engine.mesh.voxel_neighbors, dtype=np.int32)
         reference = compute_isolation_score_parallel(
@@ -67,7 +56,6 @@ class UnfinishedVoxelMaskingTests(unittest.TestCase):
         reference = np.clip(reference, 0.0, 1.0).astype(np.float32)
 
         np.testing.assert_allclose(result, reference)
-        # Unfinished voxels solidify last -> surrounded by earlier-solid neighbors.
         self.assertTrue(np.all(result[nan_mask] > 0.0))
 
     def test_shrinkage_base_risk_time_factor_masks_nan(self) -> None:
@@ -99,7 +87,6 @@ class UnfinishedVoxelMaskingTests(unittest.TestCase):
             riser_post_mask,
         )
 
-        # Reference time_factor: NaN replaced with max_time first.
         times = _sanitized_times(engine)[valid_indices]
         reference_factor = np.where(times > 0, np.minimum(times / 800.0, 1.0), 0.0)
 
@@ -112,12 +99,10 @@ class UnfinishedVoxelMaskingTests(unittest.TestCase):
 
         self.assertTrue(np.all(np.isfinite(engine.hotspot_intensity)))
         nan_mask = np.isnan(engine.solidification_times)
-        # Unfinished voxels are last-to-freeze -> hot spot candidates.
         self.assertTrue(np.all(engine.hotspot_intensity[nan_mask] > 0.0))
 
     def test_niyama_schedule_legacy_masks_nan(self) -> None:
         engine = _build_engine_with_nan_voxels()
-        # Force the schedule_legacy approximate branch regardless of solver mode.
         engine._thermal_niyama_values_at_eval = None
         engine._thermal_niyama_sampled = None
         engine._calculate_niyama()
@@ -173,7 +158,6 @@ class UnfinishedVoxelMaskingTests(unittest.TestCase):
         for key, value in estimate.items():
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 self.assertTrue(np.isfinite(value), msg=f"{key} is not finite: {value}")
-
 
 if __name__ == "__main__":
     unittest.main()

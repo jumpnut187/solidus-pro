@@ -1,13 +1,3 @@
-"""MECHANISM 2: find the FIRST spurious write into the upper riser on Test 2.
-
-Watch set = RISER cells with z >= 60 (the front is below z 40 for the whole
-window of interest, so ANY wet flag / nonzero mass / nonzero population there
-before the front arrives is spurious). Sub-operation attribution by wrapping
-every writer physics.filling.step calls, plus the gap between steps (which is
-core.filling_stage's inlet pin / top-up / skin).
-
-  CASTSIM_THREAD_BUDGET=8 ./venv/bin/python riser_seed_probe.py
-"""
 import sys, os, time, collections, json
 sys.path.insert(0, "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -56,7 +46,6 @@ def install(fs):
         obst = state.flags == FLAG_OBSTACLE
         log(f"watch: RISER z>={ZMIN} -> {S['nw']} cells; "
             f"obstacle among them {int((w & obst).sum())}")
-        # front tracker
         S["metal"] = t >= 0
         return w
 
@@ -123,7 +112,6 @@ def install(fs):
         if bad.any():
             report(state, op, bad)
 
-    # --- wrapped sub-operations -------------------------------------------
     def mk(name):
         f0 = orig[name]
         def wrapped(*a, **kw):
@@ -160,7 +148,6 @@ def install(fs):
         if "widx" not in S:
             prep(state)
         else:
-            # gap since previous step returned == the stage's own writes
             prev = S.get("exit")
             if prev is not None:
                 cur = snap(state)
@@ -187,7 +174,6 @@ def install(fs):
     import core.filling_stage as cfs
     cfs.step = step
     cfs.build_porous_zone = zone
-
 
 def main():
     import scipy.spatial as ss
@@ -232,7 +218,6 @@ def main():
                              progress_message_callback=lambda m: log(f"FILL: {m}"))
     except SystemExit:
         log("probe stop")
-
 
 if __name__ == "__main__":
     import threading

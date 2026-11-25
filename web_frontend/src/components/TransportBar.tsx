@@ -7,7 +7,6 @@ export type TransportBarProps = {
   view: ResultViewState;
   onViewChange: (patch: Partial<ResultViewState>) => void;
   meta: GridMeta | null;
-  /** No results means nothing to scrub; the bar gives its height to the canvas. */
   resultsAvailable: boolean;
   loop: boolean;
   onLoopChange: (loop: boolean) => void;
@@ -15,40 +14,18 @@ export type TransportBarProps = {
 
 const SPEEDS = [0.5, 1, 2, 4];
 
-/**
- * How far one press of step moves a sweep.
- *
- * A frame mode steps one stored frame. A sweep has no frames -- it is a
- * continuous cut-off on a static field -- so it gets a hundred even steps,
- * which on a ten-minute solidification is about six seconds a press.
- */
 const SWEEP_STEP_PERCENT = 1;
 
-/** Frame timings for whichever time series the current mode plays back. */
 function frameTimes(meta: GridMeta | null, view: ResultViewState): number[] {
   if (!meta) return [];
   if (view.mode === 'fraction_liquid') return meta.frames.fraction_liquid?.times_s ?? [];
   return meta.frames.fill?.times_s ?? meta.frames.fraction_liquid?.times_s ?? [];
 }
 
-/**
- * The end of a sweep's timeline, in seconds.
- *
- * From the field's own range, not from `GridMeta.frames`: a sweep mode has no
- * frames entry at all, and its values *are* the seconds. The last cell to
- * freeze is the end of the sequence.
- */
 function sweepMaxSeconds(meta: GridMeta | null, view: ResultViewState): number {
   return meta?.ranges[view.mode]?.max ?? 0;
 }
 
-/**
- * The recorded frame nearest a time.
- *
- * By time, not by an even split of the slider: frames crowd together early in
- * a solidification run and spread out late, so an even split named frame 40
- * while the viewport, which seeks by time, was showing frame 70.
- */
 function nearestFrame(times: number[], seconds: number): number {
   let best = 0;
   for (let index = 1; index < times.length; index += 1) {
@@ -57,14 +34,6 @@ function nearestFrame(times: number[], seconds: number): number {
   return best;
 }
 
-/**
- * Playback for the time-resolved modes.
- *
- * The percentage is the source of truth (it is what `ResultViewState` carries
- * and what the viewport samples); seconds and the frame index are derived from
- * `GridMeta.frames`, so the readout says "12.4 s of 31.7 s, frame 38 of 93"
- * instead of a bare slider position that means nothing to a foundry engineer.
- */
 export function TransportBar({
   view,
   onViewChange,

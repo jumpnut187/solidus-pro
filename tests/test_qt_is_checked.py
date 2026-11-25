@@ -1,9 +1,6 @@
-"""``stateChanged`` emits an int under PySide6; ``is_checked`` must read both shapes."""
-
 import unittest
 
 from ui.qt import Qt, is_checked
-
 
 class IsCheckedTests(unittest.TestCase):
     def test_enum_members(self) -> None:
@@ -19,7 +16,6 @@ class IsCheckedTests(unittest.TestCase):
     def test_garbage_is_unchecked(self) -> None:
         self.assertFalse(is_checked(None))
         self.assertFalse(is_checked("checked"))
-
 
 if __name__ == "__main__":
     unittest.main()

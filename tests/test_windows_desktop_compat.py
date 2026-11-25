@@ -3,7 +3,6 @@ import unittest
 
 from ui.main_window import clamp_window_position, should_use_console_translucency
 
-
 class WindowsDesktopCompatTests(unittest.TestCase):
     def test_console_translucency_is_disabled_on_windows(self) -> None:
         self.assertFalse(should_use_console_translucency("win32"))
@@ -30,7 +29,6 @@ class WindowsDesktopCompatTests(unittest.TestCase):
         self.assertFalse(visualizer.should_use_depth_peeling("win32"))
         self.assertTrue(visualizer.should_use_depth_peeling("darwin"))
         self.assertTrue(visualizer.should_use_depth_peeling("linux"))
-
 
 if __name__ == "__main__":
     unittest.main()

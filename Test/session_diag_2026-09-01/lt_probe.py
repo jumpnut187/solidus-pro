@@ -1,4 +1,3 @@
-"""Local-thickness statistics on the ground-truth grids."""
 import sys, time
 import numpy as np
 from scipy import ndimage
@@ -8,7 +7,6 @@ from core.part_manager import (PART_TYPE_SPRUE, PART_TYPE_RUNNER,
 NAMES = {PART_TYPE_SPRUE: "sprue", PART_TYPE_RUNNER: "runner",
          PART_TYPE_GATE: "gate", PART_TYPE_FILTER: "filter"}
 CODES = (PART_TYPE_SPRUE, PART_TYPE_RUNNER, PART_TYPE_FILTER, PART_TYPE_GATE)
-
 
 def local_thickness(region):
     region = np.asarray(region, dtype=bool)
@@ -33,7 +31,6 @@ def local_thickness(region):
     out[sl] = np.where(sub, 2.0 * best - 1.0, 0.0)
     return out
 
-
 def report(path, label):
     st = np.load(path)
     region = np.isin(st, CODES)
@@ -50,7 +47,6 @@ def report(path, label):
               f"min={v.min():5.2f} p10={np.percentile(v,10):5.2f} "
               f"p25={np.percentile(v,25):5.2f} med={np.median(v):5.2f} "
               f"p75={np.percentile(v,75):5.2f} max={v.max():5.2f}")
-
 
 if __name__ == "__main__":
     for a in sys.argv[1:]:

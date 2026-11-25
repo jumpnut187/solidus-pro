@@ -1,11 +1,3 @@
-"""Does the wrap seed at the far face self-heal, or does it run away?
-
-Emulates Test 2: a tall channel walled in x/y, with NO obstacle plane at z=0
-(the casting's floor is flush with the grid's bounding box) and NO lid at
-z=nz-1 (the riser's open top). The bottom two planes are pinned FLUID every
-step, standing in for the continuously-fed cast bottom. Everything above z~4
-is therefore spurious.
-"""
 import sys, os
 sys.path.insert(0, "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -17,7 +9,6 @@ from physics.fluid_flow import lattice_units, LATTICE_VELOCITIES
 
 DX_M, NU, NZ, W = 0.0043, 6.5e-7, 48, 3
 NSTEPS = int(os.environ.get("NSTEPS", "4000"))
-
 
 def go(label, lid, floor):
     n = W + 2
@@ -40,7 +31,6 @@ def go(label, lid, floor):
           f"pinned FLUID at z {zlo}-{zlo+1}")
     for s in range(1, NSTEPS+1):
         step(st, units, use_numba=True)
-        # inlet-style pin, as core/filling_stage does
         st.flags[pin] = FLAG_FLUID
         st.mass[pin] = REFERENCE_DENSITY
         ensure_interface_skin(st, halo)
@@ -51,7 +41,6 @@ def go(label, lid, floor):
             eps = st.mass / np.maximum(np.asarray(st.rho, np.float64), 1e-30)
             neg = (np.any(f < 0.0, axis=0) & wet)
             fin = bool(np.isfinite(st.mass).all() and np.isfinite(f).all())
-            # the spurious cluster = wet cells hanging off the TOP face
             spur = wet.copy(); spur[:, :, :NZ//2] = False
             szs = np.nonzero(spur.any(axis=(0,1)))[0]
             print(f"  step {s:5d} wet={int(wet.sum()):4d} z={wz.min()}-{wz.max()} "
@@ -62,7 +51,6 @@ def go(label, lid, floor):
             if not fin:
                 print("  --> NON-FINITE, stopping"); return
     return
-
 
 go("OPEN both z faces (Test 2's condition)", lid=False, floor=False)
 go("CONTROL: obstacle floor + lid",          lid=True,  floor=True)

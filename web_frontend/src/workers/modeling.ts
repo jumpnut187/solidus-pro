@@ -1,14 +1,4 @@
 /// <reference lib="webworker" />
-/**
- * The modeling worker: Manifold, the bodies it extrudes against and cuts, and builds.
- *
- * Booleans against a casting of a few hundred thousand triangles take tens to
- * hundreds of milliseconds, and the extrude preview reruns on every dimension
- * edit; on the main thread that is a frozen viewport. Welding a part's STL
- * into a Manifold is the expensive part and the same for every build, so each
- * body is welded once, kept here under its geometry-and-placement key, and
- * freed when the client stops listing it as live.
- */
 import Module from 'manifold-3d';
 import type { ManifoldToplevel, Mat4 } from 'manifold-3d';
 import wasmUrl from 'manifold-3d/manifold.wasm?url';
@@ -43,11 +33,9 @@ function freeBody(body: KernelBody): void {
   try {
     body.manifold?.delete();
   } catch {
-    /* already freed */
   }
 }
 
-// Requests run one at a time, in arrival order: each awaits the one before it.
 let queue: Promise<void> = Promise.resolve();
 
 scope.onmessage = (event: MessageEvent<ModelingRequest>) => {
@@ -56,7 +44,6 @@ scope.onmessage = (event: MessageEvent<ModelingRequest>) => {
   queue = queue.then(() => handle(request)).catch(() => undefined);
 };
 
-/** Take the bodies a request carries into the cache and free the ones no longer live. */
 function syncBodies(
   wasm: ManifoldToplevel,
   request: Extract<ModelingRequest, { kind: 'build' | 'cutPreview' }>

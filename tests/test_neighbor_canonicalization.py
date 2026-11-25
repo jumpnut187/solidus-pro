@@ -1,13 +1,3 @@
-"""
-Regression tests for voxel neighbor canonicalization.
-
-The 2x search radius used for part-interface bridging can return voxels at
-2 spacings along a direction in addition to the true adjacent voxel. The
-canonical slot assignment must keep the NEAREST candidate per direction
-slot: a 2-spacing voxel in a face slot makes the finite-difference stencil
-treat a 2*dx distance as dx (4x diffusivity error, direction-dependent).
-"""
-
 from __future__ import annotations
 
 import unittest
@@ -17,21 +7,19 @@ import numpy as np
 
 from core.voxel_mesh import AdaptiveVoxelMesh
 
-
 class NeighborCanonicalizationTests(unittest.TestCase):
     def _mesh_like(self) -> SimpleNamespace:
-        """Minimal object exposing what _canonicalize_neighbor_order uses."""
         centers = np.array(
             [
-                [0.0, 0.0, 0.0],   # 0 self
-                [0.1, 0.0, 0.0],   # 1 +X near
-                [0.2, 0.0, 0.0],   # 2 +X far
-                [-0.1, 0.0, 0.0],  # 3 -X
-                [0.0, 0.1, 0.0],   # 4 +Y
-                [0.1, 0.1, 0.0],   # 5 +X+Y near
-                [0.2, 0.2, 0.0],   # 6 +X+Y far
-                [0.1, 0.1, 0.1],   # 7 +X+Y+Z near
-                [0.2, 0.2, 0.2],   # 8 +X+Y+Z far
+                [0.0, 0.0, 0.0],
+                [0.1, 0.0, 0.0],
+                [0.2, 0.0, 0.0],
+                [-0.1, 0.0, 0.0],
+                [0.0, 0.1, 0.0],
+                [0.1, 0.1, 0.0],
+                [0.2, 0.2, 0.0],
+                [0.1, 0.1, 0.1],
+                [0.2, 0.2, 0.2],
             ],
             dtype=np.float32,
         )
@@ -40,7 +28,6 @@ class NeighborCanonicalizationTests(unittest.TestCase):
     def test_face_slot_keeps_nearest_candidate(self) -> None:
         mesh = self._mesh_like()
         center = np.asarray(mesh.voxel_centers[0])
-        # Far +X candidate listed FIRST (KD-tree order is arbitrary).
         neighbor_indices = [2, 1, 3]
         canonical = AdaptiveVoxelMesh._canonicalize_neighbor_order(
             mesh, 0, center, neighbor_indices
@@ -66,14 +53,10 @@ class NeighborCanonicalizationTests(unittest.TestCase):
         self.assertEqual(int(canonical[0, 0]), 1)
         self.assertEqual(int(canonical[0, 1]), 3)
 
-
 class VectorizedCanonicalizationTests(unittest.TestCase):
-    """``_canonicalize_pairs`` (the mesh build) against the per-voxel reference."""
 
     @staticmethod
     def _lattice_with_gaps(shape: tuple[int, int, int], pitch: float, keep: float, seed: int) -> SimpleNamespace:
-        """A voxel lattice with cells removed, so a slot's adjacent voxel is
-        often missing and the 2-spacing voxel behind it is the nearest."""
         rng = np.random.default_rng(seed)
         grid = np.stack(np.meshgrid(*[np.arange(n) for n in shape], indexing="ij"), axis=-1).reshape(-1, 3)
         grid = grid[rng.random(len(grid)) < keep]
@@ -114,7 +97,6 @@ class VectorizedCanonicalizationTests(unittest.TestCase):
             tree = _build_kdtree(mesh.voxel_centers)
             radius = np.float32(pitch) * 2.0
             reference = self._reference(mesh, tree, radius)
-            # A batch smaller than the mesh exercises the row offset.
             for batch in (len(mesh.voxel_centers), 97):
                 with self.subTest(shape=shape, keep=keep, batch=batch):
                     np.testing.assert_array_equal(self._vectorized(mesh, tree, radius, batch), reference)
@@ -123,7 +105,6 @@ class VectorizedCanonicalizationTests(unittest.TestCase):
     def test_slot_table_matches_reference(self) -> None:
         from core.voxel_mesh import _DIRECTION_SLOTS
 
-        # One voxel in each of the 26 directions around voxel 0.
         signs = [(sx, sy, sz) for sx in (-1, 0, 1) for sy in (-1, 0, 1) for sz in (-1, 0, 1) if (sx, sy, sz) != (0, 0, 0)]
         centers = np.array([(0.0, 0.0, 0.0)] + [tuple(0.1 * s for s in sign) for sign in signs], dtype=np.float32)
         mesh = SimpleNamespace(voxel_centers=centers, base_voxel_size=0.1)
@@ -135,7 +116,6 @@ class VectorizedCanonicalizationTests(unittest.TestCase):
             self.assertEqual(int(reference[slot]), index)
         self.assertEqual(int(_DIRECTION_SLOTS[1, 1, 1]), -1)
         self.assertEqual(sorted(int(s) for s in _DIRECTION_SLOTS.reshape(-1) if s >= 0), list(range(26)))
-
 
 if __name__ == "__main__":
     unittest.main()

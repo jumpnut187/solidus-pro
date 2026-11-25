@@ -1,64 +1,13 @@
-"""
-SolidificationParameters: Tunable parameters for the solidification simulation.
-
-This module exposes ~30 previously hardcoded constants as a structured,
-serializable dataclass hierarchy so they can be configured via:
-  - YAML config files (castsim.yaml)
-  - Environment variables (CASTSIM_SOLIDIFICATION_*)
-  - UI settings modal
-  - Direct Python instantiation
-
-The parameters are organized into subgroups:
-  - FeedingParams      : Riser feeding distance and shrinkage reduction near risers
-  - ChillParams         : Chill thermal boost and shrinkage reduction near chills
-  - ExothermicParams    : Exothermic riser sleeve timing and effectiveness
-  - AirGapParams        : Mold air-gap development and surface influence
-  - ThermalBoundaryParams: Mold/chill temperatures and HTC values
-  - TimingParams        : Chvorinov mold constant and simulation time bounds
-  - HotTearParams       : Hot tear risk analysis parameters
-  - FillingParams       : Mold-filling stage parameters (nests FilterParams)
-  - MoldParams          : Explicit sand mold, automatic mold box and cores, sands
-  - MoldParams          : Explicit sand mold, automatic mold box and cores, sands
-
-Usage:
-    from core.solidification_params import SolidificationParameters
-
-    # Defaults
-    params = SolidificationParameters()
-
-    # From dict (e.g. loaded from YAML or modal)
-    params = SolidificationParameters.from_dict({
-        "feeding": {"base_feeding_distance": 8.0},
-        "chill": {"shrinkage_max_reduction": 0.10},
-    })
-
-    # Access
-    fp = params.feeding
-    print(fp.base_feeding_distance)   # 8.0 (overridden)
-    print(fp.min_influence_factor)    # 0.6 (default)
-
-    # Serialize to dict for storage
-    d = params.to_dict()
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Union
 
-
-#: Hard cap on simulated time, seconds (16 h). Runs stop when the casting is
-#: solid; the cap only bounds a run that would not finish. 4 h was enough on
-#: the semi-infinite sand boundary, but in an explicit sand mold heavy
-#: sections take longer: a bronze 13.5 in box under a 10.5 x 15.8 in sleeved
-#: riser was still freezing at 4 h (2678 s on the boundary), as Chvorinov
-#: with real sand predicts (~13 000 s).
 DEFAULT_MAX_SIMULATION_TIME_S = 57600.0
 
 SHRINK_SCALAR_MIN = 0.25
 SHRINK_SCALAR_MAX = 4.0
 SHRINK_SCALAR_DEFAULT = 1.0
-
 
 def _clamp_float(value: Any, minimum: float, maximum: float, default: float) -> float:
     try:
@@ -69,7 +18,6 @@ def _clamp_float(value: Any, minimum: float, maximum: float, default: float) -> 
         numeric = default
     return max(minimum, min(maximum, numeric))
 
-
 def _clamp_int(value: Any, minimum: int, maximum: int, default: int) -> int:
     try:
         numeric = int(value)
@@ -77,10 +25,8 @@ def _clamp_int(value: Any, minimum: int, maximum: int, default: int) -> int:
         numeric = default
     return max(minimum, min(maximum, numeric))
 
-
 @dataclass
 class FeedingParams:
-    """Parameters for riser feeding distance and shrinkage reduction near risers."""
     base_feeding_distance: float = 3.0
     min_influence_factor: float = 0.6
     riser_max_reduction: float = 0.10
@@ -105,34 +51,27 @@ class FeedingParams:
             bias = 0.0
         self.feeding_zone_vertical_bias = max(0.0, min(2.0, bias))
 
-
 @dataclass
 class ChillParams:
-    """Parameters for chill thermal boost and shrinkage reduction near chills."""
     max_chill_boost: float = 3.0
     shrinkage_radius_multiplier: float = 1.5
     shrinkage_max_reduction: float = 0.15
     shrinkage_min_reduction: float = 1.0
     thickness_fallback_voxels: float = 5.0
 
-
 @dataclass
 class ExothermicParams:
-    """Parameters for exothermic riser sleeve timing and effectiveness."""
     ignition_delay: float = 10.0
     burn_duration: float = 120.0
     insulation_only_factor: float = 0.7
     full_exothermic_factor: float = 0.5
     decay_time_constant: float = 60.0
 
-
 @dataclass
 class AirGapParams:
-    """Parameters for mold air-gap development and surface influence."""
     time_constant: float = 60.0
     surface_influence_depth: float = 0.5
     max_slowdown: float = 0.75
-    # Fraction of initial interface HTC remaining after the air gap fully forms.
     htc_floor_fraction: float = 0.35
 
     def __post_init__(self) -> None:
@@ -143,48 +82,22 @@ class AirGapParams:
             0.35,
         )
 
-
 @dataclass
 class ThermalBoundaryParams:
-    """Parameters for mold/chill temperatures and heat-transfer coefficients."""
     mold_temperature: float = 21.0
     chill_temperature: float = 21.0
     htc_cast_interface: float = 500.0
     htc_riser_post: float = 350.0
     htc_riser: float = 220.0
-    # W/(m^2*K) for gating-system surfaces (pour cup, sprue, runner, gate) and
-    # ceramic filters. They sit in the same sand as the casting, so the value
-    # belongs between the riser (220, insulated sleeve) and the casting (500,
-    # bare sand contact). Without an entry here these surfaces get no boundary
-    # condition at all and integrate adiabatically -- a silent failure, since
-    # an adiabatic sprue simply never gives up heat.
     htc_gating: float = 400.0
-    # W/(m^2*K) heat transfer from chill surfaces into the surrounding mold
-    # sand (finite-heat-sink chill model). Same order as the casting-to-sand
-    # contact conductance: the chill back face is buried in the same sand.
     chill_ambient_htc: float = 500.0
-    # Late-time HTC floor for chill surfaces. The chill is rigid and does not
-    # shrink away from the sand the way the casting does, so it keeps a much
-    # higher late-time contact conductance than the air-gapped casting faces.
     chill_htc_floor_fraction: float = 0.7
-    # Semi-infinite mold heat-absorption model (silica-sand defaults): the
-    # effective interface HTC decays as the mold heats up,
-    # h_pen(t) = k / sqrt(pi * alpha * t).
-    mold_thermal_conductivity: float = 0.6     # W/(m·K)
-    mold_thermal_diffusivity: float = 3.3e-7   # m²/s (k/(rho*cp))
-    # Sand core body (bonded silica sand). Core voxels are a conducting sand
-    # volume, so a core absorbs heat early and saturates when metal encloses
-    # it, then insulates the metal around it (a late hot spot). The defaults
-    # give alpha = 0.6 / (1600 * 1140) = 3.3e-7 m²/s, the mold sand above.
-    core_thermal_conductivity: float = 0.6     # W/(m·K)
-    core_density: float = 1600.0               # kg/m³
-    core_specific_heat: float = 1140.0         # J/(kg·K), mean over 20-1500 °C
-    # W/(m^2*K) contact conductance between metal and core. The casting
-    # shrinks onto a core rather than away from it, so this keeps no air-gap
-    # decay; the sand's own heating supplies the late-time drop.
+    mold_thermal_conductivity: float = 0.6
+    mold_thermal_diffusivity: float = 3.3e-7
+    core_thermal_conductivity: float = 0.6
+    core_density: float = 1600.0
+    core_specific_heat: float = 1140.0
     htc_core_contact: float = 1000.0
-    # W/(m^2*K) core print (core sand seated in mold sand) to the mold, with
-    # a low late-time floor so the sand penetration decay governs.
     htc_core_print: float = 300.0
     core_print_htc_floor_fraction: float = 0.1
 
@@ -220,123 +133,34 @@ class ThermalBoundaryParams:
         self.htc_core_print = _clamp_float(self.htc_core_print, 1.0, 1e4, 300.0)
         self.core_print_htc_floor_fraction = _clamp_float(self.core_print_htc_floor_fraction, 0.0, 1.0, 0.1)
 
-
-#: Automatic core rules (``MoldParams.core_rule_code``).
-#:
-#: 0, ``draw`` (foundry rule, default): a pattern is drawn straight up out of
-#: the drag and straight down out of the cope, so sand that has the assembly
-#: both above and below it cannot be formed by the mold and needs a core --
-#: enclosed cavities, horizontal holes and undercuts.
-#: 1, ``enclosed`` (MAGMASOFT's automatic core): sand the outside of the mold
-#: cannot reach (a flood fill from the mold's outer faces) is core.
 CORE_RULE_DRAW = 0
 CORE_RULE_ENCLOSED = 1
 
-#: Sand material code 0: the constant sand of ThermalBoundaryParams instead
-#: of a core.mold_materials database sand -- core_thermal_conductivity,
-#: core_density and core_specific_heat for cores, mold_thermal_conductivity
-#: and mold_thermal_diffusivity for the mold.
 SAND_MATERIAL_CUSTOM = 0
 
-#: Exponent of the riser modulus in MoldParams.riser_sleeve_htc.
 RISER_SLEEVE_EXPONENT = 0.68
 
-#: Largest MoldParams.mold_grading_levels (cells up to 32 voxels per side).
 MOLD_GRADING_MAX_LEVELS = 5
-
 
 @dataclass
 class MoldParams:
-    """The sand mold and cores (see core/mold_setup.py, docs/mold_info.txt).
-
-    By default the mold is generated (``auto_mold``) and cores are found
-    (``auto_cores``) automatically. Supplied geometry overrides both: a
-    loaded mold part replaces the automatic box, and loaded core parts
-    replace the automatic cores. With ``auto_mold`` off and no mold part the
-    mold is the semi-infinite sand boundary of ThermalBoundaryParams. An
-    explicit mold puts the mold in the thermal solve as sand cells around
-    the assembly, MAGMASOFT style: metal and chills exchange heat with them
-    through interface coefficients, and the outer mold faces and open riser
-    tops radiate and convect to the air.
-
-    Coefficients follow the MAGMASOFT practice used in steel validation work
-    (Beckermann group, SFSA): ``htc_cast_mold`` above the solidus falling
-    along the measured steel-sand air-gap curve (``interface_htc_curve``),
-    sand to chill ``htc_chill_mold``. A riser in an insulating sleeve leaks
-    into the sand at ``riser_sleeve_htc``, one set to the no-heat-loss sleeve
-    (``Part.riser_sleeve`` "adiabatic") exchanges none, and a sand core meets
-    the mold through htc_core_contact.
-
-    Flags and choices are ints (0/1 flags, documented codes), like the other
-    groups: both settings UIs render numeric leaves only.
-    """
-    # 0/1: explicit sand mold box generated around the assembly when no mold
-    # part is loaded.
     auto_mold: int = 1
-    # 0/1: core sand added where the mold cannot form the cavity, when no
-    # core part is loaded.
     auto_cores: int = 1
     core_rule_code: int = CORE_RULE_DRAW
-    # Sand between the assembly and the outer mold faces (sides, bottom, and
-    # top when no riser is open). Default 2 in since 2026-11-11, the
-    # industry-standard wall (owner's decision; was 0, automatic). 0 is
-    # still automatic: three heat-penetration
-    # depths at the freeze time, which by Chvorinov is 3 x the half-thickness
-    # of the heaviest section, between 0.75 and 8 in
-    # (core.mold_setup.auto_wall_thickness). Sand beyond that never warms
-    # before the casting is solid; on the graded mold (mold_grading_levels)
-    # it is solved on coarse cells and costs little.
-    # MAGMASOFT steel validation molds carry about 4 in.
     wall_thickness_in: float = 2.0
-    # Sand over a blind (closed) riser. Open risers and pour cups stay open
-    # to the air at the top of the mold.
     closed_riser_cover_in: float = 2.0
-    # core.mold_materials.SAND_MATERIALS codes (0: the constant custom sand).
     mold_material_code: int = 2
     core_material_code: int = SAND_MATERIAL_CUSTOM
-    # W/(m^2 K) metal (casting, gating) to mold sand while the metal surface
-    # is above its solidus; below it the air-gap curve scales it down.
     htc_cast_mold: float = 1000.0
-    # 0/1: follow the steel-sand air-gap curve below the solidus, or hold
-    # htc_cast_mold constant (MAGMASOFT "C1000" style).
     interface_htc_curve: int = 1
-    # W/(m^2 K) chill to mold sand.
     htc_chill_mold: float = 1500.0
-    # Insulating riser sleeve (Part.riser_sleeve "insulating", the default)
-    # against the mold, per riser: h = riser_sleeve_htc
-    # * M^-RISER_SLEEVE_EXPONENT, M the riser's modulus in inches. A sleeve wall
-    # thickens with the riser, so its resistance grows with size; a constant
-    # contact coefficient gave modulus extension factors of 1.31 on a 2 x 3 in
-    # riser but 1.15 at 6 x 9 in. 61.7 holds MEF at 1.30-1.31 from M = 0.375 to
-    # 1.125 in (the 1.3 core/surrogate/design_rules.py sizes risers for;
-    # measured insulating sleeves 1.07-1.28, Williams et al. 2016). On the
-    # sand boundary the same riser takes htc_riser, and a core touching it
-    # takes heat through htc_core_contact. How a riser cools is chosen per
-    # riser: "adiabatic" passes no heat to the mold or core sand (the model
-    # every sleeved riser had from 2026-11-11 to 2026-11-19 under the removed
-    # switch riser_sleeve_adiabatic; a saved project that still carries that
-    # key loads and ignores it), "none" stands in bare sand.
     riser_sleeve_htc: float = 61.7
-    # Air side: convective h (W/(m^2 K)), the air temperature, and the
-    # emissivities of the mold sand and of an open metal surface (oxidized
-    # steel under slag).
     ambient_temperature: float = 21.0
     air_htc: float = 10.0
     sand_emissivity: float = 0.9
     metal_emissivity: float = 0.8
-    # Cap on lattice cells in the mold box (voxel-size cells, before grading:
-    # the dense layout arrays are lattice sized), so a fine voxel size with a
-    # large mold fails with a message instead of exhausting memory.
     max_mold_cells: int = 40_000_000
-    # Graded mold (core.mold_setup.grade_mold): sand away from the assembly is
-    # solved on cells up to 2^mold_grading_levels voxels per side, block by
-    # block, stepping 2:1. 0 = the uniform lattice at the voxel size, as
-    # before (bit for bit). The heat penetrates only a few cm of sand before
-    # the casting is solid, so the outer mold needs no voxel-size cells.
     mold_grading_levels: int = 3
-    # Layers of voxel-size sand kept around every mesh cell (metal, chills,
-    # cores) and gap; at least 2 so every metal-sand and core-sand pair
-    # meets a voxel-size cell.
     mold_fine_band_cells: int = 4
 
     def __post_init__(self) -> None:
@@ -359,10 +183,8 @@ class MoldParams:
         self.mold_grading_levels = _clamp_int(self.mold_grading_levels, 0, MOLD_GRADING_MAX_LEVELS, 3)
         self.mold_fine_band_cells = _clamp_int(self.mold_fine_band_cells, 2, 64, 4)
 
-
 @dataclass
 class TimingParams:
-    """Parameters for Chvorinov simulation time and safety factors."""
     chvorinov_mold_constant: float = 280.0
     safety_factor_with_risers: float = 2.5
     safety_factor_no_risers: float = 1.5
@@ -371,33 +193,18 @@ class TimingParams:
     sand_saturation_time: float = 30.0
     max_hot_sand_slowdown: float = 0.6
 
-
 @dataclass
 class FilterParams:
-    """Parameters for the ceramic pour filter (foam/extruded) used during
-    mold filling.
-
-    priming_enabled and drag_enabled are boolean on/off switches, but every
-    leaf in this parameter tree is rendered by the desktop settings dialog
-    (ui/main_window.py FIELD_DEFS) and the web settings drawer
-    (SolidificationDrawer.tsx), and both of those UIs only know how to render
-    a numeric slider/spinbox -- neither has a checkbox or dropdown widget.
-    A bool (or str/enum) leaf here would simply not appear in either UI. So
-    these are encoded as plain ints with a documented 0/1 meaning instead of
-    as bools, matching every other leaf in this tree (see also
-    FillingParams' docstring, which has the same constraint for its own
-    mode-code fields).
-    """
     porosity: float = 0.85
-    pore_diameter_mm: float = 2.54          # 10 ppi
+    pore_diameter_mm: float = 2.54
     ergun_prefactor: float = 2.2
     forchheimer_c_f: float = 0.55
     contact_angle_deg: float = 120.0
     window_fraction: float = 0.45
     rated_velocity_warn_factor: float = 1.5
     head_fraction_warn: float = 0.25
-    priming_enabled: int = 1                # 0/1 bool-as-int; see class docstring
-    drag_enabled: int = 1                   # 0/1 bool-as-int; see class docstring
+    priming_enabled: int = 1
+    drag_enabled: int = 1
 
     def __post_init__(self) -> None:
         self.porosity = _clamp_float(self.porosity, 0.50, 0.95, 0.85)
@@ -407,43 +214,21 @@ class FilterParams:
         self.contact_angle_deg = _clamp_float(self.contact_angle_deg, 90.0, 160.0, 120.0)
         self.window_fraction = _clamp_float(self.window_fraction, 0.2, 0.8, 0.45)
 
-
 @dataclass
 class FillingParams:
-    """Parameters for the (not-yet-implemented) mold-filling stage.
-
-    inlet_mode_code (0=head, 1=velocity) and pour_mode_code (0=lip,
-    1=bottom) are small closed sets of named modes, and vent_risers is a
-    boolean on/off switch. As with FilterParams above, both settings UIs
-    only render numeric fields, so these are ints with a documented
-    encoding rather than an enum/str or bool -- introducing either would
-    make the field invisible in both UIs.
-    """
-    # 0 = derive from the square-root rule, t = sqrt(W): a casting of W pounds
-    # pours in sqrt(W) seconds, so the rate is W/sqrt(W) = sqrt(W) lb/s. The
-    # old fixed 5.0 was independent of the casting, which is only right at
-    # about 25 lb. See core.filling_stage.recommended_pour_rate_lb_s.
     pour_rate_lb_s: float = 0.0
-    pour_time_s: float = 0.0                # 0 = derive from rate and volume
-    pour_temperature_c: float = 0.0         # 0 = use alloy.pouring_temp
+    pour_time_s: float = 0.0
+    pour_temperature_c: float = 0.0
     initial_head_in: float = 4.0
     fill_grid_coarsening: int = 2
-    # 0/1 bool-as-int; see class docstring. When on (the default), the filling
-    # stage measures the gating channels on the grid
-    # ``fill_grid_coarsening`` asks for and, if any of them comes out at or
-    # below the two cells a channel needs before it has an interior, drops the
-    # coarsening a step at a time until they clear it or it reaches 1. Turn it
-    # off to pin the coarsening exactly as set -- the under-resolution warning
-    # still fires, so an under-resolved fill is never silent either way.
-    # See core.filling_stage.choose_fill_coarsening.
     choke_auto_resolution: int = 1
     max_fill_time_s: float = 60.0
     smagorinsky_cs: float = 0.16
     lattice_velocity_max: float = 0.05
     wall_htc_multiplier: float = 1.0
-    inlet_mode_code: int = 0                # 0 = head, 1 = velocity
-    pour_mode_code: int = 0                 # 0 = lip, 1 = bottom
-    vent_risers: int = 1                    # 0/1 bool-as-int; see class docstring
+    inlet_mode_code: int = 0
+    pour_mode_code: int = 0
+    vent_risers: int = 1
     cold_shut_arrival_gap_s: float = 0.5
     cold_shut_temp_margin_c: float = 25.0
     entrapment_check_interval: int = 50
@@ -458,36 +243,9 @@ class FillingParams:
         self.cold_shut_temp_margin_c = _clamp_float(self.cold_shut_temp_margin_c, 0.0, 200.0, 25.0)
         self.entrapment_check_interval = _clamp_int(self.entrapment_check_interval, 1, 1000, 50)
 
-
-#: The pour rate FillingParams used to default to, before 0 ("derive from the
-#: square-root rule") replaced it. See migrate_legacy_pour_rate.
 LEGACY_DEFAULT_POUR_RATE_LB_S = 5.0
 
-
 def migrate_legacy_pour_rate(params: Dict[str, Any]) -> Dict[str, Any]:
-    """Rewrite a stored pour rate of exactly 5 lb/s to 0, meaning "derive".
-
-    5.0 was the fixed default every project inherited, and it is the right
-    rate only for a casting of about 25 lb: a W-pound casting pours in
-    sqrt(W) seconds, so the rate is sqrt(W) lb/s -- 20 lb/s for a 400 lb
-    casting, 2 lb/s for a 4 lb one. Almost every stored 5.0 is therefore the
-    old default rather than a measured decision, and leaving it alone pours
-    every existing project at a rate chosen for none of them.
-
-    A deliberate 5.0 cannot be told apart from an inherited one, which is why
-    this is applied per *file version* rather than on every deserialization:
-    ui.project_state runs it only on projects saved before the migration
-    existed, and saving stamps the current schema version, so a user who
-    genuinely wants 5 lb/s can set it, save, and have it survive. Migrating on
-    every load would make that one value impossible to hold.
-
-    Args:
-        params: A serialized SolidificationParameters dict (to_dict shape).
-            Not mutated.
-
-    Returns:
-        A copy, with filling.pour_rate_lb_s rewritten where it applies.
-    """
     migrated = dict(params)
     filling = migrated.get('filling')
     if not isinstance(filling, dict):
@@ -501,10 +259,8 @@ def migrate_legacy_pour_rate(params: Dict[str, Any]) -> Dict[str, Any]:
     migrated['filling'] = {**filling, 'pour_rate_lb_s': 0.0}
     return migrated
 
-
 @dataclass
 class HotTearParams:
-    """Parameters for hot tear risk analysis."""
     mold_restraint_index: float = 0.5
     metal_mold_friction_index: float = 0.5
     core_restraint_index: float = 0.0
@@ -514,25 +270,8 @@ class HotTearParams:
     surface_restraint_depth_inches: float = 0.5
     solid_path_search_depth: int = 8
 
-
 @dataclass
 class SolidificationParameters:
-    """
-    Top-level container for all tunable solidification simulation parameters.
-
-    Attributes:
-        feeding: Riser feeding distance and shrinkage reduction parameters.
-        chill: Chill thermal boost and shrinkage reduction parameters.
-        exothermic: Exothermic sleeve timing and effectiveness parameters.
-        air_gap: Mold air-gap development parameters.
-        thermal_boundary: Mold/chill temperatures and HTC values.
-        timing: Chvorinov time calculation and simulation time bounds.
-        hot_tear: Hot tear risk analysis parameters.
-        filling: Mold-filling stage parameters (pour rate/time/head, LBM
-            solver knobs, and the nested filter media parameters).
-        mold: Sand mold and core setup (explicit mold, automatic mold box and
-            cores, mold and core sands).
-    """
     feeding: FeedingParams = field(default_factory=FeedingParams)
     chill: ChillParams = field(default_factory=ChillParams)
     exothermic: ExothermicParams = field(default_factory=ExothermicParams)
@@ -545,16 +284,6 @@ class SolidificationParameters:
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]]) -> SolidificationParameters:
-        """
-        Create a SolidificationParameters instance from a dict, deep-merging
-        with defaults. Partial dicts are valid — only specified keys override.
-
-        Args:
-            data: Nested dict matching the structure of to_dict(), or None.
-
-        Returns:
-            SolidificationParameters instance with values merged in.
-        """
         if data is None:
             return cls()
 
@@ -670,12 +399,6 @@ class SolidificationParameters:
         self.mold.__post_init__()
 
     def to_dict(self) -> Dict[str, Any]:
-        """
-        Serialize to a nested dict suitable for YAML storage or JSON.
-
-        Returns:
-            Dict matching the from_dict() expected input format.
-        """
         self._clamp_values()
         return {
             'feeding': {

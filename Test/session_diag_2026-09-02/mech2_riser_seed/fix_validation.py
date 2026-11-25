@@ -1,13 +1,3 @@
-"""Miniature of Test 2's exact topology, and validation of the padding fix.
-
-CAST box flush with z=0 (no floor, as on the real assembly) + RISER column
-flush with z=nz-1 (the open top). Under periodic indexing the cast bottom is
-the riser top's neighbour. Three variants x two step paths:
-
-  BROKEN : the grid as the stage builds it today
-  PADDED : np.pad(types, 1, constant_values=EMPTY_CELL)   <- proposed fix
-  STOPGAP: obstacle |= _domain_boundary_mask(shape)       <- one-line stopgap
-"""
 import sys, os
 sys.path.insert(0, "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -26,13 +16,11 @@ NZ = 24
 CASTTOP = 8
 NSTEPS = int(os.environ.get("NSTEPS", "1200"))
 
-
 def types_grid():
-    t = np.full((NX, NY, NZ), PART_TYPE_CORE, dtype=np.int8)   # mold -> obstacle
-    t[1:NX-1, 1:NY-1, 0:CASTTOP+1] = PART_TYPE_CAST            # flush with z=0
-    t[4:8, 4:8, CASTTOP:NZ] = PART_TYPE_RISER                  # flush with z=NZ-1
+    t = np.full((NX, NY, NZ), PART_TYPE_CORE, dtype=np.int8)
+    t[1:NX-1, 1:NY-1, 0:CASTTOP+1] = PART_TYPE_CAST
+    t[4:8, 4:8, CASTTOP:NZ] = PART_TYPE_RISER
     return t
-
 
 def run(variant, use_numba):
     t = types_grid()
@@ -45,8 +33,7 @@ def run(variant, use_numba):
     riser = (t == PART_TYPE_RISER) & ~obstacle
     nz = t.shape[2]
     zi = np.arange(nz)[None, None, :]
-    upper = riser & (zi >= CASTTOP + pad + 6)      # riser cells well above the cast
-    # seed metal at the very bottom of the cast and keep it pinned
+    upper = riser & (zi >= CASTTOP + pad + 6)
     pin = np.zeros(t.shape, bool)
     pin[(t == PART_TYPE_CAST) & ~obstacle & (zi <= pad + 1)] = True
     units = lattice_units(0.0043, 6.5e-7, u_max_physical_m_s=3.0)
@@ -74,7 +61,6 @@ def run(variant, use_numba):
           f"| wet z={wz.min()}-{wz.max()} | metal cells={int(metal.sum())} "
           f"| riser-top vents detected={vent} | finite={bool(np.isfinite(st.mass).all())}")
     return first, peak
-
 
 t = types_grid()
 o = _obstacle_mask(t)

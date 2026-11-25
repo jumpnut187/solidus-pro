@@ -85,12 +85,6 @@ function NumberField({
   );
 }
 
-/**
- * The sand mold and cores (`MoldParams`, `core/mold_setup.py`).
- *
- * Mold bodies draw purple and cores green, translucent, while setting up; both
- * are hidden while a result is on screen.
- */
 export function MoldPanel({ mold, sands, preview, previewError, hasParts, onChange, onReset, onClose }: MoldPanelProps) {
   const set = (patch: Partial<MoldParams>) => onChange({ ...mold, ...patch });
   const summary = preview?.summary ?? null;

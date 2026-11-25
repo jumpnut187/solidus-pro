@@ -1,19 +1,3 @@
-"""Tests for how a filling run's outcome is reported to the user.
-
-These exist because of a specific failure: the pipeline correctly refuses to
-seed solidification from a diverged fill, which leaves ``_fill_arrival_times``
-unset, which removes the Fill Time and Fill Animation entries from the results
-list. The result was that a run whose solver blew up looked *identical* to one
-where filling was never enabled -- no view, no error, nothing. The explanation
-went to a status-bar label that the next progress message overwrote, and never
-reached the log file at all.
-
-So the thing under test is not the physics. It is that each of the four
-outcomes says something different, that a discarded fill says so, and that the
-warning about solidification falling back to a placeholder actually appears --
-because that is what tells an operator how far to trust the rest of the run.
-"""
-
 from __future__ import annotations
 
 import unittest
@@ -24,7 +8,6 @@ from core.filling_stage import (
     STATUS_STALLED,
     STATUS_TIME_CAPPED,
 )
-
 
 def _summary(status, **overrides):
     base = {
@@ -41,16 +24,13 @@ def _summary(status, **overrides):
     base.update(overrides)
     return base
 
-
 def _notice(summary):
     from ui.main_window import format_filling_notice
 
     return format_filling_notice(summary)
 
-
 class NoticeLevelTests(unittest.TestCase):
     def test_no_filling_run_says_nothing(self) -> None:
-        """Filling that was never enabled must not raise a notice at all."""
         notice = _notice(None)
         self.assertEqual(notice["level"], "none")
         self.assertEqual(notice["status_line"], "")
@@ -70,10 +50,6 @@ class NoticeLevelTests(unittest.TestCase):
                 self.assertEqual(_notice(_summary(status))["level"], "warning")
 
     def test_every_outcome_is_distinguishable(self) -> None:
-        """
-        The whole point. Four outcomes, four different things said -- a fill
-        that blew up must not read like one that merely ran out of time.
-        """
         lines = {
             status: _notice(_summary(status))["status_line"]
             for status in (
@@ -86,9 +62,7 @@ class NoticeLevelTests(unittest.TestCase):
         self.assertEqual(len(set(lines.values())), 4, lines)
         self.assertNotIn("", lines.values())
 
-
 class DivergedNoticeTests(unittest.TestCase):
-    """A discarded fill has to say what it cost the rest of the run."""
 
     def setUp(self) -> None:
         self.notice = _notice(_summary(STATUS_DIVERGED))
@@ -98,19 +72,13 @@ class DivergedNoticeTests(unittest.TestCase):
         self.assertIn("discard", self.body)
 
     def test_it_names_the_views_that_are_missing(self) -> None:
-        """Otherwise their absence is the unexplained symptom all over again."""
         self.assertIn("fill time", self.body)
         self.assertIn("fill animation", self.body)
 
     def test_it_warns_that_solidification_used_a_placeholder(self) -> None:
-        """
-        The load-bearing sentence: it tells the operator the solidification
-        numbers on screen do not reflect the pour.
-        """
         self.assertIn("placeholder", self.body)
 
     def test_it_reports_the_step_with_a_thousands_separator(self) -> None:
-        """Matches the solver's own warning text sitting right beside it."""
         self.assertIn("12,800", self.notice["body"])
 
     def test_it_carries_the_solver_warnings_through(self) -> None:
@@ -120,14 +88,8 @@ class DivergedNoticeTests(unittest.TestCase):
     def test_it_has_a_dialog_title(self) -> None:
         self.assertTrue(self.notice["title"].strip())
 
-
 class StalledNoticeTests(unittest.TestCase):
     def test_it_distinguishes_a_stall_from_a_time_limit(self) -> None:
-        """
-        These are different findings. A stall is a misrun or an under-resolved
-        section; a time cap just means the clock ran out. Reading one as the
-        other sends the user to change the wrong setting.
-        """
         body = _notice(_summary(STATUS_STALLED))["body"].lower()
         self.assertIn("time", body)
         self.assertTrue(
@@ -139,9 +101,7 @@ class StalledNoticeTests(unittest.TestCase):
         body = _notice(_summary(STATUS_TIME_CAPPED))["body"].lower()
         self.assertIn("max_fill_time_s", body)
 
-
 class RobustnessTests(unittest.TestCase):
-    """The summary crosses a process boundary; it must not be trusted blindly."""
 
     def test_an_empty_summary_is_treated_as_no_run(self) -> None:
         self.assertEqual(_notice({})["level"], "none")
@@ -165,9 +125,7 @@ class RobustnessTests(unittest.TestCase):
         notice = _notice(_summary(STATUS_DIVERGED, warnings=()))
         self.assertTrue(notice["body"].strip())
 
-
 class SummaryPlumbingTests(unittest.TestCase):
-    """The engine must expose the summary even when the fill was unusable."""
 
     def test_engine_defaults_to_no_summary(self) -> None:
         from core.solidification import SolidificationEngine
@@ -176,11 +134,6 @@ class SummaryPlumbingTests(unittest.TestCase):
         self.assertIsNone(engine.get_filling_summary())
 
     def test_a_diverged_summary_survives_the_handover(self) -> None:
-        """
-        The diverged branch skips set_initial_temperature_field entirely, so
-        the summary has to be attached outside it or it would be lost in
-        exactly the case it is needed.
-        """
         from core.solidification import SolidificationEngine
 
         engine = SolidificationEngine.__new__(SolidificationEngine)
@@ -189,7 +142,6 @@ class SummaryPlumbingTests(unittest.TestCase):
         self.assertIsNotNone(summary)
         self.assertEqual(summary["status"], STATUS_DIVERGED)
         self.assertFalse(summary["trustworthy"])
-
 
 if __name__ == "__main__":
     unittest.main()

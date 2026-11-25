@@ -8,7 +8,6 @@ export type Toast = {
   message: string;
 };
 
-/** How long each kind lingers. Errors stay until dismissed. */
 const LIFETIME_MS: Record<ToastKind, number> = {
   info: 3200,
   success: 3200,
@@ -18,13 +17,6 @@ const LIFETIME_MS: Record<ToastKind, number> = {
 
 const MAX_VISIBLE = 4;
 
-/**
- * Non-blocking status and error notices.
- *
- * Nothing in the shell is allowed to interrupt the user with a browser
- * `alert()`: a message about a background job must not steal focus from the
- * canvas or a form the user is filling in.
- */
 export function useToasts() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const nextId = useRef(1);

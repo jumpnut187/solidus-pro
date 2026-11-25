@@ -1,29 +1,13 @@
-/**
- * Sketch regions: the pieces a sketch's closed contours divide the plane
- * into, the things Onshape lets you click to choose what an extrude takes.
- *
- * The regions themselves are computed by the kernel (`sketchRegions`), which
- * has the polygon booleans. What lives here is pure geometry the shell, the
- * viewport and the kernel all need: whether a point is in a region, and a
- * point guaranteed to be inside one. A feature names the regions it uses by
- * such points (seeds), which survive the sketch being edited as long as the
- * region still covers the same spot.
- */
 import type { Vec2 } from './vec';
 
 export type SketchRegion = {
-  /** The outline and its holes, in sketch coordinates. */
   contours: Vec2[][];
-  /** A point inside the region; how a feature names it. */
   seed: Vec2;
-  /** Inside an odd number of contours: in the profile when no regions are picked. */
   inDefault: boolean;
   area: number;
-  /** Triangles for drawing the region, as xy pairs, three vertices each. */
   triangles: Float32Array;
 };
 
-/** Even-odd point-in-polygon over every contour: holes count as outside. */
 export function pointInContours(contours: Vec2[][], point: Vec2): boolean {
   let inside = false;
   const [x, y] = point;
@@ -37,11 +21,6 @@ export function pointInContours(contours: Vec2[][], point: Vec2): boolean {
   return inside;
 }
 
-/**
- * A point well inside a region: the middle of the widest span a horizontal
- * line through it crosses, trying a few heights so a line that only grazes a
- * thin part does not decide.
- */
 export function interiorPoint(contours: Vec2[][]): Vec2 {
   let minY = Infinity;
   let maxY = -Infinity;
@@ -54,7 +33,6 @@ export function interiorPoint(contours: Vec2[][]): Vec2 {
   const height = maxY - minY;
   let best: { point: Vec2; width: number } | null = null;
   for (const fraction of [0.5, 0.37, 0.63, 0.25, 0.75, 0.12, 0.88]) {
-    // Off any vertex height, so no crossing is counted twice.
     const y = minY + height * fraction + height * 1.234e-7;
     const xs: number[] = [];
     for (const contour of contours) {
@@ -73,11 +51,6 @@ export function interiorPoint(contours: Vec2[][]): Vec2 {
   return best?.point ?? contours[0]?.[0] ?? [0, 0];
 }
 
-/**
- * Which of `regions` a feature uses: the ones its seeds fall in, or, with no
- * seeds (`null`), the ones the even-odd rule fills, which is what a sketch
- * extrudes when nothing has been picked.
- */
 export function regionSelected(region: SketchRegion, seeds: Vec2[] | null | undefined): boolean {
   if (!seeds) return region.inDefault;
   return seeds.some((seed) => pointInContours(region.contours, seed));

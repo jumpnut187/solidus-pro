@@ -22,7 +22,6 @@ export type TopBarProps = {
     kind: 'screenshot' | 'animation' | 'report' | 'projectFile' | 'importProjectFile'
   ) => void;
   onHelp: (topic: 'guide' | 'shortcuts' | 'hardware' | 'about') => void;
-  /** Entries that need a project or results stay visible but disabled. */
   exportsAvailable: {
     animation: boolean;
     report: boolean;

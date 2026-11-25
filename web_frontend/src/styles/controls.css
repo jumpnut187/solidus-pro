@@ -1,11 +1,3 @@
-/* Buttons, fields, sliders, toggles, tables — the shared control vocabulary.
- * Panels compose these classes rather than styling their own inputs, which is
- * what kept the old drawers looking like five different applications. */
-
-/* --------------------------------------------------------------------------
- * Buttons
- * ----------------------------------------------------------------------- */
-
 .btn {
   display: inline-flex;
   align-items: center;
@@ -102,17 +94,12 @@
   color: var(--text);
 }
 
-/* A square icon-only button (close, eye, delete). */
 .btn-icon {
   width: 26px;
   min-height: 26px;
   padding: 0;
   flex: 0 0 auto;
 }
-
-/* --------------------------------------------------------------------------
- * Segmented control (style toggle, speed, projection)
- * ----------------------------------------------------------------------- */
 
 .segmented {
   display: inline-flex;
@@ -158,10 +145,6 @@
   display: flex;
   width: 100%;
 }
-
-/* --------------------------------------------------------------------------
- * Fields
- * ----------------------------------------------------------------------- */
 
 .field {
   display: flex;
@@ -249,10 +232,6 @@
   color: var(--text-faint);
 }
 
-/* --------------------------------------------------------------------------
- * Checkbox / switch rows
- * ----------------------------------------------------------------------- */
-
 .check {
   display: flex;
   align-items: flex-start;
@@ -294,10 +273,6 @@
   font-size: var(--fs-xs);
   line-height: 1.4;
 }
-
-/* --------------------------------------------------------------------------
- * Range sliders
- * ----------------------------------------------------------------------- */
 
 .range {
   width: 100%;
@@ -350,7 +325,6 @@
   cursor: not-allowed;
 }
 
-/* A slider with a recommended-value tick underneath it. */
 .range-marked {
   position: relative;
   padding-bottom: 9px;
@@ -376,10 +350,6 @@
   border-radius: 50%;
   background: var(--molten);
 }
-
-/* --------------------------------------------------------------------------
- * Tables
- * ----------------------------------------------------------------------- */
 
 .table {
   width: 100%;
@@ -422,10 +392,6 @@
   width: 1%;
   white-space: nowrap;
 }
-
-/* --------------------------------------------------------------------------
- * Small shared bits
- * ----------------------------------------------------------------------- */
 
 .chip {
   display: inline-flex;

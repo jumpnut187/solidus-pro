@@ -6,7 +6,6 @@ import numpy as np
 
 from core.feeding_path import FeedingPathAnalyzer
 
-
 class _StubMesh:
     def __init__(self, voxel_centers: np.ndarray, voxel_neighbors: np.ndarray) -> None:
         self.voxel_centers = voxel_centers
@@ -14,7 +13,6 @@ class _StubMesh:
 
     def get_voxel_count(self) -> int:
         return int(self.voxel_centers.shape[0])
-
 
 class FeedingPathAnalysisTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -194,7 +192,6 @@ class FeedingPathAnalysisTests(unittest.TestCase):
         self.assertAlmostEqual(result.path_length[2], 2.0, places=6)
         self.assertAlmostEqual(result.path_length[3], 3.0, places=6)
         self.assertAlmostEqual(result.path_length[4], 4.0, places=6)
-
 
 if __name__ == "__main__":
     unittest.main()

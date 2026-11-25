@@ -1,18 +1,3 @@
-"""Tests for the industry-standard pour (metal-entry) location picker.
-
-Two testing strategies are combined here, matching what each layer needs:
-
-* The real-Qt tests (``AnalysisOptionsDialog`` gating, ``MainWindow`` gate
-  wiring) instantiate genuine PySide6 widgets under ``QT_QPA_PLATFORM=offscreen``
-  -- the same approach ``tests/test_performance_summary_label.py`` uses for
-  ``PerformanceDialog``. These imports happen at module scope, before any
-  vtk/Qt stubbing below, so they keep using the real Qt classes even after
-  the stub swap happens.
-* The ``CastingVisualizer`` pick-mode/marker tests stub ``vtk`` and the Qt binding
-  exactly the way ``tests/test_visualizer_inspector.py`` does, so they run
-  without a display or real VTK render window.
-"""
-
 from __future__ import annotations
 
 import importlib
@@ -24,17 +9,13 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-# Real Qt + the modules under test, imported now so they are fully resolved
-# (and cached in sys.modules) before the vtk/Qt stub swap below. Tests that
-# instantiate real widgets name the binding directly; production code goes
-# through ui.qt instead.
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
-from core.pour_location import PourLocation  # noqa: E402
-from ui.dialogs.analysis_options_dialog import AnalysisOptionsDialog  # noqa: E402
-from ui.main_window import MainWindow  # noqa: E402
+from core.pour_location import PourLocation
+from ui.dialogs.analysis_options_dialog import AnalysisOptionsDialog
+from ui.main_window import MainWindow
 
-from tests.helpers.module_stubs import (  # noqa: E402
+from tests.helpers.module_stubs import (
     install_stub_modules,
     make_qt_stub_modules,
     make_vtk_qt_stub_modules,
@@ -42,14 +23,10 @@ from tests.helpers.module_stubs import (  # noqa: E402
     snapshot_modules,
 )
 
-# Captured before any stub is installed, so tearDownModule can hand the real
-# vtk/Qt modules back to whatever runs next in this process.
 _MODULE_SNAPSHOT = snapshot_modules()
-
 
 def tearDownModule() -> None:
     restore_modules(_MODULE_SNAPSHOT)
-
 
 def _qapp() -> QApplication:
     app = QApplication.instance()
@@ -57,14 +34,7 @@ def _qapp() -> QApplication:
         app = QApplication([])
     return app
 
-
-# ==========================================================================
-# AnalysisOptionsDialog: the "Mold Filling" toggle gate
-# ==========================================================================
-
-
 class FillingToggleGateTests(unittest.TestCase):
-    """The Mold Filling checkbox must stay gated behind set_filling_available."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -106,21 +76,13 @@ class FillingToggleGateTests(unittest.TestCase):
         self.dialog.filling_check.setChecked(True)
         self.dialog.store_original_values()
 
-        # Pour location was cleared while the dialog held this state.
         self.dialog.set_filling_available(False)
         self.dialog.restore_original_values()
 
         self.assertFalse(self.dialog.filling_check.isChecked())
         self.assertFalse(self.dialog.filling_check.isEnabled())
 
-
-# ==========================================================================
-# MainWindow: the actual gate wiring (visualizer signal -> dialog + state)
-# ==========================================================================
-
-
 class MainWindowPourLocationGateTests(unittest.TestCase):
-    """MainWindow._on_pour_location_changed must drive the gate end to end."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -177,12 +139,6 @@ class MainWindowPourLocationGateTests(unittest.TestCase):
         finally:
             self._close(host)
 
-
-# ==========================================================================
-# CastingVisualizer: click -> PourLocation, marker lifecycle (vtk-stubbed)
-# ==========================================================================
-
-
 def _install_vtk_stubs() -> None:
     vtk_module = types.ModuleType("vtk")
     vtk_module.VTK_FLOAT = 1
@@ -207,16 +163,7 @@ def _install_vtk_stubs() -> None:
         **make_qt_stub_modules(_DummyVTKClass, lambda *args, **kwargs: _DummySignal()),
     })
 
-
 class _DummyVTKClass:
-    """Generic VTK object stand-in that tolerates chained calls.
-
-    Unlike a stub that returns ``None`` from every method (fine for code
-    that never chains), ``_add_pour_location_marker`` does
-    ``actor.GetProperty().SetColor(...)`` -- so accessor methods here return
-    ``self`` rather than ``None``, letting arbitrary chains resolve to a
-    harmless no-op instead of an ``AttributeError`` on ``None``.
-    """
 
     def __init__(self, *args, **kwargs):
         pass
@@ -226,13 +173,10 @@ class _DummyVTKClass:
             return self
         return _method
 
-
 class _DummySignal:
-    """Stand-in for a bound Signal; records nothing unless replaced."""
 
     def emit(self, *args, **kwargs) -> None:
         return None
-
 
 class _RecordingRenderer:
     def __init__(self) -> None:
@@ -245,7 +189,6 @@ class _RecordingRenderer:
         if actor in self.actors:
             self.actors.remove(actor)
 
-
 class _RecordingInteractor:
     def __init__(self) -> None:
         self.event_pos = (0, 0)
@@ -253,9 +196,7 @@ class _RecordingInteractor:
     def GetEventPosition(self):
         return self.event_pos
 
-
 class _RecordingCellPicker:
-    """Stand-in for vtkCellPicker with a programmed hit (or miss)."""
 
     def __init__(self, cell_id: int, position=(0.0, 0.0, 0.0), normal=(0.0, 0.0, 0.0), actor=None) -> None:
         self._cell_id = cell_id
@@ -283,9 +224,7 @@ class _RecordingCellPicker:
     def GetActor(self):
         return self._actor
 
-
 class _RecordingWorldPicker:
-    """Stand-in for vtkWorldPointPicker."""
 
     def __init__(self, position=(0.0, 0.0, 0.0)) -> None:
         self._position = position
@@ -297,14 +236,13 @@ class _RecordingWorldPicker:
     def GetPickPosition(self):
         return self._position
 
-
 class PourPickerVisualizerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         _install_vtk_stubs()
         ui_module = sys.modules.get("ui")
         if ui_module is None:
-            import ui  # noqa: F401
+            import ui
         viz_module = importlib.import_module("ui.visualizer")
         cls.viz = importlib.reload(viz_module)
 
@@ -324,8 +262,6 @@ class PourPickerVisualizerTests(unittest.TestCase):
         viz.pour_location_changed = mock.Mock()
         return viz
 
-    # ---- entering / exiting pick mode ----
-
     def test_enable_and_disable_pick_mode(self) -> None:
         viz = self._bare_visualizer()
         self.assertFalse(viz.is_pour_pick_mode())
@@ -335,8 +271,6 @@ class PourPickerVisualizerTests(unittest.TestCase):
 
         viz.disable_pour_pick_mode()
         self.assertFalse(viz.is_pour_pick_mode())
-
-    # ---- a click producing a PourLocation ----
 
     def test_click_with_cell_hit_sets_location_with_normal_and_part(self) -> None:
         viz = self._bare_visualizer()
@@ -357,7 +291,6 @@ class PourPickerVisualizerTests(unittest.TestCase):
         self.assertEqual(location.point_in, (4.0, -2.0, 7.5))
         self.assertEqual(location.normal, (0.0, 1.0, 0.0))
         self.assertEqual(location.part_id, "part-1")
-        # A successful pick exits pick mode and notifies listeners once.
         self.assertFalse(viz.is_pour_pick_mode())
         viz.pour_location_changed.emit.assert_called_once_with(location)
 
@@ -391,8 +324,6 @@ class PourPickerVisualizerTests(unittest.TestCase):
         self.assertTrue(viz.is_pour_pick_mode())
         viz.pour_location_changed.emit.assert_not_called()
 
-    # ---- marker actor lifecycle ----
-
     def test_marker_actors_created_on_pick_and_removed_on_clear(self) -> None:
         viz = self._bare_visualizer()
         viz.enable_pour_pick_mode()
@@ -404,7 +335,6 @@ class PourPickerVisualizerTests(unittest.TestCase):
         with mock.patch.object(self.viz.vtk, "vtkCellPicker", lambda: picker):
             viz._on_left_button_press(None, None)
 
-        # Sphere + normal cone.
         self.assertEqual(len(viz.renderer.actors), baseline + 2)
         self.assertEqual(len(viz._pour_location_actors), 2)
 
@@ -416,24 +346,16 @@ class PourPickerVisualizerTests(unittest.TestCase):
         viz.pour_location_changed.emit.assert_called_with(None)
 
     def test_marker_is_drawn_even_without_a_surface_normal(self) -> None:
-        """
-        The arrow shows the pour direction, not the surface normal, and the
-        pour direction is always known (down). So the marker is sphere + arrow
-        whether or not the picker managed to report a normal.
-        """
         viz = self._bare_visualizer()
         viz.enable_pour_pick_mode()
         baseline = len(viz.renderer.actors)
 
-        # GetPickNormal returns all-zero -> treated as "no normal".
         picker = _RecordingCellPicker(cell_id=0, position=(2.0, 2.0, 2.0), normal=(0.0, 0.0, 0.0))
         with mock.patch.object(self.viz.vtk, "vtkCellPicker", lambda: picker):
             viz._on_left_button_press(None, None)
 
         self.assertIsNone(viz.pour_location.normal)
         self.assertEqual(len(viz.renderer.actors), baseline + 2)
-
-    # ---- set_pour_location() direct path (project restore) ----
 
     def test_set_pour_location_directly_draws_marker_and_emits(self) -> None:
         viz = self._bare_visualizer()
@@ -442,8 +364,6 @@ class PourPickerVisualizerTests(unittest.TestCase):
         viz.set_pour_location(location)
 
         self.assertIs(viz.pour_location, location)
-        # Sphere + downward pour arrow. The arrow does not depend on a surface
-        # normal, so a project-restored location gets one too.
         self.assertEqual(len(viz._pour_location_actors), 2)
         viz.pour_location_changed.emit.assert_called_once_with(location)
 
@@ -453,20 +373,10 @@ class PourPickerVisualizerTests(unittest.TestCase):
         self.assertIsNone(viz.pour_location)
         viz.pour_location_changed.emit.assert_called_once_with(None)
 
-
 if __name__ == "__main__":
     unittest.main()
 
-
 class PourDirectionTests(unittest.TestCase):
-    """
-    The marker must advertise the direction metal actually travels.
-
-    Reported from a real session: clicking the top face of a down sprue drew
-    the cone pointing +Z, because it followed the picked surface normal. On a
-    top face the outward normal *is* +Z, so the arrow read as metal being fired
-    upward out of the sprue -- the opposite of what happens.
-    """
 
     def test_pour_direction_is_straight_down(self) -> None:
         from ui.visualizer import POUR_DIRECTION
@@ -474,10 +384,6 @@ class PourDirectionTests(unittest.TestCase):
         self.assertEqual(POUR_DIRECTION, (0.0, 0.0, -1.0))
 
     def test_solver_gravity_is_also_straight_down(self) -> None:
-        """
-        The display constant is only honest if it matches the solver. Gravity
-        is fixed at -Z in the step loop, so this pins the two together.
-        """
         import inspect
 
         from physics.filling import gravity_force, step
@@ -491,11 +397,6 @@ class PourDirectionTests(unittest.TestCase):
                 self.assertEqual(tuple(default), POUR_DIRECTION)
 
     def test_solver_ignores_the_picked_normal(self) -> None:
-        """
-        Metal falls under gravity regardless of which face was clicked, so the
-        fill must be identical whichever normal the picker happened to report.
-        If this ever fails, the marker has to start following the normal again.
-        """
         import inspect
 
         from core import filling_stage

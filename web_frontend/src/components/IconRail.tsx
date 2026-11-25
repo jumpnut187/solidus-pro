@@ -28,11 +28,6 @@ const ENTRIES: RailEntry[] = [
   { id: 'projects', label: 'Projects', title: 'Saved projects', Icon: FolderOpen }
 ];
 
-/**
- * The left rail. Exactly one setup panel is open at a time and clicking the
- * active icon closes it, so the canvas is never competing with two stacked
- * panels the way the old 300px sidebar did.
- */
 export function IconRail({
   active,
   onSelect,

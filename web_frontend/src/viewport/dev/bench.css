@@ -1,5 +1,3 @@
-/* Styles for the development bench only. Not shipped by the application shell. */
-
 :root {
   color-scheme: dark;
 }
@@ -60,7 +58,6 @@ body,
   flex: 1;
 }
 
-/* The stage is the viewport's positioned ancestor: it fills this box. */
 .bench-stage {
   position: relative;
   flex: 1;
@@ -113,8 +110,6 @@ body,
   top: 48px;
 }
 
-/* The bench positions the orientation gizmo; the application shell has its
-   own placement for the same element, above its log strip. */
 .viewport-gizmo {
   position: absolute;
   right: 14px;

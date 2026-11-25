@@ -1,5 +1,3 @@
-"""Queue and state management for web simulation execution using multiprocessing."""
-
 from __future__ import annotations
 
 import multiprocessing
@@ -13,9 +11,6 @@ from typing import Any, Callable, Dict, Optional, cast
 
 from config.hardware_config import hardware
 
-#: Lines kept per job. A four-minute solve emits a few hundred distinct
-#: progress strings; five hundred holds a whole run plus a traceback without
-#: letting a pathological solver grow the Manager dict without bound.
 JOB_LOG_LINES = 500
 from web.services.fair_share import (
     can_start_simulation,
@@ -27,11 +22,7 @@ from web.services.fair_share import (
 if sys.platform == 'darwin':
     multiprocessing.set_start_method('spawn', force=True)
 
-
-
-
 def _env_int(name: str, default: int) -> int:
-    """Read an integer environment variable with a default fallback."""
     raw_value = os.getenv(name, "").strip()
     if not raw_value:
         return default
@@ -39,7 +30,6 @@ def _env_int(name: str, default: int) -> int:
         return int(raw_value)
     except ValueError:
         return default
-
 
 class QueueConfig:
     def __init__(
@@ -58,17 +48,7 @@ class QueueConfig:
         self.reserve_memory_mb = reserve_memory_mb
         self.min_sim_memory_mb = min_sim_memory_mb
 
-
 def default_queue_config() -> QueueConfig:
-    """
-    Build the queue configuration from environment variables and hardware.
-
-    Environment overrides:
-    - CASTSIM_MAX_CONCURRENT_SIMULATIONS (default: min(4, physical // 4))
-    - CASTSIM_WEB_RESERVED_CORES (default: 1)
-    - CASTSIM_WEB_RESERVE_MEMORY_MB (default: max(2048, 10% of RAM))
-    - CASTSIM_WEB_MIN_SIM_MEMORY_MB (default: 2048)
-    """
     physical_cores = int(getattr(hardware, "physical_cores", 0) or (os.cpu_count() or 4))
     auto_concurrency = max(1, min(4, physical_cores // 4))
 
@@ -87,23 +67,11 @@ def default_queue_config() -> QueueConfig:
         min_sim_memory_mb=_env_int("CASTSIM_WEB_MIN_SIM_MEMORY_MB", 2048),
     )
 
-
 def build_pipeline_inputs(
     sim_data: Dict[str, Any],
     *,
     thread_budget_provider: Any = None,
 ) -> Any:
-    """Map a stored project row onto :class:`PipelineInputs`.
-
-    Kept as a module-level pure function so the web layer has exactly one place
-    that translates persisted ``analysis_options`` / ``performance_options``
-    dicts into solver inputs, and so it can be tested without standing up a
-    simulation subprocess and its twenty Manager proxies.
-
-    A second, drifted copy of this mapping used to live in
-    ``web/routes.py::execute_project_task``; it was dead code that only the test
-    suite called, which is how the drift went unnoticed.
-    """
     from core.simulation_pipeline import PipelineInputs
 
     performance = sim_data.get("performance_options") or {}
@@ -124,12 +92,10 @@ def build_pipeline_inputs(
         solidification_params=sim_data.get("solidification_params") or {},
         thread_budget_provider=thread_budget_provider,
         pour_location=sim_data.get("pour_location"),
-        # None (absent) means settings.mesh.voxel_cut_cells.
         voxel_cut_cells=(
             None if performance.get("voxel_cut_cells") is None else bool(performance.get("voxel_cut_cells"))
         ),
     )
-
 
 def _simulation_process_worker(
     sim_id: str,
@@ -154,34 +120,10 @@ def _simulation_process_worker(
     min_sim_memory_mb: int,
     simulation_logs: Dict[str, Any],
 ) -> None:
-    """
-    Standalone entry point for a simulation subprocess.
-    Runs in its own process with its own pristine Numba thread pool.
-    All shared state is updated via Manager proxy objects.
-    """
     def _check_cancelled() -> bool:
         return stop_flags.get(sim_id, False)
 
     def _log(message: str) -> None:
-        """Append one line to this job's ring buffer.
-
-        The worker is a separate *process* (spawn on macOS), so nothing it
-        prints reaches the Flask process. Progress text is the only narration a
-        user gets during a four-minute solve, and ``active_simulations`` drops
-        its entry the moment the job ends -- so the log lives in its own
-        Manager dict that outlives the run.
-
-        The buffer is stored as ``{"lines": [...], "first": n}``: ``first`` is
-        the sequence number of ``lines[0]``, so a client's cursor stays
-        meaningful after the ring has wrapped. Without it, a poller holding
-        cursor 500 against a total that never moves past 500 receives an empty
-        tail forever.
-
-        A Manager dict does not proxy nested mutation: the entry has to be
-        read, copied, appended to and written back, exactly like the status
-        entries below. Consecutive duplicates are dropped, because the solver
-        emits the same "Solidifying: 61%" string many times in a row.
-        """
         try:
             with queue_lock:
                 entry = dict(simulation_logs.get(sim_id) or {"lines": [], "first": 0})
@@ -196,11 +138,8 @@ def _simulation_process_worker(
                     first += dropped
                 simulation_logs[sim_id] = {"lines": lines, "first": first}
         except Exception:
-            # Logging must never be the reason a simulation fails.
             pass
 
-    # A re-run starts a new log. Appending to the previous run's lines made the
-    # drawer read as one impossibly long job that solidified twice.
     try:
         with queue_lock:
             simulation_logs[sim_id] = {"lines": [], "first": 0}
@@ -224,7 +163,6 @@ def _simulation_process_worker(
                 active_simulations[sim_id] = entry
 
     def _chain_memory_ok() -> bool:
-        """Return True when the next queued simulation may start now."""
         try:
             available_mb = psutil.virtual_memory().available / (1024 * 1024)
         except Exception:
@@ -257,8 +195,6 @@ def _simulation_process_worker(
         )
 
         def progress_message(message: str) -> None:
-            # Bucketed into four canned strings below, which throws away the
-            # detail the solver bothered to produce. Log the real line first.
             _log(message)
             if message.startswith("Generating adaptive voxel mesh"):
                 _set_progress(15, "Generating adaptive voxel mesh...")
@@ -306,16 +242,9 @@ def _simulation_process_worker(
         artifact_dir.mkdir(parents=True, exist_ok=True)
         artifact_path = artifact_dir / f"{sim_id}.json"
         write_artifact(artifact_path, artifact)
-        # What was simulated, so the client can tell when the parts have
-        # changed since -- a deleted riser is otherwise still in the field it
-        # shows. Only in the project row: the artifact is the result itself.
         summary = {**artifact["summary"], "simulated_parts": simulated_parts_snapshot(parts_data)}
         repo.mark_project_completed(db_path, sim_id, summary, str(artifact_path))
 
-        # The artifact is on disk and its path is in the database, so every
-        # reader can find it. Keeping the parsed 50-180 MB copy in the Manager
-        # as well meant one process held every completed run of the session
-        # until restart; the routes re-read from disk through a small LRU.
         with queue_lock:
             simulation_results.pop(sim_id, None)
 
@@ -333,8 +262,6 @@ def _simulation_process_worker(
         else:
             import traceback
             traceback.print_exc()
-            # The traceback is the whole value of a failure log, and it would
-            # otherwise live only in the server's stdout.
             for line in traceback.format_exc().splitlines():
                 _log(line)
             _update_active(status="error", message=str(exc), progress=0)
@@ -390,19 +317,10 @@ def _simulation_process_worker(
                 max_concurrent_simulations=max_concurrent_simulations,
                 reserve_memory_mb=reserve_memory_mb,
                 min_sim_memory_mb=min_sim_memory_mb,
-                # One process runs several jobs back to back, so the buffer has
-                # to be threaded through this chained call too or every job
-                # after the first loses its log.
                 simulation_logs=simulation_logs,
             )
 
-
 class SimulationQueueManager:
-    """
-    Process-safe queue manager for background simulations.
-    Each simulation runs in its own multiprocessing.Process with a dedicated Numba
-    thread pool, preventing GIL contention with Flask request handlers.
-    """
 
     def __init__(self, config: Optional[QueueConfig] = None) -> None:
         self.config = config or QueueConfig()
@@ -435,17 +353,12 @@ class SimulationQueueManager:
         self.running_count = self._manager.Value('i', 0)
         self.thread_budget = self._manager.Value('i', 0)
         self.sim_memory_mb = self._manager.dict()
-        # Per-job progress log. Deliberately separate from active_simulations,
-        # which is popped the moment a job ends -- the log is most wanted right
-        # after a failure. Trimmed by clear_tracking and by the LRU below.
         self.simulation_logs = self._manager.dict()
     def _usable_cores(self) -> int:
-        """Logical cores minus those reserved for the OS/web server."""
         logical = int(getattr(hardware, "logical_cores", 0) or (os.cpu_count() or 1))
         return resolve_usable_cores(logical, self.config.reserved_cores)
 
     def _memory_ok_to_start(self) -> bool:
-        """Return True when a new simulation may start given RAM headroom."""
         try:
             available_mb = psutil.virtual_memory().available / (1024 * 1024)
         except Exception:
@@ -458,7 +371,6 @@ class SimulationQueueManager:
             reserve_mb=float(self.config.reserve_memory_mb),
             min_sim_memory_mb=float(self.config.min_sim_memory_mb),
         )
-
 
     def set_paths(self, db_path: str, base_dir: str) -> None:
         self._db_path = db_path
@@ -656,9 +568,6 @@ class SimulationQueueManager:
                 self.config.min_sim_memory_mb,
                 self.simulation_logs,
             ),
-            # Not a daemon: simulation workers need to be able to spawn
-            # additional child processes (e.g. part-assignment ProcessPool)
-            # which Python disallows from daemon parents.
             daemon=False,
         )
         proc.start()
@@ -795,17 +704,6 @@ class SimulationQueueManager:
         return cancelled
 
     def get_log(self, sim_id: str, since: int = 0) -> Optional[Dict[str, Any]]:
-        """This job's progress log from sequence number ``since``.
-
-        Survives completion on purpose: the lines that explain a failure are
-        wanted after the job has gone, not during it.
-
-        Returns ``{"lines", "next", "dropped"}``, or None when nothing is kept
-        for this job. ``next`` is the cursor to pass on the following poll, and
-        ``dropped`` counts lines that had already rolled off the ring before
-        the client asked -- silence would misreport a wrapped buffer as "no new
-        output".
-        """
         self._init_manager()
         with self.queue_lock:
             logs = self.simulation_logs

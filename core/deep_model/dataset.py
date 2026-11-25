@@ -1,23 +1,3 @@
-"""Torch dataset over captured surrogate records for deep training.
-
-Reuses ``core.surrogate.dataset.load_dataset`` (schema v2 ``.npz`` records
-from ``data/surrogate_dataset``) — no new capture code.  Records captured at
-any resolution (16/32/64) are resampled to the training resolution (64^3
-default) with occupancy-aware block pooling (linear-zoom fallback).
-
-Each item yields the channels, conditioning vector, target schedule fields
-(start / end / local), and an occupancy mask marking cells to include in the
-loss and metrics (occupancy > 0.5, chill cells excluded, reference end > 0).
-
-Train / validation membership comes from
-``core.surrogate.split.grouped_train_val_indices`` so no geometry appears on
-both sides of the split.
-
-Grid axis order is ``(z, y, x)`` (``core.surrogate.fields._scatter`` packs
-``ix + R * (iy + R * iz)``), so ``normalized_height`` varies along axis 0 and
-``augment_batch`` only flips / rotates the trailing two axes.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -27,11 +7,9 @@ import numpy as np
 try:
     import torch
     from torch.utils.data import Dataset
-except ImportError:  # pragma: no cover - torch is an optional dependency
-    # Keep the module importable so callers can read the encoding constants
-    # (CHILL_PART_TYPE, CHILL_CHANNEL_TOL) without torch installed.
-    torch = None  # type: ignore[assignment]
-    Dataset = object  # type: ignore[assignment,misc]
+except ImportError:
+    torch = None
+    Dataset = object
 
 from core.deep_model.model import DEFAULT_TRAINING_RESOLUTION, TARGET_NAMES
 from core.surrogate.dataset import DEFAULT_DATASET_DIR, load_dataset
@@ -44,30 +22,25 @@ from core.surrogate.split import (
 )
 from core.part_manager import PART_TYPE_CHILL
 
-CHILL_PART_TYPE = PART_TYPE_CHILL  # encoded as part_type / PART_TYPE_DIVISOR
+CHILL_PART_TYPE = PART_TYPE_CHILL
 CHILL_CHANNEL_TOL = 0.05
 MIN_GEOMETRY_GROUPS = 2
 
-
 def _block_mean(arr: np.ndarray, factor: int) -> np.ndarray:
-    """Block-average an array whose trailing 3 dims are divisible by factor."""
     target = arr.shape[-1] // factor
     shape = arr.shape[:-3] + (target, factor, target, factor, target, factor)
     return arr.reshape(shape).mean(axis=(-5, -3, -1))
-
 
 def _block_sum(arr: np.ndarray, factor: int) -> np.ndarray:
     target = arr.shape[-1] // factor
     shape = arr.shape[:-3] + (target, factor, target, factor, target, factor)
     return arr.reshape(shape).sum(axis=(-5, -3, -1))
 
-
 def _zoom(arr: np.ndarray, target: int) -> np.ndarray:
     from scipy.ndimage import zoom
 
     factor = target / arr.shape[-1]
     return zoom(arr, (1.0, factor, factor, factor), order=1).astype(np.float32)
-
 
 def resample_record(
     channels: np.ndarray,
@@ -76,14 +49,6 @@ def resample_record(
     local: np.ndarray,
     target: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Scatter-consistent resampling of a captured record to ``target``.
-
-    Mirrors the ``_scatter`` semantics used at capture time: a cell is
-    occupied when *any* subcell holds voxels, and channel / target values are
-    the average over the occupied subcells only (never diluted by empty
-    cells).  Without this, mean-pooling drops sparse geometry below the
-    occupancy > 0.5 activity threshold.
-    """
     channels = np.asarray(channels, dtype=np.float32)
     src = channels.shape[-1]
     if src == target:
@@ -92,12 +57,6 @@ def resample_record(
         return channels, start, end, local
 
     def _scatter_like(arr: np.ndarray) -> np.ndarray:
-        """Average over occupied subcells, binary occupancy for channel 0.
-
-        Only the multi-channel ``channels`` array re-binarizes its occupancy
-        channel after pooling; single-field schedule grids (``start``/``end``/
-        ``local``, passed as ``(1, R, R, R)``) must keep their pooled values.
-        """
         arr = np.asarray(arr, dtype=np.float32)
         is_channels = arr.ndim == 4 and arr.shape[0] > 1
         if src % target == 0:
@@ -122,9 +81,7 @@ def resample_record(
     res_local = _scatter_like(local.reshape(1, src, src, src))[0]
     return res_channels, res_start, res_end, res_local
 
-
 def resample_grid(arr: np.ndarray, target: int) -> np.ndarray:
-    """Plain block-average resample of a ``(C, R, R, R)`` grid (kept for tests)."""
     arr = np.asarray(arr, dtype=np.float32)
     src = arr.shape[-1]
     if src == target:
@@ -133,52 +90,31 @@ def resample_grid(arr: np.ndarray, target: int) -> np.ndarray:
         return _block_mean(arr, src // target).astype(np.float32)
     return _zoom(arr, target)
 
-
 @dataclass
 class DeepItem:
-    """One training item as torch tensors."""
 
-    channels: torch.Tensor          # (7, R, R, R) float32
-    conditioning: torch.Tensor      # (K,) float32
-    start: torch.Tensor             # (R, R, R)
-    end: torch.Tensor               # (R, R, R)
-    local: torch.Tensor             # (R, R, R)
-    mask: torch.Tensor              # (R, R, R) bool - cells in the loss
-
+    channels: torch.Tensor
+    conditioning: torch.Tensor
+    start: torch.Tensor
+    end: torch.Tensor
+    local: torch.Tensor
+    mask: torch.Tensor
 
 def _occupancy_mask(channels: np.ndarray) -> np.ndarray:
-    """Occupied cells, excluding chill cells (part_type 2)."""
     occ = channels[0] > 0.5
     chill = np.abs(channels[1] - CHILL_PART_TYPE / PART_TYPE_DIVISOR) < CHILL_CHANNEL_TOL
     return occ & ~chill
 
-
 def evaluation_mask(channels: np.ndarray, ref_end: np.ndarray) -> np.ndarray:
-    """Cells that count for the loss and for every reported metric.
-
-    Active (occupancy > 0.5), not chill, and reference end time > 0.  Shared
-    by the dataset items and ``training._evaluate`` so the loss mask and the
-    metric mask are the same set of cells.
-    """
     return _occupancy_mask(channels) & (np.asarray(ref_end) > 0.0)
 
-
 def log1p_targets(start: torch.Tensor, local: torch.Tensor) -> torch.Tensor:
-    """Stack the network targets ``log1p(start), log1p(local)`` -> ``(B, 2, ...)``."""
     return torch.stack(
         [torch.log1p(torch.clamp(start, min=0.0)), torch.log1p(torch.clamp(local, min=0.0))],
         dim=1,
     )
 
-
 def augment_batch(batch: Dict[str, torch.Tensor], rng: torch.Generator) -> Dict[str, torch.Tensor]:
-    """Random flips on the x / y axes and 90-degree rotations about z.
-
-    Applied identically to channels, targets and mask.  Grid axis 0 is the
-    vertical (``normalized_height`` and gravity), so it is never touched.
-    Tensor dims: ``(B, C, z, y, x)`` for channels and ``(B, z, y, x)`` for
-    the fields, so y is the second-to-last dim and x the last.
-    """
     flip_y = bool(torch.rand((), generator=rng) < 0.5)
     flip_x = bool(torch.rand((), generator=rng) < 0.5)
     quarter_turns = int(torch.randint(0, 4, (), generator=rng))
@@ -193,21 +129,9 @@ def augment_batch(batch: Dict[str, torch.Tensor], rng: torch.Generator) -> Dict[
             t = torch.rot90(t, quarter_turns, dims=(y_dim, x_dim))
         return t
 
-    # Grids are (B, C, z, y, x) or (B, z, y, x); the conditioning vector (B, K)
-    # has no spatial axes and passes through untouched.
     return {k: (_apply(v) if v.ndim >= 4 else v) for k, v in batch.items()}
 
-
 class DeepDataset(Dataset):
-    """Torch dataset over captured records, resampled to training resolution.
-
-    Args:
-        records: Output of ``core.surrogate.dataset.load_dataset``.
-        resolution: Training grid resolution (default 64).
-        split: One of ``"train"`` / ``"val"`` / ``"all"``.  Train / val
-            membership is the geometry-grouped split from
-            ``core.surrogate.split`` (``val_fraction`` 0.2, ``seed`` 0).
-    """
 
     def __init__(
         self,
@@ -271,7 +195,6 @@ class DeepDataset(Dataset):
 
     @property
     def records(self) -> List[Dict[str, Any]]:
-        """The underlying record dicts in this split."""
         return self._records
 
     @property
@@ -280,16 +203,9 @@ class DeepDataset(Dataset):
 
     @property
     def geometry_groups(self) -> int:
-        """Number of distinct geometry groups among the records."""
         return len({geometry_group_key(r) for r in self._records})
 
     def target_normalization(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Mean / std of the ``TARGET_NAMES`` log1p targets over masked cells.
-
-        Computed on this dataset only; callers pass the *train* split so the
-        validation statistics never leak into the model.  A degenerate std
-        (constant target) is floored at 1.0.
-        """
         sums = np.zeros(len(TARGET_NAMES), dtype=np.float64)
         sq_sums = np.zeros(len(TARGET_NAMES), dtype=np.float64)
         count = 0
@@ -297,8 +213,8 @@ class DeepDataset(Dataset):
             mask = item.mask
             if not bool(mask.any()):
                 continue
-            targets = log1p_targets(item.start[None], item.local[None])[0]  # (2, R, R, R)
-            vals = targets[:, mask].double().numpy()  # (2, n)
+            targets = log1p_targets(item.start[None], item.local[None])[0]
+            vals = targets[:, mask].double().numpy()
             sums += vals.sum(axis=1)
             sq_sums += (vals ** 2).sum(axis=1)
             count += vals.shape[1]
@@ -312,7 +228,6 @@ class DeepDataset(Dataset):
 
     @staticmethod
     def collate(batch: List[DeepItem]) -> Dict[str, torch.Tensor]:
-        """Collate a batch of :class:`DeepItem` into stacked tensors."""
         return {
             "channels": torch.stack([it.channels for it in batch]),
             "conditioning": torch.stack([it.conditioning for it in batch]),
@@ -322,7 +237,6 @@ class DeepDataset(Dataset):
             "mask": torch.stack([it.mask for it in batch]),
         }
 
-
 def make_train_val_datasets(
     data_dir: str = DEFAULT_DATASET_DIR,
     resolution: int = DEFAULT_TRAINING_RESOLUTION,
@@ -330,12 +244,6 @@ def make_train_val_datasets(
     val_fraction: float = DEFAULT_VAL_FRACTION,
     seed: int = DEFAULT_SEED,
 ) -> Tuple[DeepDataset, Optional[DeepDataset]]:
-    """Load records and split them by geometry group into train / validation.
-
-    Returns:
-        ``(train, val)``; ``val`` is None only when the grouped split holds
-        nothing out (a single geometry group, or ``val_fraction`` 0).
-    """
     records = load_dataset(data_dir, limit=limit)
     if not records:
         raise ValueError(f"No usable training records found in {data_dir}")

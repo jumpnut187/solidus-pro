@@ -1,11 +1,8 @@
-"""The record of what a run simulated, which the client compares with the parts on screen."""
-
 from __future__ import annotations
 
 import unittest
 
 from web.payloads import SIMULATED_PART_FIELDS, simulated_parts_snapshot
-
 
 class SimulatedPartsSnapshotTests(unittest.TestCase):
     def test_keeps_exactly_the_fields_a_run_depends_on(self) -> None:
@@ -39,7 +36,6 @@ class SimulatedPartsSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot[0]["scale"], 1.0)
         self.assertEqual(snapshot[0]["part_type"], "")
         self.assertIs(simulated_parts_snapshot([{"id": "v"}])[0]["visible"], True)
-
 
 if __name__ == "__main__":
     unittest.main()

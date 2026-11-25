@@ -1,31 +1,3 @@
-"""
-Heat Transfer Module for Casting Solidification Simulation
-
-Implements heat conduction and convection physics:
-- Fourier's law of heat conduction
-- Finite difference discretization
-- Boundary conditions (mold interface, ambient)
-- Temperature-dependent material properties
-
-Mathematical Model:
-    ∂T/∂t = α∇²T + Q/ρcₚ
-    
-where:
-    T = temperature
-    α = thermal diffusivity (k/ρcₚ)
-    Q = heat source/sink (e.g., latent heat)
-    ρ = density
-    cₚ = specific heat
-
-Usage:
-    from physics.heat_transfer import HeatTransferModel, BoundaryType
-    
-    model = HeatTransferModel(mesh, alloy)
-    model.add_boundary(surface_indices, BoundaryType.CONVECTION, h=10, T_inf=25)
-    model.step(dt)
-    temperatures = model.get_temperatures()
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -34,69 +6,37 @@ from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Unio
 import numpy as np
 from numpy.typing import NDArray
 
-
-# Type aliases
 FloatArray = NDArray[Any]
 IntArray = NDArray[Any]
 BoolArray = NDArray[Any]
 
-
 class BoundaryType(Enum):
-    """Types of boundary conditions"""
-    FIXED_TEMPERATURE = auto()  # Dirichlet: T = T_boundary
-    HEAT_FLUX = auto()          # Neumann: -k∂T/∂n = q
-    CONVECTION = auto()         # Robin: -k∂T/∂n = h(T - T_inf)
-    ADIABATIC = auto()          # Neumann: ∂T/∂n = 0
-    INTERFACE = auto()          # Mold-metal interface with IHTC
-    # Surface open to the air: -k∂T/∂n = h(T - T_inf) + eps*sigma*(T^4 - T_inf^4),
-    # ``htc`` the convective h and ``value`` the emissivity.
+    FIXED_TEMPERATURE = auto()
+    HEAT_FLUX = auto()
+    CONVECTION = auto()
+    ADIABATIC = auto()
+    INTERFACE = auto()
     RADIATION = auto()
 
-
-#: Stefan-Boltzmann constant, W/(m^2 K^4).
 STEFAN_BOLTZMANN = 5.670374419e-8
 _KELVIN = 273.15
 
-
 def radiation_htc(T: FloatArray, T_inf: float, emissivity: float) -> FloatArray:
-    """Radiative heat transfer coefficient eps*sigma*(T^2 + T_inf^2)(T + T_inf), W/(m^2 K), T in °C.
-
-    q = h_rad * (T - T_inf) equals eps*sigma*(T^4 - T_inf^4) in kelvin.
-    """
     tk = np.asarray(T, dtype=np.float64) + _KELVIN
     ti = float(T_inf) + _KELVIN
     return float(emissivity) * STEFAN_BOLTZMANN * (tk * tk + ti * ti) * (tk + ti)
 
-
 @dataclass
 class BoundaryCondition:
-    """
-    Specification of a boundary condition.
-    
-    Attributes:
-        type: Type of boundary condition
-        indices: Voxel indices where this condition applies
-        value: Condition-specific value (temperature, heat flux, etc.)
-        htc: Heat transfer coefficient for convection/interface
-        T_infinity: Ambient temperature for convection
-        time_function: Optional time-dependent modifier
-        weights: Optional per-index multiplier on the boundary area, for a
-            condition that covers only part of a cell's exposed area (an open
-            riser top next to faces in the mold). None means 1.
-    """
     type: BoundaryType
     indices: IntArray
     value: float = 0.0
-    htc: float = 0.0  # W/(m²·K)
-    T_infinity: float = 25.0  # °C
+    htc: float = 0.0
+    T_infinity: float = 25.0
     time_function: Optional[Callable[[float], float]] = None
     weights: Optional[FloatArray] = None
 
     def surface_htc(self, temperatures: FloatArray, time: float) -> Union[float, FloatArray]:
-        """h such that the boundary flux is h * (T - T_inf) on ``indices``, weights included.
-
-        Only for CONVECTION, INTERFACE and RADIATION.
-        """
         h: Union[float, FloatArray] = self.htc
         if self.type == BoundaryType.INTERFACE and self.time_function is not None:
             h = self.htc * self.time_function(time)
@@ -105,46 +45,34 @@ class BoundaryCondition:
         if self.weights is not None:
             h = h * self.weights
         return h
-    
+
     def get_effective_value(self, time: float) -> float:
-        """Get value at given time (applies time function if present)"""
         if self.time_function is not None:
             return self.value * self.time_function(time)
         return self.value
 
-
-@dataclass  
+@dataclass
 class TemperatureField:
-    """
-    Container for temperature field data.
-    
-    Provides convenient access to temperature statistics and gradients.
-    """
     values: FloatArray
     time: float = 0.0
-    
+
     @property
     def min(self) -> float:
         return float(np.min(self.values))
-    
+
     @property
     def max(self) -> float:
         return float(np.max(self.values))
-    
+
     @property
     def mean(self) -> float:
         return float(np.mean(self.values))
-    
+
     @property
     def std(self) -> float:
         return float(np.std(self.values))
-    
+
     def get_gradient_magnitude(self, neighbors: IntArray, voxel_size: float) -> FloatArray:
-        """
-        Calculate temperature gradient magnitude at each voxel.
-        
-        Uses central difference approximation.
-        """
         if NUMBA_AVAILABLE:
             return compute_gradient_magnitude_parallel(
                 np.asarray(self.values, dtype=np.float64),
@@ -167,39 +95,15 @@ class TemperatureField:
                 gradients[i] = np.sqrt(grad_sq / count)
         return gradients
 
-
 @dataclass
 class TabulatedBody:
-    """Cells whose conductivity and heat capacity follow temperature tables (bonded sand).
-
-    ``volumetric_heat_capacity`` is the apparent rho*cp in J/(m^3 K) at
-    ``temp_points`` (°C), with latent effects such as moisture evaporation
-    and the quartz inversion folded in as peaks. The model integrates it to an
-    enthalpy table and moves these cells by enthalpy: a step that carries a
-    cell across a peak is held on it until the peak's heat is paid, which a
-    temperature update at the pre-step capacity cannot do.
-    """
     indices: IntArray
     temp_points: FloatArray
     conductivity: FloatArray
     volumetric_heat_capacity: FloatArray
 
-
 @dataclass
 class InterfaceLinks:
-    """Contact between bodies that do not conduct through the stencil (metal against mold sand).
-
-    Pair p joins cells ``first[p]`` and ``second[p]`` over ``area[p]`` m^2
-    with conductance per area 1 / (dx_i / (2 k_i) + 1 / h + dx_j / (2 k_j)):
-    each cell's half-cell conduction path in series with the contact
-    coefficient h = ``htc[g] * time_functions[g](t) * f_g(T_first)``,
-    g = ``group[p]``, where f_g interpolates ``temperature_factors[g]`` (a
-    ``(temp_points, factors)`` pair, or None for 1) at the temperature of the
-    pair's first cell -- MAGMASOFT's temperature-dependent coefficients, set
-    by the casting surface temperature. The exchange is explicit against the
-    pre-step field and conservative. Links of the neighbour array between
-    the two bodies must be removed by the caller, or the pair conducts twice.
-    """
     first: IntArray
     second: IntArray
     area: FloatArray
@@ -209,7 +113,6 @@ class InterfaceLinks:
     temperature_factors: Optional[Sequence[Optional[tuple[FloatArray, FloatArray]]]] = None
 
     def group_htc(self, time: float) -> FloatArray:
-        """(n_groups,) contact coefficient of each group at ``time``."""
         return np.array(
             [
                 float(h) * (float(fn(time)) if fn is not None else 1.0)
@@ -218,24 +121,12 @@ class InterfaceLinks:
             dtype=np.float64,
         )
 
-
-#: Temperature range and step (°C) of the enthalpy tables built for a
-#: :class:`TabulatedBody`. Values outside the range clamp to the end points.
 TABULATED_ENTHALPY_RANGE = (-100.0, 2500.0)
 TABULATED_ENTHALPY_STEP = 0.5
-#: A tabulated cell's k and rho*cp are refreshed once it has moved this far
-#: (K) since their last evaluation. The explicit stencil spreads changes of
-#: 1e-12 K one cell per step, so without a threshold a whole mold that never
-#: warms would be re-evaluated every step.
 TABULATED_PROPERTY_TOLERANCE = 0.01
-#: Steps smaller than this (K) skip the enthalpy correction: its second-order
-#: term, 0.5 * c'(T) * dT^2, is far below round-off of the field at that size.
-#: The step itself is conservative either way.
 TABULATED_ENTHALPY_TOLERANCE = 1e-3
 
-
 class MaterialThermalProperties(Protocol):
-    """Protocol for material thermal properties"""
     thermal_conductivity: float
     specific_heat: float
     density_liquid: float
@@ -243,41 +134,12 @@ class MaterialThermalProperties(Protocol):
     liquidus_temp: float
     solidus_temp: float
     latent_heat: float
-    
+
     @property
     def thermal_diffusivity(self) -> float: ...
 
-
 class HeatTransferModel:
-    """
-    Heat transfer model using finite differences.
-    
-    Solves the heat equation:
-        ∂T/∂t = α∇²T + Q/(ρcₚ)
-    
-    Using explicit Euler method with adaptive time stepping.
-    
-    Features:
-    - Multiple boundary condition types
-    - Temperature-dependent properties (optional)
-    - Latent heat release during solidification
-    - Vectorized NumPy operations for performance
-    
-    Example:
-        model = HeatTransferModel(mesh, alloy)
-        model.set_initial_temperature(alloy.pouring_temp)
-        model.add_boundary(
-            surface_indices, 
-            BoundaryType.CONVECTION,
-            htc=500,  # W/(m²·K)
-            T_infinity=200  # Mold temperature
-        )
-        
-        while not model.is_solidified():
-            model.step(dt)
-            print(f"T_max = {model.temperature_field.max:.1f}°C")
-    """
-    
+
     def __init__(
         self,
         n_voxels: int,
@@ -297,57 +159,6 @@ class HeatTransferModel:
         tabulated_bodies: Optional[Sequence[TabulatedBody]] = None,
         interface_links: Optional[InterfaceLinks] = None,
     ):
-        """
-        Initialize heat transfer model.
-        
-        Args:
-            n_voxels: Number of voxels in mesh
-            voxel_size: Voxel size in meters
-            neighbors: Neighbor connectivity array (n_voxels x max_neighbors)
-            alloy: Material thermal properties
-            use_temperature_dependent: Use temperature-dependent k, cp
-            voxel_sizes: Optional per-voxel size in meters (default: scalar
-                ``voxel_size`` applied uniformly)
-            diffusivity_overrides: Optional ``(indices, alpha_values)`` pair
-                for per-voxel thermal diffusivity (e.g., chill regions)
-            property_curves: Optional dict with keys "temp_points" (°C),
-                "conductivity" (W/m·K), "specific_heat" (J/kg·K), "density"
-                (kg/m³) for temperature-dependent properties
-            rho_cp_overrides: Optional ``(indices, rho_cp_values)`` pair for
-                per-voxel volumetric heat capacity (e.g., graphite chills)
-            capacity_weights: Optional (N,) share of each cell's dx_i^3 that
-                holds material (cut cells). Heat capacity becomes
-                rho_cp * w_i * dx_i^3. A weight of 0 marks a slaved cell
-                (see ``slave_cells``). A link i-j carries
-                min(f_i, f_j) * (a_i + a_j) / 2 (``cut_cell_conductance_factors``,
-                ``cut_cell_link_apertures``): symmetric, so conservative, and
-                no cell's explicit rate exceeds the full-cell rate. With
-                property curves, capacity is rho(T)*cp(T) from the curves.
-            boundary_areas: Optional (N,) boundary area per cell in m^2.
-                Robin and heat-flux terms then use A_i / (w_i * dx_i^3)
-                instead of 1/dx_i.
-            cut_cell_apertures: Scale cut-cell links by the open-face
-                estimate (a_i + a_j) / 2 with a = clip(w, 0, 1)
-                (``cut_cell_link_apertures``). False keeps full links.
-            slave_cells: Optional ``(slaves, masters)`` index pair. After
-                each step a slave copies its master's temperature; the
-                caller has moved the slave's capacity and area to the master.
-            contact_conductance: Optional ``(indices, h)`` pair: the cells of
-                a contacting body (e.g. a sand core) and the interface heat
-                transfer coefficient h in W/(m^2 K). Every link with exactly
-                one end in ``indices`` carries h in series with the pair
-                conductivity: k_ij -> k_ij / (1 + k_ij / (h * dx)), dx the
-                contacting cell's size, so the interface conductance per area
-                is 1 / (dx / k_ij + 1 / h). Links only lose conductance, so the
-                stable step is unchanged.
-            tabulated_bodies: Optional :class:`TabulatedBody` list (sand mold
-                and cores). Their cells take k(T) and rho*cp(T) from the tables
-                every step, through the diffusivity and heat-capacity
-                overrides, and are moved by enthalpy. They must not also be in
-                ``diffusivity_overrides`` or ``rho_cp_overrides``.
-            interface_links: Optional :class:`InterfaceLinks` (metal against
-                mold sand), exchanged after conduction and the boundaries.
-        """
         self.n_voxels = n_voxels
         self.voxel_size = voxel_size
         self.neighbors = neighbors
@@ -358,8 +169,6 @@ class HeatTransferModel:
         )
         self._diffusivity_overrides = diffusivity_overrides
         self._property_curves = property_curves
-        # Contiguous float64 copies of the curves, cast once so the per-step
-        # diffusivity evaluation does no per-call conversion.
         if property_curves is not None:
             self._curve_temp = np.ascontiguousarray(property_curves["temp_points"], dtype=np.float64)
             self._curve_k = np.ascontiguousarray(property_curves["conductivity"], dtype=np.float64)
@@ -372,30 +181,22 @@ class HeatTransferModel:
             self._curve_cp = None
         self._rho_cp_scalar = alloy.density_liquid * alloy.specific_heat
         self._rho_cp_overrides = rho_cp_overrides
-        
-        # Temperature field
+
         self._temperatures = np.zeros(n_voxels, dtype=np.float64)
         self._temperatures_new = np.zeros(n_voxels, dtype=np.float64)
-        
-        # Time tracking
+
         self.time = 0.0
-        
-        # Boundary conditions
+
         self._boundaries: List[BoundaryCondition] = []
-        
-        # Heat source (latent heat during solidification)
+
         self._heat_source = np.zeros(n_voxels, dtype=np.float64)
-        
-        # Precompute constants
-        self._alpha = alloy.thermal_diffusivity  # m²/s
+
+        self._alpha = alloy.thermal_diffusivity
         self._dx2 = voxel_size ** 2
-        # Per-voxel inverse squared voxel size (1/dx_i²). Stored as a scalar
-        # for uniform grids and as an array when per-voxel sizes are supplied.
         if self._voxel_sizes is not None:
             self._inv_dx2 = 1.0 / (self._voxel_sizes ** 2)
         else:
             self._inv_dx2 = 1.0 / (voxel_size ** 2)
-        # Always-array form for the Numba parallel Laplacian kernel.
         self._inv_dx2_arr = (
             self._inv_dx2
             if isinstance(self._inv_dx2, np.ndarray)
@@ -404,15 +205,11 @@ class HeatTransferModel:
         self._numba_parallel_eligible = bool(NUMBA_AVAILABLE and not use_temperature_dependent)
         self._last_step_used_numba = False
 
-        # Cut cells (all None when not supplied: the full-cell code paths
-        # below stay exactly as they were).
         self._capacity_weights: Optional[FloatArray] = None
         self._conductance_factors: Optional[FloatArray] = None
         self._link_apertures: Optional[FloatArray] = None
         self._boundary_area_per_volume: Optional[FloatArray] = None
         self._slave_cells: Optional[tuple[IntArray, IntArray]] = None
-        # rho*cp at the curve points (J/m3/K). Cut cells with property curves
-        # use rho(T)*cp(T) for capacity, Robin and latent beta.
         self._capacity_curve: Optional[FloatArray] = None
         self._step_rho_cp: Optional[FloatArray] = None
         if capacity_weights is None and boundary_areas is not None:
@@ -448,8 +245,7 @@ class HeatTransferModel:
                 np.asarray(slaves, dtype=np.int64).reshape(-1),
                 np.asarray(masters, dtype=np.int64).reshape(-1),
             )
-        
-        # h * dx_i on contacting cells, 0 elsewhere (``contact_conductance``).
+
         self._contact_hdx = np.zeros(n_voxels, dtype=np.float64)
         self._has_contact = False
         if contact_conductance is not None:
@@ -464,16 +260,12 @@ class HeatTransferModel:
                 self._contact_hdx[contact_idx] = float(contact_h) * sizes
                 self._has_contact = True
 
-        # Tabulated bodies ride on the override arrays: their indices are
-        # appended there and their values rewritten before every step.
         self._tabulated: List[Dict[str, Any]] = []
         if tabulated_bodies:
             self._init_tabulated_bodies(tabulated_bodies)
         self._interface_links = interface_links
         if interface_links is not None:
             self._init_interface_links(interface_links)
-        # External sink (``set_external_sink``): heat exchange with a body
-        # solved by another model, e.g. a mold on its own time step.
         self._sink_cells: Optional[IntArray] = None
         self._sink_G: Optional[FloatArray] = None
         self._sink_T: Optional[FloatArray] = None
@@ -481,18 +273,12 @@ class HeatTransferModel:
         self._sink_time = 0.0
         self._sink_integral: Optional[FloatArray] = None
 
-        # What the stable-timestep evaluation worked out at the field a step
-        # starts from, handed to that step's first substep (see ``step``):
-        # rho*cp of a cut-cell model and the interface-link conductances.
         self._stable_rho_cp: Optional[FloatArray] = None
         self._stable_link_g: Optional[FloatArray] = None
 
-        # Count neighbors for each voxel (kept for API compatibility; the
-        # weighted 27-point Laplacian no longer normalizes by neighbor count).
         self._neighbor_counts = np.sum(neighbors >= 0, axis=1).astype(np.float64)
 
     def _init_tabulated_bodies(self, bodies: Sequence[TabulatedBody]) -> None:
-        """Append each body's cells to the override arrays and build its enthalpy table."""
         lo, hi = TABULATED_ENTHALPY_RANGE
         fine_t = np.arange(lo, hi + TABULATED_ENTHALPY_STEP, TABULATED_ENTHALPY_STEP)
         diff_idx = [] if self._diffusivity_overrides is None else [np.asarray(self._diffusivity_overrides[0], dtype=np.int64)]
@@ -530,8 +316,6 @@ class HeatTransferModel:
                 "fine_h": fine_h,
                 "diff_slice": slice(diff_offset, diff_offset + n),
                 "rcp_slice": slice(rcp_offset, rcp_offset + n),
-                # Field at the last property update: a cell whose temperature
-                # has not moved keeps its values (most of a mold never warms).
                 "last_T": np.full(n, np.nan),
                 "sorted_indices": np.sort(idx),
             })
@@ -544,7 +328,6 @@ class HeatTransferModel:
         self._update_tabulated_bodies(self._temperatures)
 
     def _update_tabulated_bodies(self, T: FloatArray) -> None:
-        """Rewrite the tabulated cells' override values at the field ``T``."""
         if not self._tabulated or self._diffusivity_overrides is None or self._rho_cp_overrides is None:
             return
         diff_vals = self._diffusivity_overrides[1]
@@ -574,11 +357,6 @@ class HeatTransferModel:
             body["last_T"][moved] = t_moved
 
     def _correct_tabulated_enthalpy(self, T_new: FloatArray, T_old: FloatArray) -> None:
-        """Move the tabulated cells by enthalpy: H(T_new) = H(T_old) + (T_new - T_old) * c_step.
-
-        The update before this used c_step, the capacity at T_old, so
-        (T_new - T_old) * c_step is the heat each cell took per volume.
-        """
         if not self._tabulated or self._rho_cp_overrides is None:
             return
         rcp_vals = self._rho_cp_overrides[1]
@@ -597,7 +375,6 @@ class HeatTransferModel:
                 continue
             t_old = T_old[idx]
             step = T_new[idx] - t_old
-            # A cell that took next to no heat stays on its linear step.
             moved = np.flatnonzero(np.abs(step) >= TABULATED_ENTHALPY_TOLERANCE)
             if moved.size == 0:
                 continue
@@ -610,7 +387,6 @@ class HeatTransferModel:
             T_new[cells] = _interp(h_new, body["fine_h"], body["fine_t"])
 
     def tabulated_enthalpy(self, body_index: int, temperatures: FloatArray) -> FloatArray:
-        """Enthalpy per volume (J/m^3, 0 at the table's low end) of tabulated body ``body_index`` at ``temperatures``."""
         body = self._tabulated[body_index]
         return np.interp(np.asarray(temperatures, dtype=np.float64), body["fine_t"], body["fine_h"])
 
@@ -636,11 +412,9 @@ class HeatTransferModel:
         self._link_second = second
         self._link_area = area
         self._link_group = group
-        # Pairs of each group, for the per-group temperature factor.
         self._link_group_pairs = [np.flatnonzero(group == g) for g in range(len(links.htc))]
         self._link_half_dx_first = 0.5 * sizes[first]
         self._link_half_dx_second = 0.5 * sizes[second]
-        # The exchange touches only the pairs' cells: gather and scatter there.
         cells = np.unique(np.concatenate([first, second]))
         self._link_cells = cells
         self._link_first_local = np.searchsorted(cells, first)
@@ -651,13 +425,11 @@ class HeatTransferModel:
         self._link_cell_volume = volume
 
     def _link_cell_capacity(self, rho_cp: FloatArray) -> FloatArray:
-        """Heat capacity (J/K) of each link cell: rho_cp * w * dx^3."""
         return rho_cp[self._link_cells] * self._link_cell_volume
 
     def _interface_link_conductance(
         self, alpha: FloatArray, rho_cp: FloatArray, T: Optional[FloatArray] = None
     ) -> FloatArray:
-        """(n_pairs,) conductance G = A / (dx_i/(2k_i) + 1/h + dx_j/(2k_j)) in W/K at the current time."""
         links = self._interface_links
         assert links is not None
         h = links.group_htc(self.time)[self._link_group]
@@ -689,7 +461,6 @@ class HeatTransferModel:
         return np.where(h > 0.0, self._link_area / resistance, 0.0)
 
     def _interface_link_rates(self, alpha: FloatArray, rho_cp: FloatArray) -> FloatArray:
-        """(N,) explicit rate sum_p G_p / C_i each cell carries through the interface links, 1/s."""
         if self._interface_links is None or self._link_first.size == 0:
             return np.zeros(self.n_voxels, dtype=np.float64)
         m = len(self._link_cells)
@@ -723,11 +494,6 @@ class HeatTransferModel:
         rho_cp: FloatArray,
         conductance: Optional[FloatArray] = None,
     ) -> None:
-        """Exchange q_p = G_p (T_i - T_j) over every pair, explicit against ``T_old``.
-
-        ``conductance``: the pair conductances already evaluated at ``T_old``,
-        ``alpha``, ``rho_cp`` and the current time (see ``step``).
-        """
         if self._interface_links is None or self._link_first.size == 0:
             return
         m = len(self._link_cells)
@@ -756,7 +522,6 @@ class HeatTransferModel:
         T_new[self._link_cells] += delta
 
     def _cell_volumes(self, cells: IntArray) -> FloatArray:
-        """Material volume w * dx^3 (m^3) of ``cells``."""
         sizes = self._voxel_sizes[cells] if self._voxel_sizes is not None else np.full(len(cells), self.voxel_size)
         volume = sizes ** 3
         if self._capacity_weights is not None:
@@ -764,13 +529,6 @@ class HeatTransferModel:
         return volume
 
     def set_external_sink(self, cells: IntArray, conductance: FloatArray, sink_temperature: FloatArray) -> None:
-        """Exchange heat with a body outside this model, held at ``sink_temperature`` per cell.
-
-        Cell ``cells[i]`` loses ``conductance[i] * (T - sink_temperature[i])``
-        watts, explicit against the pre-step field on every internal
-        substep. ``take_external_exchange`` returns the time integral of each
-        cell's pre-step temperature so the caller can hand the body its share.
-        """
         cells = np.asarray(cells, dtype=np.int64).reshape(-1)
         if self._sink_cells is None or len(self._sink_cells) != len(cells) or np.any(self._sink_cells != cells):
             self._sink_cells = cells
@@ -781,7 +539,6 @@ class HeatTransferModel:
         self._sink_T = np.asarray(sink_temperature, dtype=np.float64).reshape(-1)
 
     def take_external_exchange(self) -> tuple[float, FloatArray]:
-        """(time, integral of T dt per sink cell) since the last call; resets both."""
         if self._sink_integral is None:
             return 0.0, np.zeros(0)
         out = (self._sink_time, self._sink_integral.copy())
@@ -808,7 +565,6 @@ class HeatTransferModel:
         return rates
 
     def add_heat(self, cells: IntArray, joules: FloatArray) -> None:
-        """Deposit ``joules`` into ``cells`` (moved by enthalpy on tabulated cells)."""
         cells = np.asarray(cells, dtype=np.int64).reshape(-1)
         joules = np.asarray(joules, dtype=np.float64).reshape(-1)
         if cells.size == 0:
@@ -821,7 +577,6 @@ class HeatTransferModel:
                 continue
             sel = cells[inside]
             if NUMBA_AVAILABLE and len(sel) > 4096:
-                # The lengths _interp sends to the Numba kernel: both lookups in one pass.
                 shift_kernel = (
                     shift_enthalpy_serial
                     if runs_serial(len(sel), _COST_SHIFT_ENTHALPY_NS)
@@ -842,11 +597,6 @@ class HeatTransferModel:
             T[cells[rest]] += dh[rest] / self.volumetric_heat_capacity()[cells[rest]]
 
     def conductivity_at(self, cells: IntArray) -> FloatArray:
-        """Conductivity (W/(m K)) of ``cells`` at the current field.
-
-        Tabulated cells read their own k(T) table; only the rest evaluate the
-        whole field.
-        """
         cells = np.asarray(cells, dtype=np.int64)
         T = self._temperatures
         k = np.full(len(cells), np.nan)
@@ -855,20 +605,11 @@ class HeatTransferModel:
                 k[inside] = np.interp(T[cells[inside]], body["temps"], body["k"])
         rest = np.isnan(k)
         if np.any(rest):
-            # alpha * rho_cp at these cells only. Every step of both is
-            # element-wise, so this is the value the whole-field evaluation
-            # gives at the same cell, without evaluating the other cells.
             rest_cells = cells[rest]
             k[rest] = self._alpha_at(rest_cells, T) * self._rho_cp_at(rest_cells, T)
         return k
 
     def _tabulated_membership(self, cells: IntArray) -> List[IntArray]:
-        """For each tabulated body, the positions in ``cells`` that are cells of that body.
-
-        The callers ask about the same cell sets every step (the pairs of a
-        coupled mold), so the answer is kept per set. A set is recognised by
-        its contents, not by the array object.
-        """
         if not self._tabulated:
             return []
         cache = self.__dict__.setdefault("_membership_cache", [])
@@ -886,7 +627,6 @@ class HeatTransferModel:
         return membership
 
     def _cell_set_volumes(self, cells: IntArray) -> FloatArray:
-        """``_cell_volumes(cells)``, kept per cell set like ``_tabulated_membership`` (sizes and weights are fixed)."""
         cache = self.__dict__.setdefault("_volume_cache", [])
         for known, volumes in cache:
             if known is cells or (known.shape == cells.shape and np.array_equal(known, cells)):
@@ -898,14 +638,6 @@ class HeatTransferModel:
         return volumes
 
     def _override_positions(self, overrides: Optional[tuple[np.ndarray, np.ndarray]], name: str) -> Optional[IntArray]:
-        """(N,) position of each cell in an override pair's value array, -1 where not overridden.
-
-        ``field[indices] = values`` over the whole field leaves cell ``i``
-        with ``values[positions[i]]``; the table is built by the same kind of
-        assignment, so a repeated index resolves the same way. Override
-        index arrays are fixed after construction; a replaced pair rebuilds
-        the table.
-        """
         if overrides is None:
             return None
         cached = self.__dict__.get(name)
@@ -918,7 +650,6 @@ class HeatTransferModel:
         return positions
 
     def _alpha_at(self, cells: IntArray, T: FloatArray) -> FloatArray:
-        """``_step_alpha_array(T)[cells]`` without evaluating the other cells."""
         if self.use_temperature_dependent:
             alpha = np.array(self._get_temperature_dependent_diffusivity(T[cells]), dtype=np.float64, copy=True)
         else:
@@ -932,7 +663,6 @@ class HeatTransferModel:
         return alpha
 
     def _rho_cp_at(self, cells: IntArray, T: FloatArray) -> FloatArray:
-        """``volumetric_heat_capacity(T)[cells]`` without evaluating the other cells."""
         if self._capacity_curve is not None:
             t_cells = np.ascontiguousarray(T[cells], dtype=np.float64)
             if NUMBA_AVAILABLE:
@@ -953,7 +683,6 @@ class HeatTransferModel:
         return rho_cp
 
     def _step_alpha_array(self, T: FloatArray) -> FloatArray:
-        """(N,) diffusivity at ``T`` with the overrides applied."""
         if self.use_temperature_dependent:
             alpha = np.array(self._get_temperature_dependent_diffusivity(T), dtype=np.float64, copy=True)
         else:
@@ -965,50 +694,31 @@ class HeatTransferModel:
 
     @property
     def numba_parallel_eligible(self) -> bool:
-        """Return True when the model can use Numba parallel kernels."""
         return self._numba_parallel_eligible
 
     @property
     def backend_description(self) -> str:
-        """
-        Human-readable name of the kernel backend used per step.
-
-        With Numba present every ``_step_internal`` branch dispatches a
-        parallel kernel: the uniform Laplacian/update pair when alpha is
-        scalar, the conservative flux kernel when it is per-voxel.
-        ``numba_parallel_eligible`` covers only the uniform branch, so it
-        is the wrong flag to label the backend with.
-        """
         return "Numba parallel kernels" if NUMBA_AVAILABLE else "NumPy/vectorized kernels"
 
     @property
     def last_step_used_numba(self) -> bool:
-        """Return whether the most recent step used Numba parallel kernels."""
         return bool(self._last_step_used_numba)
-    
+
     @property
     def temperatures(self) -> FloatArray:
-        """Current temperature field"""
         return self._temperatures
-    
+
     @property
     def temperature_field(self) -> TemperatureField:
-        """Get temperature field object"""
         return TemperatureField(self._temperatures.copy(), self.time)
-    
+
     def set_initial_temperature(self, temperature: Union[float, FloatArray]) -> None:
-        """
-        Set initial temperature field.
-        
-        Args:
-            temperature: Uniform temperature or per-voxel array
-        """
         if isinstance(temperature, (int, float)):
             self._temperatures.fill(temperature)
         else:
             self._temperatures[:] = temperature
         self._update_tabulated_bodies(self._temperatures)
-    
+
     def add_boundary(
         self,
         indices: IntArray,
@@ -1019,18 +729,6 @@ class HeatTransferModel:
         time_function: Optional[Callable[[float], float]] = None,
         weights: Optional[FloatArray] = None,
     ) -> None:
-        """
-        Add a boundary condition.
-        
-        Args:
-            indices: Voxel indices where condition applies
-            boundary_type: Type of boundary condition
-            value: Temperature (FIXED) or heat flux (HEAT_FLUX)
-            htc: Heat transfer coefficient for CONVECTION/INTERFACE
-            T_infinity: Ambient temperature for CONVECTION
-            time_function: Optional time-dependent multiplier
-            weights: Optional per-index area multiplier (see BoundaryCondition)
-        """
         if weights is not None:
             weights = np.asarray(weights, dtype=np.float64).reshape(-1)
             if len(weights) != len(np.asarray(indices).reshape(-1)):
@@ -1048,23 +746,9 @@ class HeatTransferModel:
 
     @property
     def boundaries(self) -> List["BoundaryCondition"]:
-        """Read-only view of the registered boundary conditions."""
         return list(self._boundaries)
 
     def clear_boundaries(self, boundary_type: Optional[BoundaryType] = None) -> int:
-        """Remove boundary conditions, optionally only those of one type.
-
-        ``add_boundary`` could previously only append, so a boundary whose voxel
-        set changes over time -- a mold-filling front, where cells become wetted
-        as metal arrives -- had no way to be revised. Clear and re-add instead.
-
-        Args:
-            boundary_type: Only remove conditions of this type. ``None``
-                removes all of them.
-
-        Returns:
-            How many conditions were removed.
-        """
         before = len(self._boundaries)
         if boundary_type is None:
             self._boundaries.clear()
@@ -1075,32 +759,11 @@ class HeatTransferModel:
         return before - len(self._boundaries)
 
     def set_heat_source(self, source: FloatArray) -> None:
-        """
-        Set volumetric heat source term (W/m³).
-        
-        Typically used for latent heat release during solidification.
-        """
         self._heat_source[:] = source
-    
+
     def get_stable_timestep(
         self, alpha: Optional[FloatArray] = None, rho_cp: Optional[FloatArray] = None
     ) -> float:
-        """
-        Calculate maximum stable time step for explicit scheme.
-
-        Stability criterion (3D, isotropic 27-point weighted stencil):
-            dt < dx² / (4α)
-        The stencil's spectral radius is bounded by
-        (0.5 * 6 + 0.125 * 8) / dx² = 4 / dx², so 4α/dx² is the correct
-        diffusion bound. Uses the smallest per-voxel size and the largest
-        per-voxel diffusivity when those vary.
-
-        Args:
-            alpha: Optional diffusivity field already evaluated at the
-                current temperatures, reused instead of recomputing it.
-            rho_cp: Optional ``volumetric_heat_capacity`` of the current
-                field, already evaluated (used by the cut-cell bound).
-        """
         if isinstance(self._inv_dx2, np.ndarray):
             min_dx2 = 1.0 / float(np.max(self._inv_dx2))
         else:
@@ -1121,11 +784,6 @@ class HeatTransferModel:
         return dt
 
     def volumetric_heat_capacity(self, temperatures: Optional[FloatArray] = None) -> FloatArray:
-        """(N,) rho*cp in J/m3/K at ``temperatures`` (default: the current field).
-
-        Cut cells with property curves: rho(T)*cp(T) from the curves, chill
-        overrides applied. Otherwise the scalar rho_l*cp with the overrides.
-        """
         T = self._temperatures if temperatures is None else np.asarray(temperatures, dtype=np.float64)
         if self._capacity_curve is not None:
             if NUMBA_AVAILABLE:
@@ -1145,7 +803,6 @@ class HeatTransferModel:
         return rho_cp
 
     def _fuses_flux(self) -> bool:
-        """True when the cut-cell stencil runs through ``cut_cell_flux_parallel`` (physics.kernel_dispatch)."""
         return bool(
             NUMBA_AVAILABLE
             and self._capacity_weights is not None
@@ -1165,12 +822,6 @@ class HeatTransferModel:
         source: Optional[FloatArray],
         out: FloatArray,
     ) -> None:
-        """Run ``cut_cell_flux_parallel`` (or its twin) on this model's stencil.
-
-        ``rates``: array to receive the conduction rates, or None.
-        ``apply_dt``: step to apply (``out`` receives the new field, ``source``
-        required), or None for ``out`` to receive the flux.
-        """
         kernel = (
             cut_cell_flux_serial if runs_serial(self.n_voxels, _COST_CUT_CELL_FLUX_NS) else cut_cell_flux_parallel
         )
@@ -1194,15 +845,6 @@ class HeatTransferModel:
         )
 
     def heat_capacity_lookup(self) -> tuple:
-        """What ``volumetric_heat_capacity`` is built from, for a kernel that evaluates it per cell.
-
-        ``(use_curve, curve_temp, capacity_curve, rho_cp_scalar, use_overrides,
-        override_positions, override_values)``: the value at a cell is
-        ``override_values[override_positions[i]]`` where that position is not
-        -1, else the capacity curve at the cell's temperature when
-        ``use_curve``, else the scalar. The override values are the live
-        array, as last written by the tabulated-body update.
-        """
         empty = np.zeros(1, dtype=np.float64)
         use_curve = self._capacity_curve is not None
         positions = self._override_positions(self._rho_cp_overrides, "_rho_cp_override_positions")
@@ -1217,7 +859,6 @@ class HeatTransferModel:
         )
 
     def _fuses_properties(self) -> bool:
-        """True when alpha(T) and rho*cp(T) both come from the property curves (one kernel does both)."""
         return bool(
             NUMBA_AVAILABLE
             and self.use_temperature_dependent
@@ -1226,11 +867,6 @@ class HeatTransferModel:
         )
 
     def _diffusivity_and_capacity(self, T: FloatArray) -> tuple[FloatArray, FloatArray]:
-        """``(_get_temperature_dependent_diffusivity(T), volumetric_heat_capacity(T))`` in one pass.
-
-        Only when ``_fuses_properties()``. The diffusivity carries no
-        overrides and the heat capacity carries them, as from the two calls.
-        """
         field = np.ascontiguousarray(T, dtype=np.float64)
         kernel = (
             compute_diffusivity_and_capacity_serial
@@ -1251,12 +887,6 @@ class HeatTransferModel:
         rho_cp: Optional[FloatArray] = None,
         conduction_rates: Optional[FloatArray] = None,
     ) -> float:
-        """0.9 / max_i(conduction rate_i + Robin rate_i), the exact per-cell explicit bound.
-
-        rate_i = sum_j w_slot * min(f_i, f_j) * k_ij / (rho_cp_i * w_i * dx_i^2)
-               + h(t) * A_i / (rho_cp_i * w_i * dx_i^3)
-        with rho_cp_i at the current field (the minimum capacity governs).
-        """
         T = self._temperatures
         if self.use_temperature_dependent:
             alpha_arr = (
@@ -1279,7 +909,6 @@ class HeatTransferModel:
         else:
             rates_kernel = cut_cell_conduction_rates_parallel
         if conduction_rates is not None:
-            # Already taken at this alpha and rho_cp by the fused stencil sweep (see ``step``).
             rates = conduction_rates
         else:
             rates = rates_kernel(
@@ -1312,23 +941,6 @@ class HeatTransferModel:
         return 0.9 / max_rate
 
     def _get_alpha_max(self, alpha: Optional[FloatArray] = None) -> float:
-        """
-        Return the maximum thermal diffusivity over all voxels.
-
-        Uses the current temperature field when temperature-dependent
-        properties are active and ALWAYS includes per-voxel diffusivity
-        override values (e.g., graphite chills). Missing the overrides here
-        would under-estimate the CFL diffusivity and let the explicit
-        scheme run unstable at the chill interface (observed as +/-inf
-        blow-up within a few hundred steps).
-
-        Args:
-            alpha: Optional diffusivity field already evaluated at the
-                current temperatures, reused instead of recomputing it.
-        """
-        # Every cell overridden (a sand-only mold model): the base material
-        # never applies and must not set the bound. The override set is
-        # fixed after construction, so this is worked out once.
         override_all = getattr(self, "_overrides_cover_all", None)
         if override_all is None:
             override_all = self._diffusivity_overrides is not None and (
@@ -1348,9 +960,6 @@ class HeatTransferModel:
             if len(override_idx) > 0:
                 alpha_max = max(alpha_max, float(np.max(override_vals)))
         if self._rho_cp_overrides is not None:
-            # The conservative flux scheme bounds the pair conductivity by
-            # k_ij <= 2*min(k_i, k_j), so the effective diffusivity of any
-            # voxel is at most 2x its own alpha; reflect that in the CFL.
             rcp_idx, rcp_vals = self._rho_cp_overrides
             if len(rcp_idx) > 0:
                 alpha_max = 2.0 * alpha_max
@@ -1359,10 +968,7 @@ class HeatTransferModel:
         return alpha_max
 
     def get_gradient_magnitude(self, neighbors: IntArray, voxel_size: float) -> FloatArray:
-        """Return gradient magnitude from the current thermal field without copying."""
         neighbor_arr = np.asarray(neighbors, dtype=np.int32)
-        # The field may carry more cells than ``neighbors`` has rows (mold
-        # sand appended after the mesh); the gradient is of the leading cells.
         values = np.ascontiguousarray(self._temperatures[: len(neighbor_arr)], dtype=np.float64)
         if NUMBA_AVAILABLE:
             gradient_kernel = (
@@ -1390,25 +996,8 @@ class HeatTransferModel:
             if count > 0:
                 gradients[i] = np.sqrt(grad_sq / count)
         return gradients
-    
+
     def step(self, dt: float) -> None:
-        """
-        Advance temperature field by one time step.
-        
-        Uses explicit finite difference method.
-        
-        Args:
-            dt: Time step in seconds
-        """
-        # The CFL bound and the first substep both need alpha at the current
-        # field, so evaluate the property curves once and share the result.
-        # The bound is deliberately NOT cached across steps: alpha rises as
-        # the casting cools (k climbs toward room temperature while cp falls),
-        # so a stale bound is stale in the unstable direction, and the
-        # adaptive-dt path (CASTSIM_THERMAL_ADAPTIVE_DT) sets the outer step
-        # near this bound, making the subdivision below load-bearing.
-        # Tabulated (sand) cells take their properties at the current field
-        # before the bound is taken; later substeps refresh them themselves.
         self._update_tabulated_bodies(self._temperatures)
         rho_cp_fused = None
         if not self.use_temperature_dependent:
@@ -1418,13 +1007,10 @@ class HeatTransferModel:
         else:
             alpha0 = self._get_temperature_dependent_diffusivity(self._temperatures)
 
-        # Check stability
         self._stable_rho_cp = None
         self._stable_link_g = None
         flux0 = None
         if self._fuses_flux():
-            # One sweep of the stencil gives the conduction rates the bound
-            # needs and the conduction flux the first substep applies.
             T0 = self._temperatures
             if alpha0 is None:
                 alpha0 = np.full(self.n_voxels, float(self._alpha), dtype=np.float64)
@@ -1445,21 +1031,14 @@ class HeatTransferModel:
                 if alpha0 is not None
                 else self.get_stable_timestep()
             )
-        # The bound was taken at the field, the override values and the time
-        # the first substep starts from, so that substep reuses the rho*cp
-        # field and the link conductances the bound evaluated instead of
-        # evaluating them again. Neither array is written to after it is made.
         rho_cp0 = self._stable_rho_cp
         link_g0 = self._stable_link_g
         self._stable_rho_cp = None
         self._stable_link_g = None
         if dt > dt_stable:
-            # Subdivide step
             n_substeps = int(np.ceil(dt / dt_stable))
             dt_sub = dt / n_substeps
             for substep in range(n_substeps):
-                # Only the first substep sees the field alpha0 was built from;
-                # later ones recompute against the updated temperatures.
                 if substep > 0:
                     self._update_tabulated_bodies(self._temperatures)
                 self._step_internal(
@@ -1492,40 +1071,18 @@ class HeatTransferModel:
         link_conductance_precomputed: Optional[FloatArray] = None,
         flux_precomputed: Optional[FloatArray] = None,
     ) -> None:
-        """
-        Internal time stepping (assumes dt is stable).
-
-        Args:
-            dt: Time step in seconds
-            alpha_precomputed: Optional diffusivity field already evaluated at
-                the current temperatures (see ``step``).
-            rho_cp_precomputed: Optional ``volumetric_heat_capacity`` of the
-                current field, already evaluated (cut cells; see ``step``).
-            link_conductance_precomputed: Optional interface-link conductances
-                already evaluated at the current field and time (see ``step``).
-            flux_precomputed: Optional conduction flux of the current field
-                from ``cut_cell_flux_parallel`` (cut cells; see ``step``).
-        """
         T = self._temperatures
         T_new = self._temperatures_new
 
-        # Get thermal diffusivity (potentially temperature-dependent)
         if not self.use_temperature_dependent:
             alpha = self._alpha
         elif alpha_precomputed is not None:
             alpha = alpha_precomputed
         elif rho_cp_precomputed is None and self._fuses_properties():
-            # A later substep of a cut-cell model on curves: both property
-            # fields at the new temperatures, in one pass.
             alpha, rho_cp_precomputed = self._diffusivity_and_capacity(T)
         else:
             alpha = self._get_temperature_dependent_diffusivity(T)
 
-        # Apply per-voxel diffusivity overrides (e.g., chill regions). This
-        # mutates alpha in place, including a field handed down from step();
-        # that array is a per-call local whose CFL maximum was already taken,
-        # and _get_alpha_max folds the override values in separately, so the
-        # mutation cannot leak into a later step or under-state the bound.
         if self._diffusivity_overrides is not None:
             if not isinstance(alpha, np.ndarray):
                 alpha = np.full(self.n_voxels, alpha, dtype=np.float64)
@@ -1553,8 +1110,6 @@ class HeatTransferModel:
         self._last_step_used_numba = use_numba_kernels or use_heterogeneous_numba
 
         if heterogeneous:
-            # The conservative two-point flux branch below rebuilds the stencil
-            # as a pair-conductivity sum; the uniform Laplacian is unused there.
             laplacian = None
         elif use_numba_kernels:
             laplacian = compute_laplacian_parallel(
@@ -1563,29 +1118,9 @@ class HeatTransferModel:
                 self._inv_dx2_arr,
             )
         else:
-            # Compute Laplacian using an isotropic 27-point weighted stencil.
-            # Slot layout (set by core/voxel_mesh.py._canonicalize_neighbor_order):
-            #   0-5   = face neighbors  [+X, -X, +Y, -Y, +Z, -Z]: weight 0.5
-            #   6-17  = edge neighbors: weight 0.0 (excluded; they cancel
-            #          exactly in the weighted sum)
-            #   18-25 = corner neighbors: weight 0.125
-            # laplacian[i] = Σ_present w_j * (T_nb_j - T_i) * (1/dx_i²)
-            #
-            # This weighted difference form is exact for all quadratic fields
-            # (faces 0.5*6 + corners 0.125*24 = 6) with isotropic 4th-order
-            # truncation error; it does NOT divide by neighbor count. Summing
-            # in slot pairs (face pairs, then corner pairs) keeps the
-            # accumulation order symmetric between geometrically symmetric
-            # voxels and removes the per-step floating-point bias that would
-            # otherwise compound over thousands of time steps.
-            #
-            # Some unit tests pass a smaller neighbour array (e.g. only the
-            # 6 face slots); we clamp each loop range to whatever shape[1]
-            # actually provides.
             laplacian = np.zeros(self.n_voxels, dtype=np.float64)
             max_slot = self.neighbors.shape[1]
 
-            # Faces (weight 0.5), summed in symmetric pairs.
             slot_pairs = [(0, 1), (2, 3), (4, 5)]
             for j_a, j_b in slot_pairs:
                 if j_a >= max_slot or j_b >= max_slot:
@@ -1598,9 +1133,6 @@ class HeatTransferModel:
                 dT_b = np.where(v_b, T[np.maximum(n_b, 0)] - T, 0.0)
                 laplacian += 0.5 * (dT_a + dT_b)
 
-            # Edge neighbors (slots 6-17) carry weight 0.0 and are skipped.
-
-            # Corners (weight 0.125), summed in symmetric pairs.
             corner_start = min(18, max_slot)
             corner_end = min(26, max_slot)
             j = corner_start
@@ -1613,31 +1145,17 @@ class HeatTransferModel:
                 dT_b = np.where(v_b, T[np.maximum(n_b, 0)] - T, 0.0)
                 laplacian += 0.125 * (dT_a + dT_b)
                 j += 2
-            # Handle a lone trailing corner slot for non-canonical shapes.
             if j < corner_end:
                 n_j = self.neighbors[:, j]
                 valid = n_j >= 0
                 laplacian += 0.125 * np.where(valid, T[np.maximum(n_j, 0)] - T, 0.0)
 
-            # Normalize by the per-voxel 1/dx_i² (no neighbor-count division).
             laplacian *= self._inv_dx2
-        
-        # Heat source term: Q / (ρ * cp)
+
         rho_cp = self._rho_cp_scalar
         source_term = self._heat_source / rho_cp
 
         if heterogeneous:
-            # Conservative two-point flux update. The plain "T += dt*alpha*lap"
-            # form is only conservative when the diffusivity is uniform: each
-            # voxel applies its OWN alpha to the shared interface gradient, so
-            # at a material interface (e.g. cast vs graphite chill) the high-
-            # diffusivity side gains energy at k_hi/k_lo times the rate the
-            # low side loses it (a numerical heat pump). The fix uses the
-            # harmonic-mean conductivity of each voxel pair and each voxel's
-            # own heat capacity:
-            #   T_new[i] = T[i] + dt/(rho_cp_i*dx²) * Σ_j w_j*k_ij*(T_j - T_i)
-            #   k_ij = 2*k_i*k_j/(k_i + k_j)
-            # which conserves energy exactly for any material layout.
             if not cut_cells:
                 rho_cp_arr = np.full(self.n_voxels, rho_cp, dtype=np.float64)
                 if self._rho_cp_overrides is not None:
@@ -1654,7 +1172,6 @@ class HeatTransferModel:
                     else np.full(self.n_voxels, alpha, dtype=np.float64)
                 )
                 if flux_precomputed is not None:
-                    # First substep: the flux came with the stability rates.
                     apply_kernel = (
                         apply_cut_cell_flux_serial
                         if runs_serial(self.n_voxels, _COST_APPLY_FLUX_NS)
@@ -1703,9 +1220,6 @@ class HeatTransferModel:
                     self._contact_hdx,
                 )
             else:
-                # NumPy reference for the conservative two-point flux (used
-                # when Numba is unavailable; must stay numerically equivalent
-                # to ``update_heterogeneous_parallel``).
                 max_slot = self.neighbors.shape[1]
                 slot_pairs = [(0, 1), (2, 3), (4, 5)]
                 corner_start = min(18, max_slot)
@@ -1763,7 +1277,6 @@ class HeatTransferModel:
 
                 T_new[:] = T + dt * (flux * self._inv_dx2) / rho_cp_arr + dt * source_term
         else:
-            # Update: T_new = T + dt * (α∇²T + Q/ρcp)
             if use_numba_kernels:
                 T_new[:] = update_temperatures_parallel(
                     T,
@@ -1774,15 +1287,13 @@ class HeatTransferModel:
                 )
             else:
                 T_new[:] = T + dt * (alpha * laplacian + source_term)
-        
-        # Apply boundary conditions
+
         self._apply_boundaries(T_new, T, dt)
 
         if links:
             step_alpha = (
                 alpha if isinstance(alpha, np.ndarray) else np.full(self.n_voxels, float(alpha), dtype=np.float64)
             )
-            # Links force the heterogeneous branch, which built rho_cp_arr at T.
             if self._interface_links is not None:
                 self._apply_interface_links(
                     T_new, T, dt, step_alpha, rho_cp_arr, conductance=link_conductance_precomputed
@@ -1790,19 +1301,9 @@ class HeatTransferModel:
             self._apply_external_sink(T_new, T, dt, rho_cp_arr)
         self._correct_tabulated_enthalpy(T_new, T)
 
-        # Swap arrays
         self._temperatures, self._temperatures_new = self._temperatures_new, self._temperatures
-    
-    def _apply_boundaries(self, T_new: FloatArray, T_old: FloatArray, dt: float) -> None:
-        """
-        Apply all boundary conditions.
 
-        Robin (convection/interface) fluxes are evaluated explicitly against
-        the PRE-update field and applied to the post-update field:
-            T_new[i] -= dt * h * (T_old[i] - T_inf) / (rho_cp * dx_i)
-        The old treatment lumped the boundary cell as dx/2 (a factor-2 error)
-        and evaluated the flux against the new temperature.
-        """
+    def _apply_boundaries(self, T_new: FloatArray, T_old: FloatArray, dt: float) -> None:
         rho_cp = self._rho_cp_scalar
         rho_cp_arr = None
         if self._rho_cp_overrides is not None:
@@ -1817,12 +1318,9 @@ class HeatTransferModel:
             return
         for bc in self._boundaries:
             if bc.type == BoundaryType.FIXED_TEMPERATURE:
-                # Dirichlet: T = T_boundary
                 T_new[bc.indices] = bc.get_effective_value(self.time)
-                
+
             elif bc.type in (BoundaryType.CONVECTION, BoundaryType.RADIATION):
-                # Convective boundary: -k∂T/∂n = h(T - T_inf); radiation adds
-                # eps*sigma*(T^4 - T_inf^4) through surface_htc.
                 h = bc.surface_htc(T_old, self.time)
                 T_inf = bc.T_infinity
                 idx = bc.indices
@@ -1833,10 +1331,8 @@ class HeatTransferModel:
                 )
                 rc_i = rho_cp_arr[idx] if rho_cp_arr is not None else rho_cp
                 T_new[idx] -= dt * h * (T_old[idx] - T_inf) / (rc_i * dx_i)
-                
+
             elif bc.type == BoundaryType.INTERFACE:
-                # Mold-metal interface with IHTC
-                # Similar to convection but may have time-dependent htc
                 h = bc.surface_htc(T_old, self.time)
                 T_mold = bc.T_infinity
                 idx = bc.indices
@@ -1847,19 +1343,8 @@ class HeatTransferModel:
                 )
                 rc_i = rho_cp_arr[idx] if rho_cp_arr is not None else rho_cp
                 T_new[idx] -= dt * h * (T_old[idx] - T_mold) / (rc_i * dx_i)
-                
+
             elif bc.type == BoundaryType.HEAT_FLUX:
-                # Neumann: -k∂T/∂n = q, with n the outward normal, so a
-                # positive q is a flux INTO the domain and heats the cell.
-                #
-                # Energy balance on a boundary cell of thickness dx_i:
-                #     rho*cp*dx_i * dT/dt = q   [W/m^2]
-                # giving the same explicit form as the Robin branches above --
-                # evaluated against the pre-update field, and lumping the cell
-                # as its full dx rather than dx/2.
-                #
-                # q is in W/m^2 and dx_i is in metres, matching the SI
-                # convention of this module (see physics/units.py).
                 q = bc.get_effective_value(self.time)
                 idx = bc.indices
                 dx_i = (
@@ -1871,8 +1356,6 @@ class HeatTransferModel:
                 T_new[idx] += dt * q / (rc_i * dx_i)
 
             elif bc.type == BoundaryType.ADIABATIC:
-                # No-flux boundary: ∂T/∂n = 0
-                # Nothing to do (handled by finite difference stencil)
                 pass
 
     def _apply_cut_cell_boundaries(
@@ -1882,13 +1365,6 @@ class HeatTransferModel:
         dt: float,
         rho_cp_arr: Optional[FloatArray],
     ) -> None:
-        """``_apply_boundaries`` with area per volume A_i/(w_i dx_i^3) in place of 1/dx_i.
-
-        Same explicit form, evaluated against the pre-update field:
-            T_new[i] -= dt * h * (T_old[i] - T_inf) * A_i / (rho_cp_i * w_i * dx_i^3)
-        A cell with no boundary area (or a slaved cell) gets no flux even
-        when it is listed in a boundary set.
-        """
         apv = self._boundary_area_per_volume
         rho_cp = self._rho_cp_scalar
         for bc in self._boundaries:
@@ -1901,23 +1377,10 @@ class HeatTransferModel:
                 T_new[idx] -= dt * h * (T_old[idx] - bc.T_infinity) * apv[idx] / rc_i
             elif bc.type == BoundaryType.HEAT_FLUX:
                 T_new[idx] += dt * bc.get_effective_value(self.time) * apv[idx] / rc_i
-    
-    def _get_temperature_dependent_diffusivity(self, T: FloatArray) -> FloatArray:
-        """
-        Get temperature-dependent thermal diffusivity.
 
-        When ``property_curves`` were supplied to the constructor, the
-        diffusivity is computed vectorized from the conductivity, specific
-        heat, and density curves:
-            alpha(T) = k(T) / (rho(T) * cp(T))
-        Otherwise fall back to a simple linear blend between solid and
-        liquid values.
-        """
+    def _get_temperature_dependent_diffusivity(self, T: FloatArray) -> FloatArray:
         if self._curve_temp is not None:
             if NUMBA_AVAILABLE:
-                # One pass computing k, rho, cp and their quotient, replacing
-                # three np.interp sweeps over the full field. Small fields
-                # take the serial twin (physics/kernel_dispatch.py).
                 diffusivity_kernel = (
                     compute_diffusivity_from_curves_serial
                     if runs_serial(len(T), _COST_DIFFUSIVITY_NS)
@@ -1937,75 +1400,40 @@ class HeatTransferModel:
 
         T_solidus = self.alloy.solidus_temp
         T_liquidus = self.alloy.liquidus_temp
-        
-        # Fraction liquid
+
         f_liquid = np.clip(
             (T - T_solidus) / (T_liquidus - T_solidus),
             0.0, 1.0
         )
-        
-        # Assume liquid diffusivity is lower
+
         alpha_solid = self._alpha
         alpha_liquid = self._alpha * 0.7
-        
+
         return alpha_solid * (1 - f_liquid) + alpha_liquid * f_liquid
-    
+
     def is_solidified(self, threshold_temp: Optional[float] = None) -> bool:
-        """
-        Check if all voxels are below solidus temperature.
-        
-        Args:
-            threshold_temp: Temperature threshold (default: solidus)
-        """
         threshold = threshold_temp or self.alloy.solidus_temp
         return np.all(self._temperatures <= threshold)
-    
+
     def get_cooling_rate(self, prev_temperatures: FloatArray, dt: float) -> FloatArray:
-        """
-        Calculate cooling rate at each voxel.
-        
-        Args:
-            prev_temperatures: Temperature field from previous step
-            dt: Time step
-            
-        Returns:
-            Cooling rate in °C/s
-        """
         return (prev_temperatures - self._temperatures) / dt
 
-
 def _interp(x: FloatArray, xp: FloatArray, fp: FloatArray) -> FloatArray:
-    """``np.interp`` over a sorted table, parallel under Numba (sand property and enthalpy lookups)."""
     x = np.ascontiguousarray(x, dtype=np.float64)
     if NUMBA_AVAILABLE and len(x) > 4096:
         return interpolate_sorted_parallel(x, xp, fp)
     return np.interp(x, xp, fp)
 
-
 def _stencil_slot_weights(max_slot: int) -> np.ndarray:
-    """Per-slot weights of the 27-point stencil: faces 0.5, edges 0, corners 0.125."""
     weights = np.zeros(max_slot, dtype=np.float64)
     weights[: min(6, max_slot)] = 0.5
     weights[min(18, max_slot) : min(26, max_slot)] = 0.125
     return weights
 
-
-#: Cut-cell link scaling lets a cell's explicit rate reach this multiple of
-#: the full-cell rate 4*alpha/dx^2 before its links are scaled down. 1.0 keeps
-#: the flag-off time step; larger values keep more of the conduction between
-#: a cut cell and its neighbours at the price of a smaller time step.
 CUT_CELL_RATE_ALLOWANCE = 1.0
 
-
 def cut_cell_link_apertures(capacity_weights: FloatArray) -> FloatArray:
-    """a_i = clip(w_i, 0, 1). A link carries the open-face estimate (a_i + a_j) / 2.
-
-    A cheap stand-in for FAVOR face apertures: the face between a cut cell
-    and a full cell is estimated half open, the face between two equal cut
-    cells as open as the cells are full.
-    """
     return np.clip(np.asarray(capacity_weights, dtype=np.float64), 0.0, 1.0)
-
 
 def cut_cell_conductance_factors(
     capacity_weights: FloatArray,
@@ -2013,17 +1441,6 @@ def cut_cell_conductance_factors(
     apertures: Optional[FloatArray] = None,
     rate_allowance: float = CUT_CELL_RATE_ALLOWANCE,
 ) -> FloatArray:
-    """f_i = min(1, allowance * S_full * w_i / S_i): link scale that caps cell i's explicit rate.
-
-    S_i = sum_j w_slot_j * (a_i + a_j) / 2 over the neighbours cell i has
-    (a = 1 without apertures), S_full = 4 for the 26-slot stencil. With
-    pair scale s_ij = min(f_i, f_j) * (a_i + a_j) / 2 the explicit rate of
-    cell i, alpha * sum_j w_slot_j * s_ij / (w_i dx^2), stays at or below
-    allowance * alpha * S_full / dx^2, so allowance 1 keeps every cell
-    stable at the full-cell step. A cut cell at a wall has lost neighbours
-    and open face, so it needs little or no scaling. Cells with w_i = 0
-    (slaves) get f_i = 0 and lose every link.
-    """
     nbrs = np.asarray(neighbors)
     weights = np.asarray(capacity_weights, dtype=np.float64)
     a = np.ones(len(weights)) if apertures is None else np.asarray(apertures, dtype=np.float64)
@@ -2038,20 +1455,12 @@ def cut_cell_conductance_factors(
     factors[weights <= 0.0] = 0.0
     return factors
 
-
 def contact_limited_conductivity(k_pair: FloatArray, g_i: FloatArray, g_j: FloatArray) -> FloatArray:
-    """Pair conductivity with a contact resistance on links that cross a contact.
-
-    ``g`` is h * dx (W/(m K)) on the cells of a contacting body and 0
-    elsewhere. A link with exactly one end in the body becomes
-    k / (1 + k / g); every other link keeps k.
-    """
     crossing = (g_i > 0.0) != (g_j > 0.0)
     if not np.any(crossing):
         return k_pair
     g = np.where(crossing, g_i + g_j, 1.0)
     return np.where(crossing, k_pair / (1.0 + k_pair / g), k_pair)
-
 
 def update_heterogeneous_cut_cell_numpy(
     T: FloatArray,
@@ -2066,16 +1475,6 @@ def update_heterogeneous_cut_cell_numpy(
     dt: float,
     contact_hdx: FloatArray,
 ) -> FloatArray:
-    """NumPy reference for ``update_heterogeneous_cut_cell_parallel``.
-
-    The conservative two-point flux update with cut cells:
-        T_new[i] = T[i] + dt / (rho_cp_i * w_i * dx_i^2)
-                   * sum_j w_slot_j * min(f_i, f_j) * k_ij * (T_j - T_i)
-                   + dt * source[i]
-    Cells with w_i = 0 keep T[i]. Slots are summed in the same symmetric
-    pairs as ``update_heterogeneous_parallel``. ``contact_hdx`` adds the
-    contact resistance of :func:`contact_limited_conductivity`.
-    """
     n = len(T)
     max_slot = neighbors.shape[1]
     k_arr = alpha * rho_cp
@@ -2113,7 +1512,6 @@ def update_heterogeneous_cut_cell_numpy(
     )
     return T_new
 
-
 def cut_cell_conduction_rates_numpy(
     neighbors: IntArray,
     alpha: FloatArray,
@@ -2123,13 +1521,6 @@ def cut_cell_conduction_rates_numpy(
     apertures: FloatArray,
     inv_dx2: FloatArray,
 ) -> FloatArray:
-    """(N,) explicit conduction rate per cell, 1/s (NumPy reference of the Numba kernel).
-
-    rate_i = sum_j w_slot_j * min(f_i, f_j) * k_ij * inv_dx2_i / (rho_cp_i * w_i),
-    the diagonal of the cut-cell update; 0 for cells with w_i = 0. A step
-    dt <= 1 / max(rate) keeps every cell a convex combination of its
-    neighbours.
-    """
     max_slot = neighbors.shape[1]
     slot_weights = _stencil_slot_weights(max_slot)
     k_arr = alpha * rho_cp
@@ -2146,17 +1537,11 @@ def cut_cell_conduction_rates_numpy(
     capacity = rho_cp * capacity_weights
     return np.divide(total * inv_dx2, capacity, out=np.zeros(len(alpha)), where=capacity_weights > 0.0)
 
-
-# ============================================================================
-# Numba-accelerated kernels (optional)
-# ============================================================================
-
 try:
     from numba import njit, prange
     NUMBA_AVAILABLE = True
 except ImportError:
     NUMBA_AVAILABLE = False
-
 
 if NUMBA_AVAILABLE:
     @njit(parallel=True, cache=True)
@@ -2167,19 +1552,6 @@ if NUMBA_AVAILABLE:
         rho_vals: FloatArray,
         cp_vals: FloatArray,
     ) -> FloatArray:
-        """
-        Evaluate alpha(T) = k(T) / (rho(T) * cp(T)) in one parallel pass.
-
-        Replaces three ``np.interp`` sweeps (each strictly single-threaded,
-        and together the dominant serial cost of a thermal step) with a
-        single traversal that interpolates all three curves per voxel and
-        materializes only the quotient.
-
-        ``temp_points`` is a short ascending grid (six points in the
-        production curves), so a forward scan beats a binary search. Edge
-        behaviour matches ``np.interp``: values outside the grid clamp to the
-        end points, and NaN propagates.
-        """
         n = len(T)
         m = len(temp_points)
         alpha = np.empty(n, dtype=np.float64)
@@ -2197,9 +1569,6 @@ if NUMBA_AVAILABLE:
                 rho = rho_vals[m - 1]
                 cp = cp_vals[m - 1]
             else:
-                # Segment j with temp_points[j] <= t < temp_points[j+1]. A NaN
-                # t matches no segment and falls through with j = 0, where the
-                # arithmetic below carries the NaN into alpha as np.interp does.
                 j = 0
                 for s in range(m - 1):
                     if t < temp_points[s + 1]:
@@ -2208,7 +1577,6 @@ if NUMBA_AVAILABLE:
                 x0 = temp_points[j]
                 inv_dx = 1.0 / (temp_points[j + 1] - x0)
                 offset = t - x0
-                # Slope-then-offset form, matching np.interp's arithmetic.
                 k = (k_vals[j + 1] - k_vals[j]) * inv_dx * offset + k_vals[j]
                 rho = (rho_vals[j + 1] - rho_vals[j]) * inv_dx * offset + rho_vals[j]
                 cp = (cp_vals[j + 1] - cp_vals[j]) * inv_dx * offset + cp_vals[j]
@@ -2222,27 +1590,6 @@ if NUMBA_AVAILABLE:
         neighbors: IntArray,
         inv_dx2: FloatArray,
     ) -> FloatArray:
-        """
-        Compute discrete Laplacian in parallel.
-
-        Uses Numba for acceleration. Applies an isotropic 27-point weighted
-        stencil:
-            faces  (slots 0-5):  weight 0.5
-            edges  (slots 6-17): weight 0.0 (excluded)
-            corners(slots 18-25): weight 0.125
-            laplacian[i] = Σ_present w_j * (T_nb_j - T_i) * inv_dx2[i]
-
-        The weighted difference form is exact for all quadratic fields
-        (faces 0.5*6 + corners 0.125*24 = 6) with isotropic 4th-order
-        truncation error; it does NOT divide by neighbor count.
-
-        Slots follow the canonical layout set by
-        ``core/voxel_mesh.py._canonicalize_neighbor_order``: slots 0-5
-        are face neighbors in [+X, -X, +Y, -Y, +Z, -Z] order, slots
-        6-17 are edges, slots 18-25 are corners. Iterating the slots in
-        fixed order keeps the float-summation order consistent between
-        geometrically symmetric voxels.
-        """
         n = len(T)
         laplacian = np.zeros(n, dtype=np.float64)
         max_slot = neighbors.shape[1]
@@ -2259,8 +1606,6 @@ if NUMBA_AVAILABLE:
                 if neighbor_idx >= 0:
                     sum_dT += 0.5 * (T[neighbor_idx] - t_i)
 
-            # Edge neighbors (slots 6-17) carry weight 0.0 and are skipped.
-
             for j in range(slot_corner_start, slot_corner_end):
                 neighbor_idx = neighbors[i, j]
                 if neighbor_idx >= 0:
@@ -2269,7 +1614,7 @@ if NUMBA_AVAILABLE:
             laplacian[i] = sum_dT * inv_dx2[i]
 
         return laplacian
-    
+
     @njit(parallel=True, cache=True)
     def update_temperatures_parallel(
         T: FloatArray,
@@ -2278,15 +1623,12 @@ if NUMBA_AVAILABLE:
         alpha: float,
         dt: float
     ) -> FloatArray:
-        """
-        Update temperature field in parallel.
-        """
         n = len(T)
         T_new = np.empty(n, dtype=np.float64)
-        
+
         for i in prange(n):
             T_new[i] = T[i] + dt * (alpha * laplacian[i] + source[i])
-        
+
         return T_new
 
     @njit(parallel=True, cache=True)
@@ -2298,15 +1640,6 @@ if NUMBA_AVAILABLE:
         cp_vals: FloatArray,
         capacity_vals: FloatArray,
     ) -> tuple[FloatArray, FloatArray]:
-        """``compute_diffusivity_from_curves_parallel`` and ``interpolate_curve_parallel`` in one pass.
-
-        Returns ``(alpha, rho_cp)`` with ``alpha = k / (rho * cp)`` and
-        ``rho_cp`` interpolated from ``capacity_vals`` (rho*cp at the curve
-        points). Each output is computed with the same arithmetic, in the
-        same order, as the kernel it replaces, so the bits are the same; the
-        gain is one thread-pool launch and one segment search per cell
-        instead of two.
-        """
         n = len(T)
         m = len(temp_points)
         alpha = np.empty(n, dtype=np.float64)
@@ -2346,7 +1679,6 @@ if NUMBA_AVAILABLE:
 
     @njit(inline="always")
     def _link_conductivity(k_i: float, k_j: float, g_i: float, g_j: float) -> float:
-        """Harmonic-mean pair conductivity, with ``contact_limited_conductivity`` applied."""
         k = (2.0 * k_i * k_j) / (k_i + k_j + 1e-30)
         if (g_i > 0.0) != (g_j > 0.0):
             k = k / (1.0 + k / (g_i + g_j))
@@ -2363,25 +1695,6 @@ if NUMBA_AVAILABLE:
         dt: float,
         contact_hdx: FloatArray,
     ) -> FloatArray:
-        """
-        Conservative two-point flux update for heterogeneous material layouts.
-
-        Replaces the NumPy branch of ``HeatTransferModel._step_internal`` used
-        when per-voxel diffusivities (chill overrides or temperature-dependent
-        properties) or per-voxel heat capacities are active:
-            T_new[i] = T[i] + dt/(rho_cp_i * dx_i^2)
-                       * sum_j w_j * k_ij * (T_j - T_i)
-                       + dt * source[i]
-            k_ij = 2 * k_i * k_j / (k_i + k_j)   (harmonic mean pair
-                                                  conductivity)
-
-        Slot weights match the canonical 27-point stencil: faces (slots 0-5)
-        weight 0.5, edges (slots 6-17) weight 0.0 (excluded), corners (slots
-        18-25) weight 0.125. Slots are iterated in symmetric pairs in the same
-        fixed order as the NumPy reference so the per-voxel float accumulation
-        order is identical. ``contact_hdx`` adds the contact resistance of
-        ``contact_limited_conductivity``.
-        """
         n = len(T)
         max_slot = neighbors.shape[1]
         slot_face_end = min(6, max_slot)
@@ -2395,7 +1708,6 @@ if NUMBA_AVAILABLE:
             g_i = contact_hdx[i]
             flux_sum = 0.0
 
-            # Faces (weight 0.5), summed in symmetric pairs (slots 0-5).
             for j in range(0, slot_face_end - 1, 2):
                 x_a = 0.0
                 n_a = neighbors[i, j]
@@ -2409,9 +1721,6 @@ if NUMBA_AVAILABLE:
                     x_b = _link_conductivity(k_i, k_b, g_i, contact_hdx[n_b]) * (T[n_b] - t_i)
                 flux_sum += 0.5 * (x_a + x_b)
 
-            # Edge neighbors (slots 6-17) carry weight 0.0 and are skipped.
-
-            # Corners (weight 0.125), summed in symmetric pairs (slots 18-25).
             j = slot_corner_start
             while j < slot_corner_end - 1:
                 x_a = 0.0
@@ -2426,7 +1735,6 @@ if NUMBA_AVAILABLE:
                     x_b = _link_conductivity(k_i, k_b, g_i, contact_hdx[n_b]) * (T[n_b] - t_i)
                 flux_sum += 0.125 * (x_a + x_b)
                 j += 2
-            # Lone trailing corner slot for non-canonical shapes.
             if j < slot_corner_end:
                 n_a = neighbors[i, j]
                 if n_a >= 0:
@@ -2457,19 +1765,6 @@ if NUMBA_AVAILABLE:
         dt: float,
         contact_hdx: FloatArray,
     ) -> FloatArray:
-        """Cut-cell form of ``update_heterogeneous_parallel``.
-
-            T_new[i] = T[i] + dt / (rho_cp_i * w_i * dx_i^2)
-                       * sum_j w_slot_j * min(f_i, f_j) * k_ij * (T_j - T_i)
-                       + dt * source[i]
-
-        ``capacity_weights`` w_i scale the heat capacity, and
-        ``conductance_factors`` f_i scale each link (pair value min(f_i, f_j),
-        so the flux stays antisymmetric). Cells with w_i = 0 keep T[i].
-        ``contact_hdx`` adds the contact resistance of
-        ``contact_limited_conductivity``.
-        NumPy reference: ``update_heterogeneous_cut_cell_numpy``.
-        """
         n = len(T)
         max_slot = neighbors.shape[1]
         slot_face_end = min(6, max_slot)
@@ -2555,27 +1850,6 @@ if NUMBA_AVAILABLE:
         source: FloatArray,
         out: FloatArray,
     ) -> None:
-        """One sweep of the cut-cell stencil for the conduction rates and the conduction flux.
-
-        ``cut_cell_conduction_rates_parallel`` and
-        ``update_heterogeneous_cut_cell_parallel`` visit the same 14 links of
-        every cell; this kernel visits them once. For the 26-slot neighbour
-        layout only (faces 0-5, corners 18-25).
-
-        ``want_rates``: write each cell's explicit conduction rate (1/s) to
-        ``rates``, with the arithmetic of ``cut_cell_conduction_rates_parallel``
-        (same bits, so the stable step and the substep count are unchanged).
-
-        ``apply_now``: write the updated temperature to ``out``,
-            T[i] + dt * q_i / (rho_cp_i * w_i) + dt * source[i],
-        with q_i = inv_dx2_i * sum_j w_slot * min(f_i, f_j) * (a_i + a_j)/2
-        * k_ij * (T_j - T_i). Otherwise write q_i to ``out``, for
-        ``apply_cut_cell_flux_parallel`` once the step is known. Either way
-        the expression is that of ``update_heterogeneous_cut_cell_parallel``,
-        evaluated without ``fastmath``: it differs from that kernel in the
-        last bit of a few cells in 10,000, and it gives the same bits at any
-        thread count and from its serial twin.
-        """
         n = len(T)
         for i in prange(n):
             t_i = T[i]
@@ -2665,7 +1939,6 @@ if NUMBA_AVAILABLE:
         dt: float,
         T_new: FloatArray,
     ) -> None:
-        """The update of ``cut_cell_flux_parallel(apply_now=True)`` from the flux ``q`` it wrote earlier."""
         for i in prange(len(T)):
             w_i = capacity_weights[i]
             if w_i <= 0.0:
@@ -2679,7 +1952,6 @@ if NUMBA_AVAILABLE:
         temp_points: FloatArray,
         values: FloatArray,
     ) -> FloatArray:
-        """``np.interp(T, temp_points, values)`` in one parallel pass (same forward scan as the diffusivity kernel)."""
         n = len(T)
         m = len(temp_points)
         out = np.empty(n, dtype=np.float64)
@@ -2704,7 +1976,6 @@ if NUMBA_AVAILABLE:
 
     @njit(inline="always")
     def _interp_scalar(t: float, xp: FloatArray, fp: FloatArray) -> float:
-        """``np.interp`` at one point by binary search (sorted ``xp``)."""
         m = len(xp)
         if t <= xp[0]:
             return fp[0]
@@ -2716,15 +1987,6 @@ if NUMBA_AVAILABLE:
 
     @njit(inline="always")
     def _interp_scalar_from(t: float, xp: FloatArray, fp: FloatArray, hint: int) -> float:
-        """``_interp_scalar`` that looks for the segment near ``hint`` first.
-
-        The segment is the j with ``xp[j] <= t < xp[j + 1]``, which is what
-        ``np.searchsorted(xp, t, side="right") - 1`` returns for a strictly
-        increasing ``xp`` and ``xp[0] < t < xp[-1]``. Walking there from a
-        hint a few entries away replaces a binary search over the whole
-        table; a hint that turns out far off falls back to the search. The
-        interpolation then uses the same j and the same arithmetic.
-        """
         m = len(xp)
         if t <= xp[0]:
             return fp[0]
@@ -2761,7 +2023,6 @@ if NUMBA_AVAILABLE:
         rcp_start: int,
         tolerance: float,
     ) -> None:
-        """Numba form of ``HeatTransferModel._update_tabulated_bodies`` for one body."""
         for p in prange(len(indices)):
             t = T[indices[p]]
             if abs(t - last_T[p]) < tolerance:
@@ -2783,15 +2044,6 @@ if NUMBA_AVAILABLE:
         fine_h: FloatArray,
         tolerance: float,
     ) -> None:
-        """Numba form of ``HeatTransferModel._correct_tabulated_enthalpy`` for one body.
-
-        ``fine_t`` is an evenly spaced grid, so the segment holding a
-        temperature is known to within one entry without searching. The
-        enthalpy lookup back to temperature starts from the segment of the
-        uncorrected ``T_new``, which the corrected value lies close to.
-        ``_interp_scalar_from`` lands on the same segment a binary search
-        gives, so the result is the same as two ``_interp_scalar`` calls.
-        """
         m = len(fine_t)
         t_first = fine_t[0]
         entries_per_kelvin = (m - 1) / (fine_t[m - 1] - t_first)
@@ -2802,8 +2054,6 @@ if NUMBA_AVAILABLE:
             step = t_new - t_old
             if abs(step) < tolerance:
                 continue
-            # Entries from the low end; NaN and out-of-range fields give a
-            # hint the lookup clamps or ignores.
             at_old = (t_old - t_first) * entries_per_kelvin
             at_new = (t_new - t_first) * entries_per_kelvin
             hint_old = int(at_old) if 0.0 <= at_old < m else 0
@@ -2818,14 +2068,6 @@ if NUMBA_AVAILABLE:
         fine_t: FloatArray,
         fine_h: FloatArray,
     ) -> FloatArray:
-        """T' with H(T') = H(T) + dh per cell, on a tabulated body's enthalpy table.
-
-        ``interpolate_sorted_parallel(interpolate_sorted_parallel(T, fine_t,
-        fine_h) + dh, fine_h, fine_t)`` in one pass. ``fine_t`` is evenly
-        spaced, so both lookups start from the segment of ``T`` instead of a
-        binary search (``_interp_scalar_from``); segment and arithmetic are
-        the same as in that expression.
-        """
         n = len(temperatures)
         m = len(fine_t)
         out = np.empty(n, dtype=np.float64)
@@ -2838,8 +2080,6 @@ if NUMBA_AVAILABLE:
             if hint > m - 2:
                 hint = m - 2
             h = _interp_scalar_from(t, fine_t, fine_h, hint) + dh[p]
-            # The deposit can move a cell by many table entries, so the
-            # lookup back starts where the local slope of H says it lands.
             entries = dh[p] / (fine_h[hint + 1] - fine_h[hint])
             if entries != entries:
                 hint_back = hint
@@ -2852,11 +2092,6 @@ if NUMBA_AVAILABLE:
             out[p] = _interp_scalar_from(h, fine_h, fine_t, hint_back)
         return out
 
-    # The three interface-link kernels below run on the calling thread and
-    # visit the pairs in order: ``np.bincount`` adds its weights in input
-    # order, and a sum taken in another order differs in the last bit.
-    # ``error_model="numpy"`` keeps NumPy's inf/NaN on a zero divisor.
-
     @njit(cache=True, error_model="numpy")
     def interface_link_conductance_kernel(
         h: FloatArray,
@@ -2868,7 +2103,6 @@ if NUMBA_AVAILABLE:
         half_dx_second: FloatArray,
         area: FloatArray,
     ) -> FloatArray:
-        """Pair conductances from the pair coefficients ``h``: the NumPy tail of ``_interface_link_conductance``."""
         n = len(first)
         g = np.empty(n, dtype=np.float64)
         for p in range(n):
@@ -2878,7 +2112,6 @@ if NUMBA_AVAILABLE:
                 j = second[p]
                 k_first = alpha[i] * rho_cp[i]
                 k_second = alpha[j] * rho_cp[j]
-                # np.maximum(x, 1e-12): the floor for a small x, x itself otherwise (NaN included).
                 if k_first < 1e-12:
                     k_first = 1e-12
                 if k_second < 1e-12:
@@ -2901,7 +2134,6 @@ if NUMBA_AVAILABLE:
         rho_cp: FloatArray,
         n_voxels: int,
     ) -> FloatArray:
-        """(N,) sum of pair conductances over capacity per link cell: the NumPy tail of ``_interface_link_rates``."""
         m = len(link_cells)
         from_first = np.zeros(m, dtype=np.float64)
         from_second = np.zeros(m, dtype=np.float64)
@@ -2932,7 +2164,6 @@ if NUMBA_AVAILABLE:
         cell_volume: FloatArray,
         rho_cp: FloatArray,
     ) -> None:
-        """Exchange q_p = G_p (T_i - T_j) over every pair: the NumPy tail of ``_apply_interface_links``."""
         m = len(link_cells)
         into_second = np.zeros(m, dtype=np.float64)
         out_of_first = np.zeros(m, dtype=np.float64)
@@ -2954,7 +2185,6 @@ if NUMBA_AVAILABLE:
         xp: FloatArray,
         fp: FloatArray,
     ) -> FloatArray:
-        """``np.interp(x, xp, fp)`` in parallel, by binary search: for long tables (enthalpy)."""
         n = len(x)
         m = len(xp)
         out = np.empty(n, dtype=np.float64)
@@ -2982,7 +2212,6 @@ if NUMBA_AVAILABLE:
         apertures: FloatArray,
         inv_dx2: FloatArray,
     ) -> FloatArray:
-        """Numba form of ``cut_cell_conduction_rates_numpy``."""
         n = len(alpha)
         max_slot = neighbors.shape[1]
         slot_face_end = min(6, max_slot)
@@ -3016,7 +2245,6 @@ if NUMBA_AVAILABLE:
         neighbors: IntArray,
         voxel_size: float,
     ) -> FloatArray:
-        """Compute temperature gradient magnitude in parallel."""
         n = len(values)
         gradients = np.zeros(n, dtype=np.float32)
         inv_h = 1.0 / max(voxel_size, 1e-12)
@@ -3036,16 +2264,6 @@ if NUMBA_AVAILABLE:
 
         return gradients
 
-
-# ============================================================================
-# Serial twins (see physics/kernel_dispatch.py)
-# ============================================================================
-
-#: Serial cost (ns per cell) of each twinned kernel: measured on Apple silicon
-#: (1.8, 1.3, 2.1, 8.3, 5.0, 10.5, 6.4 in this order) and raised by a
-#: quarter, so the twin is only taken where it is cheaper than a thread-pool
-#: launch. The enthalpy shift is set from a real run (13.5): a mold heat
-#: deposit moves a cell many table entries, which a synthetic field does not.
 _COST_DIFFUSIVITY_NS = 2.3
 _COST_CURVE_NS = 1.7
 _COST_DIFFUSIVITY_AND_CAPACITY_NS = 2.6
@@ -3054,7 +2272,6 @@ _COST_TABULATED_CORRECT_NS = 6.5
 _COST_CONDUCTION_RATES_NS = 13.0
 _COST_GRADIENT_NS = 8.0
 _COST_SHIFT_ENTHALPY_NS = 14.0
-#: The fused stencil sweep (13 measured) and its apply pass.
 _COST_CUT_CELL_FLUX_NS = 16.0
 _COST_APPLY_FLUX_NS = 2.0
 

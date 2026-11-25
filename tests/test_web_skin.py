@@ -1,14 +1,3 @@
-"""
-Tests for the skin distance grid: signed distance from the lattice to the
-parts' real surfaces.
-
-The fixture is a box whose faces do not fall on lattice planes, voxelized the
-way the mesher does it -- any voxel whose cube touches the box is metal -- so
-that the mask genuinely overhangs the surface. The grid has to call those
-overhanging metal voxels *outside*, which is the one thing the mask itself can
-never say.
-"""
-
 from __future__ import annotations
 
 import tempfile
@@ -25,44 +14,31 @@ from web.payloads import write_artifact
 from web.routes_fields import fields_bp
 from web.services.simulation_queue import SimulationQueueManager
 
-
 SPACING = 0.5
 ORIGIN = (-2.0, -2.0, -2.0)
 DIMS = (9, 9, 9)
-#: Half-extents chosen so every face sits between two planes of voxel centers
-#: and the outer plane's cubes reach it: the centers at +-1.0 are inside, the
-#: centers at +-1.5 are outside, but their cubes start at 1.25 and so touch
-#: the face at 1.3 -- the mesher counts them as metal though they lie outside.
 HALF = 1.3
-
 
 def _box() -> trimesh.Trimesh:
     return trimesh.creation.box(extents=(2 * HALF, 2 * HALF, 2 * HALF))
 
-
 def _lattice() -> fields.Lattice:
     return fields.Lattice(dims=DIMS, origin=ORIGIN, spacing=SPACING)
-
 
 def _centers() -> np.ndarray:
     nx, ny, nz = DIMS
     iz, iy, ix = np.mgrid[0:nz, 0:ny, 0:nx]
     return np.asarray(ORIGIN) + np.stack([ix.ravel(), iy.ravel(), iz.ravel()], axis=1) * SPACING
 
-
 def _exact_distance(mesh: trimesh.Trimesh, points: np.ndarray) -> np.ndarray:
-    """Signed Euclidean distance in voxels, negative inside."""
     _, distance, _ = trimesh.proximity.closest_point(mesh, points)
     inside = mesh.contains(points)
     return np.where(inside, -distance, distance) / SPACING
 
-
 def _inclusive_mask() -> np.ndarray:
-    """Metal wherever the voxel cube touches the box, as the mesher does."""
     centers = _centers()
     touches = np.all(np.abs(centers) - SPACING / 2 <= HALF + 1e-9, axis=1)
     return touches.astype(np.uint8)
-
 
 class SkinGridBuild(unittest.TestCase):
     def setUp(self) -> None:
@@ -80,18 +56,15 @@ class SkinGridBuild(unittest.TestCase):
         self.assertEqual(self.values.shape, (int(np.prod(DIMS)),))
 
     def test_mask_overhangs_the_box(self) -> None:
-        """The premise: the mesher's mask contains centers outside the surface."""
         outside_but_metal = (self.mask != 0) & (self.exact > 0)
         self.assertGreater(int(np.count_nonzero(outside_but_metal)), 0)
 
     def test_overhanging_metal_reads_outside(self) -> None:
-        """What the mask cannot say and the grid must: those centers are out."""
         outside_but_metal = (self.mask != 0) & (self.exact > 0)
         self.assertTrue(np.all(self.distance[outside_but_metal] > 0))
         self.assertTrue(np.all(self.values[outside_but_metal] > 127))
 
     def test_sign_matches_geometry_everywhere(self) -> None:
-        # Cells exactly on the surface are allowed either sign.
         clear = np.abs(self.exact) > 1e-6
         self.assertTrue(np.all((self.distance[clear] < 0) == (self.exact[clear] < 0)))
 
@@ -102,7 +75,7 @@ class SkinGridBuild(unittest.TestCase):
         self.assertLess(float(error.max()), quantum + 1e-6)
 
     def test_far_cells_take_the_range_limit(self) -> None:
-        self.assertEqual(int(self.values[0]), 255)  # a corner of the box, well outside
+        self.assertEqual(int(self.values[0]), 255)
         center = int(np.argmin(np.sum(self.centers**2, axis=1)))
         self.assertEqual(int(self.values[center]), 0)
 
@@ -116,18 +89,15 @@ class SkinGridBuild(unittest.TestCase):
         self.assertIsNone(skin.build_skin_grid(self.lattice, self.mask, []))
 
     def test_overlapping_parts_are_a_union(self) -> None:
-        """Two boxes that overlap: a point inside both is inside, not crossed twice."""
         shifted = _box().copy()
         shifted.apply_translation((HALF, 0.0, 0.0))
         values = skin.build_skin_grid(self.lattice, self.mask, [_box(), shifted])
         assert values is not None
         distance = skin.dequantize(values)
-        # Centers inside both boxes, and deep enough to be unambiguous.
         both = (np.abs(self.centers[:, 1]) < HALF - 0.3) & (np.abs(self.centers[:, 2]) < HALF - 0.3)
         both &= (self.centers[:, 0] > 0.3) & (self.centers[:, 0] < HALF - 0.3)
         self.assertGreater(int(np.count_nonzero(both)), 0)
         self.assertTrue(np.all(distance[both] < 0))
-
 
 class SkinGridCaching(unittest.TestCase):
     def setUp(self) -> None:
@@ -182,10 +152,8 @@ class SkinGridCaching(unittest.TestCase):
         assert grid is not None
         distance = skin.dequantize(grid.values)
         centers = _centers()
-        # The box now spans x in [-0.2, 2.2]: a center at x = -1.0 on the axis is out.
         index = int(np.argmin(np.sum((centers - np.asarray([-1.0, 0.0, 0.0])) ** 2, axis=1)))
         self.assertGreater(distance[index], 0)
-
 
 def _synthetic_artifact() -> Tuple[Dict[str, Any], np.ndarray]:
     mask = _inclusive_mask()
@@ -202,7 +170,6 @@ def _synthetic_artifact() -> Tuple[Dict[str, Any], np.ndarray]:
         },
         mask,
     )
-
 
 class SkinEndpoint(unittest.TestCase):
     def setUp(self) -> None:
@@ -248,8 +215,6 @@ class SkinEndpoint(unittest.TestCase):
         )
         response = self.client.get(f"/api/projects/{self.project_id}/grid/skin")
         self.assertEqual(response.status_code, 200)
-        # The run's lattice hugs the occupied voxels, so it is the 7 x 7 x 7
-        # block of metal centers, every one of which is metal.
         self.assertEqual(response.headers["X-Grid-Dims"], "7,7,7")
         self.assertEqual(response.headers["X-Grid-Dtype"], "uint8")
         self.assertEqual(float(response.headers["X-Skin-Range-Voxels"]), skin.SKIN_RANGE_VOXELS)
@@ -258,8 +223,6 @@ class SkinEndpoint(unittest.TestCase):
         iz, iy, ix = np.mgrid[0:7, 0:7, 0:7]
         centers = -1.5 + np.stack([ix.ravel(), iy.ravel(), iz.ravel()], axis=1) * SPACING
         exact = _exact_distance(_box(), centers)
-        # Every cell here is metal to the mask, yet the outer layer lies
-        # outside the box and must read as outside; the interior as inside.
         self.assertGreater(int(np.count_nonzero(exact > 0)), 0)
         self.assertTrue(np.all(values[exact > 0] > 127))
         self.assertTrue(np.all(values[exact < -0.5] < 128))
@@ -267,7 +230,6 @@ class SkinEndpoint(unittest.TestCase):
     def test_unknown_project_is_404(self) -> None:
         response = self.client.get("/api/projects/nope/grid/skin")
         self.assertEqual(response.status_code, 404)
-
 
 if __name__ == "__main__":
     unittest.main()

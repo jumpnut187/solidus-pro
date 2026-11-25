@@ -1,5 +1,3 @@
-"""Parts manager dialog."""
-
 from __future__ import annotations
 
 from ui.qt import (
@@ -33,9 +31,7 @@ from core.part_manager import (
 )
 from .base import DraggableDialog
 
-
 class PartsDialog(DraggableDialog):
-    """Modal dialog for managing parts with batch part type assignment"""
 
     add_part_requested = Signal()
     remove_part_requested = Signal()
@@ -50,10 +46,8 @@ class PartsDialog(DraggableDialog):
     open_top_changed = Signal(str, bool)
     riser_sleeve_changed = Signal(str, str)
 
-    #: Dropdown entries, derived so a new PartType is selectable automatically.
     PART_TYPE_OPTIONS = list(PART_TYPE_DISPLAY_NAMES.values())
 
-    #: Riser sleeve dropdown entries: (label, Part.riser_sleeve value).
     RISER_SLEEVE_OPTIONS = (
         ("Insulating", RISER_SLEEVE_INSULATING),
         ("No heat loss", RISER_SLEEVE_ADIABATIC),
@@ -76,7 +70,6 @@ class PartsDialog(DraggableDialog):
         self._pending_changes = {}
 
     def _setup_ui(self):
-        """Set up the parts dialog UI"""
         btn_layout = QHBoxLayout()
         self.add_part_btn = QPushButton("Add Part")
         self.add_part_btn.clicked.connect(self.add_part_requested.emit)
@@ -138,8 +131,6 @@ class PartsDialog(DraggableDialog):
             }
         """)
 
-        # Qt 6 exposes enum members on the metaclass, so these have to come off
-        # QPalette itself -- `palette.Text` raised AttributeError under PySide6.
         palette = self.parts_table.palette()
         palette.setColor(QPalette.Text, QColor(255, 255, 255))
         palette.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
@@ -256,7 +247,6 @@ class PartsDialog(DraggableDialog):
         self._updating = False
 
     def _on_row_clicked(self, row, column):
-        """Handle table row selection"""
         part_id = self._get_part_id_for_row(row)
         if part_id:
             self.part_selected.emit(part_id)
@@ -264,14 +254,12 @@ class PartsDialog(DraggableDialog):
             self.duplicate_btn.setEnabled(True)
 
     def _get_part_id_for_row(self, row):
-        """Get the part_id stored in a table row"""
         name_item = self.parts_table.item(row, 0)
         if name_item:
             return name_item.data(Qt.UserRole)
         return None
 
     def _on_dropdown_changed(self, row, new_type_text):
-        """Handle part type dropdown change (no re-render, just track pending)"""
         if self._updating:
             return
 
@@ -289,7 +277,6 @@ class PartsDialog(DraggableDialog):
         self._update_confirm_button_state()
 
     def _update_confirm_button_state(self):
-        """Enable/disable confirm button based on pending changes"""
         has_changes = len(self._pending_changes) > 0
         self.confirm_types_btn.setEnabled(has_changes)
 
@@ -299,7 +286,6 @@ class PartsDialog(DraggableDialog):
             self.confirm_types_btn.setText("Confirm Part Type Assignment")
 
     def _on_confirm_types(self):
-        """Apply all pending part type changes at once"""
         if self._pending_changes:
             self.batch_part_types_confirmed.emit(self._pending_changes.copy())
 
@@ -310,7 +296,6 @@ class PartsDialog(DraggableDialog):
             self._update_confirm_button_state()
 
     def _on_position_changed(self):
-        """Forward position change to main window"""
         if not self._updating:
             self.position_changed.emit(
                 self.pos_x_spin.value(),
@@ -319,7 +304,6 @@ class PartsDialog(DraggableDialog):
             )
 
     def update_position_spinboxes(self, x, y, z):
-        """Update position spinboxes without triggering signals"""
         self._updating = True
         self.pos_x_spin.setValue(x)
         self.pos_y_spin.setValue(y)
@@ -327,7 +311,6 @@ class PartsDialog(DraggableDialog):
         self._updating = False
 
     def _on_rotation_changed(self):
-        """Forward rotation change to main window."""
         if not self._updating:
             self.rotation_changed.emit(
                 self.rot_x_spin.value(),
@@ -336,7 +319,6 @@ class PartsDialog(DraggableDialog):
             )
 
     def update_rotation_spinboxes(self, rx, ry, rz):
-        """Update rotation spinboxes without triggering signals."""
         self._updating = True
         self.rot_x_spin.setValue(rx)
         self.rot_y_spin.setValue(ry)
@@ -344,17 +326,14 @@ class PartsDialog(DraggableDialog):
         self._updating = False
 
     def _on_open_top_changed(self, part_id: str, is_open: bool):
-        """Handle Open Top checkbox state change"""
         if not self._updating:
             self.open_top_changed.emit(part_id, is_open)
 
     def _on_riser_sleeve_changed(self, part_id: str, combo: QComboBox):
-        """Handle Sleeve dropdown change"""
         if not self._updating:
             self.riser_sleeve_changed.emit(part_id, combo.currentData())
 
     def _update_open_top_checkbox_state(self, row: int, new_type_text: str):
-        """Enable/disable Open Top checkbox and Sleeve dropdown based on part type"""
         is_riser = new_type_text == "Riser"
         container_widget = self.parts_table.cellWidget(row, 2)
         if container_widget:
@@ -370,7 +349,6 @@ class PartsDialog(DraggableDialog):
                 sleeve_combo.setCurrentIndex(0)
 
     def populate_parts(self, parts_data):
-        """Populate the table with parts data."""
         self._updating = True
         self.parts_table.setRowCount(0)
         self._original_part_types.clear()
@@ -473,7 +451,6 @@ class PartsDialog(DraggableDialog):
         )
 
     def get_selected_part_id(self):
-        """Get the currently selected part ID"""
         selected_rows = self.parts_table.selectionModel().selectedRows()
         if selected_rows:
             row = selected_rows[0].row()
@@ -481,7 +458,6 @@ class PartsDialog(DraggableDialog):
         return None
 
     def select_part_by_id(self, part_id):
-        """Select a row by part ID"""
         for row in range(self.parts_table.rowCount()):
             if self._get_part_id_for_row(row) == part_id:
                 self.parts_table.selectRow(row)

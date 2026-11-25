@@ -39,7 +39,6 @@ export type CanvasStageProps = {
   resultsVersion: number;
   view: ResultViewState;
   onViewChange: (patch: Partial<ResultViewState>) => void;
-  /** The parametric modeling session; its toolbar replaces the viewport's while one is open. */
   modeling: ModelingController;
   ortho: boolean;
   tool: ViewportTool;
@@ -54,7 +53,6 @@ export type CanvasStageProps = {
   onStatus: (message: string | null) => void;
   onError: (message: string) => void;
   onAddFiles: (files: File[]) => void;
-  /** A project or upload is in flight, so an empty canvas is not yet "empty". */
   busy: boolean;
   hasParts: boolean;
   onOrthoChange: (ortho: boolean) => void;
@@ -64,32 +62,19 @@ export type CanvasStageProps = {
   measurement: MeasureResult | null;
   toasts: Toast[];
   onDismissToast: (id: number) => void;
-  /** The loaded run was stored strided; warn until the user dismisses it. */
   showDownsampledWarning: boolean;
   onDismissDownsampledWarning: () => void;
-  /** What changed since the loaded run, or null when the results match the parts. */
   staleResults: string | null;
   onRunAgain: () => void;
   running: boolean;
   onRequestAddParts: () => void;
-  /** Hands the shell a way to open this stage's file picker from a shortcut. */
   registerAddParts: (open: () => void) => void;
-  /** The job log drawer, anchored to the foot of the canvas. */
   log?: ReactNode;
-  /** The Orient & Parting Line tool's view state, or null when unused. */
   orient: OrientViewState | null;
   onOrientPick: (pick: OrientPick) => void;
-  /** One-click prompt shown over the canvas, e.g. to orient a fresh casting; null for none. */
   prompt?: ReactNode;
 };
 
-/**
- * The canvas well: the viewport plus everything painted over it.
- *
- * With no parts loaded the whole canvas is a drop target, not just a small zone
- * inside a panel — dropping an STL onto the empty 3D view is what people try
- * first.
- */
 export function CanvasStage(props: CanvasStageProps) {
   const {
     viewportRef,
@@ -163,11 +148,8 @@ export function CanvasStage(props: CanvasStageProps) {
         onAddFiles(Array.from(event.dataTransfer.files));
       }}
     >
-      {/* The canvas and everything painted over it. The log drawer sits
-          outside this box so opening it shortens the canvas instead of
-          covering the stats chip and the orientation gizmo. */}
-      {/* `has-stats` tells the stylesheet that the bottom-centre band is taken
-          by the stats chip, so the toast column lifts clear of it. */}
+      {}
+      {}
       <div className={gridMeta && resultsAvailable ? 'stage-main has-stats' : 'stage-main'}>
       <div className="stage-canvas">
         <ResultsViewport
@@ -196,10 +178,7 @@ export function CanvasStage(props: CanvasStageProps) {
         />
       </div>
 
-      {/* One column for everything that appears under the toolbar, so the
-          banner and the loading pill stack instead of landing on each other or
-          on the toolbar. It stops short of the ColorBar's gutter on the right;
-          see `.stage-top-stack`. */}
+      {}
       {showDownsampledWarning || status || staleResults !== null || prompt ? (
         <div className="stage-top-stack">
           {prompt ?? null}

@@ -1,11 +1,3 @@
-/**
- * Reading and writing the nested `solidification_params` structure.
- *
- * The Filling tab is the awkward one: its filter fields are shown alongside the
- * rest but persist one level deeper, at `filling.filter.*`. Every access goes
- * through here so that nesting rule lives in one place rather than being
- * re-derived at each call site.
- */
 import type { SolidificationParams } from './api';
 import { FILTER_KEYS, PARAM_DEFS, type ParamDef, type ParamGroup } from './solidificationFields';
 
@@ -42,7 +34,6 @@ export function writeParam(
   return { ...params, [def.group]: group };
 }
 
-/** Restore one tab's visible fields to their defaults, leaving other tabs alone. */
 export function resetGroup(params: SolidificationParams, group: ParamGroup): SolidificationParams {
   let next = params;
   for (const def of PARAM_DEFS) {
@@ -52,7 +43,6 @@ export function resetGroup(params: SolidificationParams, group: ParamGroup): Sol
   return next;
 }
 
-/** How many fields in a tab differ from their default — shown as a badge. */
 export function changedCount(params: SolidificationParams, group: ParamGroup): number {
   let count = 0;
   for (const def of PARAM_DEFS) {

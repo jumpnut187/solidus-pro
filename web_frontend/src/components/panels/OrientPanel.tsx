@@ -1,10 +1,3 @@
-/**
- * Orient & Parting Line: turn the casting the way it will be poured, lift it,
- * and set the flat parting line that risers and gating sit on.
- *
- * Every control has a fixed visible label or aria-label, independent of the
- * current step, so the panel can be driven by name.
- */
 import { useEffect, useState } from 'react';
 import { ArrowDownToLine, Crosshair, RotateCcw, Undo2 } from 'lucide-react';
 
@@ -29,10 +22,6 @@ function fmt(value: number | null | undefined, digits = 2): string {
   return value === null || value === undefined || !Number.isFinite(value) ? '--' : value.toFixed(digits);
 }
 
-/**
- * A number box that applies on Enter or when it loses focus, not per
- * keystroke: typing "-1.5" must not move the part to "-" and then to "-1".
- */
 function NumberField({
   label,
   value,

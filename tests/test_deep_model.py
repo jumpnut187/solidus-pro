@@ -1,9 +1,3 @@
-"""Tests for the deep learning solidification surrogate (core/deep_model).
-
-Skipped gracefully when torch is absent — the deep module is an optional
-dependency and the app must start without it.
-"""
-
 from __future__ import annotations
 
 import contextlib
@@ -19,7 +13,7 @@ import trimesh
 
 try:
     import torch
-except ImportError:  # pragma: no cover
+except ImportError:
     torch = None
 
 from core.surrogate import load_model, run_surrogate_pipeline
@@ -47,23 +41,23 @@ from core.surrogate.split import geometry_group_key
 
 HAVE_TORCH = torch is not None
 try:
-    import onnxruntime  # noqa: F401
+    import onnxruntime
 
     HAVE_ONNXRUNTIME = True
-except ImportError:  # pragma: no cover
+except ImportError:
     HAVE_ONNXRUNTIME = False
 HAVE_COREML = False
 HAVE_TFLITE = False
 if HAVE_TORCH:
     try:
-        import coremltools  # noqa: F401
+        import coremltools
 
         HAVE_COREML = True
     except ImportError:
         pass
     try:
-        import tflite_runtime  # noqa: F401
-        import onnx2tf  # noqa: F401
+        import tflite_runtime
+        import onnx2tf
 
         HAVE_TFLITE = True
     except ImportError:
@@ -73,19 +67,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-
 def _conditioning():
     return build_conditioning_vector(get_alloy("WCB"), {"max_dim": 10.0, "voxel_size": 0.1})
 
-
 def _write_synthetic_record(out_dir: str, seed: int, resolution: int = 8) -> str:
-    """Write a schema-v2 .npz record in the capture_run format.
-
-    Geometry varies with ``seed % 3`` (the box is shortened along x) so
-    datasets built from several seeds contain several geometry groups, which
-    the grouped train/val split requires.  Grid axis order is ``(z, y, x)``
-    like the real capture; ``normalized_height`` varies along axis 0.
-    """
     R = resolution
     x_hi = R - 1 - (seed % 3)
     meta = GridMeta(
@@ -123,13 +108,11 @@ def _write_synthetic_record(out_dir: str, seed: int, resolution: int = 8) -> str
     )
     return path
 
-
 def _two_record_dataset(tmp: str) -> str:
     data_dir = os.path.join(tmp, "data")
     _write_synthetic_record(data_dir, 0)
     _write_synthetic_record(data_dir, 1)
     return data_dir
-
 
 def _loader_for(mesh):
     bounds = np.stack([mesh.bounds[0], mesh.bounds[1]], axis=1)
@@ -143,7 +126,6 @@ def _loader_for(mesh):
             "get_bounds_array": lambda self: bounds,
         },
     )()
-
 
 @unittest.skipUnless(HAVE_TORCH, "torch not installed")
 class ArchitectureTests(unittest.TestCase):
@@ -202,7 +184,6 @@ class ArchitectureTests(unittest.TestCase):
         self.assertEqual(levels_for_resolution(64), 4)
         self.assertEqual(levels_for_resolution(128), 4)
 
-
 @unittest.skipUnless(HAVE_TORCH, "torch not installed")
 class TrainingTests(unittest.TestCase):
     def test_tiny_overfit_loss_decreases(self):
@@ -252,7 +233,7 @@ class TrainingTests(unittest.TestCase):
     def test_training_refuses_single_geometry_group(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = os.path.join(tmp, "data")
-            for seed in (0, 3, 6):  # same geometry (seed % 3 == 0), different end times
+            for seed in (0, 3, 6):
                 _write_synthetic_record(data_dir, seed)
             from core.deep_model.training import train_deep_model
 
@@ -290,7 +271,6 @@ class TrainingTests(unittest.TestCase):
                 self.assertTrue(summary["early_stopped"])
                 self.assertEqual(summary["epochs_run"], summary["best_epoch"] + 2)
 
-            # The saved weights are the best-val epoch, not the last one.
             model = build_unet_from_artifact(out_dir, _read_manifest(out_dir))
             _, val = make_train_val_datasets(data_dir, resolution=8)
             loader = DataLoader(val, batch_size=2, collate_fn=DeepDataset.collate)
@@ -334,7 +314,6 @@ class TrainingTests(unittest.TestCase):
             self.assertGreaterEqual(summary["headline"]["confidence"], 0.0)
             self.assertLessEqual(summary["headline"]["confidence"], 1.0)
 
-
 @unittest.skipUnless(HAVE_TORCH, "torch not installed")
 class GroupedSplitTests(unittest.TestCase):
     def test_make_train_val_datasets_groups_geometry(self):
@@ -342,7 +321,7 @@ class GroupedSplitTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = os.path.join(tmp, "data")
-            for seed in range(9):  # 3 geometries x 3 end-time variants
+            for seed in range(9):
                 _write_synthetic_record(data_dir, seed)
             train, val = make_train_val_datasets(data_dir, resolution=8)
             self.assertIsNotNone(val)
@@ -374,23 +353,16 @@ class GroupedSplitTests(unittest.TestCase):
                  "conditioning": torch.rand(2, 23)}
         for seed in range(6):
             out = augment_batch(batch, torch.Generator().manual_seed(seed))
-            # Same permutation applied to every grid: masked values line up.
             torch.testing.assert_close(out["channels"][:, 0][out["mask"]].sort().values,
                                        channels[:, 0][mask].sort().values)
             torch.testing.assert_close(out["start"][out["mask"]].sort().values,
                                        start[mask].sort().values)
-            # z profile (axis 0 of the grid) is untouched.
             torch.testing.assert_close(out["channels"].mean(dim=(1, 3, 4)),
                                        channels.mean(dim=(1, 3, 4)))
             torch.testing.assert_close(out["conditioning"], batch["conditioning"])
 
-
 @unittest.skipUnless(HAVE_TORCH, "torch not installed")
 class DatasetResampleTests(unittest.TestCase):
-    """Resampling must preserve schedule field values (regression: the
-    occupancy re-binarization overwrote start/end/local with the occupancy
-    mask, collapsing every training target to constant 1.0 on occupied
-    cells and producing degenerate fraction-liquid playback)."""
 
     def _record(self) -> dict:
         from core.deep_model.dataset import resample_record
@@ -416,7 +388,6 @@ class DatasetResampleTests(unittest.TestCase):
         self.assertEqual(set(np.unique(channels[0])).issubset({0.0, 1.0}), True)
 
     def test_resample_not_collapsed_to_occupancy(self):
-        # Regression guard: fields must not be replaced by the 0/1 occupancy mask.
         channels, start, end, local = self._record()
         for field in (start, end, local):
             active = field[field > 0]
@@ -439,8 +410,6 @@ class DatasetResampleTests(unittest.TestCase):
                     self.assertGreater(active.size, 0)
                     self.assertGreater(float(active.max()), 1.0)
                 self.assertTrue((item.end.numpy() > 0).any())
-
-
 
 @unittest.skipUnless(HAVE_TORCH, "torch not installed")
 class InferenceTests(unittest.TestCase):
@@ -477,9 +446,6 @@ class InferenceTests(unittest.TestCase):
             self.assertTrue(np.all(pred >= 0.0))
 
     def test_predict_reconstructs_coherent_schedule(self):
-        # Regression: end must equal start + local on active cells (bounded by
-        # max_simulation_time). An incoherent end head inflates the
-        # fraction-liquid timeline far past the true completion time.
         with tempfile.TemporaryDirectory() as tmp:
             saved_to = self._train_small_model(tmp)
             result = load_model(saved_to)
@@ -549,7 +515,6 @@ class InferenceTests(unittest.TestCase):
             self.assertTrue(np.all(np.isfinite(engine.solidification_times)))
             self.assertIn("solidification_times", pipe_result.visualization_data)
 
-
 @unittest.skipUnless(HAVE_TORCH, "torch not installed")
 class ExportSmokeTests(unittest.TestCase):
     def _train_small_model(self, tmp: str) -> str:
@@ -617,8 +582,6 @@ class ExportSmokeTests(unittest.TestCase):
             self.assertTrue(result["validated"])
             self.assertIn("coreml", read_deep_manifest(saved_to).targets)
 
-            # Regression: the GroupNorm export shim must reproduce the torch
-            # forward (it once normalized per channel, i.e. InstanceNorm).
             from core.deep_model.backend import DeepBackend
             from core.deep_model.inference import load_deep_model
 
@@ -651,7 +614,6 @@ class ExportSmokeTests(unittest.TestCase):
                 export_for_target(saved_to, "tflite", progress_cb=lambda _m: None)
             self.assertIn("onnx2tf", str(ctx.exception))
 
-
 def _active_channels(resolution: int = 8) -> np.ndarray:
     channels = np.zeros((7, resolution, resolution, resolution), dtype=np.float32)
     channels[0, 2:6, 2:6, 2:6] = 1.0
@@ -659,10 +621,8 @@ def _active_channels(resolution: int = 8) -> np.ndarray:
     channels[3] = 0.5
     return channels
 
-
 @unittest.skipUnless(HAVE_TORCH and HAVE_ONNXRUNTIME, "torch / onnxruntime not installed")
 class OnnxInferenceTests(unittest.TestCase):
-    """ONNX Runtime inference: validation against PyTorch, auto selection, fallback."""
 
     def _export_onnx(self, tmp: str) -> str:
         data_dir = _two_record_dataset(tmp)
@@ -691,12 +651,11 @@ class OnnxInferenceTests(unittest.TestCase):
             pred_onnx = onnx_model.predict(channels, cond)
             self.assertEqual(onnx_model._backend, DeepBackend.ONNX)
             self.assertIn("onnx_provider", onnx_model.selection)
-            self.assertNotIn("onnx_ms", onnx_model.selection)  # explicit: no benchmark
+            self.assertNotIn("onnx_ms", onnx_model.selection)
             pred_torch = torch_model.predict(channels, cond)
             active = channels[0] > 0.5
             np.testing.assert_allclose(pred_onnx[:, active], pred_torch[:, active], rtol=1e-3, atol=1e-2)
 
-            # Later predictions reuse the session instead of re-checking.
             runner = onnx_model._onnx
             onnx_model.predict(channels, cond)
             self.assertIs(onnx_model._onnx, runner)
@@ -731,14 +690,12 @@ class OnnxInferenceTests(unittest.TestCase):
             model = load_deep_model(saved_to, backend="onnx").model
             torch_model = load_deep_model(saved_to, backend="cpu").model
             channels, cond = _active_channels(), _conditioning()
-            # A negative tolerance can never be met, so the check must reject ONNX.
             with mock.patch.object(inference, "ONNX_MATCH_ATOL_S", -1.0), \
                     mock.patch.object(inference, "ONNX_MATCH_RTOL", 0.0):
                 pred = model.predict(channels, cond)
             self.assertEqual(model._backend, model._torch_backend)
             self.assertIsNone(model._onnx)
             self.assertIn("differs from PyTorch", model.selection["onnx_rejected"])
-            # The fallback may run on MPS while torch_model runs on CPU.
             np.testing.assert_allclose(pred, torch_model.predict(channels, cond), rtol=1e-4, atol=1e-2)
 
     def test_no_onnx_artifact_stays_on_torch(self):
@@ -771,10 +728,8 @@ class OnnxInferenceTests(unittest.TestCase):
             self.assertEqual(len(skipped), 1)
             self.assertTrue(skipped[0].startswith("NoSuchExecutionProvider"))
 
-
 @unittest.skipUnless(HAVE_ONNXRUNTIME, "onnxruntime not installed")
 class OnnxProviderOrderTests(unittest.TestCase):
-    """Provider ordering and overrides; no model or torch needed."""
 
     def _order(self, installed, env=""):
         from unittest import mock
@@ -817,9 +772,7 @@ class OnnxProviderOrderTests(unittest.TestCase):
         self.assertEqual(DeepModelSettings(inference_backend="ONNX").inference_backend, "onnx")
         self.assertEqual(DeepModelSettings(inference_backend="tpu").inference_backend, "auto")
 
-
 class AutoTrainPolicyTests(unittest.TestCase):
-    """Pure policy logic — no Qt, no torch required."""
 
     def _state(self, count=2, mtimes=(1.0, 2.0), trained_at=0.0, model_exists=True):
         return AutoTrainState(
@@ -927,7 +880,6 @@ class AutoTrainPolicyTests(unittest.TestCase):
             sig2 = dataset_signature(tmp)
             self.assertEqual(sig2[0], 2)
             self.assertNotEqual(sig, sig2)
-
 
 if __name__ == "__main__":
     unittest.main()

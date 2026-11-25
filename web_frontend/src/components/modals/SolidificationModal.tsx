@@ -20,14 +20,6 @@ export type SolidificationModalProps = {
   onClose: () => void;
 };
 
-/**
- * The 45-parameter solidification dialog, tabbed exactly like the desktop.
- *
- * The old web drawer rendered every group into one scroll box that clipped
- * after the first field. Here each tab is its own scroll region inside a
- * fixed-height dialog, and every field carries its label, unit and range so a
- * value can be judged without opening the source.
- */
 export function SolidificationModal({ params, onChange, onClose }: SolidificationModalProps) {
   const [tab, setTab] = useState<ParamGroup>('feeding');
   const { main, filter } = paramsForTab(tab);
@@ -116,8 +108,6 @@ function ParamRow({
 }) {
   const isSlider = SLIDER_KEYS.has(def.key);
   const isBoolean = isBooleanParam(def);
-  // "0 to 1" under an on/off switch is noise, so a boolean shows only its unit
-  // (usually none) and leans on the tooltip for the rest.
   const meta = isBoolean
     ? def.unit
     : def.unit

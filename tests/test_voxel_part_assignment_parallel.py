@@ -8,12 +8,10 @@ import trimesh
 
 from core.voxel_mesh import AdaptiveVoxelMesh
 
-
 def _grid_centers() -> np.ndarray:
     axis = np.linspace(-0.9, 0.9, 19, dtype=np.float32)
     xx, yy, zz = np.meshgrid(axis, axis, axis, indexing="ij")
     return np.column_stack((xx.ravel(), yy.ravel(), zz.ravel())).astype(np.float32)
-
 
 def _parts_data() -> list[tuple[trimesh.Trimesh, int]]:
     cast = trimesh.creation.box(extents=[2.2, 2.2, 2.2])
@@ -29,7 +27,6 @@ def _parts_data() -> list[tuple[trimesh.Trimesh, int]]:
 
     return [(cast, 0), (riser, 1), (chill, 2), (post, 3)]
 
-
 def _run_assignment(mode: str, workers: int = 2) -> np.ndarray:
     mesh = AdaptiveVoxelMesh(
         base_voxel_size=0.1,
@@ -41,7 +38,6 @@ def _run_assignment(mode: str, workers: int = 2) -> np.ndarray:
     mesh.assign_part_types(_parts_data())
     assert mesh.voxel_part_types is not None
     return np.asarray(mesh.voxel_part_types).copy()
-
 
 class PartAssignmentParallelTests(unittest.TestCase):
     def test_single_cast_uses_fast_path(self) -> None:
@@ -77,7 +73,6 @@ class PartAssignmentParallelTests(unittest.TestCase):
         )
         per_worker = AdaptiveVoxelMesh.AUTO_PART_ASSIGNMENT_MEMORY_PER_WORKER_BYTES
 
-        # Sizing must read live RAM, not the import-time hardware snapshot.
         with mock.patch.object(voxel_mesh_module, "_available_memory_bytes", return_value=per_worker * 2), \
              mock.patch.object(voxel_mesh_module.hardware, "get_optimal_thread_count", return_value=8):
             self.assertEqual(mesh._get_part_assignment_workers(), 2)
@@ -102,12 +97,9 @@ class PartAssignmentParallelTests(unittest.TestCase):
         gb = 1024 ** 3
         with mock.patch.object(mesh, "_memory_reserve_bytes", return_value=4 * gb):
             with mock.patch.object(voxel_mesh_module, "_available_memory_bytes", return_value=16 * gb):
-                # (16 - 4) / 6 = 2 workers at a 6 GB measured cost
                 self.assertEqual(mesh._memory_bounded_concurrency(6 * gb, ceiling=17), 2)
-                # cheap batches are capped by the pool ceiling
                 self.assertEqual(mesh._memory_bounded_concurrency(100 * 2**20, ceiling=17), 17)
             with mock.patch.object(voxel_mesh_module, "_available_memory_bytes", return_value=3 * gb):
-                # inside the reserve: nothing may run in workers
                 self.assertEqual(mesh._memory_bounded_concurrency(100 * 2**20, ceiling=17), 0)
 
     def test_parallel_falls_back_to_sequential_when_headroom_is_gone(self) -> None:
@@ -115,8 +107,6 @@ class PartAssignmentParallelTests(unittest.TestCase):
 
         with patch("core.voxel_mesh._available_memory_bytes", return_value=0), \
              patch("core.voxel_mesh.ProcessPoolExecutor", side_effect=AssertionError("pool must not be created")):
-            # No pool is ever built: _get_part_assignment_workers() sees no RAM and
-            # returns 1, so _should_parallelize_part_assignment() is False.
             types = _run_assignment("parallel", workers=0)
 
         np.testing.assert_array_equal(types, expected_types)
@@ -125,10 +115,6 @@ class PartAssignmentParallelTests(unittest.TestCase):
         import core.voxel_mesh as voxel_mesh_module
         expected_types = _run_assignment("legacy", workers=1)
 
-        # Plenty of RAM for sizing, then the guard sees the reserve breached on
-        # every submission check: the first batch is probed in-process, the
-        # pool is created, and the rest must finish sequentially with the same
-        # answer.
         readings = iter([64 * 1024 ** 3, 64 * 1024 ** 3])
 
         def _fake_available() -> int:
@@ -159,7 +145,6 @@ class PartAssignmentParallelTests(unittest.TestCase):
         with patch.object(voxel_mesh_module, "ProcessPoolExecutor", side_effect=_counting_executor):
             mesh.assign_part_types(_parts_data())
 
-        # Three non-CAST parts, one pool.
         self.assertEqual(len(created), 1)
         self.assertIsNone(mesh._part_assignment_pool)
         self.assertIsNone(mesh._part_assignment_scratch_dir)
@@ -197,7 +182,6 @@ class PartAssignmentParallelTests(unittest.TestCase):
             fallback_types = _run_assignment("parallel", workers=2)
 
         np.testing.assert_array_equal(fallback_types, expected_types)
-
 
 if __name__ == "__main__":
     unittest.main()

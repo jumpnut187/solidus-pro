@@ -1,16 +1,3 @@
-/**
- * Probe and measurement markers.
- *
- * Both tools answer a question about a specific place on the casting, so the
- * answer belongs at that place rather than only in a panel: a probe reading
- * with no marker leaves you guessing which spot you actually hit, and a
- * distance with no line leaves you guessing what you measured between.
- *
- * Labels are billboarded planes carrying a `DynamicTexture`. That is heavier
- * than an HTML overlay, but an overlay has to be re-projected every frame from
- * React and drifts behind the camera during an orbit; a billboard is placed
- * once and tracks exactly.
- */
 import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial';
 import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture';
 import { Color3 } from '@babylonjs/core/Maths/math.color';
@@ -40,8 +27,6 @@ function createLabel(scene: Scene, name: string, worldHeight: number): Label {
   );
   plane.isPickable = false;
   plane.billboardMode = Mesh.BILLBOARDMODE_ALL;
-  // Ahead of the casting in the render order: a reading hidden inside the
-  // part it describes is worse than no reading.
   plane.renderingGroupId = 2;
 
   const texture = new DynamicTexture(
@@ -67,17 +52,12 @@ function createLabel(scene: Scene, name: string, worldHeight: number): Label {
 function drawLabel(label: Label, text: string, color: string): void {
   const context = label.texture.getContext();
   context.clearRect(0, 0, LABEL_WIDTH, LABEL_HEIGHT);
-  // A rounded plate behind the text, so a reading stays legible over a bright
-  // region of the colormap.
   context.fillStyle = 'rgba(8, 11, 16, 0.82)';
   context.fillRect(8, 24, LABEL_WIDTH - 16, LABEL_HEIGHT - 48);
   label.texture.update();
-  // drawText is what Babylon's canvas abstraction supports across backends;
-  // the raw context lacks fillText on some of them.
   label.texture.drawText(text, null, 88, 'bold 54px Helvetica, Arial, sans-serif', color, null, true, true);
 }
 
-/** A single point marker plus its label. */
 class Marker {
   readonly sphere: Mesh;
   private readonly _label: Label;
@@ -129,12 +109,6 @@ class Marker {
   }
 }
 
-/**
- * Everything the probe and measure tools draw into the scene.
- *
- * Created lazily and sized to the assembly, so a marker on a two-inch riser
- * and one on a six-foot casting both read the same.
- */
 export class Annotations {
   private readonly _scene: Scene;
   private _size: number;
@@ -163,7 +137,6 @@ export class Annotations {
     this._probe?.hide();
   }
 
-  /** The first click of a measurement: a marker with no distance yet. */
   showMeasureStart(point: Vector3): void {
     if (!this._measureStart) {
       this._measureStart = new Marker(this._scene, 'measure-a', this._size, MEASURE_COLOR, '#8fe4ff');
@@ -173,7 +146,6 @@ export class Annotations {
     this._measureLine?.setEnabled(false);
   }
 
-  /** The completed measurement: both markers, the line, and the distance. */
   showMeasurement(start: Vector3, end: Vector3, distanceIn: number): void {
     if (!this._measureStart) {
       this._measureStart = new Marker(this._scene, 'measure-a', this._size, MEASURE_COLOR, '#8fe4ff');
@@ -184,8 +156,6 @@ export class Annotations {
     this._measureStart.place(start, null);
     this._measureEnd.place(end, `${distanceIn.toFixed(3)} in`);
 
-    // The line is rebuilt rather than moved: `updatable` lines keep their
-    // original vertex count, and two points is two points.
     this._measureLine?.dispose();
     this._measureLine = MeshBuilder.CreateLines(
       'measure-line',

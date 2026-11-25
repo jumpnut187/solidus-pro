@@ -1,10 +1,3 @@
-"""
-Shared simulation pipeline used by desktop UI and web API.
-
-This module centralizes part loading, voxel mesh generation, simulation
-execution, and result packaging to avoid duplicated orchestration logic.
-"""
-
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
@@ -16,8 +9,8 @@ from core.filling_stage import maybe_run_filling
 
 try:
     from core.error_logger import logger as _error_logger
-except ImportError:  # pragma: no cover - headless/dummy fallback
-    from core.error_logger_dummy import logger as _error_logger  # type: ignore
+except ImportError:
+    from core.error_logger_dummy import logger as _error_logger  # type: ignore[assignment]
 from core.materials import get_alloy
 from core.part_manager import (
     PartManager,
@@ -46,9 +39,7 @@ DetailedProgressCallback = Callable[[int, int, str], None]
 CancelCallback = Callable[[], bool]
 ThreadBudgetProvider = Callable[[], Optional[int]]
 
-
 def _get_default_solver_mode_override() -> Optional[str]:
-    """Return validated solver-mode override from environment, if present."""
     raw_mode: Optional[str] = os.getenv("CASTSIM_DEFAULT_SOLVER_MODE")
     if raw_mode is None:
         return None
@@ -59,13 +50,10 @@ def _get_default_solver_mode_override() -> Optional[str]:
 
     return solver_mode
 
-
 class SimulationCancelledError(RuntimeError):
-    """Raised when an external caller requests cancellation."""
-
+    pass
 
 class PipelineInputs:
-    """Normalized simulation input parameters."""
 
     def __init__(
         self,
@@ -102,15 +90,10 @@ class PipelineInputs:
         self.show_progress = show_progress
         self.solidification_params = solidification_params
         self.thread_budget_provider = thread_budget_provider
-        # Serialized PourLocation, or None. Filling runs only when set.
         self.pour_location = pour_location
-        # Cut cells on the voxel mesh (core/cut_cells.py); None uses
-        # settings.mesh.voxel_cut_cells.
         self.voxel_cut_cells = voxel_cut_cells
 
-
 class PipelineResult:
-    """Simulation pipeline outputs."""
 
     def __init__(
         self,
@@ -126,37 +109,22 @@ class PipelineResult:
         self.result_data = result_data
         self.visualization_data = visualization_data
 
-
 def resolve_voxel_cut_cells(inputs: PipelineInputs, mesh_settings: Optional[MeshSettings] = None) -> bool:
-    """Cut cells for a voxel mesh of this run: ``inputs.voxel_cut_cells`` when set, else the setting.
-
-    A settings object without the field (written before it existed) means off.
-    """
     requested = getattr(inputs, "voxel_cut_cells", None)
     if requested is not None:
         return bool(requested)
     settings_mesh = mesh_settings if mesh_settings is not None else get_settings().mesh
     return bool(getattr(settings_mesh, "voxel_cut_cells", False))
 
-
 def _emit_message(callback: Optional[ProgressMessageCallback], message: str) -> None:
     if callback is not None:
         callback(message)
-
 
 def _check_cancel(callback: Optional[CancelCallback]) -> None:
     if callback is not None and callback():
         raise SimulationCancelledError("Cancelled")
 
-
 def _apply_thread_budget(provider: Optional[ThreadBudgetProvider]) -> None:
-    """
-    Apply the current fair-share thread budget to this process.
-
-    Called at pipeline stage boundaries so every thread-count consumer in
-    the process (Numba pools, voxelization/part-assignment workers, and the
-    env var inherited by spawned worker pools) honors the same budget.
-    """
     if provider is None:
         return
     budget = provider()
@@ -167,16 +135,8 @@ def _apply_thread_budget(provider: Optional[ThreadBudgetProvider]) -> None:
     else:
         os.environ["CASTSIM_THREAD_BUDGET"] = str(budget)
 
-
 def build_part_manager_from_parts(parts_data: Sequence[Dict[str, Any]]) -> PartManager:
-    """Build a ``PartManager`` from serialized web API part payloads.
-
-    Thin wrapper around :func:`core.part_manager.build_part_manager` that
-    preserves the historical "preserve STL coordinates" default for the
-    desktop pipeline.
-    """
     return build_part_manager(parts_data, preserve_origin=True)
-
 
 def create_analysis_options(
     options: Optional[Dict[str, Any]],
@@ -185,9 +145,6 @@ def create_analysis_options(
     use_incremental: bool,
     solidification_params: Optional[Dict[str, Any]] = None,
 ) -> AnalysisOptions:
-    """
-    Convert dictionary options from UI/web into AnalysisOptions.
-    """
     from core.solidification_params import SolidificationParameters
 
     option_map = options or {}
@@ -220,7 +177,6 @@ def create_analysis_options(
         )
     return analysis_options
 
-
 def build_visualization_payload(
     engine: SolidificationEngine,
     voxel_mesh: AdaptiveVoxelMesh,
@@ -229,9 +185,6 @@ def build_visualization_payload(
     bounds: np.ndarray,
     max_voxels: int,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """
-    Build summary and downsampled visualization payload for web clients.
-    """
     voxel_centers = voxel_mesh.voxel_centers
     if voxel_centers is None:
         raise RuntimeError("Voxel mesh centers are not available for visualization payload.")
@@ -266,7 +219,6 @@ def build_visualization_payload(
             visualization_data["surface_voxels"] = surface_voxels[indices].tolist()
 
     if engine.shrinkage_probability is not None:
-        # The Shrink result: same array the desktop shows (chills at 0, no porosity).
         display_fn = getattr(engine, "get_shrink_display_intensity", None)
         if callable(display_fn):
             shrinkage = np.asarray(display_fn(), dtype=np.float32)
@@ -285,7 +237,6 @@ def build_visualization_payload(
             "affected_count": int(np.sum(shrinkage > 0.05)),
         }
 
-    # Expose feeding-blocked and feeding-path fields for the shrinkage/porosity overlay.
     feeding_blocked = getattr(engine, "feeding_blocked", None)
     if feeding_blocked is not None and len(feeding_blocked) == n_voxels:
         visualization_data["feeding_blocked"] = np.asarray(feeding_blocked, dtype=bool)[indices].tolist()
@@ -295,7 +246,6 @@ def build_visualization_payload(
     feeding_open_fraction = getattr(engine, "feeding_open_fraction", None)
     if feeding_open_fraction is not None and len(feeding_open_fraction) == n_voxels:
         visualization_data["feeding_open_fraction"] = np.asarray(feeding_open_fraction, dtype=np.float32)[indices].tolist()
-    # The Microporosity result: same array the desktop shows (chills at 0).
     porosity_standalone = getattr(engine, "porosity_probability", None)
     microporosity_fn = getattr(engine, "get_microporosity_display_intensity", None)
     if porosity_standalone is not None and callable(microporosity_fn):
@@ -310,7 +260,6 @@ def build_visualization_payload(
         feed_modulus = np.asarray(local_modulus, dtype=np.float32)
         if len(feed_modulus) == n_voxels:
             feed_modulus_in = np.where(np.isfinite(feed_modulus), feed_modulus, 0.0).astype(np.float32)
-            # Feed modulus is only meaningful for cast metal; exclude chills and cores.
             part_types = getattr(voxel_mesh, "voxel_part_types", None)
             if part_types is not None and len(part_types) == n_voxels:
                 chill_mask = np.isin(np.asarray(part_types, dtype=np.int32), (2, 4))
@@ -361,11 +310,9 @@ def build_visualization_payload(
         if len(combined_feed_risk) == n_voxels:
             visualization_data["combined_feed_risk"] = combined_feed_risk[indices].tolist()
 
-    # Chills and phantom gap-fill voxels must never render as liquid metal;
-    # route liquid fields through the engine's mask when available.
     mask_liquid = getattr(engine, "_mask_non_cast_fraction_liquid", None)
     if not callable(mask_liquid):
-        mask_liquid = lambda arr: arr  # noqa: E731
+        mask_liquid = lambda arr: arr
 
     if voxel_mesh.voxel_states is not None:
         fraction_liquid = 1.0 - np.asarray(voxel_mesh.voxel_states).astype(float)
@@ -407,11 +354,6 @@ def build_visualization_payload(
         if len(hotspots) == n_voxels:
             visualization_data["gas_porosity_hotspots"] = hotspots[indices].tolist()
 
-    # Mold-filling arrival time, in seconds, per voxel; -1 marks metal the
-    # fill never reached (a misrun) and NaN marks a voxel that is not metal at
-    # all, for which the question does not apply. Only present when a filling
-    # stage ran, so a run without filling does not gain an empty "fill_time"
-    # mode.
     fill_arrival_times = getattr(engine, "_fill_arrival_times", None)
     if fill_arrival_times is not None:
         fill_times = np.asarray(fill_arrival_times, dtype=np.float64)
@@ -419,8 +361,6 @@ def build_visualization_payload(
             visualization_data["fill_time"] = fill_times[indices].tolist()
             filled_mask = fill_times >= 0.0
             filled_count = int(np.sum(filled_mask))
-            # Non-metal voxels are NaN, not misruns (see core.filling_stage);
-            # subtracting from n_voxels would bill the entire mold as unfilled.
             unfilled_count = int(np.sum(np.isfinite(fill_times) & ~filled_mask))
             max_fill_time_s = float(np.max(fill_times[filled_mask])) if filled_count > 0 else 0.0
             result_data["fill_time_stats"] = {
@@ -429,13 +369,6 @@ def build_visualization_payload(
                 "unfilled_voxels": unfilled_count,
             }
 
-    # Playback frames from the pour, gathered onto voxels by the filling stage
-    # (``core.filling_stage.FillFrame``). ``fill_time`` alone gives a static
-    # arrival-time map that a slider can sweep; these are the actual free
-    # surface at each instant, including the partial cells that are the
-    # advancing front, which is what makes a fill animation read as metal
-    # flowing rather than as cells switching on. The engine holds them only
-    # when a filling stage ran and was trustworthy.
     fill_frames = getattr(engine, "_fill_frames", None)
     if fill_frames:
         fill_history: list[list[float]] = []
@@ -458,25 +391,7 @@ def build_visualization_payload(
 
     return result_data, visualization_data
 
-
 def _add_summary_statistics(result_data: Dict[str, Any], engine: SolidificationEngine) -> None:
-    """
-    Add the run's scalar statistics under flat, final names.
-
-    The engine's own ``export_results`` carries roughly twenty-five of these,
-    but it never reached the web layer: the artifact summary was assembled
-    separately and only picked up a handful of nested ``*_stats`` dicts. The
-    browser now shows a statistics panel, so the numbers have to arrive, and
-    they have to arrive under names that do not change shape from run to run.
-
-    Naming rules, applied here so the panel never has to guess:
-      * flat scalars only, no nesting -- ``GridMeta.stats`` is a flat map
-      * a unit suffix wherever the unit is not implied: ``_s``, ``_in3``,
-        ``_mpa``, ``_um``, ``_percentage``
-      * ``_count`` for whole voxels, ``_fraction`` for 0..1
-    A statistic the run did not produce is absent rather than zero: zero
-    hot tears and "hot tearing was not analysed" are different answers.
-    """
 
     def put(name: str, value: Any) -> None:
         if value is None:
@@ -488,7 +403,6 @@ def _add_summary_statistics(result_data: Dict[str, Any], engine: SolidificationE
     put("alloy", getattr(getattr(engine, "alloy", None), "name", None))
     put("simulation_time_s", _optional_float(getattr(engine, "time", None)))
 
-    # Chvorinov is a per-voxel field; the panel wants the scalars off it.
     chvorinov = getattr(engine, "chvorinov_time", None)
     if chvorinov is not None:
         values = np.asarray(chvorinov, dtype=np.float64)
@@ -497,14 +411,11 @@ def _add_summary_statistics(result_data: Dict[str, Any], engine: SolidificationE
             put("chvorinov_time_max_s", float(np.max(finite)))
             put("chvorinov_time_mean_s", float(np.mean(finite)))
 
-    # The defect volume the desktop's "Calculate Defect Volume" reports, at
-    # its own default threshold, so the panel has a number without the user
-    # having to pick one first.
     estimate = getattr(engine, "get_defect_volume_estimate", None)
     if callable(estimate):
         try:
             defect = estimate()
-        except Exception:  # pragma: no cover - a statistic must never fail a run
+        except Exception:
             defect = None
         if isinstance(defect, dict):
             put("defect_volume_in3", _optional_float(defect.get("total_volume_in3")))
@@ -532,8 +443,6 @@ def _add_summary_statistics(result_data: Dict[str, Any], engine: SolidificationE
     feeding = getattr(engine, "feeding_path_result", None)
     put("fed_fraction", _optional_float(getattr(feeding, "fed_fraction", None)))
 
-    # Primary pipe from the riser volume balance. Pipe volume outside the
-    # riser means a feeder froze before the section it feeds.
     pipe_report = getattr(engine, "riser_pipe_report", None)
     if isinstance(pipe_report, list) and pipe_report:
         put("riser_pipe_volume_in3", float(sum(r["pipe_in3"] for r in pipe_report)))
@@ -546,8 +455,6 @@ def _add_summary_statistics(result_data: Dict[str, Any], engine: SolidificationE
         if clearances:
             put("riser_pipe_min_clearance_in", float(min(clearances)))
 
-    # Casting metal no riser reaches drains by gravity too: its own pools, kept
-    # apart from the riser numbers above.
     casting_pipe = getattr(engine, "casting_pipe_report", None)
     if isinstance(casting_pipe, list) and casting_pipe:
         put("casting_pipe_volume_in3", float(sum(r["pipe_in3"] for r in casting_pipe)))
@@ -556,14 +463,11 @@ def _add_summary_statistics(result_data: Dict[str, Any], engine: SolidificationE
     put("max_stress_mpa", _optional_float(getattr(engine, "max_stress_mpa", None)))
     put("avg_sdas_um", _optional_float(getattr(engine, "avg_sdas_um", None)))
 
-    # Mold filling, promoted out of the nested dict so the names read the same
-    # way as everything else here.
     fill_stats = result_data.get("fill_time_stats")
     if isinstance(fill_stats, dict):
         put("fill_max_time_s", _optional_float(fill_stats.get("max_fill_time_s")))
         put("fill_filled_voxel_count", _optional_int(fill_stats.get("filled_voxels")))
         put("fill_unfilled_voxel_count", _optional_int(fill_stats.get("unfilled_voxels")))
-
 
 def _optional_float(value: Any) -> Optional[float]:
     try:
@@ -572,13 +476,11 @@ def _optional_float(value: Any) -> Optional[float]:
         return None
     return number if np.isfinite(number) else None
 
-
 def _optional_int(value: Any) -> Optional[int]:
     try:
         return int(value)
     except (TypeError, ValueError):
         return None
-
 
 def _prepare_mold_stage(
     inputs: PipelineInputs,
@@ -587,7 +489,6 @@ def _prepare_mold_stage(
     mesh_to_use: Any,
     progress_message_callback: Optional[ProgressMessageCallback],
 ) -> None:
-    """Sand mold and automatic cores (core/mold_setup.py), before filling and solidification."""
     from core.mold_setup import MoldSetupError, auto_cores_apply, mold_requested, prepare_mold
     from core.part_manager import PART_TYPE_CAST
     from core.solidification_params import SolidificationParameters
@@ -618,9 +519,7 @@ def _prepare_mold_stage(
             f"Mold: {sand}, {layout.added_core_voxels:,} auto-core voxels",
         )
 
-
 def _prepare_riser_sleeves(voxel_mesh: AdaptiveVoxelMesh, part_manager: Optional[PartManager]) -> None:
-    """Mark the voxels of risers set to no sleeve or to a no-heat-loss sleeve (``Part.riser_sleeve``)."""
     from core.riser_sleeve import riser_sleeve_masks
 
     voxel_mesh.voxel_riser_bare = None
@@ -636,7 +535,6 @@ def _prepare_riser_sleeves(voxel_mesh: AdaptiveVoxelMesh, part_manager: Optional
         part_manager.get_riser_sleeve_parts(),
     )
 
-
 def prepare_mesh_and_geometry(
     inputs: PipelineInputs,
     *,
@@ -646,18 +544,6 @@ def prepare_mesh_and_geometry(
     detailed_progress_callback: Optional[DetailedProgressCallback] = None,
     cancel_callback: Optional[CancelCallback] = None,
 ) -> Tuple[Any, Any, float, Sequence[Any], AdaptiveVoxelMesh, Dict[str, Any]]:
-    """
-    Resolve the geometry source and generate the simulation mesh.
-
-    Shared by the traditional pipeline (:func:`run_pipeline`) and the
-    surrogate pipeline (``core.surrogate.pipeline``) so both paths perform
-    identical geometry work.
-
-    Returns:
-        ``(mesh_to_use, bounds_to_use, total_volume, parts_with_types,
-        voxel_mesh, mem_stats)``. ``parts_with_types`` is empty when the
-        geometry came from a bare STL.
-    """
     mesh_settings = get_settings().mesh
     _check_cancel(cancel_callback)
 
@@ -717,8 +603,6 @@ def prepare_mesh_and_geometry(
         bounds_to_use,
         show_progress=False,
         progress_callback=on_mesh_progress,
-        # The parts themselves, so a pocket they seal off between them is not
-        # filled as metal along with their interiors.
         part_meshes=[mesh for mesh, _ in parts_with_types] or None,
     )
     if not success:
@@ -749,7 +633,6 @@ def prepare_mesh_and_geometry(
     )
     return mesh_to_use, bounds_to_use, total_volume, parts_with_types, voxel_mesh, mem_stats
 
-
 def run_pipeline(
     inputs: PipelineInputs,
     *,
@@ -759,9 +642,6 @@ def run_pipeline(
     detailed_progress_callback: Optional[DetailedProgressCallback] = None,
     cancel_callback: Optional[CancelCallback] = None,
 ) -> PipelineResult:
-    """
-    Execute the full simulation pipeline.
-    """
     _check_cancel(cancel_callback)
     _emit_message(progress_message_callback, f"Loading material properties: {inputs.alloy_name}")
     alloy = get_alloy(inputs.alloy_name)
@@ -784,26 +664,8 @@ def run_pipeline(
     default_solver_mode = _get_default_solver_mode_override()
     if default_solver_mode is not None:
         analysis_options.solver_mode = default_solver_mode
-    # LEGACY FALLBACK DISABLED — always use thermal_coupled unless explicitly overridden.
-    # This ensures the full Numba-prange time-integration loop runs on all hardware.
-    # To re-enable schedule_legacy as a fallback, set CASTSIM_DEFAULT_SOLVER_MODE=schedule_legacy
-    # or pass solver_mode="schedule_legacy" explicitly in analysis_options.
 
-
-    # Filling messages go to the log as well as the progress callback. The
-    # callback lands in a status-bar label that the next message overwrites
-    # seconds later, so without this the entire record of a fill -- including
-    # "the solver diverged and the results were discarded" -- existed only for
-    # as long as it took solidification to emit its first line. A run that
-    # threw its fill away looked identical to one where filling was never
-    # ticked.
     def _filling_message(message: str) -> None:
-        # Console as well as the log and the progress callback. The callback
-        # reaches a Qt status label and nothing else, so on the terminal the
-        # mesh stage chatters through every part and then goes completely
-        # silent for the minutes the fill takes -- which reads as a hang, not
-        # as work. Every other long stage in this pipeline prints; this one
-        # was the exception.
         print(f"  {message}", flush=True)
         _error_logger.info(message)
         _emit_message(progress_message_callback, message)
@@ -825,11 +687,6 @@ def run_pipeline(
     if inputs.thread_budget_provider is not None:
         engine._thread_budget_provider = inputs.thread_budget_provider
     if filling_result is not None:
-        # Attached whether or not the fill can be used. The Fill Time and Fill
-        # Animation views disappear from the results list when a fill is
-        # discarded, and a view that is simply absent is indistinguishable
-        # from an analysis that was never enabled. This is what lets the UI
-        # say which of the two happened, and why.
         engine._filling_summary = {
             "status": filling_result.status,
             "trustworthy": filling_result.trustworthy,
@@ -839,18 +696,12 @@ def run_pipeline(
             "filled_fraction": filling_result.filled_fraction,
             "fill_seconds": filling_result.fill_seconds,
             "choke_thickness_cells": filling_result.choke_thickness_cells,
-            # Which body is the narrowest, not just how narrow. One scalar
-            # for "the gating system" cannot tell an operator whether to
-            # re-mesh the gate or the sprue.
             "choke_thickness_by_part": dict(filling_result.choke_thickness_by_part),
-            # Per body, since a part code covers every body of that type and
-            # the scalar above is the thinnest of them.
             "choke_thickness_bodies_by_part": {
                 name: list(values)
                 for name, values in
                 filling_result.choke_thickness_bodies_by_part.items()
             },
-            # Bodies too small to judge the grid by; reported, not acted on.
             "choke_body_fragments_by_part": {
                 name: list(sizes)
                 for name, sizes in
@@ -861,10 +712,6 @@ def run_pipeline(
         }
 
     if filling_result is not None and not filling_result.trustworthy:
-        # A diverged fill still returns arrays of the right shape, so seeding
-        # from them would run a complete, plausible-looking solidification on
-        # numerical debris. Fall back to the two-constant placeholder and say
-        # so, rather than silently dressing up a failed solve as a result.
         _filling_message(
             f"Filling: DISCARDED -- the solver diverged at step "
             f"{filling_result.diverged_at_step:,}. Solidification will use the "
@@ -877,9 +724,6 @@ def run_pipeline(
             fill_arrival_times=filling_result.fill_time_s,
         )
         engine._fill_frames = filling_result.frames
-        # Report the handover explicitly. Without this the only sign a fill ran
-        # is its progress chatter, so a run where filling was silently off is
-        # indistinguishable from one where it ran and found nothing wrong.
         _emit_message(
             progress_message_callback,
             f"Filling: seeded initial temperature from the fill "

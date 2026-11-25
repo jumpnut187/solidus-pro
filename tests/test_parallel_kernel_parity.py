@@ -1,10 +1,3 @@
-"""Parity tests for the Numba parallel kernels that replaced serial NumPy.
-
-Each kernel introduced to cut the thermal loop's single-threaded fraction has
-a NumPy formulation it must agree with. These tests pin that agreement so a
-future kernel edit cannot silently change the physics.
-"""
-
 from __future__ import annotations
 
 import unittest
@@ -19,7 +12,6 @@ from core.solidification_loop import _apply_enthalpy_correction_numpy
 from physics.solidification_physics import SolidificationMethod, SolidificationModel
 
 NUMBA_KERNELS = heat_transfer.NUMBA_AVAILABLE and solidification_physics.NUMBA_AVAILABLE
-
 
 class _DummyAlloy:
     name = "DUMMY"
@@ -37,9 +29,7 @@ class _DummyAlloy:
     eutectic_temperature = None
     eutectic_fraction = 0.0
 
-
 def _production_curves() -> dict[str, np.ndarray]:
-    """Curve set with the same shape core/solidification.py builds."""
     solidus = _DummyAlloy.solidus_temp
     liquidus = _DummyAlloy.liquidus_temp
     k_s = _DummyAlloy.thermal_conductivity
@@ -57,10 +47,8 @@ def _production_curves() -> dict[str, np.ndarray]:
         ),
     }
 
-
 @unittest.skipUnless(NUMBA_KERNELS, "Numba kernels unavailable")
 class DiffusivityKernelParityTests(unittest.TestCase):
-    """compute_diffusivity_from_curves_parallel vs three np.interp sweeps."""
 
     def _temperatures(self) -> np.ndarray:
         curves = _production_curves()
@@ -68,8 +56,8 @@ class DiffusivityKernelParityTests(unittest.TestCase):
         rng = np.random.default_rng(20260827)
         return np.concatenate(
             [
-                rng.uniform(-200.0, 2200.0, 50_000),  # spans below/inside/above
-                points,  # exact breakpoints
+                rng.uniform(-200.0, 2200.0, 50_000),
+                points,
                 np.nextafter(points, -np.inf),
                 np.nextafter(points, np.inf),
                 np.array([np.nan, np.inf, -np.inf]),
@@ -93,15 +81,12 @@ class DiffusivityKernelParityTests(unittest.TestCase):
         )
 
         finite = np.isfinite(expected)
-        # The kernel reproduces np.interp's slope-then-offset arithmetic, but
-        # exact bit-identity is not guaranteed across the two implementations.
         np.testing.assert_allclose(actual[finite], expected[finite], rtol=1e-12, atol=0.0)
         np.testing.assert_array_equal(np.isnan(actual), np.isnan(expected))
         np.testing.assert_array_equal(actual[~finite & ~np.isnan(expected)],
                                       expected[~finite & ~np.isnan(expected)])
 
     def test_model_dispatch_matches_numpy_fallback(self) -> None:
-        """The model's kernel and NumPy branches agree end to end."""
         neighbors = np.array([[1, -1], [0, -1]], dtype=np.int32)
         model = heat_transfer.HeatTransferModel(
             n_voxels=2,
@@ -119,17 +104,12 @@ class DiffusivityKernelParityTests(unittest.TestCase):
 
         np.testing.assert_allclose(with_kernel, with_numpy, rtol=1e-12, atol=0.0)
 
-
 @unittest.skipUnless(NUMBA_KERNELS, "Numba kernels unavailable")
 class SolidificationCommitParityTests(unittest.TestCase):
-    """SolidificationModel.update's kernel path vs its NumPy path."""
 
     def _run_sequence(self, method: SolidificationMethod, *, use_numba: bool) -> dict[str, np.ndarray]:
         model = SolidificationModel(n_voxels=6, alloy=_DummyAlloy(), method=method)
         rates = []
-        # Cooling sequence covering: staying liquid, partial mushy progress,
-        # a single-step liquid -> solid crossing (voxel 5), and a temperature
-        # rise that must not un-solidify anything.
         schedule = [
             np.array([1600.0, 1520.0, 1490.0, 1470.0, 1455.0, 1600.0]),
             np.array([1560.0, 1495.0, 1480.0, 1460.0, 1449.0, 1400.0]),
@@ -167,7 +147,6 @@ class SolidificationCommitParityTests(unittest.TestCase):
         self._assert_identical(SolidificationMethod.BACK_DIFFUSION)
 
     def test_single_step_crossing_spans_one_step(self) -> None:
-        """A liquid -> solid jump inside one step keeps a non-zero interval."""
         model = SolidificationModel(
             n_voxels=1, alloy=_DummyAlloy(), method=SolidificationMethod.LEVER_RULE
         )
@@ -186,10 +165,8 @@ class SolidificationCommitParityTests(unittest.TestCase):
         model.update(np.array([1400.0, 1400.0]), dt=1.0)
         np.testing.assert_array_equal(first, snapshot)
 
-
 @unittest.skipUnless(NUMBA_KERNELS, "Numba kernels unavailable")
 class EnthalpyCorrectionParityTests(unittest.TestCase):
-    """apply_enthalpy_correction_parallel vs its NumPy reference."""
 
     def test_all_branches_identical(self) -> None:
         T_liq = _DummyAlloy.liquidus_temp
@@ -203,8 +180,6 @@ class EnthalpyCorrectionParityTests(unittest.TestCase):
         ) / rho_cp
 
         rng = np.random.default_rng(4242)
-        # Random field plus explicit boundary values so every branch is hit:
-        # above liquidus, exactly at each bound, mushy, and below solidus.
         T_post = np.concatenate(
             [
                 rng.uniform(T_sol - 200.0, T_liq + 200.0, 40_000),
@@ -237,13 +212,10 @@ class EnthalpyCorrectionParityTests(unittest.TestCase):
         )
         self.assertTrue(np.all(actual <= T_sol))
 
-
 @unittest.skipUnless(NUMBA_KERNELS, "Numba kernels unavailable")
 class ThermalLoopEndToEndParityTests(unittest.TestCase):
-    """A full thermal-coupled run agrees between kernel and NumPy paths."""
 
     def _run(self, *, use_numba: bool) -> dict[str, np.ndarray]:
-        # Imported lazily: building an engine pulls in the GPU manager.
         from tests.test_thermal_boundary_config import _build_engine
 
         engine = _build_engine(with_chill=True)
@@ -289,7 +261,6 @@ class ThermalLoopEndToEndParityTests(unittest.TestCase):
                 equal_nan=True,
                 err_msg=f"end-to-end mismatch in {key}",
             )
-
 
 if __name__ == "__main__":
     unittest.main()

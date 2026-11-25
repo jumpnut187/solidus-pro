@@ -13,14 +13,10 @@ from tests.helpers.module_stubs import (
     snapshot_modules,
 )
 
-# Captured before any stub is installed, so tearDownModule can hand the real
-# vtk/Qt modules back to whatever runs next in this process.
 _MODULE_SNAPSHOT = snapshot_modules()
-
 
 def tearDownModule() -> None:
     restore_modules(_MODULE_SNAPSHOT)
-
 
 class _DummyVTKClass:
     def __init__(self, *args, **kwargs):
@@ -31,11 +27,9 @@ class _DummyVTKClass:
             return None
         return _method
 
-
 class _DummySignal:
     def emit(self, *args, **kwargs):
         return None
-
 
 def _install_visualizer_import_stubs() -> None:
     vtk_module = types.ModuleType("vtk")
@@ -45,16 +39,13 @@ def _install_visualizer_import_stubs() -> None:
     def _vtk_getattr(name):
         return _DummyVTKClass
 
-    vtk_module.__getattr__ = _vtk_getattr  # type: ignore[attr-defined]
+    vtk_module.__getattr__ = _vtk_getattr
 
     vtk_util_module = types.ModuleType("vtk.util")
     numpy_support_module = types.ModuleType("vtk.util.numpy_support")
     numpy_support_module.numpy_to_vtk = lambda *args, **kwargs: _DummyVTKClass()
     vtk_util_module.numpy_support = numpy_support_module
 
-    # Forced, not setdefault: the stub must win even if an earlier test
-    # already imported the real module, or this module's behavior would
-    # depend on test execution order. tearDownModule puts them back.
     install_stub_modules({
         "vtk": vtk_module,
         "vtk.util": vtk_util_module,
@@ -62,7 +53,6 @@ def _install_visualizer_import_stubs() -> None:
         **make_vtk_qt_stub_modules(_DummyVTKClass),
         **make_qt_stub_modules(_DummyVTKClass, lambda *args, **kwargs: _DummySignal()),
     })
-
 
 class VisualizerColormapTests(unittest.TestCase):
     @classmethod
@@ -119,7 +109,6 @@ class VisualizerColormapTests(unittest.TestCase):
         all_mask = self.visualizer.compute_top_percent_mask(values, 1.0)
         np.testing.assert_array_equal(none_mask, np.array([False, False, False]))
         np.testing.assert_array_equal(all_mask, np.array([True, True, True]))
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,3 @@
-"""Smoke tests for physics.gas_porosity module."""
-
 from __future__ import annotations
 
 import unittest
@@ -15,19 +13,15 @@ from physics.gas_porosity import (
     _propagate_sgi_numba,
 )
 
-
 class TestSurfaceGasGeneration(unittest.TestCase):
     def test_core_has_higher_sgi_than_mold_wall(self):
         n = 100
         surface_indices = np.arange(n, dtype=np.int32)
         part_types = np.zeros(n * 3, dtype=np.int32)
-        part_types[5] = 4  # core
+        part_types[5] = 4
         part_types[6] = 4
         local_st = np.ones(n * 3, dtype=np.float32) * 10.0
 
-        # An unvented core (weight 1.0) out-gasses more than the mold wall
-        # (0.6). This test used the default venting 0.5 and passed only
-        # because venting was skipped unless the last surface entry was a core.
         sgi0 = compute_surface_gas_generation(
             surface_indices=surface_indices,
             voxel_part_types=part_types,
@@ -46,8 +40,6 @@ class TestSurfaceGasGeneration(unittest.TestCase):
                                "Core surfaces should produce higher SGI than mold wall")
 
     def test_core_venting_applies_wherever_core_entries_sit(self):
-        # Before the fix venting was applied only when the last surface entry
-        # was a core: here the cores are entries 5 and 6 of 100.
         n = 100
         surface_indices = np.arange(n, dtype=np.int32)
         part_types = np.zeros(n, dtype=np.int32)
@@ -64,12 +56,9 @@ class TestSurfaceGasGeneration(unittest.TestCase):
         }
         np.testing.assert_allclose(by_venting[0.5][[5, 6]], 0.5 * by_venting[0.0][[5, 6]], rtol=1e-6)
         np.testing.assert_array_equal(by_venting[1.0][[5, 6]], 0.0)
-        # Mold-wall entries do not depend on core venting.
         np.testing.assert_array_equal(by_venting[0.0][:5], by_venting[1.0][:5])
 
     def test_core_last_with_other_entries_does_not_raise(self):
-        # Before the fix: last entry core, 2 core entries against 4 positive
-        # entries -> "sgi0[sgi0 > 0] = sgi0[core]" raised a shape ValueError.
         surface_indices = np.arange(4, dtype=np.int32)
         part_types = np.array([0, 4, 0, 4], dtype=np.int32)
         local_st = np.full(4, 10.0, dtype=np.float32)
@@ -86,7 +75,7 @@ class TestSurfaceGasGeneration(unittest.TestCase):
         n = 20
         surface_indices = np.arange(n, dtype=np.int32)
         part_types = np.zeros(n * 2, dtype=np.int32)
-        part_types[0:5] = 2  # chill
+        part_types[0:5] = 2
         local_st = np.ones(n * 2, dtype=np.float32) * 5.0
 
         sgi0 = compute_surface_gas_generation(
@@ -129,7 +118,6 @@ class TestSurfaceGasGeneration(unittest.TestCase):
         self.assertTrue(np.all(sgi0 >= 0.0) and np.all(sgi0 <= 1.0),
                         "SGI0 must be in [0, 1]")
 
-
 class TestPropagationDecay(unittest.TestCase):
     def test_exponential_decay_below_5pct_at_3lambda(self):
         distances = np.array([0.0, 3.0, 9.0], dtype=np.float32)
@@ -142,7 +130,6 @@ class TestPropagationDecay(unittest.TestCase):
         self.assertLess(sgi[1], 1.0)
         self.assertLessEqual(float(sgi[2]), 0.06,
                              f"At d=3λ, SGI should be <5% (got {sgi[2]:.4f})")
-
 
 class TestCombinedRisk(unittest.TestCase):
     def test_risk_in_thick_section_higher_than_thin(self):
@@ -221,7 +208,6 @@ class TestCombinedRisk(unittest.TestCase):
         self.assertTrue(np.all(risk >= 0.0) and np.all(risk <= 1.0),
                         "Combined gas risk must be in [0, 1]")
 
-
 class TestHotspots(unittest.TestCase):
     def test_hotspot_threshold(self):
         risk = np.array([0.0, 0.3, 0.6, 0.7, 1.0], dtype=np.float32)
@@ -229,7 +215,6 @@ class TestHotspots(unittest.TestCase):
 
         expected = np.array([False, False, False, True, True])
         np.testing.assert_array_equal(hotspots, expected)
-
 
 class TestConstants(unittest.TestCase):
     def test_surface_weights(self):
@@ -241,7 +226,6 @@ class TestConstants(unittest.TestCase):
     def test_binder_gas_yields(self):
         self.assertIn("phenolic_urethane", BINDER_GAS_YIELDS)
         self.assertGreater(BINDER_GAS_YIELDS["phenolic_urethane"], 0)
-
 
 if __name__ == "__main__":
     unittest.main()

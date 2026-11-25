@@ -1,18 +1,4 @@
 #!/usr/bin/env python3
-"""
-Train a surrogate solidification model from simulation data.
-
-Thin CLI wrapper around ``core.surrogate.training``; the same logic is
-available from the desktop UI (Surrogate > Retrain Surrogate Model).
-
-Examples:
-
-    # Generate a dataset + train the default model
-    python tools/train_surrogate_model.py --generate
-
-    # Train on an existing captured dataset
-    python tools/train_surrogate_model.py --data-dir data/surrogate_dataset
-"""
 
 import argparse
 import os
@@ -29,7 +15,6 @@ from core.surrogate.training import (
     generate_dataset,
     retrain_from_dataset,
 )
-
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Train a surrogate solidification model.")
@@ -82,7 +67,6 @@ def main() -> int:
           f"skill {headline.get('skill', nan):.2f}")
     print("  (active, non-chill cells with reference end > 0 on geometry-grouped validation)")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

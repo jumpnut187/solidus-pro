@@ -1,32 +1,14 @@
-/**
- * Presentation for `GridMeta.stats`.
- *
- * Which keys appear depends on which analyses a run enabled, and a statistic
- * the run did not produce is *absent* rather than zero -- "no hot tears" and
- * "hot tearing was not analysed" are different answers, and the panel must not
- * flatten them into the same 0.
- *
- * So this cannot be a fixed list. The server names statistics to a convention
- * (`core/simulation_pipeline._add_summary_statistics`): flat scalars, a unit
- * suffix wherever the unit is not implied (`_s`, `_in3`, `_in`, `_mpa`, `_um`,
- * `_percentage`), `_count` for whole voxels and `_fraction` for 0..1. Units and
- * precision are derived from that suffix, so a statistic added upstream shows
- * up correctly without this file being touched. The table below only overrides
- * the handful whose derived wording reads badly, or that deserve a tooltip.
- */
 import { formatCount, formatNumber } from './format';
 
 export type StatDisplay = {
   key: string;
   label: string;
   value: string;
-  /** Longer explanation for a tooltip, when the number needs one. */
   hint?: string;
 };
 
 type Unit = { suffix: string; unit: string; decimals: number };
 
-/** Longest suffix first: `_max_in3` must not be read as `_in`. */
 const UNIT_SUFFIXES: Unit[] = [
   { suffix: '_in3', unit: 'in³', decimals: 3 },
   { suffix: '_mpa', unit: 'MPa', decimals: 1 },
@@ -39,7 +21,6 @@ const UNIT_SUFFIXES: Unit[] = [
 
 const COUNT_SUFFIXES = ['_count', '_voxel_count', '_snapshots'];
 
-/** Overrides for names whose derived label or precision is not good enough. */
 const OVERRIDES: Record<string, { label?: string; hint?: string; decimals?: number }> = {
   alloy: { label: 'Alloy' },
   voxel_count: { label: 'Voxels', hint: 'Total metal and mold voxels in the solved mesh.' },
@@ -58,17 +39,11 @@ const OVERRIDES: Record<string, { label?: string; hint?: string; decimals?: numb
     label: 'Defect volume (upper bound)',
     hint: 'The same voxels counted at full volume, as if every one were entirely defective.'
   },
-  // Not "Defect volume" again: the in³ figures above already own that label,
-  // and two rows with the same name and different numbers read as a bug.
   defect_volume_percentage: { label: 'Defect share of casting' },
   defect_voxel_count: { label: 'Defect voxels' },
   defect_threshold: { label: 'Threshold used', decimals: 2 },
   casting_volume_in3: { label: 'Casting volume' },
   shrinkage_volume_in3: { label: 'Shrinkage volume' },
-  // Two counts arrive for shrinkage, for hot spots and for Niyama, and they
-  // differ by an order of magnitude because they are counted against different
-  // thresholds: one on the displayed field, one by the solver itself. Labelling
-  // both "voxels at risk" would put two contradictory numbers side by side.
   shrinkage_voxel_count: {
     label: 'Voxels flagged by the solver',
     hint: "The solver's own shrinkage threshold, which is stricter than the display one."
@@ -127,7 +102,6 @@ const OVERRIDES: Record<string, { label?: string; hint?: string; decimals?: numb
   shrink_scalar_formula: { label: 'Shrink scalar formula' }
 };
 
-/** Section headings, matched against the start of a key, longest prefix first. */
 const GROUPS: { prefix: string; label: string }[] = [
   { prefix: 'niyama_metadata_', label: 'Niyama method' },
   { prefix: 'niyama_', label: 'Niyama' },
@@ -179,7 +153,6 @@ function humanize(key: string): string {
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
-/** Strip the unit suffix from a key so the label is not "Fill max time s". */
 function describe(key: string): { label: string; unit: string; decimals: number; count: boolean } {
   const override = OVERRIDES[key];
   const count = COUNT_SUFFIXES.some((suffix) => key.endsWith(suffix));
@@ -209,7 +182,6 @@ function renderValue(value: number | string, spec: ReturnType<typeof describe>):
   return spec.unit ? `${text} ${spec.unit}` : text;
 }
 
-/** Summary keys written by runs from before the tet mesher was removed; not shown. */
 const LEGACY_MESH_KEYS = new Set(['mesh_type', 'requested_mesh_type', 'mesh_fallback_reason', 'tet_count', 'tet_edge_length_in']);
 
 function groupFor(key: string): string {
@@ -219,15 +191,6 @@ function groupFor(key: string): string {
 
 export type StatGroup = { label: string; rows: StatDisplay[] };
 
-/**
- * Turn the raw stats bag into labelled, grouped, ordered rows.
- *
- * `voxelCount`, `castVoxelCount` and `totalVolumeIn3` come from `GridMeta`
- * itself rather than from `stats`, so they are folded in here -- a statistics
- * panel that omitted the cast voxel count would be missing the number people
- * check first. Each is included only when the viewport actually reported it;
- * none of them is defaulted to zero.
- */
 export function buildStatGroups(
   stats: Record<string, number | string>,
   extras: { voxelCount: number; castVoxelCount: number; totalVolumeIn3: number; spacing: number }
@@ -266,9 +229,7 @@ export function buildStatGroups(
   }
 
   for (const [key, value] of Object.entries(stats)) {
-    // Already shown from GridMeta's own fields, in better units.
     if (key === 'voxel_count' || key === 'total_volume') continue;
-    // Mesh-type bookkeeping carried by runs stored before the tet mesher was removed.
     if (LEGACY_MESH_KEYS.has(key)) continue;
     const spec = describe(key);
     push(groupFor(key), {

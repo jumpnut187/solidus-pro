@@ -1,23 +1,3 @@
-"""Pipe in metal no riser feeds, and the per-riser sleeve choice.
-
-Uses the CI model plate (tests/ci_models/cast.stl, 15.25 x 6 x 2.5 in) with
-the 4 in diameter, 6 in tall cylinder on top (z 2.5 to 8.5), WCB. The pipe
-cases run at voxel_size=0.30 in; the sleeve comparisons only need the sign of
-the difference and run at 0.50 in to keep CI fast.
-
-- The cylinder typed CAST: nothing is a riser, but the liquid still drains by
-  gravity, so a funnel forms at the top of the last-to-freeze region (deeper on
-  the axis than at the wall) and is reported apart from the riser report.
-- The cylinder typed RISER with ``riser_sleeve`` "none" (bare sand) against the
-  default "insulating": the bare riser freezes sooner and its pipe reaches
-  further down, into the casting.
-- A riser run on the default insulating sleeve, which leaks into the sand,
-  reproduces the numbers the code gave before unrisered pools existed.
-- The pipe shape follows the sleeve. In the insulating sleeve a skin grows on
-  the riser wall and the pipe is a funnel on the axis. With ``riser_sleeve``
-  "adiabatic", which passes no heat to the sand, the riser freezes after the
-  plate, holds the whole pipe, and the pipe is a level drop across the bore.
-"""
 from __future__ import annotations
 
 import os
@@ -30,7 +10,6 @@ from tests.helpers.ci_models import CI_MODELS_DIR
 from core.part_manager import build_part_manager
 from core.simulation_pipeline import PipelineInputs, run_pipeline
 
-
 TEST_MODEL_DIR = CI_MODELS_DIR
 CAST_PATH = os.path.join(TEST_MODEL_DIR, "cast.stl")
 RISER_PATH = os.path.join(TEST_MODEL_DIR, "riser.stl")
@@ -39,8 +18,6 @@ CYLINDER_BOTTOM_Z = 2.5
 CYLINDER_TOP_Z = 8.5
 CYLINDER_RADIUS = 2.0
 
-#: ``riser_pipe_report[0]`` of the riser run on the insulating (leaking) sleeve,
-#: taken on the code before unrisered pools were added (voxel_size 0.30, auto mold on).
 OLD_RISER_REPORT = {
     "demand_in3": 14.216858530080579,
     "pipe_in3": 14.215963226140072,
@@ -54,9 +31,7 @@ BOUNDARY_ONLY = {"mold": {"auto_mold": 0, "auto_cores": 0}}
 PIPE_VOXEL_SIZE = 0.30
 SLEEVE_VOXEL_SIZE = 0.50
 
-
 _RUNS: Dict[str, Dict[str, Any]] = {}
-
 
 def _run(
     cylinder_type: str,
@@ -65,12 +40,10 @@ def _run(
     voxel_size: float = PIPE_VOXEL_SIZE,
     open_top: bool = True,
 ) -> Dict[str, Any]:
-    """One pipeline run, kept for the module so each case is simulated once."""
     key = repr((cylinder_type, riser_sleeve, solidification_params, voxel_size, open_top))
     if key not in _RUNS:
         _RUNS[key] = _simulate(cylinder_type, riser_sleeve, solidification_params, voxel_size, open_top)
     return _RUNS[key]
-
 
 def _simulate(
     cylinder_type: str,
@@ -116,19 +89,15 @@ def _simulate(
         "summary": dict(result.result_data),
     }
 
-
 def _radius(centers: np.ndarray) -> np.ndarray:
     return np.hypot(centers[:, 0], centers[:, 1])
-
 
 def _in_cylinder(centers: np.ndarray) -> np.ndarray:
     return (_radius(centers) < CYLINDER_RADIUS) & (centers[:, 2] > CYLINDER_BOTTOM_Z)
 
-
 def _lowest_piped_z(run: Dict[str, Any], select: np.ndarray) -> float:
     piped = select & (run["pipe"] > 0.5)
     return float(run["centers"][piped, 2].min()) if np.any(piped) else float("inf")
-
 
 class UnriseredPipeTests(unittest.TestCase):
     @classmethod
@@ -163,7 +132,6 @@ class UnriseredPipeTests(unittest.TestCase):
         self.assertGreater(axis_depth, 2.0)
         self.assertGreater(axis_depth, wall_depth + 1.0)
 
-
 class RiserDefaultUnchangedTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -179,10 +147,7 @@ class RiserDefaultUnchangedTests(unittest.TestCase):
         self.assertEqual(self.sim["casting_report"], [])
         self.assertNotIn("casting_pipe_volume_in3", self.sim["summary"])
 
-
 class RiserSleeveTests(unittest.TestCase):
-    """No sleeve given means insulating (tests/test_riser_sleeve.py), so the
-    default run stands in for the insulated riser."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -208,12 +173,9 @@ class RiserSleeveTests(unittest.TestCase):
         riser = run["part_types"] == 1
         self.assertGreater(float(run["times"][riser].max()), float(run["times"][~riser].max()))
         self.assertLess(run["riser_report"][0]["pipe_in_casting_in3"], 0.01)
-        # The insulating sleeve leaks, so the same riser freezes sooner.
         self.assertLess(float(self.insulating["times"][riser].max()), float(run["times"][riser].max()))
 
-
 def _drained_radius_by_layer(run: Dict[str, Any]) -> Dict[float, float]:
-    """Equivalent radius of the drained metal in each riser layer, top first (voxel-count weighted)."""
     riser = run["part_types"] == 1
     z = np.round(run["centers"][:, 2], 3)
     out: Dict[float, float] = {}
@@ -222,22 +184,15 @@ def _drained_radius_by_layer(run: Dict[str, Any]) -> Dict[float, float]:
         out[level] = CYLINDER_RADIUS * float(np.sqrt(run["pipe"][layer].mean()))
     return out
 
-
 class PipeShapeFollowsTheSleeveTests(unittest.TestCase):
-    """A funnel in the insulating sleeve, a level drop in the no-heat-loss sleeve.
-
-    Closed top, so no crust forms and the pipe opens at the top of the riser.
-    """
 
     def test_insulating_sleeve_gives_a_funnel_on_the_axis(self) -> None:
         run = _run("riser", voxel_size=SLEEVE_VOXEL_SIZE, open_top=False)
         radii = [r for r in _drained_radius_by_layer(run).values() if r > 0.1]
         self.assertGreaterEqual(len(radii), 5)
-        # The full bore at the top, narrowing with depth.
         self.assertGreater(radii[0], 0.9 * CYLINDER_RADIUS)
         self.assertLess(radii[3], 0.5 * radii[0])
         self.assertLess(max(radii[3:]), 0.5 * radii[0])
-        # Below the mouth the drained metal sits on the axis inside a sound wall.
         riser = run["part_types"] == 1
         below_mouth = riser & (run["centers"][:, 2] < CYLINDER_TOP_Z - 1.5)
         piped = below_mouth & (run["pipe"] > 0.5)
@@ -252,24 +207,19 @@ class PipeShapeFollowsTheSleeveTests(unittest.TestCase):
         run = _run("riser", "adiabatic", voxel_size=SLEEVE_VOXEL_SIZE, open_top=False)
         radii = [r for r in _drained_radius_by_layer(run).values() if r > 0.0]
         self.assertGreater(len(radii), 1)
-        # Every drained layer but the last is drained across the whole bore.
         for r in radii[:-1]:
             self.assertGreater(r, 0.95 * CYLINDER_RADIUS)
-        # Shallower than the funnel the insulating sleeve gives the same riser.
         funnel = _run("riser", voxel_size=SLEEVE_VOXEL_SIZE, open_top=False)
         everything = np.ones(len(run["pipe"]), dtype=bool)
         self.assertGreater(_lowest_piped_z(run, everything), _lowest_piped_z(funnel, everything) + 1.0)
 
-
 class RiserSleeveBoundaryPathTests(unittest.TestCase):
-    """Without an explicit mold the bare riser takes the casting's interface HTC."""
 
     def test_bare_riser_freezes_sooner_on_the_sand_boundary(self) -> None:
         insulating = _run("riser", None, BOUNDARY_ONLY, SLEEVE_VOXEL_SIZE)
         bare = _run("riser", "none", BOUNDARY_ONLY, SLEEVE_VOXEL_SIZE)
         riser = insulating["part_types"] == 1
         self.assertLess(float(bare["times"][riser].max()), 0.97 * float(insulating["times"][riser].max()))
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,17 +1,3 @@
-"""Surrogate solidification backend.
-
-Public API:
-
-* ``run_surrogate_pipeline`` — run a surrogate simulation end-to-end.
-* ``load_model`` / ``save_numpy_demo`` — manage model artifacts.
-* ``detect_backend`` / ``Backend`` / ``get_available_backends`` — backend ladder.
-* ``capture_run`` — opt-in training-data capture from traditional sims.
-
-Phase 0 ships the NumPy reference model; Core ML (Apple Neural Engine) and
-MLX inference are scaffolded behind the same interface and activated once the
-trainer produces those artifacts.
-"""
-
 from core.surrogate.backend import (
     Backend,
     backend_device_name,

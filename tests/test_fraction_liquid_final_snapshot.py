@@ -8,11 +8,9 @@ import numpy as np
 from core.solidification_params import SolidificationParameters
 from core.solidification_loop import run_time_integration
 
-
 class _DummyLogger:
     def info(self, _message: str, context=None) -> None:
         self.context = context
-
 
 class _DummyEngine:
     def __init__(self) -> None:
@@ -59,7 +57,6 @@ class _DummyEngine:
         del chill_boost, effective_slowdown, material_factor
         return np.array([1.0, 0.996], dtype=np.float32)
 
-
 class FractionLiquidFinalSnapshotTests(unittest.TestCase):
     def test_appends_fully_solid_snapshot_when_run_ends_with_residual_liquid(self) -> None:
         engine = _DummyEngine()
@@ -75,7 +72,6 @@ class FractionLiquidFinalSnapshotTests(unittest.TestCase):
         self.assertGreaterEqual(len(engine.fraction_liquid_history), 3)
         np.testing.assert_allclose(engine.fraction_liquid_history[-1], np.ones(2, dtype=np.float32))
         self.assertAlmostEqual(engine.fraction_liquid_times[-1], engine.time + 0.1)
-
 
 if __name__ == "__main__":
     unittest.main()

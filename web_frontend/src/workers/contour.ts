@@ -1,48 +1,7 @@
-/**
- * Isosurface extraction for the time modes, off the main thread.
- *
- * The solidification front moves every frame, so its surface cannot be
- * fetched: at 93 frames and four playback speeds the server would be asked
- * for a new contour dozens of times a second. It is extracted here instead,
- * from the frame stack the client already holds, in a worker so that a 50 ms
- * contour never lands in the middle of a rendered frame.
- *
- * The algorithm is naive surface nets rather than marching cubes. Both walk
- * the same sign changes; the difference is that surface nets places one
- * vertex per straddling cell at the average of its edge crossings and joins
- * neighbouring cells with quads, instead of emitting a triangle soup from a
- * 256-case table. That buys three things worth having here: the output is
- * naturally smooth, which is what a liquid pool should look like without a
- * separate smoothing pass; vertices are shared, so a front over this lattice
- * is thousands of vertices rather than tens of thousands; and there is no
- * lookup table to get subtly wrong.
- *
- * Normals come from the central-difference gradient of the field at each
- * vertex, not from face normals, so the surface shades smoothly even where
- * the lattice is coarse relative to the curvature.
- *
- * The surface built here is deliberately a little too big. It is extracted in
- * every cell that touches metal, and the mesher's idea of metal is any voxel
- * whose cube touches the part, so the raw front reaches up to half a voxel
- * beyond the casting's drawn skin. Nothing here tries to trim it back: the
- * lattice cannot know where the STL is, and every attempt to approximate that
- * with the mask either left the front proud of the skin or tore holes in it.
- * The trim is done per fragment in the renderer, against the skin distance
- * grid the server measures from the real part surfaces.
- */
 import type { ContourInit, ContourMessage, ContourRequest, ContourResult } from './contourTypes';
 
-/**
- * How far inside the surface the colour scalar is sampled, in lattice cells.
- *
- * Under about one cell the sample is still on the iso and the front comes back
- * flat. Much over three and a thin pool samples clean through itself and out
- * the far side, which paints its middle cold. Two is a fair reading of "just
- * behind this surface" at every lattice this renderer sees.
- */
 const INSIDE_SAMPLE_CELLS = 2;
 
-/** Corner offsets of a cell, in the canonical order used by the edge table. */
 const CORNERS: ReadonlyArray<readonly [number, number, number]> = [
   [0, 0, 0],
   [1, 0, 0],
@@ -54,7 +13,6 @@ const CORNERS: ReadonlyArray<readonly [number, number, number]> = [
   [1, 1, 1]
 ];
 
-/** The twelve edges of a cell as corner index pairs. */
 const EDGES: ReadonlyArray<readonly [number, number]> = [
   [0, 1],
   [2, 3],
@@ -76,18 +34,11 @@ type State = {
   spacing: number;
   mask: Uint8Array;
   cellCount: number;
-  /** Scratch field, rebuilt per request. */
   field: Float32Array;
-  /** Scratch buffers for the masked blur; allocated once, reused per request. */
   blurValue: Float32Array;
   blurWeight: Float32Array;
   blurValueSwap: Float32Array;
   blurWeightSwap: Float32Array;
-  /**
-   * For every cell, the nearest cell that is usable metal. Built once per run
-   * from the mask, which does not change; keyed by whether the caller is
-   * restricting to cast bodies, because that changes what "usable" means.
-   */
   nearest: Map<string, Int32Array>;
 };
 
@@ -130,17 +81,6 @@ function initialize(message: ContourInit): State {
   };
 }
 
-/**
- * Nearest usable metal cell for every cell in the lattice.
- *
- * Multi-source breadth-first search out of the metal, six-connected, so the
- * result is exact in the lattice's own step metric and costs one pass over the
- * grid. It is built once per run because the mask never changes -- doing it
- * per request would put a full grid traversal in the middle of playback.
- *
- * The map exists so that the field handed to the contourer has no artificial
- * background; see `buildField`.
- */
 function nearestUsableMap(current: State, castOnly: boolean): Int32Array | null {
   const key = castOnly ? 'cast' : 'all';
   const cached = current.nearest.get(key);
@@ -161,8 +101,6 @@ function nearestUsableMap(current: State, castOnly: boolean): Int32Array | null 
       tail += 1;
     }
   }
-  // A run with no cast bodies at all under `castOnly`: there is nothing to
-  // spread, and the caller falls back to leaving the field empty.
   if (tail === 0) return null;
 
   const strideY = nx;
@@ -200,36 +138,8 @@ function visit(
   return tail + 1;
 }
 
-/** Mask byte for cast metal: the engine's CAST code (0) plus one. */
 const CAST_CODE = 1;
 
-/**
- * Build the scalar field for this request: two frames blended, then extended.
- *
- * The mask still decides which cells carry real data -- the stored grids are
- * hole-filled so that painting the casting's *surface* never fades to zero at
- * the boundary, so every cell in the bounding box carries a plausible value
- * and contouring that unmasked would grow the pool out through the mold.
- *
- * What the mask must *not* do is put a wall of some sentinel value around the
- * metal. That is what this used to do, and it is what made the front look like
- * a shell. With the mold pinned below the iso, fully liquid metal put the 0.5
- * level set exactly on the metal boundary -- so at t = 0 the contourer
- * faithfully produced a second copy of the casting's own surface, sitting a
- * depth-bias away from the painted shell and z-fighting into stripes along the
- * riser wall, with a sawtooth rim wherever the lattice cut the plate at an
- * angle. Every vertex of it also sampled its colour out in the mold, which is
- * where the stray yellow and blue came from.
- *
- * Instead, cells outside the metal take the value of the nearest cell inside
- * it. The field is then continuous across the boundary, so there is no
- * crossing there and no surface: the front exists only where liquid meets
- * solid *within* the metal, which is the only place a front physically is.
- * Where liquid runs to the mold wall the surface simply ends, which is why the
- * envelope material is two-sided. Anything the extension does produce out
- * beyond the casting is discarded per fragment -- against the parts' real
- * surface where the run has a skin grid, and against this mask otherwise.
- */
 function buildField(current: State, request: ContourRequest): boolean {
   const { cellCount, mask, field, blurValue, blurWeight } = current;
   const a = request.frameA;
@@ -253,26 +163,9 @@ function buildField(current: State, request: ContourRequest): boolean {
   return true;
 }
 
-/**
- * A 1-2-1 blur that only ever averages cells inside the metal.
- *
- * A mold-filling frame is not a smooth field: it is close to 1 in filled
- * metal and close to 0 ahead of the front, and individual cells dip below
- * half for entirely physical reasons -- a cell straddling the free surface,
- * residual from the lattice solve, the pore fraction inside a filter.
- * Contouring that raw at 0.5 turns every one of them into a hole, and the
- * filled region comes out looking shot through rather than solid.
- *
- * The blur is normalized: value and weight are blurred separately and then
- * divided, so a cell at the wall averages only with the metal beside it. A
- * plain blur would mix in the zeros of the mold and pull the front back off
- * every wall, eroding exactly the surface being drawn.
- */
 function blurInsideMask(current: State, strength: number): void {
   const [nx, ny, nz] = current.dims;
   if (strength <= 0) return;
-  // Kept so the blurred result can be mixed back over the raw values; a
-  // partial blur is what stops the 0.5 crossing drifting out to the wall.
   const raw = current.blurValue.slice();
   let value = current.blurValue;
   let weight = current.blurWeight;
@@ -286,7 +179,6 @@ function blurInsideMask(current: State, strength: number): void {
     const stride = strides[axis];
     const limit = limits[axis];
     if (limit < 3) {
-      // Nothing to average along an axis one or two cells deep.
       continue;
     }
     for (let iz = 0; iz < nz; iz += 1) {
@@ -342,7 +234,6 @@ function contour(request: ContourRequest): ContourResult | null {
     field[ix + nx * (iy + ny * iz)];
   const insideAt = (value: number): boolean => sign * (value - iso) >= 0;
 
-  // One vertex per straddling cell; -1 marks a cell that produced none.
   const cellVertex = new Int32Array((nx - 1) * (ny - 1) * (nz - 1)).fill(-1);
   const positions: number[] = [];
   const normals: number[] = [];
@@ -357,7 +248,6 @@ function contour(request: ContourRequest): ContourResult | null {
   const usableAt = (fx: number, fy: number, fz: number): boolean =>
     usableCell(Math.round(fx), Math.round(fy), Math.round(fz));
 
-  /** Trilinear sample in lattice coordinates, clamped at the border. */
   const sampleLattice = (fx: number, fy: number, fz: number): number => {
     const cx = Math.min(Math.max(fx, 0), nx - 1);
     const cy = Math.min(Math.max(fy, 0), ny - 1);
@@ -389,24 +279,6 @@ function contour(request: ContourRequest): ContourResult | null {
   for (let iz = 0; iz < nz - 1; iz += 1) {
     for (let iy = 0; iy < ny - 1; iy += 1) {
       for (let ix = 0; ix < nx - 1; ix += 1) {
-        // A cell with no metal in it at all cannot hold a front.
-        //
-        // The field no longer has a wall around the casting, which is what
-        // stopped the front copying the skin -- but it does mean the extension
-        // out in the mold carries real values, and where the extension of a
-        // frozen region meets the extension of a liquid one, out in the air
-        // beside the riser, it crosses the iso. That crossing is not a front;
-        // it is an artefact of the extension, and it was the molten tongues
-        // running down the outside of the riser wall.
-        //
-        // The test is deliberately "any corner" rather than "every corner".
-        // Every corner also removes the tongues, but it takes the front out of
-        // the whole boundary cell layer with it, and where the frozen shell is
-        // thinner than a cell -- the fillet at the riser base, at 0.26 in --
-        // that left the liquid body open. Any corner keeps the front in every
-        // cell the casting's surface passes through, which is what lets the
-        // renderer's clip end it exactly on the skin; what it also builds in
-        // the mold beside the riser, the clip throws away.
         let metalCorners = 0;
         for (let c = 0; c < 8; c += 1) {
           const [dx, dy, dz] = CORNERS[c];
@@ -421,7 +293,6 @@ function contour(request: ContourRequest): ContourResult | null {
           corner[c] = value;
           if (insideAt(value)) insideCount += 1;
         }
-        // All in or all out: no surface passes through this cell.
         if (insideCount === 0 || insideCount === 8) continue;
 
         let sumX = 0;
@@ -449,15 +320,6 @@ function contour(request: ContourRequest): ContourResult | null {
         const localY = sumY / crossings;
         const localZ = sumZ / crossings;
 
-        // Every straddling cell that touches metal keeps its vertex, whether
-        // or not the vertex itself rounds to a metal cell. This used to drop
-        // the vertex when it did not, to keep the front off the mold -- but a
-        // dropped vertex takes the quads of up to twelve lattice edges with
-        // it, and those edges run through the *inside* of the pool wherever
-        // the front meets a wall at an angle. The pool came out torn along
-        // every wall it touched. Trimming is the fragment shader's job: it
-        // clips against the parts' real surface, which this lattice does not
-        // know, and against the mask where the run has no skin grid.
         cellVertex[cellIndex(ix, iy, iz)] = positions.length / 3;
         positions.push(
           Math.fround(origin[0] + (ix + localX) * spacing),
@@ -465,16 +327,12 @@ function contour(request: ContourRequest): ContourResult | null {
           Math.fround(origin[2] + (iz + localZ) * spacing)
         );
 
-        // Central-difference gradient, one cell out, clamped at the border.
         const gx =
           sampleAt(Math.min(ix + 1, nx - 1), iy, iz) - sampleAt(Math.max(ix - 1, 0), iy, iz);
         const gy =
           sampleAt(ix, Math.min(iy + 1, ny - 1), iz) - sampleAt(ix, Math.max(iy - 1, 0), iz);
         const gz =
           sampleAt(ix, iy, Math.min(iz + 1, nz - 1)) - sampleAt(ix, iy, Math.max(iz - 1, 0));
-        // The gradient points uphill; the outward normal points away from the
-        // solid side, so it is the negated gradient for a "high is inside"
-        // field and the gradient itself for an inverted one.
         const scale = -sign;
         const length = Math.hypot(gx, gy, gz) || 1;
         const nxv = (gx * scale) / length;
@@ -482,16 +340,6 @@ function contour(request: ContourRequest): ContourResult | null {
         const nzv = (gz * scale) / length;
         normals.push(nxv, nyv, nzv);
 
-        // Step back along the outward normal -- into the region the surface
-        // encloses -- and record what the field is there. See
-        // `ContourResult.scalars`.
-        //
-        // The step is shortened until it lands in metal. A front that runs
-        // along the wall of the casting has an inward normal pointing straight
-        // out of the part, so a fixed two-cell step walks into the mold and
-        // reads the extended field there; that is what put stray colours on
-        // the vertices at the rim. Falling back through one cell to none keeps
-        // every sample on a value the metal actually holds.
         let depth = INSIDE_SAMPLE_CELLS;
         while (
           depth > 0 &&
@@ -520,14 +368,6 @@ function contour(request: ContourRequest): ContourResult | null {
     }
   };
 
-  // One quad per sign-changing lattice edge, joining the four cells around it.
-  //
-  // An edge along x from (ix, iy, iz) is shared by the cells at iy-1..iy and
-  // iz-1..iz, so it needs iy and iz to be at least 1 -- but ix may be 0. The
-  // loops used to start every axis at 1, which silently skipped the edges
-  // leaving the first lattice plane of each axis. On a lattice that hugs the
-  // voxel extents that first plane is the underside of the plate, and the
-  // front had vertices but no quads for the whole layer above it.
   for (let iz = 0; iz < nz - 1; iz += 1) {
     for (let iy = 0; iy < ny - 1; iy += 1) {
       for (let ix = 0; ix < nx - 1; ix += 1) {

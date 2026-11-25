@@ -1,7 +1,3 @@
-/* Real dialogs: a backdrop, a focus trap, Escape to close. Sized so even the
- * tallest one (Solidification Parameters, 45 fields over 8 tabs) fits inside a
- * 768px-tall window without the page behind it moving. */
-
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -106,19 +102,12 @@
   }
 }
 
-/* --------------------------------------------------------------------------
- * Tabs (Solidification Parameters)
- * ----------------------------------------------------------------------- */
-
 .tabs {
   display: flex;
   align-items: stretch;
   gap: var(--sp-1);
   padding: 0 var(--sp-5);
   border-bottom: 1px solid var(--border);
-  /* `overflow-x: auto` on its own also clips vertically, which shaved the
-   * descenders off "Feeding" and "Air Gap". The explicit height plus visible
-   * vertical overflow keeps the labels and the active underline intact. */
   overflow-x: auto;
   overflow-y: visible;
   scrollbar-width: none;
@@ -161,8 +150,6 @@
   background: var(--accent);
 }
 
-/* A parameter row: label + unit on the left, control on the right. Two columns
- * so 45 fields stay legible instead of turning into a wall of stacked pairs. */
 .param-list {
   display: flex;
   flex-direction: column;
@@ -175,8 +162,6 @@
   align-items: center;
   gap: var(--sp-5);
   min-width: 0;
-  /* Capped and centred: an uncapped row in an 880px dialog left a hand's width
-   * of dead space between a label and the value it belongs to. */
   width: 100%;
   max-width: 620px;
   margin-inline: auto;
@@ -212,10 +197,6 @@
   border-top: 1px solid var(--border);
 }
 
-/* --------------------------------------------------------------------------
- * Project list
- * ----------------------------------------------------------------------- */
-
 .project-table-wrap {
   max-height: min(60vh, 460px);
   overflow-y: auto;
@@ -238,10 +219,6 @@
   gap: var(--sp-2);
   justify-content: flex-end;
 }
-
-/* --------------------------------------------------------------------------
- * Help / About / Hardware content
- * ----------------------------------------------------------------------- */
 
 .prose {
   display: flex;

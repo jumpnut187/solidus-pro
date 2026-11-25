@@ -1,10 +1,3 @@
-"""Orient & Parting Line tool: orient a casting for pouring and set the parting plane.
-
-All geometry lives in :class:`ui.orientation_tool.OrientationController`; this
-dialog turns clicks into controller calls and reports back through signals the
-main window uses to redraw and to drive viewport picks.
-"""
-
 from __future__ import annotations
 
 from typing import Dict, Optional
@@ -34,7 +27,6 @@ from ui.qt import (
 
 from .base import DraggableDialog
 
-#: Pick modes the viewport can be put into by this tool.
 PICK_FACE_DOWN = "face_down"
 PICK_FACE_UP = "face_up"
 PICK_PARTING_HEIGHT = "parting_height"
@@ -45,15 +37,12 @@ _PICK_HINTS = {
     PICK_PARTING_HEIGHT: "Pick height: click a point on the model to put the parting line there. Esc cancels.",
 }
 
-
 def _named(widget, name: str, tooltip: str = ""):
-    """Give a control a stable accessible name (screen automation) and a tooltip."""
     widget.setObjectName(name)
     widget.setAccessibleName(name)
     if tooltip:
         widget.setToolTip(tooltip)
     return widget
-
 
 def _spin(name: str, tooltip: str, low: float, high: float, step: float, suffix: str) -> QDoubleSpinBox:
     spin = _named(QDoubleSpinBox(), name, tooltip)
@@ -61,21 +50,14 @@ def _spin(name: str, tooltip: str, low: float, high: float, step: float, suffix:
     spin.setDecimals(3)
     spin.setSingleStep(step)
     spin.setSuffix(suffix)
-    # Apply on Enter / focus-out / arrow clicks, not on every keystroke.
     spin.setKeyboardTracking(False)
     return spin
 
-
 class OrientationDialog(DraggableDialog):
-    """Non-modal "Orient & Parting Line" tool."""
 
-    #: Part transforms changed: redraw parts (and the parting plane).
     geometry_changed = Signal()
-    #: Only the parting line changed: redraw the plane.
     parting_changed = Signal()
-    #: Start a viewport pick: (mode, part ids to pick from or None for any part).
     pick_requested = Signal(str, object)
-    #: The tool ended a pick mode (cancel button, Esc in the dialog, closing).
     pick_cancelled = Signal()
 
     TITLE = "Orient & Parting Line"
@@ -90,8 +72,6 @@ class OrientationDialog(DraggableDialog):
         self._snapshot = None
         self._build_ui()
         self.refresh()
-
-    # ------------------------------------------------------------------ UI
 
     def _build_ui(self) -> None:
         layout = self.content_layout
@@ -366,8 +346,6 @@ class OrientationDialog(DraggableDialog):
         group.setLayout(box)
         return group
 
-    # --------------------------------------------------------------- steps
-
     def rotation_step(self) -> float:
         return float(self.rotation_step_combo.currentData())
 
@@ -380,10 +358,7 @@ class OrientationDialog(DraggableDialog):
             _, axis, sign = name.split(" ")
             btn.setToolTip(f"Turn {sign}{step:g}° about the world {axis} axis, through the part's center")
 
-    # ------------------------------------------------------------- refresh
-
     def refresh(self) -> None:
-        """Re-read the controller into every widget without emitting changes."""
         self._updating = True
         try:
             controller = self.controller
@@ -469,8 +444,6 @@ class OrientationDialog(DraggableDialog):
             f"Drag volume: {split['drag_fraction'] * 100:.0f}%"
         )
 
-    # -------------------------------------------------------------- actions
-
     def _geometry_done(self, changed: bool) -> None:
         if changed:
             self.geometry_changed.emit()
@@ -531,8 +504,6 @@ class OrientationDialog(DraggableDialog):
     def _on_seat(self, side: str) -> None:
         self._geometry_done(self.controller.seat_target(side))
 
-    # ----------------------------------------------------------- pick modes
-
     def _toggle_pick(self, mode: str) -> None:
         if self.pick_mode == mode:
             self.cancel_pick()
@@ -552,7 +523,6 @@ class OrientationDialog(DraggableDialog):
         self.pick_requested.emit(mode, part_ids)
 
     def cancel_pick(self) -> None:
-        """End the active pick mode (button, Esc, close)."""
         if self.pick_mode is None:
             return
         self.pick_mode = None
@@ -560,7 +530,6 @@ class OrientationDialog(DraggableDialog):
         self.pick_cancelled.emit()
 
     def end_pick_mode(self) -> None:
-        """The viewport ended the pick (Esc there); reset without re-emitting."""
         self.pick_mode = None
         self._sync_pick_buttons()
 
@@ -572,7 +541,6 @@ class OrientationDialog(DraggableDialog):
         self.pick_hint_label.setText(_PICK_HINTS.get(self.pick_mode or "", ""))
 
     def handle_pick(self, payload: dict) -> None:
-        """Apply a viewport pick: ``{"point", "triangle", "toward_viewer", "part_id"}``."""
         mode = self.pick_mode
         self.pick_mode = None
         self._sync_pick_buttons()
@@ -588,8 +556,6 @@ class OrientationDialog(DraggableDialog):
                 return
             direction = "down" if mode == PICK_FACE_DOWN else "up"
             self._geometry_done(self.controller.face_to(normal, direction))
-
-    # -------------------------------------------------------- dialog events
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key_Escape and self.pick_mode is not None:

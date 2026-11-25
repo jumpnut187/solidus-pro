@@ -1,21 +1,4 @@
 #!/usr/bin/env python3
-"""
-Train the deep learning solidification surrogate (3D U-Net + FiLM).
-
-Thin CLI wrapper around ``core.deep_model.training``; the same logic is
-available from the desktop UI (Deep Model > Train Deep Model...) and runs
-automatically via auto-train when the feature is enabled.
-
-Requires torch (optional dependency — see requirements.txt).
-
-Examples:
-
-    # Train on the captured dataset at the default 64^3 resolution
-    python tools/train_deep_model.py
-
-    # Train with custom hyperparameters
-    python tools/train_deep_model.py --grid 32 --epochs 200 --batch-size 8 --patience 20
-"""
 
 import argparse
 import os
@@ -24,7 +7,6 @@ import sys
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Train the deep solidification surrogate.")
@@ -91,7 +73,6 @@ def main() -> int:
           f"MAE {headline.get('mae_s', 0):.1f}s · "
           f"skill {headline.get('confidence', 0):.2f}")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

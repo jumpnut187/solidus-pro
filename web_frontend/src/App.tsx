@@ -92,16 +92,13 @@ import {
 } from './lib/viewState';
 
 const CAD_PATTERN = /\.(stl|step|stp)$/i;
-/** The canvas status line while an Orient click is armed. */
 const ORIENT_PICK_STATUS = {
   faceDown: 'Face down: click a face of the part (Esc to cancel)',
   faceUp: 'Face up: click a face of the part (Esc to cancel)',
   pickHeight: 'Pick height: click a point for the parting line (Esc to cancel)'
 } as const;
-/** Playback tick. 90 ms matches the desktop timer; speed scales the step. */
 const PLAYBACK_INTERVAL_MS = 90;
 const PLAYBACK_STEP_PERCENT = 1;
-/** How long to wait after the last edit before persisting settings. */
 const AUTOSAVE_DEBOUNCE_MS = 700;
 
 type ModalId =
@@ -119,9 +116,6 @@ type ModalId =
 export function App() {
   const [settings, setSettings] = useState<ProjectSettings>(loadStoredSettings);
   const [shell, setShell] = useState<ShellPrefs>(loadShellPrefs);
-  // Seeded from storage, not from an effect: the effect that persists this id
-  // runs on mount too, and starting at null made it erase the very id the
-  // restore was about to read.
   const [projectId, setProjectId] = useState<string | null>(loadStoredProjectId);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(false);
@@ -129,36 +123,25 @@ export function App() {
   const [referencePlanes, setReferencePlanes] = useState<ReferencePlane[]>([]);
   const [cutFeatures, setCutFeatures] = useState<CutFeature[]>([]);
   const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
-  /** The project's flat parting line (`ui_state.parting_line`), or null when none is set. */
   const [partingLine, setPartingLine] = useState<PartingLine | null>(null);
-  /** The project whose "orient this casting" prompt was dismissed this session. */
   const [orientPromptDismissed, setOrientPromptDismissed] = useState<string | null>(null);
   const [materials, setMaterials] = useState<MaterialInfo[]>([]);
   const [sands, setSands] = useState<SandInfo[]>(FALLBACK_SANDS);
-  /** The automatic mold box and cores for the current parts and mold settings. */
   const [moldPreview, setMoldPreview] = useState<MoldPreview | null>(null);
   const [moldPreviewError, setMoldPreviewError] = useState<string | null>(null);
   const [hardware, setHardware] = useState<HardwareInfo | null>(null);
   const [alloyGuide, setAlloyGuide] = useState<AlloyGuideRow[]>([]);
-  /** Set when the API cannot be reached at all, so panels can say why. */
   const [offline, setOffline] = useState(false);
   const [referenceAttempt, setReferenceAttempt] = useState(0);
 
   const [resultsAvailable, setResultsAvailable] = useState(false);
   const [resultsVersion, setResultsVersion] = useState(0);
-  /** The parts the loaded run simulated; null when unknown (an older run) or no run. */
   const [simulatedParts, setSimulatedParts] = useState<SimulatedPart[] | null>(null);
   const [gridMeta, setGridMeta] = useState<GridMeta | null>(null);
   const [viewportStatus, setViewportStatus] = useState<string | null>(null);
   const [probe, setProbe] = useState<ProbeReading | null>(null);
   const [measurement, setMeasurement] = useState<MeasureResult | null>(null);
   const [defectVolume, setDefectVolume] = useState<number | null>(null);
-  /**
-   * Whether the "stored at reduced resolution" warning has been dismissed for
-   * the run currently loaded. Keyed by resultsVersion rather than a boolean, so
-   * dismissing it once does not silence it for every later run: a new run bumps
-   * the version and the banner is due again.
-   */
   const [downsampledDismissedFor, setDownsampledDismissedFor] = useState<number | null>(null);
 
   const [modal, setModal] = useState<ModalId>(null);
@@ -194,10 +177,6 @@ export function App() {
     setShell((current) => ({ ...current, view: { ...current.view, ...patch } }));
   }, []);
 
-  // --- Reference data ------------------------------------------------------
-  // The alloy list is the canary: if it cannot be fetched the API is not
-  // reachable, and every panel should say so rather than sitting on a
-  // "Loading..." that will never resolve.
   useEffect(() => {
     let cancelled = false;
     api
@@ -243,8 +222,6 @@ export function App() {
       setProjects(await api.listProjects());
       setOffline(false);
     } catch (error) {
-      // A failed list is the same signal as a failed alloy fetch; report it
-      // through the banner rather than a toast the user has to dismiss.
       setOffline(true);
       void error;
     } finally {
@@ -256,7 +233,6 @@ export function App() {
     void refreshProjects();
   }, [refreshProjects]);
 
-  // --- Persistence ---------------------------------------------------------
   useEffect(() => saveStoredSettings(settings), [settings]);
   useEffect(() => saveShellPrefs(shell), [shell]);
   useEffect(() => saveStoredProjectId(projectId), [projectId]);
@@ -268,8 +244,6 @@ export function App() {
     onCompleted: (finishedId) => {
       setResultsAvailable(true);
       setResultsVersion((version) => version + 1);
-      // The run's record of what it simulated is in the project row; the parts
-      // on screen may already have changed while it ran.
       setSimulatedParts(null);
       api
         .getProject(finishedId)
@@ -279,16 +253,11 @@ export function App() {
         .catch(() => undefined);
       patchView({ timePercent: 0, playing: false });
       succeed('Simulation complete.');
-      // The project row is now `completed`; refresh so the list and the Open
-      // dialog show it as having results.
       void refreshProjects();
     },
     onError: (message) => fail(message, 'Simulation failed')
   });
 
-  // Mold filling can only run against an inlet point, so if the pour location
-  // is cleared the analysis toggle has to come off with it -- the panel only
-  // disables the checkbox, it does not clear a value that was already set.
   useEffect(() => {
     if (!settings.pour_location && settings.analysis_options.filling) {
       setSettings((current) => ({
@@ -298,9 +267,6 @@ export function App() {
     }
   }, [settings.pour_location, settings.analysis_options.filling]);
 
-  // Debounced autosave. Panels apply live, so the project row has to keep up
-  // without the user pressing anything -- but not on every keystroke, and not
-  // immediately after a project is loaded (that would just echo it back).
   useEffect(() => {
     if (!projectId) return;
     if (skipAutosave.current) {
@@ -313,7 +279,6 @@ export function App() {
     return () => window.clearTimeout(timer);
   }, [projectId, settings, fail]);
 
-  // --- Playback ------------------------------------------------------------
   useEffect(() => {
     if (!view.playing || !(isTimeMode(view.mode) || isSweepMode(view.mode)) || !resultsAvailable) return;
     const timer = window.setInterval(() => {
@@ -331,10 +296,7 @@ export function App() {
     return () => window.clearInterval(timer);
   }, [view.playing, view.mode, view.speed, resultsAvailable, loop]);
 
-  // --- Project lifecycle ---------------------------------------------------
   const applyProjectRecord = useCallback((project: ProjectRecord) => {
-    // Merge over the defaults so a project saved before a setting existed still
-    // opens with a complete, valid settings object.
     setSettings({
       name: project.name,
       alloy: project.alloy || 'WCB',
@@ -372,17 +334,10 @@ export function App() {
         setResultsVersion((version) => version + 1);
         if (!options?.silent) succeed(`Opened "${project.name}".`);
 
-        // Geometry is not in the project row, so fetch each part's triangles in
-        // parallel and append each part only once its mesh is in hand: the
-        // renderer builds a part's geometry the first time it sees the part and
-        // never revisits it, so a part added before its mesh arrives would stay
-        // invisible for the rest of the session. Appending in original order
-        // keeps the table stable however the requests interleave.
         const order = new Map(storedParts.map((part, index) => [part.id, index]));
         await Promise.all(
           storedParts.map(async (part) => {
             const meshData = await api.partMesh(id, part.id).catch(() => undefined);
-            // A part whose file is gone is still listed; it just cannot render.
             const loaded = meshData ? { ...part, meshData } : part;
             setParts((current) =>
               [...current, loaded].sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0))
@@ -392,8 +347,6 @@ export function App() {
         return true;
       } catch (error) {
         if (options?.silent) {
-          // A remembered project that no longer exists must not wedge startup:
-          // fall back to an empty session instead of showing a dead id.
           setProjectId(null);
           saveStoredProjectId(null);
         } else {
@@ -407,9 +360,6 @@ export function App() {
     [applyProjectRecord, fail, job, succeed]
   );
 
-  // Restore the last project on load. This is the fix for the old client's
-  // worst behaviour: the project id lived only in React state, so a refresh
-  // silently discarded the parts, the settings and the results.
   const restoredRef = useRef(false);
   useEffect(() => {
     if (restoredRef.current) return;
@@ -418,13 +368,6 @@ export function App() {
     if (stored) void openProject(stored, { silent: true });
   }, [openProject]);
 
-  /**
-   * The project row for the current session, created on first need.
-   *
-   * `nextSettings` is for a caller that has just changed the settings in the
-   * same event: the state update has not landed yet, so without it the row
-   * would be written from the previous render's settings.
-   */
   const ensureProject = useCallback(async (nextSettings?: ProjectSettings): Promise<string> => {
     const payload = nextSettings ?? settings;
     if (projectId) {
@@ -441,9 +384,6 @@ export function App() {
   const saveProject = useCallback(async () => {
     try {
       const id = await ensureProject();
-      // Settings already persist on a debounce as they change, so this is a
-      // confirmation, not a rescue. Saying so stops people wondering what they
-      // would have lost by not pressing it.
       succeed('Project saved. Settings also save automatically as you change them.');
       void refreshProjects();
       return id;
@@ -467,8 +407,6 @@ export function App() {
     notify: { succeed, fail, warn }
   });
   const modelingActive = modeling.active;
-  // A modeling session lives in the Model panel; starting one from anywhere
-  // (the tree, a keyboard shortcut) brings the panel up with it.
   useEffect(() => {
     if (modelingActive) setShell((current) => (current.activePanel === 'model' ? current : { ...current, activePanel: 'model' }));
   }, [modelingActive]);
@@ -485,7 +423,6 @@ export function App() {
     notify: orientNotify
   });
   const cancelModeling = modeling.cancel;
-  // A sketch belongs to the project it was started in.
   useEffect(() => cancelModeling(), [projectId, cancelModeling]);
 
   const newProject = useCallback(() => {
@@ -538,7 +475,6 @@ export function App() {
     });
   }, [ensureProject, fail, openProject, refreshProjects, settings.name, succeed]);
 
-  // --- Parts ---------------------------------------------------------------
   const addFiles = useCallback(
     async (files: File[]) => {
       const accepted = files.filter((file) => CAD_PATTERN.test(file.name));
@@ -549,13 +485,6 @@ export function App() {
       setUploading(true);
       notify(`Uploading ${accepted.length} file${accepted.length === 1 ? '' : 's'}...`);
       try {
-        // Every project used to be "Untitled Casting", which made the project
-        // list a column of identical rows. The first part added to a project
-        // that still has the placeholder name names it: the casting's own file
-        // is the name a foundry already uses for the job, and taking it here
-        // costs no extra dialog. A cast body is preferred over a riser or sprue
-        // dropped alongside it. A name the user has typed is never replaced,
-        // and neither is a project that already has parts.
         let named: ProjectSettings | undefined;
         if (parts.length === 0 && isPlaceholderProjectName(settings.name)) {
           const source = accepted.find((file) => inferPartType(file.name) === 'cast') ?? accepted[0];
@@ -569,8 +498,6 @@ export function App() {
         const uploaded = await api.uploadFiles(accepted, settings.voxel_size);
         const added: ProjectPart[] = [];
         for (const file of uploaded.files) {
-          // Prefer the server's clean display name; fall back to the stored
-          // filename minus its extension only if an older server omits it.
           const name = file.display_name || file.filename.replace(/\.[^.]+$/, '');
           const response = await api.addPart(target, {
             name,
@@ -592,8 +519,6 @@ export function App() {
         }
         setParts((current) => [...current, ...added]);
         setSelectedPartId(added.at(-1)?.id ?? null);
-        // A casting on its own is a fresh CAD import: CAD orientation is rarely
-        // the pouring orientation, so the orient tool comes up with it.
         if (parts.length === 0 && added.length === 1 && added[0].part_type === 'cast') {
           patchShell({ activePanel: 'orient' });
         }
@@ -615,8 +540,6 @@ export function App() {
         current.map((part) => {
           if (part.id !== partId) return part;
           const merged = { ...part, ...patch };
-          // Open-top only means anything on a riser; changing the type away
-          // from riser has to clear the flag, not leave it set and invisible.
           if (patch.part_type && patch.part_type !== 'riser') {
             merged.is_open_top = false;
             merged.riser_sleeve = 'insulating';
@@ -634,7 +557,6 @@ export function App() {
   const rebuildDependents = modeling.rebuildDependents;
   const removePart = useCallback(
     (partId: string) => {
-      // Before the part leaves state: the rebuild reads which bodies used it.
       rebuildDependents(partId);
       setParts((current) => current.filter((part) => part.id !== partId));
       setSelectedPartId((current) => (current === partId ? null : current));
@@ -709,7 +631,6 @@ export function App() {
         })
       );
       if (!projectId) return;
-      // Persist from the merged values rather than the stale `parts` closure.
       setParts((current) => {
         for (const part of current) {
           if (byId.has(part.id)) {
@@ -755,7 +676,6 @@ export function App() {
     });
   }, [applyPositions, parts, warn]);
 
-  // --- Mesh ----------------------------------------------------------------
   const estimateMesh = useCallback(async () => {
     try {
       const target = await ensureProject();
@@ -795,7 +715,6 @@ export function App() {
     }
   }, [ensureProject]);
 
-  // --- Run -----------------------------------------------------------------
   const runSimulation = useCallback(async () => {
     if (!parts.length) {
       warn('Add at least one CAD part before running.');
@@ -819,7 +738,6 @@ export function App() {
     void job.cancel(projectId);
   }, [projectId, job]);
 
-  // --- Screenshot ----------------------------------------------------------
   const takeScreenshot = useCallback(async () => {
     const handle = viewportRef.current;
     if (!handle) return;
@@ -833,7 +751,6 @@ export function App() {
       document.body.appendChild(link);
       link.click();
       link.remove();
-      // Revoke on the next tick; revoking synchronously can beat the download.
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
       succeed('Screenshot saved.');
     } catch (error) {
@@ -848,35 +765,20 @@ export function App() {
     setMeasurement(null);
   }, []);
 
-  /**
-   * Ask the viewport for the volume above the current threshold.
-   *
-   * Deliberately on demand rather than recomputed on every threshold tick: the
-   * handle walks the whole dense grid, which is not something to do sixty
-   * times a second while a slider is being dragged.
-   */
   const recomputeDefectVolume = useCallback(() => {
     const value = viewportRef.current?.defectVolumeIn3() ?? null;
     setDefectVolume(value);
     if (value === null) warn('Defect volume is only defined for threshold modes.');
   }, [warn]);
 
-  /**
-   * What changed since the loaded run, or null while the results still match
-   * the parts. Not judged while a project is loading: its parts arrive one at
-   * a time and would look like deletions until the last one lands.
-   */
   const staleResults = useMemo(() => {
     if (!resultsAvailable || !simulatedParts || loadingProject || job.isBusy) return null;
     if (simulatedPartsKey(simulatedParts) === simulatedPartsKey(parts)) return null;
     return describePartChanges(simulatedParts, parts);
   }, [resultsAvailable, simulatedParts, loadingProject, job.isBusy, parts]);
 
-  // A stale volume is worse than none: it is a number for a threshold the user
-  // has already moved past.
   useEffect(() => setDefectVolume(null), [view.threshold, view.mode, view.castOnly, resultsVersion]);
 
-  // --- Exports -------------------------------------------------------------
   const generateReport = useCallback(
     async (format: string, sections: ReportSectionToggles) => {
       if (!projectId) return;
@@ -917,7 +819,6 @@ export function App() {
       setAnimationBusy(true);
       setAnimationError(null);
       setAnimationProgress(0);
-      // Playback must not fight the recorder for the time slider.
       patchView({ playing: false });
       try {
         const { blob, extension } = await recordAnimation(canvas, {
@@ -982,20 +883,15 @@ export function App() {
     [openProject, refreshProjects, succeed, warn, fail]
   );
 
-  // --- Keyboard ------------------------------------------------------------
   const closeTopLayer = useCallback(() => {
     if (promptRequest) return setPromptRequest(null);
     if (confirmRequest) return setConfirmRequest(null);
     if (modal) return setModal(null);
     if (orient.pick) return orient.cancelPick();
-    // In a sketch Escape belongs to the sketcher (it backs out of the shape
-    // being drawn, then the tool); only the plane step cancels outright.
     if (modeling.session) {
       if (modeling.session.stage === 'plane') modeling.cancel();
       return;
     }
-    // The Measure tool clears its selections on Escape itself; the plane
-    // manager cancels.
     if (modeling.planeSession) return modeling.cancel();
     if (modeling.measurePicks) return;
     if (shell.tool !== 'select') return patchShell({ tool: 'select' });
@@ -1007,7 +903,6 @@ export function App() {
     stop: stopSimulation,
     addPart: () => {
       patchShell({ activePanel: 'parts' });
-      // The panel mounts on the next paint; open its picker after that.
       window.setTimeout(() => addPartsRef.current(), 0);
     },
     screenshot: () => void takeScreenshot(),
@@ -1026,7 +921,6 @@ export function App() {
     }
   });
 
-  // --- Project list actions ------------------------------------------------
   const renameProject = useCallback(
     (project: ProjectSummary) => {
       setPromptRequest({
@@ -1091,9 +985,6 @@ export function App() {
     [projectId, refreshProjects, notify, fail]
   );
 
-  // --- Derived -------------------------------------------------------------
-  // A project that is one casting and nothing else, with no parting line yet,
-  // is a fresh import that has not been oriented: offer the tool.
   const showOrientPrompt =
     parts.length === 1 &&
     parts[0].part_type === 'cast' &&
@@ -1106,10 +997,6 @@ export function App() {
   const closePanel = useCallback(() => patchShell({ activePanel: null }), [patchShell]);
   const setPanel = useCallback((panel: PanelId | null) => patchShell({ activePanel: panel }), [patchShell]);
 
-  // --- Mold and cores preview -------------------------------------------------
-  // The server builds the automatic mold box and cores on the run's lattice
-  // from the saved parts; edits are debounced so dragging a part or a field
-  // does not queue a rasterisation per frame.
   const mold = readMold(settings.solidification_params);
   const moldKey = JSON.stringify(mold);
   const partsKey = JSON.stringify(
@@ -1153,12 +1040,8 @@ export function App() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-    // `moldKey` and `partsKey` stand in for `mold` and `parts`: they change
-    // exactly when something the preview depends on does.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, moldKey, partsKey, settings.voxel_size]);
 
-  /** Parts as drawn: the project's own plus the automatic mold and core preview bodies. */
   const displayParts = useMemo(() => {
     if (!moldPreview) return parts;
     const preview: ProjectPart[] = [];
@@ -1313,7 +1196,6 @@ export function App() {
               }))
             }
             onReset={() =>
-              // voxel_cut_cells belongs to the Mesh panel; its reset is there.
               setSettings((current) => ({
                 ...current,
                 performance_options: {
@@ -1331,7 +1213,6 @@ export function App() {
             params={settings.solidification_params}
             onOpenModal={() => setModal('solidification')}
             onReset={() =>
-              // The mold group has its own panel and its own reset.
               setSettings((current) => ({
                 ...current,
                 solidification_params: {
@@ -1484,8 +1365,6 @@ export function App() {
           onSelectPart={setSelectedPartId}
           resultsAvailable={resultsAvailable}
           resultsVersion={resultsVersion}
-          // Modeling is done on the bodies themselves: the result field would
-          // only hide the faces being sketched on.
           view={modelingActive ? { ...view, showResults: false } : view}
           onViewChange={patchView}
           modeling={modeling}
@@ -1644,8 +1523,6 @@ export function App() {
           busy={animationBusy}
           progress={animationProgress}
           error={animationError}
-          // A sweep has no stored frames to match, so the recorder is left to
-          // its own default rather than being told a count that does not exist.
           frameCount={
             isSweepMode(view.mode)
               ? 0
@@ -1664,7 +1541,7 @@ export function App() {
       {modal === 'about' ? <AboutModal onClose={() => setModal(null)} /> : null}
       {modal === 'shortcuts' ? <ShortcutsModal onClose={() => setModal(null)} /> : null}
 
-      {/* Project-file import: a project JSON plus the CAD files it references. */}
+      {}
       <input
         ref={importInputRef}
         type="file"

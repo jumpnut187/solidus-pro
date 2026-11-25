@@ -1,5 +1,3 @@
-"""Regression tests for web simulation queue using multiprocessing.Process."""
-
 from __future__ import annotations
 
 import multiprocessing
@@ -19,12 +17,9 @@ from web.services.simulation_queue import (
     _simulation_process_worker,
 )
 
-
 class SimulationQueueProcessTests(unittest.TestCase):
-    """Verify simulation queue uses multiprocessing.Process (not threading.Thread)."""
 
     def test_manager_uses_multiprocessing_manager(self) -> None:
-        """Manager should use multiprocessing.Manager for cross-process shared state."""
         manager = SimulationQueueManager(QueueConfig(max_concurrent_simulations=1))
         manager._init_manager()
 
@@ -38,7 +33,6 @@ class SimulationQueueProcessTests(unittest.TestCase):
         self.assertIsNotNone(manager.user_simulation_counts)
 
     def test_running_count_is_manager_value(self) -> None:
-        """running_count should be a Manager Value proxy, not a plain int."""
         manager = SimulationQueueManager(QueueConfig(max_concurrent_simulations=1))
         manager._init_manager()
 
@@ -47,7 +41,6 @@ class SimulationQueueProcessTests(unittest.TestCase):
         self.assertEqual(manager.running_count.value, 1)
 
     def test_submit_starts_multiprocessing_process(self) -> None:
-        """submit() should create a multiprocessing.Process, not a threading.Thread."""
         manager = SimulationQueueManager(QueueConfig(max_concurrent_simulations=1))
         manager._init_manager()
         manager.set_paths("/tmp/test.db", "/tmp")
@@ -67,13 +60,6 @@ class SimulationQueueProcessTests(unittest.TestCase):
         manager.clear_tracking(sim_id)
 
     def test_simulation_process_is_not_daemon(self) -> None:
-        """Worker process must be non-daemon so it can spawn child pools for part assignment.
-
-        ``multiprocessing.ProcessPoolExecutor`` (used by part assignment) calls
-        ``multiprocessing.Process`` under the hood. Python refuses to spawn
-        children from daemon parents, which would force the parallel
-        containment checks into a slow sequential fallback.
-        """
         manager = SimulationQueueManager(QueueConfig(max_concurrent_simulations=1))
         manager._init_manager()
         manager.set_paths("/tmp/test.db", "/tmp")
@@ -92,7 +78,6 @@ class SimulationQueueProcessTests(unittest.TestCase):
         manager.clear_tracking(sim_id)
 
     def test_process_worker_receives_proxy_objects(self) -> None:
-        """_simulation_process_worker should receive Manager proxy objects as args."""
         import inspect
         sig = inspect.signature(_simulation_process_worker)
         param_names = list(sig.parameters.keys())
@@ -116,7 +101,6 @@ class SimulationQueueProcessTests(unittest.TestCase):
             self.assertIn(req, param_names)
 
     def test_cancel_sets_stop_flag(self) -> None:
-        """cancel() should set the stop flag so the subprocess can check it."""
         manager = SimulationQueueManager(QueueConfig(max_concurrent_simulations=1))
         manager._init_manager()
         manager.set_paths("/tmp/test.db", "/tmp")
@@ -135,7 +119,6 @@ class SimulationQueueProcessTests(unittest.TestCase):
         manager.clear_tracking(sim_id)
 
     def test_get_status_returns_dict(self) -> None:
-        """get_status() should return a plain dict (not a proxy)."""
         manager = SimulationQueueManager(QueueConfig(max_concurrent_simulations=1))
         manager._init_manager()
         manager.set_paths("/tmp/test.db", "/tmp")
@@ -154,19 +137,14 @@ class SimulationQueueProcessTests(unittest.TestCase):
         manager.clear_tracking(sim_id)
 
     def test_queue_config_defaults_match_plan(self) -> None:
-        """QueueConfig defaults should match the plan: 1 concurrent, 6 queue, 1 per user."""
         config = QueueConfig()
         self.assertEqual(config.max_concurrent_simulations, 1)
         self.assertEqual(config.max_queue_size, 6)
         self.assertEqual(config.max_simulations_per_user, 1)
 
-
 class SimulationWorkerInputsTests(unittest.TestCase):
-    """Verify _simulation_process_worker plumbs performance options into PipelineInputs."""
 
     def _run_worker(self, sim_data: dict) -> "PipelineInputs":
-        """Invoke _simulation_process_worker with mocked dependencies and return the
-        PipelineInputs instance passed to run_pipeline."""
         from core.simulation_pipeline import PipelineInputs
 
         captured = {}
@@ -211,9 +189,6 @@ class SimulationWorkerInputsTests(unittest.TestCase):
                                     max_concurrent_simulations=1,
                                     reserve_memory_mb=0,
                                     min_sim_memory_mb=0,
-                                    # A plain dict stands in for the Manager
-                                    # proxy the queue normally passes; the
-                                    # worker only ever get/sets whole values.
                                     simulation_logs={},
                                 )
 
@@ -222,25 +197,16 @@ class SimulationWorkerInputsTests(unittest.TestCase):
         return captured["inputs"]
 
     def test_use_gpu_option_reaches_pipeline_inputs(self) -> None:
-        """performance_options={'use_gpu': True} must reach PipelineInputs.use_gpu=True."""
         inputs = self._run_worker(
             {"performance_options": {"use_gpu": True}, "alloy": "WCB"}
         )
         self.assertTrue(inputs.use_gpu)
 
     def test_use_gpu_defaults_to_false_when_option_missing(self) -> None:
-        """Callers that omit use_gpu must keep the existing default of False."""
         inputs = self._run_worker({"alloy": "WCB"})
         self.assertFalse(inputs.use_gpu)
 
     def test_pour_location_reaches_pipeline_inputs_through_worker(self) -> None:
-        """A stored project's pour_location must survive the subprocess worker path.
-
-        This covers the same mapping as
-        ``BuildPipelineInputsTests.test_pour_location_reaches_pipeline_inputs`` in
-        tests/test_web_api.py, but through ``_simulation_process_worker`` -- the
-        entry point the live queued-simulation path actually calls.
-        """
         pour_location = {
             "schema_version": 1,
             "point_in": [0.5, 1.5, 2.5],
@@ -250,12 +216,9 @@ class SimulationWorkerInputsTests(unittest.TestCase):
         inputs = self._run_worker({"alloy": "WCB", "pour_location": pour_location})
         self.assertEqual(inputs.pour_location, pour_location)
 
-
 class SimulationQueueCleanupTests(unittest.TestCase):
-    """Verify cleanup and cancellation work across process boundaries."""
 
     def test_clear_tracking_removes_process(self) -> None:
-        """clear_tracking should remove the process from tracking dict."""
         manager = SimulationQueueManager(QueueConfig(max_concurrent_simulations=1))
         manager._init_manager()
         manager.set_paths("/tmp/test.db", "/tmp")
@@ -271,7 +234,6 @@ class SimulationQueueCleanupTests(unittest.TestCase):
         self.assertNotIn(sim_id, manager.simulation_processes)
 
     def test_cleanup_user_cancels_all_user_sims(self) -> None:
-        """cleanup_user() should cancel all running/queued sims for that user."""
         manager = SimulationQueueManager(QueueConfig(max_concurrent_simulations=1))
         manager._init_manager()
         manager.set_paths("/tmp/test.db", "/tmp")
@@ -289,7 +251,6 @@ class SimulationQueueCleanupTests(unittest.TestCase):
         manager.clear_tracking("sim2")
 
     def test_get_queue_status_reflects_running_count(self) -> None:
-        """get_queue_status should show the current running count."""
         manager = SimulationQueueManager(QueueConfig(max_concurrent_simulations=1))
         manager._init_manager()
         manager.set_paths("/tmp/test.db", "/tmp")
@@ -298,9 +259,7 @@ class SimulationQueueCleanupTests(unittest.TestCase):
         self.assertEqual(status["running"], 0)
         self.assertEqual(status["max_concurrent"], 1)
 
-
 class SimulationQueueFairShareTests(unittest.TestCase):
-    """Fair-share thread budgeting and memory gating in the queue manager."""
 
     def setUp(self) -> None:
         self.manager = SimulationQueueManager(
@@ -319,7 +278,6 @@ class SimulationQueueFairShareTests(unittest.TestCase):
         self.manager._manager.shutdown() if self.manager._manager else None
 
     def test_submit_updates_thread_budget_fair_share(self) -> None:
-        """Starting sims halves the thread share; finishing returns it."""
         usable = self.manager._usable_cores()
 
         with mock.patch.object(self.manager, "_start_running_simulation"):
@@ -335,8 +293,7 @@ class SimulationQueueFairShareTests(unittest.TestCase):
         self.manager.clear_tracking("sim-b")
 
     def test_memory_gate_queues_when_headroom_low(self) -> None:
-        """A new sim is queued, not started, when RAM headroom is insufficient."""
-        self.manager.config.min_sim_memory_mb = 10**9  # effectively infinite floor
+        self.manager.config.min_sim_memory_mb = 10**9
 
         with mock.patch.object(self.manager, "_start_running_simulation"):
             first = self.manager.submit("sim-mem-a", {}, [], "10.0.0.3")
@@ -352,7 +309,6 @@ class SimulationQueueFairShareTests(unittest.TestCase):
         self.manager.clear_tracking("sim-mem-a")
 
     def test_queue_status_includes_fair_share_fields(self) -> None:
-        """Queue status exposes thread share and memory info."""
         status = self.manager.get_queue_status("127.0.0.1")
         for field in (
             "thread_share",
@@ -363,7 +319,6 @@ class SimulationQueueFairShareTests(unittest.TestCase):
             self.assertIn(field, status)
         self.assertEqual(status["reserved_cores"], 1)
         self.assertEqual(status["active_memory_mb"], 0)
-
 
 if __name__ == "__main__":
     if sys.platform == 'darwin':

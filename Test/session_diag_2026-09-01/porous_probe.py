@@ -1,16 +1,3 @@
-"""Does a porous cell's MOMENTUM actually feel the drag, or only its velocity?
-
-Guo-Zhao brakes the flow with a body force F = eps*g - (eps nu/k1) u
-- (eps c_F/sqrt(k1)) |u| u.  The solver resolves u from that force implicitly
-(resolve_porous_velocity), but the force itself never reaches the collision's
-Guo source.  If that is the bug, then a fully periodic block of filter under
-gravity has no terminal velocity: sum_i c_i f_i grows linearly for ever while
-u -- the number the equilibrium is built from -- creeps up only as sqrt.  The
-gap between the two is the non-equilibrium the TRT never relaxes (omega_minus
-~ 2e-4), and once |f_asym| passes f_sym the upstream population goes negative.
-
-Runs both the numba and numpy paths so a fix has to land in both.
-"""
 import os, sys
 sys.path.insert(0, "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -27,7 +14,6 @@ NU = 8.5e-7
 UMAXP = float(np.sqrt(2.0 * 9.81 * 0.40))
 POROSITY = 0.85
 PORE_D = 2.54e-3
-
 
 def make(porous_everywhere=True, n=6):
     units = lattice_units(DX, NU, u_max_physical_m_s=UMAXP, u_max_lattice=0.05)
@@ -46,7 +32,6 @@ def make(porous_everywhere=True, n=6):
                       initial_fluid=np.ones(shape, dtype=bool), porous=zone)
     return st, units, (k1, ik2, c0, c1)
 
-
 def momentum_z(st):
     f = np.asarray(st.f, dtype=np.float64)
     m = np.zeros(st.shape)
@@ -55,15 +40,10 @@ def momentum_z(st):
             m += LATTICE_VELOCITIES[i, 2] * f[i]
     return m
 
-
 def terminal_u(units, c0, c1):
-    """Solve 2*c0*u + c1*u^2 = g_lattice for the physical terminal velocity."""
     g = units.gravity_lattice
-    # v = 2 c0 u + c1 |u| u, and at terminal the per-step gravity increment is
-    # exactly balanced: g = (2c0 - 1) u + c1 u^2  (the -1 is the un-dragged part)
     a, b, c = c1, 2.0 * c0 - 1.0, -g
     return (-b + np.sqrt(b * b + 4 * a * g)) / (2 * a)
-
 
 def run(label, use_numba, steps=400, every=50):
     st, units, (k1, ik2, c0, c1) = make()
@@ -82,7 +62,6 @@ def run(label, use_numba, steps=400, every=50):
                   f"min f {f.min():+.6e}  negs {(f < 0).sum()}")
             if not np.isfinite(f).all():
                 print("  NON-FINITE"); break
-
 
 if __name__ == "__main__":
     run("numba", True)

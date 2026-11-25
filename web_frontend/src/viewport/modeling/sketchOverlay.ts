@@ -1,40 +1,3 @@
-/**
- * The modeling overlay, drawn into the results viewport's scene.
- *
- * Four stages, the way SOLIDWORKS runs them:
- *
- * 1. plane   -- the datum planes and the reference planes are shown and any
- *               face of the model can be clicked. What the click is for is
- *               the session's `purpose`: a sketch plane, a face to extrude as
- *               it is, or the reference for a new offset plane.
- * 2. sketch  -- the plane carries a grid and the sketch; clicks place lines,
- *               centerlines, arcs, rectangles, circles, polygons and slots,
- *               snapping to the grid, the origin, ends, midpoints and centres,
- *               with horizontal/vertical inference on lines. Every driving
- *               dimension is a label that can be clicked and typed into, and
- *               open contour ends are marked in red.
- * 3. feature -- the sketch stays on screen with the extrude's preview body
- *               and its direction.
- * 4. measure -- clicks select vertices, edges and faces; the result is drawn
- *               as a dimension line.
- *
- * Declarative like the rest of the viewport: the shell owns the session and
- * passes it in as `ModelingViewState`; this class draws it and reports what
- * the user did as `ModelingEvent`s. The only state kept here is what lives
- * between two clicks (the first corner of a rectangle) and the pointer.
- *
- * Sketch lines are drawn in rendering group 1, after the model with depth
- * cleared, so a sketch on a plane through the middle of the casting is not
- * hidden inside it.
- *
- * The mouse works the way SOLIDWORKS and Onshape sketchers do: while
- * sketching the left button only draws -- click-click, or press, drag and
- * release -- and the view turns on the middle button (or Shift + left, for a
- * trackpad), pans on the right and zooms on the wheel. Typing a number while
- * a shape is being drawn sets its size; typing one right after sets the new
- * entity's dimension. In the feature stage the direction arrow sits on the
- * end face and is dragged to set the depth.
- */
 import type { ArcRotateCamera } from '@babylonjs/core/Cameras/arcRotateCamera';
 import type { Camera } from '@babylonjs/core/Cameras/camera';
 import { Constants } from '@babylonjs/core/Engines/constants';
@@ -91,28 +54,21 @@ import { buildCreasedGeometry } from '../creaseGeometry';
 import { createFatLines, syncFatLineResolution } from './fatLines';
 import { faceBoundaryLoops, type PlanarFace } from './planarFace';
 
-/** A part surface under the pointer. */
 export type SurfacePick = {
   point: Vector3;
   normal: Vector3;
   distance: number;
   partName: string | null;
-  /** The flat face under the pointer, or the facet of a curved one. */
   face: PlanarFace | null;
 };
 
 export type AssemblyBounds = { center: Vector3; size: number } | null;
 
-/** Pixels within which the pointer snaps to a point. */
 const SNAP_RADIUS_PX = 10;
-/** Pixels within which a click selects a sketch line or grabs an end. */
 const SELECT_RADIUS_PX = 7;
 const CLICK_DRAG_THRESHOLD_PX = 4;
-/** A line within this many degrees of horizontal or vertical is made so. */
 const HV_INFERENCE_DEG = 4;
-/** Grid steps, inches: the binary fractions a pattern shop works in, then decimal inches. */
 const GRID_STEPS = [1 / 64, 1 / 32, 1 / 16, 1 / 8, 1 / 4, 1 / 2, 1, 2, 5, 10, 20, 50];
-/** The grid's minor spacing aims for about this many screen pixels. */
 const GRID_TARGET_PX = 22;
 
 const SKETCH_LINE = new Color3(0.36, 0.66, 1);
@@ -131,7 +87,6 @@ const PREVIEW_PLANE_COLOR = new Color3(1, 0.62, 0.2);
 const CHOSEN_PLANE_COLOR = new Color3(0.3, 0.85, 0.55);
 const PREVIEW_OK = new Color3(0.98, 0.78, 0.25);
 const PREVIEW_BAD = new Color3(0.95, 0.3, 0.3);
-/** The material an extrude cut removes. */
 const PREVIEW_CUT = new Color3(0.9, 0.22, 0.42);
 const ARROW_LINE = new Color3(1, 0.78, 0.25);
 const MEASURE_LINE = new Color3(1, 0.62, 0.15);
@@ -170,14 +125,12 @@ export class SketchOverlay {
   private _bounds: AssemblyBounds = null;
   private _frame: PlaneFrame | null = null;
 
-  // Plane stage
   private _planeQuads: PlaneQuad[] = [];
   private _decor: Mesh[] = [];
   private _hoverPlane: string | null = null;
   private _faceHint: Mesh | null = null;
   private _hintSource: Float32Array | null = null;
 
-  // Sketch stage
   private _sketchPlane: Mesh | null = null;
   private _grid: LinesMesh | null = null;
   private _gridStep = 0;
@@ -187,7 +140,6 @@ export class SketchOverlay {
   private _rubber: Mesh | null = null;
   private _snapMarker: Mesh | null = null;
 
-  // Feature stage
   private _regionMeshes: Mesh[] = [];
   private _regionLines: LinesMesh | null = null;
   private _hoverRegion = -1;
@@ -195,7 +147,6 @@ export class SketchOverlay {
   private _previewEdges: LinesMesh | null = null;
   private _arrow: Mesh | null = null;
 
-  // Measure stage
   private _measureMeshes: Mesh[] = [];
   private _measureHover: Mesh[] = [];
   private _hoverMeasureKey = '';
@@ -214,18 +165,10 @@ export class SketchOverlay {
 
   private _draft: Draft | null = null;
   private _cursor: Snap | null = null;
-  /**
-   * The button press in progress. `orbit`: Shift + left, which turns the view
-   * and draws nothing. `startedDraft`: the press placed a shape's first point,
-   * so a release without a drag is the first click of click-click.
-   */
   private _pointerDown: { x: number; y: number; button: number; orbit: boolean; startedDraft: boolean } | null = null;
-  /** The size being typed for the shape being drawn. */
   private _numeric: { box: HTMLDivElement; input: HTMLInputElement } | null = null;
-  /** The feature stage's depth arrow: where it is, and the drag in progress. */
   private _depthHandle: { origin: Vector3; dir: Vector3; base: Vector3; tip: Vector3; midplane: boolean } | null = null;
   private _depthDrag: { last: number } | null = null;
-  /** A selection box being dragged out, from where the press was (CSS pixels). */
   private _box: { x0: number; y0: number; additive: boolean; element: HTMLDivElement | null } | null = null;
   private _depthLabel: Label | null = null;
   private _drag: Drag | null = null;
@@ -258,10 +201,6 @@ export class SketchOverlay {
     this._planeMaterial = flatMaterial('sketch-plane-mat', PLANE_COLOR, 0.14, this._scene);
     this._hintMaterial = flatMaterial('sketch-hint-mat', new Color3(0.25, 0.6, 1), 0.55, this._scene);
     this._measureFaceMaterial = flatMaterial('measure-face-mat', MEASURE_LINE, 0.45, this._scene);
-    // Both lie on the faces they mark. Pulled toward the camera in depth --
-    // in the orthographic view a 40,000-inch depth range leaves the depth
-    // buffer no finer than the lift they are drawn at -- and not writing
-    // depth, so they never hide what is behind them.
     for (const material of [this._hintMaterial, this._measureFaceMaterial]) {
       material.zOffset = -2;
       material.zOffsetUnits = -8;
@@ -278,11 +217,6 @@ export class SketchOverlay {
     this._previewMaterial.transparencyMode = PBRMaterial.PBRMATERIAL_ALPHABLEND;
     this._previewMaterial.needDepthPrePass = true;
 
-    // What a cut removes lies inside the bodies it cuts, so it is drawn with
-    // the depth test off: after the model (it is transparent) and over it.
-    // Not in rendering group 1 with the sketch lines: a PBR mesh there is
-    // drawn into the ambient-occlusion pre-pass targets without writing
-    // them, which WebGL rejects on every frame.
     this._cutPreviewMaterial = new PBRMaterial('sketch-cut-preview-mat', this._scene);
     this._cutPreviewMaterial.albedoColor = PREVIEW_CUT;
     this._cutPreviewMaterial.metallic = 0;
@@ -300,7 +234,6 @@ export class SketchOverlay {
     this._layer.appendChild(this._readout);
 
     this._pointerObserver = this._scene.onPointerObservable.add((info) => this._onPointer(info));
-    // Before the camera sees a press, decide whether it may turn the view.
     this._prePointerObserver = this._scene.onPrePointerObservable.add((info) => {
       const event = info.event as PointerEvent;
       this._syncCameraButtons(event.button === 0 && event.shiftKey);
@@ -385,22 +318,11 @@ export class SketchOverlay {
     this._readout.remove();
   }
 
-  /**
-   * Which buttons turn the view. While sketching the left button belongs to
-   * the sketch, as it does in SOLIDWORKS and Onshape: a drag that was meant
-   * to size a circle used to swing the camera instead, leaving the sketch
-   * seen edge-on with nothing drawn. Shift + left still turns it, for a
-   * trackpad with no middle button.
-   */
   private _syncCameraButtons(orbitWithLeft: boolean): void {
     const pointers = this._camera.inputs.attached.pointers as unknown as { buttons: number[] } | undefined;
     if (!pointers) return;
     pointers.buttons = this._state?.stage === 'sketch' && !orbitWithLeft ? [1, 2] : [0, 1, 2];
   }
-
-  // -------------------------------------------------------------------------
-  // Building the scene objects
-  // -------------------------------------------------------------------------
 
   private _clearPlaneStage(): void {
     for (const quad of this._planeQuads) quad.mesh.dispose(false, true);
@@ -486,12 +408,10 @@ export class SketchOverlay {
     this._dirtyLabels = true;
   }
 
-  /** Half the side of the datum planes and the sketch grid, in inches. */
   private _extent(): number {
     return Math.max((this._bounds?.size ?? 10) * 0.75, 4);
   }
 
-  /** Where on a plane its quad is centred: the model's centre, pressed onto it. */
   private _gridCenter(frame: PlaneFrame): Vec2 {
     const center = this._bounds?.center;
     if (!center) return [0, 0];
@@ -577,7 +497,6 @@ export class SketchOverlay {
       this._planeQuads.push({ key: entry.key, plane: entry.plane, frame, center, half: entry.size, mesh });
       this._planeLabel(entry.name, sketchToWorld(frame, [center[0] - entry.size, center[1] + entry.size]));
     }
-    // Chosen faces (not datum or reference planes) get a quad of their own.
     for (const plane of state.chosenPlanes) {
       if (planes.some((entry) => planeKey(entry.plane) === planeKey(plane))) continue;
       const frame = planeFrame(plane);
@@ -588,7 +507,6 @@ export class SketchOverlay {
       this._decor.push(mesh);
       this._planeLabel(planeLabel(plane), sketchToWorld(frame, [center[0] - half * 0.6, center[1] + half * 0.6]));
     }
-    // The planes the Plane property manager is about to make.
     state.planePreview.forEach((plane, index) => {
       const frame = planeFrame(plane);
       const center = this._gridCenter(frame);
@@ -631,7 +549,6 @@ export class SketchOverlay {
     this._rebuildGrid(true);
   }
 
-  /** Pixels per inch on the sketch plane at its origin. */
   private _pixelsPerUnit(): number {
     const frame = this._frame;
     if (!frame) return 1;
@@ -695,12 +612,10 @@ export class SketchOverlay {
       const points = path.closed ? [...path.points, path.points[0]] : path.points;
       const selected = state.selectedEntityIds.includes(entity.id);
       if (entity.construction) {
-        // Dashed, as construction geometry is drawn: 7 px on, 5 px off.
         for (const dash of dashes(points, 7 / ppu, 5 / ppu)) (selected ? groups.selected : groups.construction).push(toWorld(dash));
       } else {
         (selected ? groups.selected : groups.normal).push(toWorld(points));
       }
-      // A centre mark on round and centred shapes.
       if ('cx' in entity && entity.type !== 'rectangle') {
         const mark = 4 / ppu;
         const c: Vec2 = [entity.cx, entity.cy];
@@ -723,19 +638,13 @@ export class SketchOverlay {
       mesh.renderingGroupId = 1;
       this._entities.push(mesh);
     }
-    // A one-pixel copy under the wide lines, drawn by the plain line shader
-    // the grid and the dimension lines use. Where the wide lines draw it is
-    // hidden under them; where a GPU fails to draw them the sketch is still
-    // on screen rather than reduced to its dimension labels.
     if (thinLines.length) {
-      // With vertex alpha, like the grid, so it shares the grid's compiled shader.
       const thin = MeshBuilder.CreateLineSystem('sketch-entities-thin', { lines: thinLines, colors: thinColors, useVertexAlpha: true }, this._scene);
       thin.renderingGroupId = 1;
       thin.isPickable = false;
       this._entities.push(thin);
     }
 
-    // Open contour ends, as SOLIDWORKS marks them: small red squares.
     const openEnds = sketchProfiles(state.entities).openEnds;
     if (openEnds.length) {
       const size = 4 / ppu;
@@ -759,7 +668,6 @@ export class SketchOverlay {
       this._dirtyLabels = true;
       return;
     }
-    // Driving dimensions: a thin line for the span and a label to type into.
     const gap = Math.max(16 / ppu, 0.05);
     const dims = sketchDimensions(state.entities, this._primarySelection(), gap);
     const dimLines: Vector3[][] = [];
@@ -795,7 +703,6 @@ export class SketchOverlay {
     this._dirtyLabels = true;
   }
 
-  /** Turn a dimension label into an input. `typed` starts it with that text, as when a number is typed. */
   private _beginEdit(spec: DimensionSpec, element: HTMLElement, typed?: string): void {
     if (!this._state) return;
     const input = document.createElement('input');
@@ -886,9 +793,6 @@ export class SketchOverlay {
       const centroid = sketchCentroid(state.entities);
       const origin = toVector(sketchToWorld(frame, centroid));
       const dir = new Vector3(direction[0], direction[1], direction[2]).normalize();
-      // With a depth to set, the arrow stands on the end face, the way the
-      // SOLIDWORKS and Onshape extrude manipulators do, and dragging it sets
-      // the depth. Otherwise it starts at the sketch and only shows the way.
       const depth = state.extrudeDepth;
       const endOffset = depth ? (depth.midplane ? depth.value / 2 : depth.value) : 0;
       const base = origin.add(dir.scale(endOffset));
@@ -928,10 +832,6 @@ export class SketchOverlay {
     this._dirtyLabels = true;
   }
 
-  // -------------------------------------------------------------------------
-  // Regions
-  // -------------------------------------------------------------------------
-
   private _clearRegions(): void {
     for (const mesh of this._regionMeshes) mesh.dispose(false, true);
     this._regionMeshes = [];
@@ -940,13 +840,6 @@ export class SketchOverlay {
     this._hoverRegion = -1;
   }
 
-  /**
-   * The sketch's regions in the feature stage, each a click target: the
-   * ones the feature uses filled, the others outlined, the one under the
-   * pointer lit -- Onshape's region picking. The fills sit on the sketch
-   * plane, pulled toward the eye like the face hint; their outlines are drawn
-   * over the model, so a region under the preview body is still found.
-   */
   private _rebuildRegions(): void {
     this._clearRegions();
     const state = this._state;
@@ -996,7 +889,6 @@ export class SketchOverlay {
     });
   }
 
-  /** The region under the pointer, by index, or -1. */
   private _regionAtPointer(): number {
     const regions = this._state?.regions;
     if (!regions?.length) return -1;
@@ -1005,7 +897,6 @@ export class SketchOverlay {
     return regions.findIndex((region) => pointInContours(region.contours, raw));
   }
 
-  /** Type the depth into the label at the arrow's tip. */
   private _editDepth(element: HTMLElement, value: number): void {
     const input = document.createElement('input');
     input.className = 'sketch-dim-input';
@@ -1038,26 +929,17 @@ export class SketchOverlay {
     input.addEventListener('pointerdown', (event) => event.stopPropagation());
   }
 
-  /** Whether the pointer is on the depth arrow, within a few pixels. */
   private _onDepthHandle(): boolean {
     const handle = this._depthHandle;
     if (!handle) return false;
     const a = this._project([handle.base.x, handle.base.y, handle.base.z]);
     const b = this._project([handle.tip.x, handle.tip.y, handle.tip.z]);
     if (!a || !b) return false;
-    // An arrow pointing at the eye is a dot over the sketch; it is not a
-    // handle then, or it would swallow clicks on the region under it.
     if (Math.hypot(b.x - a.x, b.y - a.y) < 14) return false;
-    // Both in CSS pixels: `_project` scales the render size back down.
     const p: Vec2 = [this._scene.pointerX, this._scene.pointerY];
     return segmentDistance(p, [a.x, a.y], [b.x, b.y]) <= 10;
   }
 
-  /**
-   * The depth for the pointer during an arrow drag: where the pointer's ray
-   * passes closest to the extrude's axis, snapped to a quarter of the grid
-   * step (a few pixels) unless Alt is held.
-   */
   private _depthAtPointer(free: boolean): number | null {
     const handle = this._depthHandle;
     if (!handle) return null;
@@ -1077,10 +959,6 @@ export class SketchOverlay {
     return Math.max(depth, free ? 1e-3 : step);
   }
 
-  // -------------------------------------------------------------------------
-  // Measure
-  // -------------------------------------------------------------------------
-
   private _clearMeasure(): void {
     for (const mesh of this._measureMeshes) mesh.dispose();
     this._measureMeshes = [];
@@ -1094,7 +972,6 @@ export class SketchOverlay {
     this._hoverMeasureKey = '';
   }
 
-  /** Scene objects that show one pick: a face tint, an edge line, or a dot. */
   private _drawPick(pick: MeasurePick, color: Color3, into: Mesh[], labels: Label[] | null, material: StandardMaterial): void {
     if (pick.kind === 'face') {
       into.push(this._triangleMesh('measure-face', pick.triangles, pick.normal, material));
@@ -1171,10 +1048,6 @@ export class SketchOverlay {
     if (pick) this._drawPick(pick, MEASURE_HOVER, this._measureHover, null, this._hintMaterial);
   }
 
-  // -------------------------------------------------------------------------
-  // Per frame
-  // -------------------------------------------------------------------------
-
   private _beforeRender(): void {
     const state = this._state;
     if (!state) return;
@@ -1186,8 +1059,6 @@ export class SketchOverlay {
       if (state.stage === 'sketch' || state.stage === 'feature') {
         const previousStep = this._gridStep;
         this._rebuildGrid();
-        // Dimension gaps, dashes and marks are sized in pixels, so a zoom
-        // has to redraw them.
         if (previousStep !== this._gridStep && !this._editing) this._rebuildEntities();
       }
       this._placeLabels();
@@ -1230,16 +1101,11 @@ export class SketchOverlay {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Pointer
-  // -------------------------------------------------------------------------
-
   private _ray(): { origin: Vector3; direction: Vector3 } {
     const ray = this._scene.createPickingRay(this._scene.pointerX, this._scene.pointerY, Matrix.Identity(), this._camera);
     return { origin: ray.origin, direction: ray.direction };
   }
 
-  /** The pointer on the sketch plane, in sketch coordinates. */
   private _pointerOnPlane(frame: PlaneFrame | null = this._frame): Vec2 | null {
     if (!frame) return null;
     const { origin, direction } = this._ray();
@@ -1280,8 +1146,6 @@ export class SketchOverlay {
     }
     if (best) return { point: [best[0], best[1]], kind: 'point' };
 
-    // Horizontal / vertical inference while drawing a line, as SOLIDWORKS
-    // shows it: the line is made exactly so when it is nearly so.
     if (draft && (draft.tool === 'line' || draft.tool === 'centerline')) {
       const dx = raw[0] - draft.start[0];
       const dy = raw[1] - draft.start[1];
@@ -1313,15 +1177,12 @@ export class SketchOverlay {
         this._pointerDown = down;
         if (event.button !== 0 || orbit) break;
         if (state.stage === 'feature' && this._onDepthHandle()) {
-          // The arrow is held: the view must not turn with it.
           this._camera.detachControl();
           this._depthDrag = { last: state.extrudeDepth?.value ?? 0 };
           this._rebuildPreview();
           break;
         }
         this._maybeStartDrag(event);
-        // A press places a shape's first point, so the shape can be drawn by
-        // dragging to the second and releasing, as well as by two clicks.
         if (state.stage === 'sketch' && isDrawingTool(state.tool) && !this._draft) {
           this._closeNumeric();
           this._onClick(event);
@@ -1347,12 +1208,9 @@ export class SketchOverlay {
         if (event.button !== 0 || !down || down.button !== 0 || down.orbit) break;
         const moved = Math.hypot(scene.pointerX - down.x, scene.pointerY - down.y) > CLICK_DRAG_THRESHOLD_PX;
         if (state.stage === 'sketch' && isDrawingTool(state.tool)) {
-          // The release of the press that started the shape: with no drag it
-          // is the first of two clicks, and the shape waits for the second.
           if (down.startedDraft && !moved) break;
           const dragged = down.startedDraft && moved;
           this._onClick(event);
-          // A line dragged out is one line, as in SOLIDWORKS; clicks chain.
           if (dragged && (state.tool === 'line' || state.tool === 'centerline')) {
             this._draft = null;
             this._dirtyRubber = true;
@@ -1398,8 +1256,6 @@ export class SketchOverlay {
       return;
     }
     if (state.stage === 'plane' || state.stage === 'measure' || (state.stage === 'sketch' && state.tool === 'convert')) {
-      // Picked once per frame at most, not per pointer event: a pick is a
-      // ray against every triangle of the casting.
       this._dirtyHover = true;
       if (state.stage !== 'sketch') return;
     }
@@ -1412,8 +1268,6 @@ export class SketchOverlay {
     this._cursor = this._snap(raw, event.altKey);
     const draft = this._draft;
     if (draft?.tool === 'centerArc' && draft.start) {
-      // Follow the pointer round the centre, so the arc sweeps the way the
-      // mouse moves, clockwise or counter-clockwise.
       const angle = Math.atan2(this._cursor.point[1] - draft.center[1], this._cursor.point[0] - draft.center[0]);
       let delta = angle - draft.lastAngle;
       if (delta > Math.PI) delta -= Math.PI * 2;
@@ -1461,12 +1315,6 @@ export class SketchOverlay {
     this._readout.textContent = `${text}  in`;
   }
 
-  /**
-   * What a click in the plane stage (or with Convert Entities) would choose:
-   * a face of the model wherever the pointer is on one, else a plane. The
-   * planes span the whole model, so letting the nearer of the two win made
-   * every face behind a datum plane impossible to pick.
-   */
   private _planeTarget(): { surface: SurfacePick } | { quad: PlaneQuad } | null {
     const surface = this._pickSurface(this._scene.pointerX, this._scene.pointerY);
     if (surface) return { surface };
@@ -1491,8 +1339,6 @@ export class SketchOverlay {
       this._clearFaceHint();
       this._hintSource = triangles;
       if (triangles && surface) {
-        // The face itself, lit up, the way a CAD viewer pre-highlights what a
-        // click will select.
         this._faceHint = this._triangleMesh('sketch-face-hint', triangles, [surface.normal.x, surface.normal.y, surface.normal.z], this._hintMaterial);
       }
     }
@@ -1531,8 +1377,6 @@ export class SketchOverlay {
       if (target && 'surface' in target) {
         const surface = target.surface;
         const label = surface.partName ? `Face of ${surface.partName}` : 'Face';
-        // A flat face's plane is the face's own, not the tangent plane of
-        // the one triangle that happened to be under the pointer.
         const normal = surface.face?.planar ? surface.face.normal : ([surface.normal.x, surface.normal.y, surface.normal.z] as Vec3);
         this._emit({
           type: 'planePicked',
@@ -1549,7 +1393,6 @@ export class SketchOverlay {
       return;
     }
     if (state.stage === 'feature') {
-      // A click on a region adds it to the profile or takes it out.
       const raw = state.regions ? this._pointerOnPlane() : null;
       if (raw && this._regionAtPointer() >= 0) this._emit({ type: 'regionToggled', point: raw });
       return;
@@ -1571,7 +1414,6 @@ export class SketchOverlay {
     if (state.tool === 'select') {
       const hit = this._entityAt(raw);
       if (addsToSelection(event)) {
-        // Ctrl- or Cmd-click adds an entity to the selection or takes it out.
         if (hit) {
           const ids = state.selectedEntityIds;
           this._emit({ type: 'entitySelected', ids: ids.includes(hit.id) ? ids.filter((id) => id !== hit.id) : [...ids, hit.id] });
@@ -1584,7 +1426,6 @@ export class SketchOverlay {
     this._applyPoint(point, snap.kind);
   }
 
-  /** Place the next point of the shape the current tool is drawing. */
   private _applyPoint(point: Vec2, snapKind: SnapKind): void {
     const state = this._state;
     if (!state || state.stage !== 'sketch') return;
@@ -1613,8 +1454,6 @@ export class SketchOverlay {
             ...(exactly && snapKind !== 'free' ? { relation: exactly } : {})
           }
         });
-        // The chain ends where it closes on itself or meets another end, the
-        // way the Line tool stops when a contour closes.
         const closes = distance2(point, draft.chainStart) <= COINCIDENT_TOL || (snapKind === 'point' && this._isEnd(point));
         this._draft = closes || construction ? null : { ...draft, start: point };
         break;
@@ -1678,7 +1517,6 @@ export class SketchOverlay {
     this._dirtyRubber = true;
   }
 
-  /** Whether a point is an end of an existing line or arc. */
   private _isEnd(point: Vec2): boolean {
     return (this._state?.entities ?? []).some((entity) => {
       const ends = entityEnds(entity);
@@ -1724,7 +1562,6 @@ export class SketchOverlay {
     }
   }
 
-  /** The entity whose outline is nearest the point, or the smallest closed one containing it. */
   private _entityAt(point: Vec2, outlineOnly = false): SketchEntity | null {
     const state = this._state;
     if (!state) return null;
@@ -1750,7 +1587,6 @@ export class SketchOverlay {
     return best ?? inside?.entity ?? null;
   }
 
-  /** The end of a line or arc under the pointer, if any. */
   private _endAt(point: Vec2): { id: string; end: 0 | 1 } | null {
     const state = this._state;
     if (!state) return null;
@@ -1765,15 +1601,6 @@ export class SketchOverlay {
     return null;
   }
 
-  // -------------------------------------------------------------------------
-  // Dragging
-  // -------------------------------------------------------------------------
-
-  /**
-   * A press with the Select tool: on an end it drags the end, on a line it
-   * drags the selection (or the line, if it was not selected), and anywhere
-   * else it starts a selection box.
-   */
   private _maybeStartDrag(event: PointerEvent): void {
     const state = this._state;
     if (!state || state.stage !== 'sketch' || state.tool !== 'select') return;
@@ -1785,8 +1612,6 @@ export class SketchOverlay {
       this._drag = { kind: 'end', id: end.id, end: end.end, original: state.entities, moved: false };
       return;
     }
-    // Only the line itself is a handle: pressing inside a circle starts a
-    // box, as it does in SOLIDWORKS and Onshape.
     const entity = this._entityAt(raw, true);
     if (!entity) {
       this._box = { x0: this._scene.pointerX, y0: this._scene.pointerY, additive: addsToSelection(event), element: null };
@@ -1795,8 +1620,6 @@ export class SketchOverlay {
     this._camera.detachControl();
     const selected = state.selectedEntityIds;
     const moving = selected.includes(entity.id) ? selected : addsToSelection(event) ? [...selected, entity.id] : [entity.id];
-    // A line or arc drags the whole chain it is joined into, so a contour
-    // drawn with the Line tool moves as one shape.
     const ids = new Set<string>();
     for (const id of moving) {
       const item = state.entities.find((candidate) => candidate.id === id);
@@ -1807,17 +1630,11 @@ export class SketchOverlay {
     if (moving !== selected) this._emit({ type: 'entitySelected', ids: moving });
   }
 
-  /** The entity whose dimensions are shown and typed into: the selection, when it is one entity. */
   private _primarySelection(): string | null {
     const ids = this._state?.selectedEntityIds ?? [];
     return ids.length === 1 ? ids[0] : null;
   }
 
-  // -------------------------------------------------------------------------
-  // Box selection
-  // -------------------------------------------------------------------------
-
-  /** Draw the selection box from the press to the pointer. */
   private _updateBox(): void {
     const box = this._box;
     if (!box) return;
@@ -1829,8 +1646,6 @@ export class SketchOverlay {
       box.element.className = 'sketch-box';
       this._layer.appendChild(box.element);
     }
-    // Left to right selects what is wholly inside; right to left, anything
-    // the box touches -- SOLIDWORKS' window and crossing selection.
     box.element.classList.toggle('is-crossing', x < box.x0);
     box.element.style.left = `${Math.min(x, box.x0)}px`;
     box.element.style.top = `${Math.min(y, box.y0)}px`;
@@ -1838,7 +1653,6 @@ export class SketchOverlay {
     box.element.style.height = `${Math.abs(y - box.y0)}px`;
   }
 
-  /** Finish a selection box. Returns false when it was never dragged out (a click). */
   private _endBox(): boolean {
     const box = this._box;
     this._box = null;
@@ -1869,7 +1683,6 @@ export class SketchOverlay {
     return true;
   }
 
-  /** The entities as the drag in progress would leave them. */
   private _draggedEntities(): SketchEntity[] | null {
     const drag = this._drag;
     const cursor = this._cursor;
@@ -1894,10 +1707,6 @@ export class SketchOverlay {
     this._emit({ type: 'entitiesChanged', entities: next });
   }
 
-  // -------------------------------------------------------------------------
-  // Rubber band
-  // -------------------------------------------------------------------------
-
   private _drawRubberBand(): void {
     this._rubber?.dispose();
     this._rubber = null;
@@ -1917,7 +1726,6 @@ export class SketchOverlay {
       for (const entity of next ?? []) {
         if (ids && !ids.has(entity.id)) continue;
         if (!ids) {
-          // An end drag also bends whatever is joined there.
           const before = this._drag.original.find((item) => item.id === entity.id);
           if (before === entity) continue;
         }
@@ -1967,8 +1775,6 @@ export class SketchOverlay {
     }
 
     if (state.tool !== 'select' && state.tool !== 'convert') {
-      // The snap marker: a square on a point, a cross on the grid, a dash on
-      // a horizontal or vertical inference.
       const size = 5 / this._pixelsPerUnit();
       const color = cursor.kind === 'grid' || cursor.kind === 'free' ? RUBBER_LINE : SELECTED_LINE;
       const marker: Vec2[][] =
@@ -1984,11 +1790,6 @@ export class SketchOverlay {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Typed sizes
-  // -------------------------------------------------------------------------
-
-  /** What a number typed now sizes, for the shape being drawn, or null. */
   private _numericPrompt(): string | null {
     switch (this._draft?.tool) {
       case 'line':
@@ -2005,11 +1806,6 @@ export class SketchOverlay {
     }
   }
 
-  /**
-   * Open the size box beside the pointer, starting with the key that opened
-   * it: SOLIDWORKS' on-screen numeric input. The shape keeps following the
-   * pointer for its direction; Enter places it at the typed size.
-   */
   private _openNumeric(typed: string): void {
     const prompt = this._numericPrompt();
     const cursor = this._cursor;
@@ -2062,7 +1858,6 @@ export class SketchOverlay {
     numeric.box.remove();
   }
 
-  /** Place the shape being drawn at the typed size, pointing the way the pointer is. */
   private _commitNumeric(): void {
     const numeric = this._numeric;
     const draft = this._draft;
@@ -2115,14 +1910,9 @@ export class SketchOverlay {
     }
     this._closeNumeric();
     if (!point) return;
-    // A line typed along a horizontal or vertical inference keeps the relation.
     const kind = this._cursor?.kind;
     this._applyPoint(point, kind === 'horizontal' || kind === 'vertical' ? kind : 'free');
   }
-
-  // -------------------------------------------------------------------------
-  // Keyboard
-  // -------------------------------------------------------------------------
 
   private _handleKey(event: KeyboardEvent): void {
     const state = this._state;
@@ -2160,8 +1950,6 @@ export class SketchOverlay {
       this._emit({ type: 'entitySelected', ids: state.entities.map((entity) => entity.id) });
       event.preventDefault();
     } else if (/^[0-9.]$/.test(event.key) && !event.metaKey && !event.ctrlKey && !event.altKey) {
-      // A number typed while a shape is drawn sizes it; typed right after,
-      // it sets the new entity's size dimension, as in Onshape.
       if (this._numericPrompt()) {
         this._openNumeric(event.key);
         event.preventDefault();
@@ -2184,18 +1972,15 @@ export class SketchOverlay {
   }
 }
 
-/** Ctrl, or Cmd on a Mac, adds to the selection. */
 function addsToSelection(event: PointerEvent): boolean {
   return event.ctrlKey || event.metaKey;
 }
 
-/** Whether a screen segment passes through a rectangle (both ends may be outside it). */
 function segmentCrossesRect(
   a: { x: number; y: number },
   b: { x: number; y: number },
   rect: { left: number; right: number; top: number; bottom: number }
 ): boolean {
-  // Clip the segment to the rectangle (Liang-Barsky); anything left crosses it.
   let t0 = 0;
   let t1 = 1;
   const dx = b.x - a.x;
@@ -2219,22 +2004,16 @@ function segmentCrossesRect(
   return true;
 }
 
-/** Every tool but Select and Convert Entities places points. */
 function isDrawingTool(tool: SketchTool): boolean {
   return tool !== 'select' && tool !== 'convert';
 }
 
-/** Single-key sketch tool shortcuts. */
 const SHORTCUTS: Record<string, SketchTool> = {
   l: 'line',
   r: 'rectangle',
   c: 'circle',
   a: 'arc3'
 };
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 function flatMaterial(name: string, color: Color3, alpha: number, scene: Scene): StandardMaterial {
   const material = new StandardMaterial(name, scene);
@@ -2272,7 +2051,6 @@ function closed(points: Vec2[]): Vec2[] {
   return points.length ? [...points, points[0]] : points;
 }
 
-/** Split a polyline into dashes `on` long with `off` gaps (sketch units). */
 function dashes(points: Vec2[], on: number, off: number): Vec2[][] {
   const out: Vec2[][] = [];
   let current: Vec2[] = [points[0]];
@@ -2302,17 +2080,11 @@ function dashes(points: Vec2[], on: number, off: number): Vec2[][] {
   return out;
 }
 
-/** Inches to three places, trailing zeros trimmed to two: 2.00, 2.50, 0.125. */
 export function formatInches(value: number): string {
   const fixed = value.toFixed(3);
   return fixed.endsWith('0') ? fixed.slice(0, -1) : fixed;
 }
 
-/**
- * Read a typed dimension. Accepts plain numbers, simple arithmetic
- * ("2+1/8"), and a trailing unit of in, ", mm or cm -- what gets typed into
- * a SOLIDWORKS modify box.
- */
 export function evaluateLength(text: string): number | null {
   let source = text.trim().toLowerCase();
   let factor = 1;
@@ -2325,7 +2097,6 @@ export function evaluateLength(text: string): number | null {
   return value !== null && Number.isFinite(value) ? value * factor : null;
 }
 
-/** `+ - * /`, parentheses and unary minus over decimal numbers; null on anything else. */
 function parseArithmetic(source: string): number | null {
   const tokens = source.match(/\d*\.?\d+(?:e[-+]?\d+)?|[-+*/()]|\S/g) ?? [];
   let at = 0;

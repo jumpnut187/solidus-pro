@@ -1,5 +1,3 @@
-"""Smooth isosurface extraction for web result visualization."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,20 +6,12 @@ from typing import Any, Iterable
 import numpy as np
 from scipy import ndimage
 
-
 @dataclass(frozen=True)
 class SurfaceArrays:
-    """
-    An isosurface as raw arrays, before any serialization decision.
 
-    The binary body the viewport fetches builds straight from these, so it
-    never pays for a round trip through Python lists -- a 100,000 triangle
-    envelope is 7 MB of JSON and about 2 MB of Float32.
-    """
-
-    positions: np.ndarray  # (V, 3) float32, world inches
-    normals: np.ndarray  # (V, 3) float32, unit
-    indices: np.ndarray  # (T * 3,) uint32
+    positions: np.ndarray
+    normals: np.ndarray
+    indices: np.ndarray
 
     @staticmethod
     def empty_surface() -> "SurfaceArrays":
@@ -43,7 +33,6 @@ class SurfaceArrays:
     def empty(self) -> bool:
         return self.indices.size == 0
 
-
 def contour_dense_grid(
     volume: np.ndarray,
     origin: Iterable[float],
@@ -52,27 +41,11 @@ def contour_dense_grid(
     *,
     smooth_sigma: float = 0.75,
 ) -> SurfaceArrays:
-    """
-    Contour an already-dense scalar grid.
-
-    This is the only contouring path left. It is handed the dense grid the
-    sidecar already holds rather than rebuilding a lattice out of sparse voxel
-    centers per request, so there is no JSON parse, and -- crucially -- the
-    caller has already masked the grid to the metal, so the contour cannot
-    leak into the hole-filled values outside the casting.
-
-    ``volume`` is indexed ``[ix, iy, iz]``; ``origin`` is the world position of
-    the center of cell ``(0, 0, 0)``. A one-cell ring of background is added on
-    every side so the surface closes where the casting reaches the edge of its
-    own bounding box instead of being sliced open by it.
-    """
     if volume.ndim != 3 or volume.size == 0:
         return SurfaceArrays.empty_surface()
 
     background = float(np.min(volume))
     if background >= threshold:
-        # Every cell is above the threshold, so a closed surface needs a
-        # background strictly below it to contour against.
         background = threshold - max(abs(threshold), 1.0) * 1e-3
 
     padded = np.full(tuple(size + 2 for size in volume.shape), background, dtype=np.float32)
@@ -90,12 +63,11 @@ def contour_dense_grid(
     spacing_arr = np.full(3, float(spacing), dtype=np.float32)
     return _extract_with_vtk(padded, origin_arr, spacing_arr, float(threshold))
 
-
 def _extract_with_vtk(volume: np.ndarray, origin: np.ndarray, spacing: np.ndarray, threshold: float) -> SurfaceArrays:
     try:
         import vtk
         from vtk.util import numpy_support
-    except Exception as exc:  # pragma: no cover - exercised only when VTK is unavailable
+    except Exception as exc:
         raise RuntimeError("VTK is required for smooth web result surfaces") from exc
 
     image = vtk.vtkImageData()
@@ -137,16 +109,7 @@ def _extract_with_vtk(volume: np.ndarray, origin: np.ndarray, spacing: np.ndarra
     polydata = normals.GetOutput()
     return _polydata_to_arrays(polydata)
 
-
 def _polydata_to_arrays(polydata: Any) -> SurfaceArrays:
-    """
-    Pull positions, normals and triangles out of a vtkPolyData as numpy arrays.
-
-    Vectorized rather than looped. The previous version walked the cell array
-    in Python and appended to a list, which is fine for the few thousand
-    triangles a risk-field envelope produces and quadratically unpleasant for
-    the hundred thousand a fine solidification-time isosurface does.
-    """
     from vtk.util import numpy_support
 
     points = polydata.GetPoints()
@@ -176,7 +139,6 @@ def _polydata_to_arrays(polydata: Any) -> SurfaceArrays:
 
     sizes = np.diff(offsets)
     if np.all(sizes == 3):
-        # The fast path, and the only one a contour filter ever takes.
         triangles = connectivity.reshape(-1, 3)
     else:
         triangles = _fan_triangulate(offsets, connectivity, sizes)
@@ -190,9 +152,7 @@ def _polydata_to_arrays(polydata: Any) -> SurfaceArrays:
         indices=np.ascontiguousarray(triangles.reshape(-1), dtype=np.uint32),
     )
 
-
 def _fan_triangulate(offsets: np.ndarray, connectivity: np.ndarray, sizes: np.ndarray) -> np.ndarray:
-    """Fan-triangulate any polygon with more than three corners."""
     fans: list[np.ndarray] = []
     triples = sizes == 3
     if np.any(triples):

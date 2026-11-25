@@ -22,7 +22,6 @@ for name, sl in faces:
         continue
     c = collections.Counter(NAME.get(int(v),str(v)) for v in sl[m].ravel())
     print(f"{name}: {n} part cells -> {dict(c)}")
-# where exactly on top plane
 top = t[:,:,nz-1]
 if (top>=0).any():
     xs,ys = np.nonzero(top>=0)
@@ -31,7 +30,6 @@ if (top>=0).any():
         mm = top==v
         xs,ys = np.nonzero(mm)
         print(f"    {NAME.get(int(v),v)}: {int(mm.sum())} cells x[{xs.min()},{xs.max()}] y[{ys.min()},{ys.max()}]")
-# per-part max z
 print("\n--- per-part z extent ---")
 for v in vals:
     if v < 0: continue

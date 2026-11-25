@@ -1,25 +1,9 @@
-/**
- * The flat face of a tessellated part around one triangle.
- *
- * An STL has no faces, only triangles, so "the face you clicked" has to be
- * recovered: every triangle reachable from the picked one across shared
- * vertices that lies in the same plane (normal within half a degree, and on
- * the plane within a small tolerance). That is the region a CAD viewer lights
- * up when you hover a face, and the region the sketch plane will sit on. A
- * curved face has no such region; the result is then the picked triangle
- * alone, and the plane is the tangent plane there.
- */
 import type { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh';
 import { Vector3 } from '@babylonjs/core/Maths/math.vector';
 
 const NORMAL_COS = Math.cos((0.5 * Math.PI) / 180);
 const MAX_TRIANGLES = 50_000;
 
-/**
- * Vertex-to-triangle adjacency over WELDED vertices: the crease-angle split
- * duplicates every vertex on a sharp edge, and two copies of one point have
- * to count as the same vertex or a face would stop at its own diagonal.
- */
 type Adjacency = { weld: Uint32Array; offsets: Uint32Array; triangles: Uint32Array };
 const adjacencyCache = new WeakMap<object, Adjacency>();
 
@@ -50,28 +34,16 @@ function buildAdjacency(positions: ArrayLike<number>, indices: ArrayLike<number>
 }
 
 export type PlanarFace = {
-  /** Triangle indices of the face, for testing whether a later pick is on it. */
   ids: Set<number>;
-  /** World-space triangles, nine floats each, for drawing the highlight. */
   world: Float32Array;
-  /**
-   * False when the region is a facet of a curved surface rather than a flat
-   * face: one or two triangles (a cylinder's facet is a quad) with a smoothly
-   * turning neighbour across an edge.
-   */
   planar: boolean;
-  /** World-space area, square inches. */
   area: number;
-  /** Area-weighted centre, world space. */
   centroid: [number, number, number];
-  /** Outward unit normal, world space. */
   normal: [number, number, number];
 };
 
-/** Faces meeting within this angle are a smooth surface, not an edge. */
 const SMOOTH_COS = Math.cos((20 * Math.PI) / 180);
 
-/** The planar face containing triangle `faceId` of `mesh`, or null if there is no such triangle. */
 export function planarFace(mesh: AbstractMesh, faceId: number): PlanarFace | null {
   const positions = mesh.getVerticesData('position');
   const indices = mesh.getIndices();
@@ -95,7 +67,6 @@ export function planarFace(mesh: AbstractMesh, faceId: number): PlanarFace | nul
   const seedNormal = unitNormal(faceId);
   if (!seedNormal) return null;
   const offset = Vector3.Dot(seedNormal, point(indices[3 * faceId]));
-  // Scaled to the part, so a large casting's float noise does not split a face.
   const extent = mesh.getBoundingInfo().boundingBox.extendSize.length();
   const planeTolerance = Math.max(extent * 1e-4, 1e-5);
 
@@ -172,13 +143,6 @@ export function planarFace(mesh: AbstractMesh, faceId: number): PlanarFace | nul
   };
 }
 
-/**
- * The closed loops bounding a set of triangles (nine floats each), as
- * world-space points. Edges used by one triangle of the set are its boundary;
- * they are chained head to tail in the triangles' own winding, so the outer
- * loop of a face runs counter-clockwise seen from its outside and the loops
- * around its holes clockwise -- exactly what an even-odd profile wants.
- */
 export function faceBoundaryLoops(triangles: Float32Array): Array<Array<[number, number, number]>> {
   const keyOf = (i: number) => `${triangles[i]},${triangles[i + 1]},${triangles[i + 2]}`;
   const pointOf = new Map<string, [number, number, number]>();
@@ -192,7 +156,6 @@ export function faceBoundaryLoops(triangles: Float32Array): Array<Array<[number,
       directed.set(key, (directed.get(key) ?? 0) + 1);
     }
   }
-  // A boundary edge is one whose reverse is not in the set.
   const next = new Map<string, string[]>();
   for (const key of directed.keys()) {
     const [a, b] = key.split('|');

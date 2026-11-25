@@ -1,15 +1,3 @@
-"""Tests for the Foseco STELEX ceramic filter catalog.
-
-The numbers in ``filter_database.csv`` are transcribed from a printed vendor
-table and drive a flow calculation a foundry acts on, so these tests are mostly
-about *provenance invariants*: properties the published data has, which a
-careless edit would break silently.
-
-The central one is that flow rate is an exact area law and capacity is not.
-Conflating the two is the specific mistake that would over-rate the smallest
-filter by 6-8 % in the unsafe direction.
-"""
-
 from __future__ import annotations
 
 import collections
@@ -57,16 +45,13 @@ _GOOD_ROW = (
     "carbon_low_alloy,lip,zr_ti,5.6,85.0,1680,handbook_t18_2\n"
 )
 
-
 class CatalogShapeTests(unittest.TestCase):
-    """The CSV ships with the repo and must parse into the full published grid."""
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.db = load_filter_database()
 
     def test_all_104_published_cells_are_present(self) -> None:
-        """13 sizes x 2 alloy classes x 2 pour modes x 2 deoxidation practices."""
         self.assertEqual(len(self.db), 104)
         self.assertEqual(len({spec.nominal_size for spec in self.db}), 13)
 
@@ -145,23 +130,13 @@ class CatalogShapeTests(unittest.TestCase):
         self.assertEqual(len(specs), 1)
         self.assertEqual(specs[0].nominal_size, "75x75x25")
 
-
 class FlowRateIsAnExactAreaLawTests(unittest.TestCase):
-    """
-    The load-bearing property. Flow rate is what the solver consumes and what a
-    non-catalog filter size gets rated by, so the area law must hold exactly --
-    including for the round sizes, which capacity's does not.
-    """
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.db = load_filter_database()
 
     def test_square_flow_cells_match_the_area_law_to_publication_rounding(self) -> None:
-        """
-        For square filters the residual never exceeds 1 %, and every case is
-        explained by the table being printed to one decimal.
-        """
         for spec in self.db:
             if spec.shape != SHAPE_SQUARE:
                 continue
@@ -179,13 +154,6 @@ class FlowRateIsAnExactAreaLawTests(unittest.TestCase):
                 )
 
     def test_round_flow_cells_follow_the_law_only_approximately(self) -> None:
-        """
-        Round filters drift up to ~3.5 %, more than one-decimal rounding can
-        explain, so the law is an approximation there rather than the vendor's
-        own arithmetic. Asserted as a band in both directions: too tight and a
-        true statement about the data becomes false, too loose and a real
-        transcription error slips through.
-        """
         worst = 0.0
         for spec in self.db:
             if spec.shape != SHAPE_ROUND:
@@ -202,11 +170,6 @@ class FlowRateIsAnExactAreaLawTests(unittest.TestCase):
         )
 
     def test_the_law_is_exact_at_100x100(self) -> None:
-        """
-        100x100x25 is exactly 100 cm^2, so k x area lands on a round number with
-        zero residual in all four columns. That is the strongest single piece of
-        evidence Foseco generated the column from face-area constants.
-        """
         exact = {
             (STEEL_CARBON_LOW_ALLOY, POUR_MODE_LIP): 10.0,
             (STEEL_CARBON_LOW_ALLOY, POUR_MODE_BOTTOM): 12.5,
@@ -222,11 +185,6 @@ class FlowRateIsAnExactAreaLawTests(unittest.TestCase):
                 )
 
     def test_flow_is_independent_of_deoxidation_practice(self) -> None:
-        """
-        A structural invariant of the source: the Zr/Ti and CaSi/Al flow columns
-        are identical in all 26 published rows. Deoxidation affects how much
-        metal the filter can take, not how fast it passes.
-        """
         by_key = collections.defaultdict(dict)
         for spec in self.db:
             key = (spec.nominal_size, spec.steel_class, spec.pour_mode)
@@ -257,12 +215,7 @@ class FlowRateIsAnExactAreaLawTests(unittest.TestCase):
                     flow_rate_kg_s_for_area(100.0, STEEL_CARBON_LOW_ALLOY, mode),
                 )
 
-
 class CapacityIsNotAnAreaLawTests(unittest.TestCase):
-    """
-    Capacity fits the area law only for square filters 25 mm thick and up.
-    These tests pin the two documented departures so nobody "tidies them away".
-    """
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -285,11 +238,6 @@ class CapacityIsNotAnAreaLawTests(unittest.TestCase):
                 )
 
     def test_the_20mm_filter_really_does_deviate(self) -> None:
-        """
-        The 50x50x20 is the range's only 20 mm filter and sits 6-8 % below the
-        area law in every column. If this ever stops being true the data
-        changed, and THIN_FILTER_CAPACITY_FACTOR is no longer justified.
-        """
         ratios = []
         for spec in self.db:
             if spec.nominal_size != "50x50x20":
@@ -320,12 +268,6 @@ class CapacityIsNotAnAreaLawTests(unittest.TestCase):
                 self.assertLess(abs(predicted - spec.capacity_kg) / spec.capacity_kg, 0.02)
 
     def test_casi_al_multiplier_is_not_uniform(self) -> None:
-        """
-        Three columns scale ~1.50 from Zr/Ti to CaSi/Al but high-alloy bottom
-        pour scales ~1.67. Anyone regenerating the CaSi/Al half with a single
-        factor would under-rate that column by ~10 %, so the data must stay
-        published rather than derived.
-        """
         ratios = {}
         for spec in self.db:
             key = (spec.steel_class, spec.pour_mode)
@@ -340,11 +282,6 @@ class CapacityIsNotAnAreaLawTests(unittest.TestCase):
         self.assertGreater(outlier, 1.60)
 
     def test_round_capacities_are_not_reproduced_by_the_law(self) -> None:
-        """
-        Documented limitation: round sizes scatter up to ~6.6 %. This asserts the
-        scatter exists so the docstring's warning stays true, and so nobody
-        starts computing round capacities.
-        """
         worst = 0.0
         for spec in self.db:
             if spec.shape != SHAPE_ROUND:
@@ -356,9 +293,7 @@ class CapacityIsNotAnAreaLawTests(unittest.TestCase):
             worst = max(worst, abs(predicted - spec.capacity_kg) / spec.capacity_kg)
         self.assertGreater(worst, 0.03, "round scatter vanished - re-check the data")
 
-
 class RatingGuardTests(unittest.TestCase):
-    """Refusing to guess is a feature: a wrong class is a 40 % flow error."""
 
     def test_unknown_steel_class_raises(self) -> None:
         with self.assertRaises(ValueError):
@@ -393,7 +328,6 @@ class RatingGuardTests(unittest.TestCase):
                     with self.subTest(cls=steel_class, mode=mode, deox=deox):
                         self.assertIn((steel_class, mode, deox), CAPACITY_KG_PER_CM2)
 
-
 class AlloyMappingTests(unittest.TestCase):
     def test_mapped_alloys_exist_in_the_catalog(self) -> None:
         names = set(get_all_alloy_names())
@@ -425,14 +359,12 @@ class AlloyMappingTests(unittest.TestCase):
                     f"listed as non-ferrous - classify it in ALLOY_STEEL_CLASS",
                 )
 
-
 class SelectionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.db = load_filter_database()
 
     def test_selects_smallest_adequate_square_filter(self) -> None:
-        # Carbon steel, lip pour: 75x75 rates 5.6 kg/s, 100x100 rates 10.0.
         spec = select_filter(6.0, self.db, STEEL_CARBON_LOW_ALLOY, POUR_MODE_LIP)
         self.assertIsNotNone(spec)
         assert spec is not None
@@ -447,8 +379,6 @@ class SelectionTests(unittest.TestCase):
         self.assertIsNone(select_filter(1e6, self.db, STEEL_CARBON_LOW_ALLOY))
 
     def test_selection_respects_steel_class(self) -> None:
-        # 7.0 kg/s discriminates: carbon lip needs 100x100 (75x75 rates 5.6),
-        # high-alloy lip clears it at 75x75 (rated 7.8).
         carbon = select_filter(7.0, self.db, STEEL_CARBON_LOW_ALLOY, POUR_MODE_LIP)
         high = select_filter(7.0, self.db, STEEL_HIGH_ALLOY_STAINLESS, POUR_MODE_LIP)
         assert carbon is not None and high is not None
@@ -466,9 +396,7 @@ class SelectionTests(unittest.TestCase):
             6.0, self.db, STEEL_CARBON_LOW_ALLOY, POUR_MODE_LIP, shape=None
         )
         assert spec is not None
-        # A 100 dia. x 25 round (78.5 cm^2, 7.8 kg/s) beats the 100 mm square.
         self.assertEqual(spec.shape, SHAPE_ROUND)
-
 
 class AreaMatchTests(unittest.TestCase):
     @classmethod
@@ -476,7 +404,6 @@ class AreaMatchTests(unittest.TestCase):
         cls.db = load_filter_database()
 
     def test_matches_a_modelled_body_to_its_catalog_size(self) -> None:
-        # A 75 mm square drawn slightly off: 74.2 x 74.2 mm -> 55.06 cm^2.
         spec = match_filter_by_area(
             55.06, self.db, STEEL_CARBON_LOW_ALLOY, POUR_MODE_LIP, shape=SHAPE_SQUARE
         )
@@ -489,9 +416,7 @@ class AreaMatchTests(unittest.TestCase):
     def test_non_positive_area_returns_none(self) -> None:
         self.assertIsNone(match_filter_by_area(0.0, self.db, STEEL_CARBON_LOW_ALLOY))
 
-
 class SolverUnitTests(unittest.TestCase):
-    """The solver consumes SI, so the SI accessors must be right."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -503,7 +428,6 @@ class SolverUnitTests(unittest.TestCase):
         self.assertAlmostEqual(spec.front_face_area_m2, 0.01, places=9)
 
     def test_rated_velocity_honours_the_alloy_density(self) -> None:
-        """Defaulting the density for a specific alloy is a ~3 % error."""
         spec = next(s for s in self.db if s.nominal_size == "100x100x25")
         generic = spec.rated_superficial_velocity_m_s()
         wcb = spec.rated_superficial_velocity_m_s(7200.0)
@@ -518,11 +442,6 @@ class SolverUnitTests(unittest.TestCase):
         self.assertAlmostEqual(spec.rated_superficial_velocity_m_s(), expected, places=12)
 
     def test_rated_velocity_sits_in_the_practice_band(self) -> None:
-        """
-        The Foseco rating and the 3.0x filter-to-choke sizing rule are one
-        statement: keep the filter face near 0.15 m/s. All four columns land in
-        a narrow band despite being independent vendor table columns.
-        """
         for spec in self.db:
             with self.subTest(size=spec.nominal_size, cls=spec.steel_class, mode=spec.pour_mode):
                 u_rated = spec.rated_superficial_velocity_m_s(7200.0)
@@ -530,13 +449,6 @@ class SolverUnitTests(unittest.TestCase):
                 self.assertLess(u_rated, 0.26)
 
     def test_rating_brackets_campbells_critical_ingate_velocity(self) -> None:
-        """
-        Behind the minimum 3.0x filter face the rated columns imply choke
-        velocities of 0.42-0.73 m/s, bracketing Campbell's 0.5 m/s critical
-        ingate velocity rather than uniformly respecting it. Only the most
-        conservative column stays under it, which is why a solver-side
-        acceptance check needs headroom over the bare rating.
-        """
         implied = {
             (s.steel_class, s.pour_mode): s.rated_superficial_velocity_m_s(7200.0)
             * MIN_FILTER_TO_CHOKE_AREA_RATIO
@@ -551,11 +463,6 @@ class SolverUnitTests(unittest.TestCase):
                 self.assertLess(velocity, 0.5 * 1.5)
 
     def test_face_velocity_is_size_independent_within_a_column(self) -> None:
-        """
-        A pure area law in mass flow means face velocity is constant across
-        sizes. That is the single most useful consequence for the solver: the
-        filter's rated restriction does not depend on how big it is.
-        """
         for steel_class in STEEL_CLASSES:
             for mode in POUR_MODES:
                 velocities = [
@@ -568,7 +475,6 @@ class SolverUnitTests(unittest.TestCase):
                 with self.subTest(cls=steel_class, mode=mode):
                     spread = (max(velocities) - min(velocities)) / min(velocities)
                     self.assertLess(spread, 0.02, f"face velocities vary: {velocities}")
-
 
 if __name__ == "__main__":
     unittest.main()

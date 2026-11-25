@@ -1,5 +1,3 @@
-"""Time-integration loop extracted from SolidificationEngine."""
-
 from __future__ import annotations
 
 import os
@@ -20,25 +18,22 @@ try:
     NUMBA_THREADING_AVAILABLE = True
 except ImportError:
     NUMBA_THREADING_AVAILABLE = False
-    prange = range  # type: ignore[assignment]
+    prange = range
 
 try:
     from physics.solidification_physics import (
         apply_enthalpy_correction,
-        apply_enthalpy_correction_parallel,  # noqa: F401  (import proves the Numba kernels exist)
+        apply_enthalpy_correction_parallel,
     )
 
     ENTHALPY_KERNEL_AVAILABLE = True
 except ImportError:
     ENTHALPY_KERNEL_AVAILABLE = False
 
-
-def _jit(fn):  # type: ignore[no-redef]
-    """JIT decorator that gracefully no-ops when numba is missing."""
+def _jit(fn):
     if NUMBA_THREADING_AVAILABLE:
         return jit(nopython=True, parallel=True, fastmath=True, cache=True)(fn)
     return fn
-
 
 ProgressCallback = Optional[Callable[[int, int, str], None]]
 DEFAULT_SCHEDULE_CURVE_EXPONENT = 2.0
@@ -46,15 +41,7 @@ THERMAL_COUPLED_SOLVER_MODE = "thermal_coupled"
 NIYAMA_EVAL_FRACTION_SOLID = 0.90
 THREAD_BUDGET_CHECK_INTERVAL = 2.0
 
-
 def _resolve_solidification_thread_target() -> int:
-    """
-    Resolve Numba thread target for solidification kernels.
-
-    Environment overrides:
-    - CASTSIM_SOLIDIFICATION_THREADS=all|physical|logical|<int>
-    - CASTSIM_NUMBA_THREADS=all|physical|logical|<int>
-    """
     logical_cores = int(getattr(hardware, "logical_cores", 0) or (os.cpu_count() or 1))
     physical_cores = int(getattr(hardware, "physical_cores", 0) or logical_cores)
     max_threads = max(logical_cores, 1)
@@ -81,9 +68,7 @@ def _resolve_solidification_thread_target() -> int:
 
     return max(1, min(int(target), max_threads))
 
-
 def _configure_numba_threads_for_solidification(engine: Any, *, show_progress: bool) -> None:
-    """Set Numba thread count so solidification can use full CPU resources."""
     if not NUMBA_THREADING_AVAILABLE:
         return
 
@@ -102,17 +87,7 @@ def _configure_numba_threads_for_solidification(engine: Any, *, show_progress: b
         f"(physical cores: {physical_cores})"
     )
 
-
 def _apply_live_thread_budget(engine: Any) -> None:
-    """
-    Re-apply the fair-share thread budget if it changed since the last check.
-
-    The budget is read through ``engine._thread_budget_provider`` (attached
-    by the web pipeline). The provider updates the process-local budget and
-    hardware cap; only the Numba thread count is re-applied here, from the
-    loop thread, and only when the budget actually changed. Numba applies
-    the new pool size at the next parallel region.
-    """
     if not NUMBA_THREADING_AVAILABLE:
         return
     provider = getattr(engine, "_thread_budget_provider", None)
@@ -130,9 +105,7 @@ def _apply_live_thread_budget(engine: Any) -> None:
         setattr(engine, "_active_thread_budget", budget)
         setattr(engine, "_solidification_numba_threads", active_threads)
     except Exception:
-        # A thread-pool resize hiccup must never abort a running simulation.
         pass
-
 
 def _least_squares_gradients_c_per_mm(
     *,
@@ -143,18 +116,6 @@ def _least_squares_gradients_c_per_mm(
     cast_mask: np.ndarray,
     excluded_neighbor_mask: Optional[np.ndarray] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return local temperature-gradient magnitudes and quality flags.
-
-    ``cast_mask`` selects which voxels are *evaluated*; neighbour temperatures
-    are sampled from every in-mesh voxel except those in
-    ``excluded_neighbor_mask``. Chill and riser voxels are solved cells
-    carrying valid temperatures, and at a chill face they hold nearly the
-    whole local delta-T - dropping them would collapse the gradient exactly
-    where it is steepest. Sand core voxels are the opposite case: low-k sand
-    carries the steep delta-T on its own side of the interface, so sampling
-    it would inflate the metal gradient next to a core (and hide the hot spot
-    a saturated core makes). The caller excludes them.
-    """
     gradients = np.zeros(len(target_indices), dtype=np.float32)
     quality = np.zeros(len(target_indices), dtype=np.int8)
 
@@ -182,8 +143,6 @@ def _least_squares_gradients_c_per_mm(
             grad_vec, _, rank, _ = np.linalg.lstsq(offsets_mm, delta_t, rcond=None)
             grad_mag = float(np.linalg.norm(grad_vec))
             if rank < 3:
-                # The minimum-norm solution under-reports |grad T| along the
-                # unsampled directions; fall back to the steepest sampled slope.
                 slopes = np.abs(delta_t) / np.maximum(np.linalg.norm(offsets_mm, axis=1), 1e-9)
                 grad_mag = max(grad_mag, float(np.max(slopes)))
             gradients[out_i] = grad_mag
@@ -194,7 +153,6 @@ def _least_squares_gradients_c_per_mm(
             quality[out_i] = 1
 
     return gradients, quality
-
 
 def _least_squares_gradients_kernel_py(
     centers_in: np.ndarray,
@@ -208,17 +166,7 @@ def _least_squares_gradients_kernel_py(
     gradients: np.ndarray,
     quality: np.ndarray,
     needs_reference: np.ndarray,
-) -> None:  # pragma: no cover - numba
-    """``_least_squares_gradients_c_per_mm`` for the voxels whose neighbours span three directions.
-
-    Same neighbour selection, then the 3x3 normal equations solved by
-    Cholesky in place of ``np.linalg.lstsq``. For a well-conditioned stencil
-    the two agree to rounding. A voxel whose stencil does not span three
-    directions (too few neighbours, or all in one plane or on one line) is
-    not solved here: its ``needs_reference`` entry is set and the caller
-    sends it to ``_least_squares_gradients_c_per_mm``, which keeps the
-    minimum-norm solution and the steepest-slope fallback for that case.
-    """
+) -> None:
     n_centers = centers_in.shape[0]
     for out_i in range(len(target_indices)):
         voxel = target_indices[out_i]
@@ -263,11 +211,6 @@ def _least_squares_gradients_kernel_py(
             count += 1
         if count == 0:
             continue
-        # Cholesky of the normal matrix. A pivot that is tiny against the
-        # largest diagonal entry means the offsets do not span that
-        # direction. On a voxel lattice the two cases are far apart: a
-        # stencil that spans three directions has pivots of the order of
-        # the diagonal, a flat one has a pivot of rounding size.
         scale = max(a00, max(a11, a22))
         floor = 1e-9 * scale
         if count < 3 or not (a00 > floor):
@@ -296,12 +239,10 @@ def _least_squares_gradients_kernel_py(
         gradients[out_i] = np.sqrt(g0 * g0 + g1 * g1 + g2 * g2)
         quality[out_i] = 2 if count >= 4 else 1
 
-
 if NUMBA_THREADING_AVAILABLE:
     _least_squares_gradients_kernel = jit(nopython=True, cache=True, error_model="numpy")(
         _least_squares_gradients_kernel_py
     )
-
 
 def _least_squares_gradients_fused(
     *,
@@ -312,12 +253,6 @@ def _least_squares_gradients_fused(
     cast_mask: np.ndarray,
     excluded_neighbor_mask: Optional[np.ndarray] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """``_least_squares_gradients_c_per_mm`` through the compiled kernel.
-
-    ``centers`` is taken in its own dtype (the kernel widens each
-    coordinate it reads), so the whole array is not converted on every call.
-    Voxels the kernel does not solve go to the reference function.
-    """
     gradients = np.zeros(len(target_indices), dtype=np.float32)
     quality = np.zeros(len(target_indices), dtype=np.int8)
     needs_reference = np.zeros(len(target_indices), dtype=np.bool_)
@@ -349,7 +284,6 @@ def _least_squares_gradients_fused(
         quality[left] = ref_quality
     return gradients, quality
 
-
 @_jit
 def _feeding_zone_mask_kernel(
     states: np.ndarray,
@@ -357,15 +291,6 @@ def _feeding_zone_mask_kernel(
     part_types: np.ndarray,
     out_mask: np.ndarray,
 ) -> None:
-    """Fill ``out_mask`` with True for voxels inside the riser feeding zone.
-
-    A voxel is in the feeding zone when it is itself a riser or any of its
-    liquid neighbors is a riser. The legacy
-    ``acceleration.update_solidification_with_feeding_connectivity`` rule also
-    checks ``riser_slowdown < 0.6`` for propagated connectivity; the
-    thermal-coupled path does not carry per-voxel riser_slowdown arrays, so
-    only the part-type rule is reproduced here.
-    """
     RISER = np.int32(1)
     n_voxels = states.shape[0]
     for i in prange(n_voxels):
@@ -385,7 +310,6 @@ def _feeding_zone_mask_kernel(
                     break
         out_mask[i] = in_zone
 
-
 @_jit
 def _directional_solidification_delta_kernel(
     states: np.ndarray,
@@ -397,17 +321,6 @@ def _directional_solidification_delta_kernel(
     dt: float,
     out_delta: np.ndarray,
 ) -> None:
-    """Compute per-voxel directional-solidification delta in parallel.
-
-    Writes to ``out_delta``:
-
-        extra[i] = min(1 - states[i],
-                       (1 - heights[i]) * factor * base_rate * dt)
-
-    where ``factor = max(feeding_bias, baseline)`` inside the feeding zone
-    and ``factor = baseline`` elsewhere. ``out_delta[i] = 0`` once the voxel
-    is fully solid.
-    """
     n_voxels = states.shape[0]
     fz_strength = max(feeding_bias, baseline)
     for i in prange(n_voxels):
@@ -423,18 +336,11 @@ def _directional_solidification_delta_kernel(
             raw = cap
         out_delta[i] = raw
 
-
-# Public helpers exposed for tests; thin Python wrappers around the JIT
-# kernels above to keep test code ergonomic.
 def _compute_feeding_zone_mask(
     voxel_states: np.ndarray,
     voxel_neighbors: np.ndarray,
     part_types: np.ndarray,
 ) -> np.ndarray:
-    """Return a boolean mask of voxels inside the riser feeding zone.
-
-    JIT-compiled kernel; see ``_feeding_zone_mask_kernel`` for semantics.
-    """
     out_mask = np.zeros(voxel_states.shape[0], dtype=np.bool_)
     states_f32 = np.ascontiguousarray(voxel_states, dtype=np.float32)
     neighbors_i32 = np.ascontiguousarray(voxel_neighbors, dtype=np.int32)
@@ -444,17 +350,10 @@ def _compute_feeding_zone_mask(
     )
     return out_mask
 
-
-# Baseline directional-solidification strength applied to EVERY voxel so the
-# casting solidifies from bottom to top by default. Matches the
-# `vertical_factor = 1 + (1 - h) * 0.3` constant in the legacy front-based
-# solver at ``core.acceleration.update_solidification_with_feeding_connectivity``.
 FEEDING_ZONE_BASELINE_VERTICAL_BIAS = 0.3
 DVR_RATE = 0.02
 
-
 def _resolve_feeding_zone_bias(engine: Any) -> float:
-    """Read ``feeding_zone_vertical_bias`` defensively from ``engine``."""
     params = getattr(getattr(engine, "analysis_options", None), "solidification_params", None)
     if params is None:
         return 0.0
@@ -466,36 +365,11 @@ def _resolve_feeding_zone_bias(engine: Any) -> float:
     except (TypeError, ValueError, AttributeError):
         return 0.0
 
-
 def _apply_feeding_zone_bias(
     engine: Any,
     solidification_model: Any,
     feeding_bias: float,
 ) -> bool:
-    """Apply directional-solidification bias in the thermal-coupled path.
-
-    Always applies a baseline vertical bias
-    (``FEEDING_ZONE_BASELINE_VERTICAL_BIAS``) to every liquid voxel so the
-    casting still solidifies bottom-up when no risers are present. In
-    addition, voxels inside the riser feeding zone receive an extra
-    directional bias controlled by the user-facing
-    ``feeding_zone_vertical_bias`` slider. The effective per-voxel
-    extra fraction-solid delta matches the legacy front-based formulation:
-
-        extra = (1 - normalized_height) * factor * DVR_RATE * dt
-
-    where ``factor`` is ``FEEDING_ZONE_BASELINE_VERTICAL_BIAS`` outside the
-    feeding zone and ``max(feeding_bias, FEEDING_ZONE_BASELINE_VERTICAL_BIAS)``
-    inside it.
-
-    Mutates ``solidification_model._fraction_solid`` and
-    ``engine.mesh.voxel_states`` so the bias compounds across iterations
-    rather than being overwritten by the next temperature-driven
-    ``SolidificationModel.update`` call.
-
-    Returns:
-        ``True`` when the bias produced a state change; ``False`` otherwise.
-    """
     baseline = float(FEEDING_ZONE_BASELINE_VERTICAL_BIAS)
     states = np.asarray(solidification_model._fraction_solid, dtype=np.float32)
     n_voxels = states.shape[0]
@@ -506,8 +380,6 @@ def _apply_feeding_zone_bias(
     heights_fn = getattr(engine, "_get_normalized_heights", None)
     if not callable(heights_fn):
         return False
-    # Cached heights array avoids the per-call O(n) z-min/z-max scan when the
-    # integration loop calls us every time step.
     heights_cache = getattr(engine, "_directional_bias_heights", None)
     if heights_cache is None or heights_cache.shape[0] != n_voxels:
         heights_cache = np.ascontiguousarray(heights_fn(), dtype=np.float32)
@@ -566,7 +438,6 @@ def _apply_feeding_zone_bias(
     engine.mesh.voxel_states[:] = np.asarray(new_states, dtype=np.float32)
     return True
 
-
 def _capture_niyama_history_step(
     engine: Any,
     *,
@@ -576,7 +447,6 @@ def _capture_niyama_history_step(
     temperatures: np.ndarray,
     cooling_rate_step: np.ndarray,
 ) -> None:
-    """Sample raw Niyama inputs once when each cast voxel reaches late solidification."""
     sampled = getattr(engine, "_thermal_niyama_sampled", None)
     if sampled is None:
         return
@@ -584,7 +454,6 @@ def _capture_niyama_history_step(
     eval_fs = float(getattr(engine, "niyama_eval_fraction_solid", NIYAMA_EVAL_FRACTION_SOLID))
     crossed = (~sampled) & (previous_states < eval_fs) & (current_states >= eval_fs)
     if not crossed.any():
-        # Most steps: nothing crossed, so the part-type masks below are not needed.
         return
     part_types = getattr(engine.mesh, "voxel_part_types", None)
     core_mask: Optional[np.ndarray] = None
@@ -637,7 +506,6 @@ def _capture_niyama_history_step(
     engine._thermal_niyama_quality[target_indices] = quality
     sampled[target_indices] = True
 
-
 def _run_front_based_integration(
     engine: Any,
     chill_boost: np.ndarray,
@@ -646,7 +514,6 @@ def _run_front_based_integration(
     show_progress: bool,
     progress_callback: ProgressCallback,
 ) -> int:
-    """Legacy front-based time loop (fallback path)."""
     wcb_diffusivity = 45 / (7200 * 600)
     thermal_rate_factor = engine.alloy.thermal_diffusivity / wcb_diffusivity
 
@@ -826,7 +693,6 @@ def _run_front_based_integration(
 
     return iteration
 
-
 def compute_schedule_fraction_solid(
     start_times: np.ndarray,
     local_times: np.ndarray,
@@ -835,7 +701,6 @@ def compute_schedule_fraction_solid(
     *,
     curve_exponent: float = DEFAULT_SCHEDULE_CURVE_EXPONENT,
 ) -> np.ndarray:
-    """Compute fraction solid from precomputed solidification schedules."""
     fraction_solid = np.zeros_like(start_times, dtype=np.float32)
     active = local_times > 0.0
     if np.any(active):
@@ -850,7 +715,6 @@ def compute_schedule_fraction_solid(
     fraction_solid[pre_solid_mask] = 1.0
     return fraction_solid
 
-
 def build_schedule_fraction_history(
     start_times: np.ndarray,
     local_times: np.ndarray,
@@ -860,7 +724,6 @@ def build_schedule_fraction_history(
     curve_exponent: float = DEFAULT_SCHEDULE_CURVE_EXPONENT,
     sample_count: int = 101,
 ) -> tuple[list[np.ndarray], list[float]]:
-    """Sample the schedule on a uniform time grid for playback and history analyses."""
     if final_time <= 0.0:
         sample_times = np.array([0.0], dtype=np.float32)
     else:
@@ -883,16 +746,11 @@ def build_schedule_fraction_history(
     ]
     history_times = [float(sample_time) for sample_time in sample_times]
 
-    # Only append a synthetic all-solid snapshot if the last sample genuinely
-    # failed to reach solid fraction due to floating-point rounding.  When the
-    # schedule is uncapped, the true final time equals max(end_times), so the
-    # last voxel is exactly at its end_time and should be solid.
     if not np.all(np.isclose(history[-1], 1.0, atol=1e-6, rtol=0)):
         history.append(np.ones_like(start_times, dtype=np.float32))
         history_times.append(float(final_time) + 0.1)
 
     return history, history_times
-
 
 def _run_schedule_based_integration(
     engine: Any,
@@ -900,7 +758,6 @@ def _run_schedule_based_integration(
     show_progress: bool,
     progress_callback: ProgressCallback,
 ) -> int:
-    """Schedule-driven fraction-solid loop used by the authoritative engine."""
     start_times = np.asarray(engine.solidification_start_times, dtype=np.float32)
     end_times = np.asarray(engine.solidification_end_times, dtype=np.float32)
     local_times = np.asarray(engine.local_solidification_time, dtype=np.float32)
@@ -918,8 +775,6 @@ def _run_schedule_based_integration(
     )
     max_time = float(engine.max_time)
 
-    # Compute final states directly from schedule; no need to iterate through 0.1s
-    # steps when the uncapped horizon may be 30+ ks (hours of wall-clock time).
     final_states = compute_schedule_fraction_solid(
         start_times,
         local_times,
@@ -930,20 +785,14 @@ def _run_schedule_based_integration(
     engine.mesh.voxel_states[:] = final_states
     engine.time = final_schedule_time
 
-    # Set solidification_times from the schedule directly.
     engine.solidification_times[:] = end_times
 
-    # feeding_fraction_solid: record the fraction solid when each voxel
-    # first crosses the coherency point.  Keep consistent with the
-    # front_based / thermal_coupled convention so that downstream
-    # feeding-path and Darcy analyses see physically meaningful values.
     critical_fs = float(getattr(engine.alloy, "critical_fraction_solid", 1.0))
     feeding_fraction_solid = getattr(engine, "feeding_fraction_solid", None)
     if feeding_fraction_solid is not None:
         mask = np.isnan(feeding_fraction_solid) & (local_times > 0)
         feeding_fraction_solid[mask] = critical_fs
 
-    # Report progress at discretized percentages so the callback still fires.
     if progress_callback or show_progress:
         n_reports = 10
         for pct in range(10, 101, 10):
@@ -993,7 +842,6 @@ def _run_schedule_based_integration(
 
     return 0
 
-
 def _apply_enthalpy_correction_numpy(
     T_post: np.ndarray,
     fs_prev: np.ndarray,
@@ -1003,14 +851,6 @@ def _apply_enthalpy_correction_numpy(
     dT: float,
     beta: float | np.ndarray,
 ) -> None:
-    """
-    NumPy reference for the implicit latent-heat correction.
-
-    Fallback for when the Numba kernel is unavailable, and the parity
-    reference the kernel is tested against. Writes into ``T_final``; see
-    ``_run_thermal_coupled_integration`` for the derivation. ``beta`` is a
-    scalar or a per-point array (``L_i / C_i``).
-    """
     beta_all = np.broadcast_to(np.asarray(beta, dtype=np.float64), T_post.shape)
     T_final[:] = T_post
     below_liq = T_post < T_liq
@@ -1018,15 +858,12 @@ def _apply_enthalpy_correction_numpy(
         return
 
     liq_idx = np.flatnonzero(below_liq)
-    fs_max = np.clip((T_liq - T_post[liq_idx]) / dT, 0.0, 1.0)  # fs(T_post)
+    fs_max = np.clip((T_liq - T_post[liq_idx]) / dT, 0.0, 1.0)
     active = (fs_max > fs_prev[liq_idx]) & (T_post[liq_idx] > T_sol)
     if np.any(active):
         sel = liq_idx[active]
         beta_sel = beta_all[sel]
         T_mush = (T_post[sel] + beta_sel * (T_liq / dT - fs_prev[sel])) / (1.0 + beta_sel / dT)
-        # Branch: implicit solve leaves the mushy zone upward (would
-        # remelt -> no latent, keep T_post) or downward (all latent
-        # released at solidus -> recalesce by the remaining fraction).
         remelt = T_mush >= T_liq
         all_solid = T_mush <= T_sol
         T_final[sel] = np.where(
@@ -1040,24 +877,12 @@ def _apply_enthalpy_correction_numpy(
         )
     below_sol = T_post[liq_idx] <= T_sol
     if np.any(below_sol):
-        # Already below solidus: release all remaining latent.
         sel2 = liq_idx[below_sol]
         remaining = 1.0 - fs_prev[sel2]
-        # Recalescence must not push a completed voxel back above
-        # solidus. On a coarse step a voxel can cross below solidus
-        # with a large remaining latent fraction (fine steps cross
-        # with remaining ~ 0), and without this cap the temperature
-        # jump beta*remaining (tens of K) re-heats completed voxels
-        # into the mushy zone as permanent hot lumps, stalling their
-        # neighbors (observed: a dt=2s run frozen at ~98% while the
-        # dt=0.1s run finished at the same wall time). Capping at
-        # T_sol makes coarse-step crossings consistent with the
-        # fine-step limit.
         T_final[sel2] = np.minimum(
             T_post[sel2] + beta_all[sel2] * np.clip(remaining, 0.0, 1.0),
             T_sol,
         )
-
 
 def _invert_enthalpy_numpy(
     T_post: np.ndarray,
@@ -1067,23 +892,12 @@ def _invert_enthalpy_numpy(
     T_sol: float,
     beta: np.ndarray,
 ) -> None:
-    """Exact enthalpy inversion per point.
-
-    The heat step left h = T_post + beta * (1 - fs_prev). T_final solves
-    h = T + beta * (1 - fs(T)) with fs(T) = max(fs_prev, lever(T)):
-    T_post where T_post >= T_p = T_liq - fs_prev * dT (no new solid), h when
-    h < T_sol (fully solid, all remaining latent released, no cap), else
-    the mushy root (T_post * dT + beta * T_p) / (dT + beta). Unlike
-    ``_apply_enthalpy_correction_numpy`` it never caps recalescence, so no
-    latent heat is discarded. Writes into ``T_final``.
-    """
     dT = max(float(T_liq) - float(T_sol), 1e-6)
     fs = np.clip(fs_prev, 0.0, 1.0)
     h = T_post + beta * (1.0 - fs)
     T_p = T_liq - fs * dT
     T_mush = (T_post * dT + beta * T_p) / (dT + beta)
     T_final[:] = np.where(T_post >= T_p, T_post, np.where(h < T_sol, h, T_mush))
-
 
 @_jit
 def _invert_enthalpy_kernel(
@@ -1093,8 +907,7 @@ def _invert_enthalpy_kernel(
     T_liq: float,
     T_sol: float,
     beta: np.ndarray,
-) -> None:  # pragma: no cover - numba
-    """Numba form of ``_invert_enthalpy_numpy``."""
+) -> None:
     dT = max(T_liq - T_sol, 1e-6)
     for i in prange(T_post.shape[0]):
         fs = min(max(fs_prev[i], 0.0), 1.0)
@@ -1110,7 +923,6 @@ def _invert_enthalpy_kernel(
             else:
                 T_final[i] = (t * dT + b * t_p) / (dT + b)
 
-
 def _write_final_thermal_products(
     engine: Any,
     heat_model: Any,
@@ -1119,30 +931,16 @@ def _write_final_thermal_products(
     n_voxels: int,
     needs_thermal_history: bool,
 ) -> None:
-    """Write the engine arrays that describe the state after the last step.
-
-    The thermal-coupled loop used to rewrite all of these every step. Nothing
-    reads them while the loop runs (the progress callback carries no engine,
-    and the Niyama capture takes its own arguments), and each is a function
-    of the fields the last step leaves, so one write after the loop gives the
-    same arrays.
-    """
     start_times = np.asarray(solidification_model.solidification_time, dtype=np.float64)
     end_times = np.asarray(solidification_model._solidification_end, dtype=np.float64)
 
     finite_start = np.isfinite(start_times)
     finite_end = np.isfinite(end_times)
-    # Same value as the model's local_solidification_time property, built
-    # from the arrays already in hand instead of re-deriving them. The
-    # masked subtract leaves unfinished voxels at inf without evaluating
-    # inf - inf for them.
     finite_local = finite_start & finite_end
     local_times = np.full_like(start_times, np.inf)
     np.subtract(end_times, start_times, out=local_times, where=finite_local)
 
     engine.solidification_start_times[:] = np.where(finite_start, start_times, 0.0).astype(np.float32)
-    # Unfinished voxels get NaN (not 0.0) so they cannot collide with
-    # chill/pre-solid semantics downstream.
     engine.solidification_end_times[:] = np.where(finite_end, end_times, np.nan).astype(np.float32)
     engine.local_solidification_time[:] = np.where(
         finite_local,
@@ -1175,14 +973,12 @@ def _write_final_thermal_products(
         engine._thermal_latest_gradients = (gradients_m / 1000.0).astype(np.float32)
         engine.thermal_gradients = engine._thermal_latest_gradients.copy()
 
-
 def _run_thermal_coupled_integration(
     engine: Any,
     *,
     show_progress: bool,
     progress_callback: ProgressCallback,
 ) -> int:
-    """Thermal-field integration loop for the coupled heat/solidification solver."""
     heat_model = getattr(engine, "_thermal_heat_model", None)
     solidification_model = getattr(engine, "_thermal_solidification_model", None)
     if heat_model is None or solidification_model is None:
@@ -1200,14 +996,6 @@ def _run_thermal_coupled_integration(
         engine.fraction_liquid_history = [np.asarray(engine.mesh.voxel_states, dtype=np.float32).copy()]
         engine.fraction_liquid_times = [0.0]
 
-    # Thermal gradients feed shrinkage/feeding-effectiveness, hot-tear, and
-    # Niyama post-analysis; the Niyama history sampler feeds Niyama. When none
-    # of those analyses are enabled there is no consumer for either per-
-    # iteration product (hotspot, sand_burn_in, and fraction-liquid history do
-    # not read them), so gate both behind one flag computed before the loop
-    # and skip the full-voxel gradient kernel plus per-voxel lstsq sampling.
-    # Missing attributes fall back to the AnalysisOptions defaults so
-    # SimpleNamespace test doubles behave like the real engine.
     needs_thermal_history = bool(
         getattr(engine.analysis_options, "niyama", False)
         or getattr(engine.analysis_options, "hot_tear", False)
@@ -1215,18 +1003,10 @@ def _run_thermal_coupled_integration(
         or getattr(engine.analysis_options, "feeding_path", False)
     )
 
-    # Per-iteration scratch, allocated once: the enthalpy correction's output
-    # field and the pre-step fraction-solid snapshot it reads. The thermal
-    # field may carry mold sand after the mesh's cells (core.mold_setup); the
-    # solidification state covers the mesh only, so everything below works
-    # on the leading n_voxels cells.
     n_voxels = int(np.asarray(solidification_model.fraction_solid).size)
     T_final = np.empty(n_voxels, dtype=np.float64)
     fs_prev = np.empty(n_voxels, dtype=np.float64)
-    # Voxel cut cells (core/cut_cells.py) take the exact enthalpy inversion.
     cut_cell_mode = getattr(engine, "_cut_cell_merge", None) is not None
-    # Cut cells with the lever rule: capacity, inversion and the
-    # solidification update in one kernel (physics.kernel_dispatch).
     fused_finish = bool(
         cut_cell_mode
         and kernel_dispatch.fused_kernels_enabled()
@@ -1241,24 +1021,8 @@ def _run_thermal_coupled_integration(
             break
 
         previous_temperatures = np.array(heat_model.temperatures[:n_voxels], dtype=np.float64)
-        heat_model.step(engine.time_step)  # pure diffusion only
+        heat_model.step(engine.time_step)
 
-        # Implicit (enthalpy) latent-heat release on the SAME step.
-        #
-        # The naive explicit correction  T += L_vol*dfs/rho_cp  overshoots:
-        # the full-step latent of a single temperature drop is ~8x larger
-        # than the step's diffusion cooling, so the field alternates between
-        # a latent pulse and pure diffusion at ~1/8 duty cycle, stalling the
-        # mushy plateau ~8x longer than the energy balance allows. Instead
-        # solve the enthalpy equation implicitly for T_final in the mushy
-        # zone:
-        #   T_final = T_post + beta * (fs(T_final) - fs_prev),
-        #   beta = L_vol/rho_cp,  fs(T) = (T_liq - T)/dT
-        # which has the closed-form solution
-        #   T_final = (T_post + beta*(T_liq/dT - fs_prev)) / (1 + beta/dT)
-        # with branch handling when T_final leaves the mushy zone. This is
-        # the classic apparent-heat-capacity formulation: oscillation-free,
-        # energy-conserving, and the plateau proceeds at the physical rate.
         if not fused_finish:
             np.copyto(fs_prev, np.asarray(solidification_model.fraction_solid, dtype=np.float64))
         T_post = heat_model.temperatures[:n_voxels]
@@ -1271,20 +1035,14 @@ def _run_thermal_coupled_integration(
             * (engine.alloy.density_liquid + engine.alloy.density_solid)
             / 2.0
         )
-        beta = l_vol / rho_cp  # K of recalescence per unit fraction solid
+        beta = l_vol / rho_cp
 
         if fused_finish:
-            # The same inversion and update as the two branches below, in one pass.
             solidification_model.finish_step_from_enthalpy(
                 T_post, heat_model.heat_capacity_lookup(), T_liq, T_sol, l_vol, engine.time_step
             )
             T_final = T_post
         elif cut_cell_mode:
-            # Cut cells: exact inversion with beta_i = L_vol / rho_cp_i(T_post)
-            # (rho(T)*cp(T) on curve runs). The heat step used rho_cp at the
-            # pre-step temperature; the lag is O(dt) (tests/test_cut_cells.py
-            # LatentHeatTest). phi scales latent and sensible capacity alike,
-            # so it cancels.
             beta_cells = l_vol / heat_model.volumetric_heat_capacity()[:n_voxels]
             if NUMBA_THREADING_AVAILABLE:
                 _invert_enthalpy_kernel(T_post, fs_prev, T_final, T_liq, T_sol, beta_cells)
@@ -1301,12 +1059,8 @@ def _run_thermal_coupled_integration(
         if not fused_finish:
             heat_model.temperatures[:n_voxels] = T_final
 
-            # Fraction solid and solidification-time tracking from the corrected
-            # field; update() keeps fs monotone (irreversible).
             solidification_model.update(T_final, engine.time_step)
 
-        # Re-read AFTER the correction so cooling rate, Niyama capture,
-        # gradients, and progress all use the corrected field.
         temperatures = np.array(heat_model.temperatures[:n_voxels], dtype=np.float64)
         cooling_rate_step = np.maximum((previous_temperatures - temperatures) / engine.time_step, 0.0)
 
@@ -1315,13 +1069,6 @@ def _run_thermal_coupled_integration(
         engine.time = heat_model.time
         iteration += 1
 
-        # thermal-coupled mode is purely temperature-driven; no heuristic vertical solidification bias
-
-        # The start/end/local time arrays, the latest temperature and gradient
-        # fields and the cooling-rate copy are read only after the loop, and
-        # each is a function of the state the last step leaves. They are
-        # written once, by _write_final_thermal_products below.
-
         if getattr(engine, "feeding_fraction_solid", None) is not None:
             critical_fs = float(getattr(engine.alloy, "critical_fraction_solid", 1.0))
             crossed_feeding_limit = (
@@ -1329,13 +1076,6 @@ def _run_thermal_coupled_integration(
                 & (current_states >= critical_fs)
                 & np.isnan(engine.feeding_fraction_solid)
             )
-            # With same-step latent heat most voxels cross from liquid to fully
-            # solid within one step; recording current_states (=1.0) for those
-            # makes the feeding-path tracer treat them as unreachable and
-            # collapses feeding paths. The meaningful value at the coherency
-            # cutoff is the critical fraction solid itself; record that for
-            # degenerate single-step crossings and the observed overshoot
-            # otherwise (matches legacy multi-step behavior).
             full_solid_crossing = crossed_feeding_limit & (current_states >= 0.99)
             engine.feeding_fraction_solid[full_solid_crossing] = critical_fs
             engine.feeding_fraction_solid[crossed_feeding_limit & ~full_solid_crossing] = (
@@ -1392,9 +1132,6 @@ def _run_thermal_coupled_integration(
         engine.fraction_liquid_history.append(np.asarray(engine.mesh.voxel_states, dtype=np.float32).copy())
         engine.fraction_liquid_times.append(engine.time)
 
-    # Voxels still liquid at the cap never finished: write NaN (not 0.0) so
-    # they cannot collide with chill/pre-solid semantics downstream. Chill
-    # voxels (pre-solid, states == 1.0 with times 0.0) keep 0.0.
     unfinished = np.asarray(engine.mesh.voxel_states, dtype=np.float32) < 0.99
     engine.solidification_end_times[unfinished] = np.nan
     engine.solidification_times[unfinished] = np.nan
@@ -1424,7 +1161,6 @@ def _run_thermal_coupled_integration(
 
     return iteration
 
-
 def run_time_integration(
     engine: Any,
     chill_boost: np.ndarray,
@@ -1433,9 +1169,6 @@ def run_time_integration(
     show_progress: bool,
     progress_callback: ProgressCallback,
 ) -> int:
-    """
-    Execute the solidification time loop and update engine state in place.
-    """
     _configure_numba_threads_for_solidification(engine, show_progress=show_progress)
 
     solver_mode = getattr(getattr(engine, "analysis_options", None), "solver_mode", None)

@@ -1,10 +1,3 @@
-"""Cut cells on the voxel grid (core/cut_cells.py, physics/heat_transfer.py, core/voxel_mesh.py).
-
-Geometry: metal fraction phi and exterior area A per cell. Solver: capacity
-rho_cp*phi*h^3, Robin flux through A/(phi*h^3), conductance scaling for
-stability and merging of small cells. Flag ``settings.mesh.voxel_cut_cells``.
-"""
-
 from __future__ import annotations
 
 import contextlib
@@ -31,9 +24,7 @@ from physics.units import inches_to_meters
 
 NUMBA = heat_transfer.NUMBA_AVAILABLE
 
-
 def _lattice_centers(meshes, pitch: float, shift: float = 0.013) -> np.ndarray:
-    """Centre-containment voxelization (the chunked path's rule) on a shifted lattice."""
     lo = np.min([m.bounds[0] for m in meshes], axis=0) - pitch
     hi = np.max([m.bounds[1] for m in meshes], axis=0) + pitch
     axes = [np.arange(lo[d] + shift, hi[d], pitch) for d in range(3)]
@@ -43,9 +34,7 @@ def _lattice_centers(meshes, pitch: float, shift: float = 0.013) -> np.ndarray:
         inside |= mesh.contains(grid)
     return grid[inside]
 
-
 def _canonical_neighbors(centers: np.ndarray, pitch: float) -> np.ndarray:
-    """(N,26) neighbour slots in the core/voxel_mesh.py canonical layout."""
     origin = centers[0]
     ijk = np.rint((centers - origin) / pitch).astype(np.int64)
     index = {tuple(v): i for i, v in enumerate(ijk)}
@@ -74,9 +63,7 @@ def _canonical_neighbors(centers: np.ndarray, pitch: float) -> np.ndarray:
                     out[i, slot] = j
     return out
 
-
 class _Alloy:
-    """Constant-property material with a short time constant."""
 
     name = "TEST"
     liquidus_temp = 2000.0
@@ -88,10 +75,8 @@ class _Alloy:
     thermal_conductivity = 400.0
     thermal_diffusivity = 400.0 / (1000.0 * 1000.0)
 
-
 class MetalFractionTest(unittest.TestCase):
     def test_voxel_cut_by_an_axis_aligned_plane(self) -> None:
-        # Unit voxel centred at the origin, metal where x < 0.3: phi = 0.8.
         slab = trimesh.creation.box(bounds=[[-5.0, -5.0, -5.0], [0.3, 5.0, 5.0]])
         phi, counts = sample_metal_fractions(np.zeros((1, 3)), 1.0, [slab])
         self.assertAlmostEqual(float(phi[0]), 0.8, delta=1.0 / 64 + 1e-9)
@@ -104,7 +89,6 @@ class MetalFractionTest(unittest.TestCase):
         area = float(np.sum(geometry.surface_areas, dtype=np.float64))
         self.assertLess(abs(volume / (4.0 / 3.0 * np.pi) - 1.0), 0.01)
         self.assertLess(abs(area / (4.0 * np.pi) - 1.0), 0.02)
-        # Centre containment drops cut cells; the pass adds them back.
         self.assertGreater(geometry.n_added, 0)
         self.assertTrue(np.all(geometry.metal_fractions > 0.0))
         self.assertTrue(np.all(geometry.metal_fractions <= 1.0))
@@ -113,13 +97,10 @@ class MetalFractionTest(unittest.TestCase):
         a = trimesh.creation.box(bounds=[[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]])
         b = trimesh.creation.box(bounds=[[1.0, 0.0, 0.0], [2.0, 1.0, 1.0]])
         geometry = compute_cut_cell_geometry(_lattice_centers([a, b], 0.1), 0.1, [a, b])
-        # Union is a 2 x 1 x 1 box: area 10, not 12.
         self.assertAlmostEqual(float(np.sum(geometry.surface_areas, dtype=np.float64)), 10.0, delta=0.05)
         self.assertAlmostEqual(float(np.sum(geometry.metal_fractions, dtype=np.float64)) * 1e-3, 2.0, delta=0.01)
 
     def test_touching_bodies_in_one_stl_are_split(self) -> None:
-        # thick_thin_test.stl is two boxes sharing a face in one mesh; ray parity
-        # on the combined mesh misclassifies the column behind the shared face.
         lower = trimesh.creation.box(bounds=[[-1.5, -1.5, 0.0], [1.5, 1.5, 2.0]])
         upper = trimesh.creation.box(bounds=[[-0.5, -0.5, 2.0], [0.5, 0.5, 5.0]])
         combined = trimesh.util.concatenate([lower, upper])
@@ -128,8 +109,6 @@ class MetalFractionTest(unittest.TestCase):
         self.assertAlmostEqual(float(np.sum(geometry.surface_areas, dtype=np.float64)), 54.0, delta=0.1)
 
     def test_clearance_gap_between_parts_is_not_mold_contact(self) -> None:
-        # review_cut_cells.md P2: a 0.01 in CAD gap at 0.1 in is bridged by
-        # lattice conduction, so its two faces must not also lose heat to sand.
         a = trimesh.creation.box(bounds=[[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]])
         b = trimesh.creation.box(bounds=[[1.01, 0.0, 0.0], [2.01, 1.0, 1.0]])
         geometry = compute_cut_cell_geometry(_lattice_centers([a, b], 0.1), 0.1, [a, b])
@@ -137,25 +116,18 @@ class MetalFractionTest(unittest.TestCase):
         self.assertAlmostEqual(float(np.sum(geometry.metal_fractions, dtype=np.float64)) * 1e-3, 2.0, delta=0.01)
 
     def test_part_with_an_open_piece_stays_one_unit(self) -> None:
-        # review_cut_cells.md P2: an open piece's volume depends on the origin,
-        # so it must not be split off and tested alone.
-        # A sphere with its cap cut off: Trimesh.split's repair cannot close the
-        # hole (it does close a missing box face), and the volume is > 0.
         closed = trimesh.creation.box(bounds=[[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]])
         open_cap = trimesh.creation.icosphere(subdivisions=2, radius=0.5)
         open_cap.apply_translation((3.0, 3.0, 3.0))
         open_cap.update_faces(open_cap.triangles_center[:, 2] < 3.2)
         open_cap.remove_unreferenced_vertices()
         self.assertFalse(open_cap.is_watertight)
-        self.assertGreater(open_cap.volume, 0.0)  # the pre-fix split rule would accept it
+        self.assertGreater(open_cap.volume, 0.0)
         units, owner = cut_cells.split_into_bodies([trimesh.util.concatenate([closed, open_cap])])
         self.assertEqual(len(units), 1)
         np.testing.assert_array_equal(owner, [0])
         two_closed = trimesh.util.concatenate([closed, trimesh.creation.box(bounds=[[2.0, 2.0, 2.0], [3.0, 3.0, 3.0]])])
         self.assertEqual(len(cut_cells.split_into_bodies([two_closed])[0]), 2)
-        # One missing triangle: split's repair closes it, so the part is used closed
-        # whether it arrives alone or inside an assembly mesh
-        # (tests/test_voxel_sealed_pockets.py::test_open_part_keeps_the_fill).
         holed = trimesh.creation.box(bounds=[[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]])
         holed.update_faces(np.arange(len(holed.faces)) != 0)
         self.assertFalse(holed.is_watertight)
@@ -164,10 +136,8 @@ class MetalFractionTest(unittest.TestCase):
         self.assertTrue(units[0].is_watertight)
 
     def test_open_mesh_containment_stays_on_the_winding_number(self) -> None:
-        # review_cut_cells.md P2: above WINDING_NUMBER_MAX_PAIRS the winding
-        # number fell back to the ray test; contains() now chunks the points.
         open_box = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
-        open_box.update_faces(open_box.face_normals[:, 2] < 0.5)  # drop the top face
+        open_box.update_faces(open_box.face_normals[:, 2] < 0.5)
         self.assertFalse(open_box.is_watertight)
         points = np.random.default_rng(5).uniform(-0.8, 0.8, (500, 3))
         expected = cut_cells.winding_number_contains(open_box, points)
@@ -192,20 +162,15 @@ class MetalFractionTest(unittest.TestCase):
         codes = dominant_part_codes(counts, [0, 1, 2])
         np.testing.assert_array_equal(codes, [0, 1, -1, 2])
 
-
 def _open_cylinder(radius, height, center, *, open_end: str, sections=32) -> trimesh.Trimesh:
-    """Cylinder with its ``"top"`` or ``"bottom"`` cap removed: an open, non-watertight surface."""
     mesh = trimesh.creation.cylinder(radius=radius, height=height, sections=sections)
     mesh.apply_translation(center)
     normal_z = mesh.face_normals[:, 2]
     keep = normal_z < 0.99 if open_end == "top" else normal_z > -0.99
     return trimesh.Trimesh(mesh.vertices, mesh.faces[keep], process=True)
 
-
 class WindingNumberTest(unittest.TestCase):
-    """Containment on non-watertight parts uses the generalized winding number."""
 
-    # Riser z 1..3 with its top cap missing.
     OPEN_RISER = _open_cylinder(0.8, 2.0, (0.0, 0.0, 2.0), open_end="top")
 
     def test_winding_number_matches_exact_containment_where_ray_tests_fail(self) -> None:
@@ -215,7 +180,6 @@ class WindingNumberTest(unittest.TestCase):
         exact = (np.hypot(points[:, 0], points[:, 1]) < 0.8) & (points[:, 2] > 1.0) & (points[:, 2] < 3.0)
         winding_wrong = int(np.sum(cut_cells.winding_number_contains(riser, points) != exact))
         ray_wrong = int(np.sum(riser.contains(points) != exact))
-        # Measured: 47 (faceting of the 32-gon) vs 1933 of 6737 inside points.
         self.assertLess(winding_wrong, 0.02 * len(points))
         self.assertGreater(ray_wrong, 0.05 * len(points))
 
@@ -227,7 +191,6 @@ class WindingNumberTest(unittest.TestCase):
             inside = cut_cells.winding_number_contains(self.OPEN_RISER, points)
         robust.assert_called_once()
         np.testing.assert_array_equal(inside, [True, False])
-
 
 class MergeTest(unittest.TestCase):
     def test_merging_preserves_volume_and_area(self) -> None:
@@ -251,11 +214,8 @@ class MergeTest(unittest.TestCase):
         merge = merge_small_cut_cells(phi, areas, neighbors, np.array([0, 2, 0]), 0.25)
         np.testing.assert_array_equal(merge.masters, [2])
 
-
 class SolverTest(unittest.TestCase):
     def _cube_model(self, *, merge: bool, htc: float = 50.0):
-        # 1 in cube offset from the 0.2 in lattice so the skin cells are cut
-        # (smallest phi 0.15 per axis).
         cube = trimesh.creation.box(bounds=[[0.03, 0.03, 0.03], [1.03, 1.03, 1.03]])
         pitch = 0.2
         geometry = compute_cut_cell_geometry(_lattice_centers([cube], pitch, shift=0.0), pitch, [cube])
@@ -282,7 +242,7 @@ class SolverTest(unittest.TestCase):
         model.set_initial_temperature(1000.0)
         side = inches_to_meters(1.0)
         rho_cp = _Alloy.density_liquid * _Alloy.specific_heat
-        tau = rho_cp * side**3 / (50.0 * 6.0 * side**2)  # Bi = 0.0016: lumped
+        tau = rho_cp * side**3 / (50.0 * 6.0 * side**2)
         dt = model.get_stable_timestep()
         steps = int(round(tau / dt))
         for _ in range(steps):
@@ -291,11 +251,9 @@ class SolverTest(unittest.TestCase):
         mean_t = float(np.sum(weights * model.temperatures) / np.sum(weights))
         expected = 20.0 + 980.0 * np.exp(-steps * dt / tau)
         self.assertLess(abs(mean_t - expected) / (expected - 20.0), 0.01)
-        # Slaves report their master's temperature.
         np.testing.assert_array_equal(model.temperatures[merged.slaves], model.temperatures[merged.masters])
 
     def test_tiny_cells_stay_stable_and_conserve_energy(self) -> None:
-        # 3 x 3 x 3 block, phi 1e-4 on every face-centre cell, no merging.
         centers = np.stack(np.meshgrid(*[np.arange(3.0)] * 3, indexing="ij"), -1).reshape(-1, 3) * 0.1
         neighbors = _canonical_neighbors(centers, 0.1)
         weights = np.ones(len(centers))
@@ -339,8 +297,6 @@ class SolverTest(unittest.TestCase):
         exposed = 6 - np.sum(neighbors[:, :6] >= 0, axis=1)
         surface = np.flatnonzero(exposed > 0)
         t0 = np.random.default_rng(5).uniform(1300.0, 1600.0, n)
-        # Interior S_i = 4 everywhere only for full rows; the conductance
-        # factor stays 1 because w = 1 >= S_i / 4 for every cell.
         plain = HeatTransferModel(n, h_m, neighbors, _Alloy(), rho_cp_overrides=(np.array([0]), np.array([1e6])))
         cut = HeatTransferModel(
             n, h_m, neighbors, _Alloy(), rho_cp_overrides=(np.array([0]), np.array([1e6])),
@@ -349,7 +305,6 @@ class SolverTest(unittest.TestCase):
         for model in (plain, cut):
             model.set_initial_temperature(t0)
             model.add_boundary(surface, BoundaryType.INTERFACE, htc=500.0, T_infinity=20.0)
-        # One substep per step on both models (their stable-dt rules differ).
         dt = 0.5 * min(plain.get_stable_timestep(), cut.get_stable_timestep())
         for model in (plain, cut):
             for _ in range(50):
@@ -377,7 +332,6 @@ class SolverTest(unittest.TestCase):
             np.full(n, 1.0 / inches_to_meters(0.1) ** 2),
             rng.uniform(-1.0, 1.0, n),
             0.05,
-            # Contact h*dx on ~30 % of cells, so links crossing a contact are covered.
             np.where(rng.random(n) < 0.3, rng.uniform(0.1, 5.0, n), 0.0),
         )
         kernel = heat_transfer.update_heterogeneous_cut_cell_parallel(*args)
@@ -396,9 +350,7 @@ class SolverTest(unittest.TestCase):
         rate = (pair * slot_w[None, :]).sum(axis=1) / weights
         self.assertLessEqual(float(rate.max()), 4.0 + 1e-12)
 
-
 class _Steel:
-    """WCB-like alloy for the latent-heat tests (same fields the engine reads)."""
 
     name = "STEEL"
     liquidus_temp = 1500.0
@@ -416,9 +368,7 @@ class _Steel:
     eutectic_temperature = None
     eutectic_fraction = 0.0
 
-
 def _steel_curves() -> dict:
-    """The 6-point curves core/solidification.py builds (_alloy_property_curves)."""
     a = _Steel
     ts, tl = a.solidus_temp, a.liquidus_temp
     return {
@@ -431,10 +381,8 @@ def _steel_curves() -> dict:
         ),
     }
 
-
 class LatentHeatTest(unittest.TestCase):
     def test_adiabatic_enthalpy_is_conserved_with_cut_cells(self) -> None:
-        """Heat step + exact inversion through solidification, no boundaries: total enthalpy holds."""
         from core.solidification_loop import _invert_enthalpy_kernel, _invert_enthalpy_numpy
         from physics.solidification_physics import SolidificationModel
 
@@ -450,7 +398,6 @@ class LatentHeatTest(unittest.TestCase):
             slave_cells=(merged.slaves, merged.masters),
         )
         fs_model = SolidificationModel(n_voxels=n, alloy=_Steel())
-        # Hot core, cool skin: the inside solidifies late, the skin first.
         radius = np.linalg.norm(geometry.centers.astype(np.float64), axis=1)
         t0 = 1560.0 - 250.0 * (radius / radius.max()) ** 2
         t0[merged.slaves] = t0[merged.masters]
@@ -481,10 +428,9 @@ class LatentHeatTest(unittest.TestCase):
             model.temperatures[:] = T_final
             fs_model.update(T_final.copy(), dt)
         fs = np.asarray(fs_model.fraction_solid)
-        self.assertGreater(float(fs[w > 0].min()), 0.0)  # every cell went through the mushy zone
+        self.assertGreater(float(fs[w > 0].min()), 0.0)
         released = l_vol * float(np.sum(w * fs)) + 1.0
         drift = abs(enthalpy() - h0)
-        # Lagged rho(T)*cp(T): drift is O(dt); measured 3.8e-4 of the latent released.
         self.assertLess(drift / released, 2e-3)
 
     @unittest.skipUnless(NUMBA, "Numba unavailable")
@@ -526,7 +472,6 @@ class LatentHeatTest(unittest.TestCase):
             heat_transfer.cut_cell_conduction_rates_numpy(*args), rtol=1e-12,
         )
 
-
 def _generate(meshes, pitch: float, *, cut: bool, chunked: bool = False) -> AdaptiveVoxelMesh:
     mesh = AdaptiveVoxelMesh(base_voxel_size=pitch, use_chunked_voxelization=chunked)
     combined = trimesh.util.concatenate(meshes)
@@ -534,7 +479,6 @@ def _generate(meshes, pitch: float, *, cut: bool, chunked: bool = False) -> Adap
     with mock.patch.object(get_settings().mesh, "voxel_cut_cells", cut), contextlib.redirect_stdout(io.StringIO()):
         assert mesh.generate(combined, bounds, show_progress=False, auto_adjust=False, part_meshes=list(meshes))
     return mesh
-
 
 class VoxelMeshCutCellTest(unittest.TestCase):
     def _assembly(self):
@@ -554,7 +498,7 @@ class VoxelMeshCutCellTest(unittest.TestCase):
         cut = _generate(meshes, 0.2, cut=True)
         self.assertFalse(plain.cut_cells)
         self.assertIsNone(plain.voxel_metal_fractions)
-        self.assertGreater(float(np.sum(plain.voxel_volumes)) / cad, 1.2)  # plain voxels: ~+40 %
+        self.assertGreater(float(np.sum(plain.voxel_volumes)) / cad, 1.2)
         self.assertTrue(cut.cut_cells)
         self.assertLess(abs(float(np.sum(cut.voxel_volumes, dtype=np.float64)) / cad - 1.0), 0.01)
         np.testing.assert_array_equal(cut.surface_voxels, np.asarray(cut.voxel_surface_areas) > 0)
@@ -562,9 +506,6 @@ class VoxelMeshCutCellTest(unittest.TestCase):
             cut.assign_part_types(parts)
         codes = np.asarray(cut.voxel_part_types)
         volumes = np.asarray(cut.voxel_volumes, dtype=np.float64)
-        # A cell holds one code, so each part can be off by up to half a cell
-        # layer over its part-to-part interface area (riser foot 1.13 in^2,
-        # chill top 1.0 in^2); on this lattice both interfaces bisect a layer.
         interface_area = {0: 2.13, 1: 1.13, 2: 1.0}
         for (mesh, code) in parts:
             error = abs(volumes[codes == code].sum() - abs(mesh.volume))
@@ -573,23 +514,20 @@ class VoxelMeshCutCellTest(unittest.TestCase):
     def test_chunked_path_adds_dropped_surface_cells(self) -> None:
         sphere = trimesh.creation.icosphere(subdivisions=4, radius=1.0)
         cad = sphere.volume
-        plain = _generate([sphere], 0.04, cut=False, chunked=True)  # 54^3 candidates: chunked
+        plain = _generate([sphere], 0.04, cut=False, chunked=True)
         cut = _generate([sphere], 0.04, cut=True, chunked=True)
         self.assertGreater(cut.get_voxel_count(), plain.get_voxel_count())
         self.assertLess(abs(float(np.sum(cut.voxel_volumes, dtype=np.float64)) / cad - 1.0), 0.005)
         self.assertGreater(cut.cut_cell_stats["added_voxels"], 0)
 
     def test_chunked_path_off_pitch_extent_has_no_duplicate_cells(self) -> None:
-        # Padded extent 5.13 in at 0.1 in: 52 chunked centres per axis spaced
-        # 0.0986 in, so from k ~ 37 two centres round to one lattice cell.
         box = trimesh.creation.box(extents=(5.03, 5.03, 5.03))
         cad = box.volume
-        cut = _generate([box], 0.1, cut=True, chunked=True)  # 52^3 candidates: chunked
+        cut = _generate([box], 0.1, cut=True, chunked=True)
         centers = np.asarray(cut.voxel_centers, dtype=np.float64)
         self.assertGreater(cut.cut_cell_stats["duplicate_voxels"], 0)
         self.assertEqual(len(np.unique(np.rint(centers / 0.1).astype(np.int64), axis=0)), len(centers))
         self.assertLess(abs(float(np.sum(cut.voxel_volumes, dtype=np.float64)) / cad - 1.0), 0.002)
-
 
 class EngineVolumeShareTest(unittest.TestCase):
     def test_shrinkage_percentage_is_volume_weighted_with_cut_cells(self) -> None:
@@ -610,7 +548,6 @@ class EngineVolumeShareTest(unittest.TestCase):
         self.assertAlmostEqual(SolidificationEngine.get_shrinkage_percentage(engine), 100 * 0.2 / 2.2)
         mesh.cut_cells = False
         self.assertAlmostEqual(SolidificationEngine.get_shrinkage_percentage(engine), 50.0)
-
 
 class FlagOffTest(unittest.TestCase):
     def test_flag_off_never_reaches_cut_cell_code(self) -> None:
@@ -643,9 +580,7 @@ class FlagOffTest(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(np.asarray(result.engine.solidification_times)[
             np.asarray(result.voxel_mesh.voxel_part_types) != 2])))
 
-
 class _MeshSettingsWithoutCutCellFlag:
-    """``settings.mesh`` as it was before the flag existed: ``voxel_cut_cells`` raises AttributeError."""
 
     def __init__(self, inner) -> None:
         object.__setattr__(self, "_inner", inner)
@@ -655,13 +590,9 @@ class _MeshSettingsWithoutCutCellFlag:
             raise AttributeError(name)
         return getattr(self._inner, name)
 
-
 def _output_arrays(engine) -> dict:
-    """Every ndarray the engine, its mesh and its heat model hold (dict values one level down)."""
     out = {}
     heat = getattr(engine, "_thermal_heat_model", None)
-    # An explicit sand mold wraps the casting model and a mold model
-    # (physics/mold_coupling.py); compare both.
     sources = {
         "engine": engine,
         "mesh": engine.mesh,
@@ -680,10 +611,8 @@ def _output_arrays(engine) -> dict:
                         out[f"{prefix}.{name}[{key!r}]"] = item
     return out
 
-
 class FlagOffBitIdentityTest(unittest.TestCase):
     def test_flag_off_matches_a_run_without_the_flag_bit_for_bit(self) -> None:
-        """tests/test_simulation_scenarios.py cast + chill + riser, flag False vs no flag attribute."""
         from tests.test_simulation_scenarios import (
             _cast_with_chill_and_riser_manager,
             _run_pipeline_with_patched_memory,
@@ -710,13 +639,10 @@ class FlagOffBitIdentityTest(unittest.TestCase):
             else:
                 self.assertEqual(np.ascontiguousarray(a).tobytes(), np.ascontiguousarray(b).tobytes(), msg=name)
 
-
 @unittest.skipUnless(NUMBA, "Numba unavailable")
 class CutCellKernelParityTest(unittest.TestCase):
-    """Cut-cell Numba kernels vs their NumPy references (tests/test_parallel_kernel_parity.py pattern)."""
 
     def test_update_kernel_matches_numpy_for_truncated_stencils(self) -> None:
-        # 6 slots (faces only), 21 slots (odd corner remainder), 26 slots.
         rng = np.random.default_rng(17)
         centers = np.stack(np.meshgrid(*[np.arange(5.0)] * 3, indexing="ij"), -1).reshape(-1, 3) * 0.1
         full = _canonical_neighbors(centers, 0.1)
@@ -815,7 +741,6 @@ class CutCellKernelParityTest(unittest.TestCase):
         }
 
     def test_thermal_loop_end_to_end_with_cut_cells(self) -> None:
-        """Engine thermal loop with cut cells: kernels vs NumPy (exact inversion included)."""
         kernel = self._run_engine(use_numba=True)
         reference = self._run_engine(use_numba=False)
         self.assertGreater(float(np.max(kernel["states"])), 0.0)
@@ -823,10 +748,8 @@ class CutCellKernelParityTest(unittest.TestCase):
             np.testing.assert_allclose(kernel[key], reference[key], rtol=1e-9, atol=1e-9, equal_nan=True,
                                        err_msg=f"end-to-end mismatch in {key}")
 
-
 class SlaveInitialStateTest(unittest.TestCase):
     def test_slaved_cell_starts_at_its_masters_temperature(self) -> None:
-        """review_cut_cells.md P2: with a non-uniform initial field the slave starts at the master's T."""
         import core.solidification_loop as solidification_loop
         from tests.test_thermal_boundary_config import _build_engine
 
@@ -845,11 +768,9 @@ class SlaveInitialStateTest(unittest.TestCase):
         temperatures = np.asarray(engine._thermal_heat_model.temperatures)
         self.assertEqual(temperatures[3], temperatures[4])
         self.assertEqual(engine._thermal_latest_temperatures[3], engine._thermal_latest_temperatures[4])
-        self.assertNotEqual(temperatures[2], temperatures[4])  # the field itself is untouched elsewhere
+        self.assertNotEqual(temperatures[2], temperatures[4])
         solidification_loop._run_thermal_coupled_integration(engine, show_progress=False, progress_callback=None)
-        # Without the copy, step 1 reports the slave's jump to the master's T as cooling.
         self.assertEqual(engine._thermal_peak_cooling_rates[3], engine._thermal_peak_cooling_rates[4])
-
 
 def _sphere_manager():
     from core.part_manager import Part, PartManager, PartType
@@ -862,7 +783,6 @@ def _sphere_manager():
     manager._part_order.append("sphere")
     return manager
 
-
 def _run_sphere(voxel_cut_cells, setting: bool):
     import core.simulation_pipeline as sp
 
@@ -870,7 +790,6 @@ def _run_sphere(voxel_cut_cells, setting: bool):
                                analysis_options={"shrinkage": True, "hotspot": True, "filling": False})
     with mock.patch.object(get_settings().mesh, "voxel_cut_cells", setting), contextlib.redirect_stdout(io.StringIO()):
         return sp.run_pipeline(inputs, part_manager=_sphere_manager())
-
 
 class PipelineInputsCutCellsTest(unittest.TestCase):
     def test_inputs_override_the_setting_and_none_follows_it(self) -> None:
@@ -887,10 +806,8 @@ class PipelineInputsCutCellsTest(unittest.TestCase):
         self.assertFalse(_run_sphere(False, True).voxel_mesh.cut_cells)
         self.assertTrue(_run_sphere(None, True).voxel_mesh.cut_cells)
 
-
 class SurrogateRecordCutCellsTest(unittest.TestCase):
     def test_records_and_index_mark_cut_cell_runs(self) -> None:
-        """review_cut_cells.md P2: capture_run writes ``cut_cells`` to the record and the index."""
         import csv
         import os
         import tempfile
@@ -900,7 +817,6 @@ class SurrogateRecordCutCellsTest(unittest.TestCase):
         on = _run_sphere(True, False)
         off = _run_sphere(False, False)
         with tempfile.TemporaryDirectory() as tmp:
-            # An index written before the cut_cells column: the value lands as a trailing field.
             with open(os.path.join(tmp, INDEX_FILENAME), "w", newline="") as fh:
                 fh.write("sample_id,timestamp,alloy,voxel_count,resolution,path,mesh_type\r\n"
                          "aaaaaaaaaaaa,2026-01-01 00:00:00,WCB,125,16,/old/run_a.npz,voxel\r\n")
@@ -919,7 +835,6 @@ class SurrogateRecordCutCellsTest(unittest.TestCase):
             with open(os.path.join(tmp, INDEX_FILENAME), newline="") as fh:
                 header = next(csv.reader(fh))
             self.assertEqual(header[-3:], ["mesh_type", "cut_cells", "explicit_mold"])
-
 
 if __name__ == "__main__":
     unittest.main()

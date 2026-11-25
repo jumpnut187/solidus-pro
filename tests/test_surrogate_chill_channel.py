@@ -1,16 +1,3 @@
-"""Chills must reach the surrogate as a real input signal.
-
-Regression tests for two defects that made chills a no-op in every trained
-surrogate:
-
-1. ``capture_run`` read ``engine._chill_boost`` after the solve.  The loop
-   decays that array to 1.0 (air gap + saturation), so every captured record
-   had a zero chill_boost channel and the models learned nothing about chills.
-2. The numpy models decoded channel 5 with ``expm1`` against an encoder that
-   stores ``log(boost)/log(6)``; boosts in [1, 2] read as exactly 1.0 and
-   everything above was under-read by one.
-"""
-
 from __future__ import annotations
 
 import tempfile
@@ -34,7 +21,6 @@ from tests.test_simulation_scenarios import (
     _cast_with_chill_manager,
     _run_pipeline_with_patched_memory,
 )
-
 
 def _fake_engine(n: int = 300, chill_fraction: float = 0.0):
     rng = np.random.default_rng(0)
@@ -65,7 +51,6 @@ def _fake_engine(n: int = 300, chill_fraction: float = 0.0):
     engine._calculate_riser_influence = lambda: np.ones(n, dtype=np.float32)
     return engine
 
-
 class ChillDecodeTests(unittest.TestCase):
     def test_decode_inverts_encoder_across_the_boost_range(self):
         for boost in (1.0, 1.25, 1.5, 2.0, 3.0, 5.0):
@@ -87,7 +72,6 @@ class ChillDecodeTests(unittest.TestCase):
         end_chill = model.predict(with_chill, cond)[1]
         active = no_chill[0] > 0.5
         ratio = end_chill[active] / end_plain[active]
-        # A uniform 3x boost must cut the predicted end time by 3x, not 2x.
         self.assertTrue(np.allclose(ratio, 1.0 / 3.0, rtol=1e-3), f"ratio range {ratio.min()}..{ratio.max()}")
 
     def test_demo_model_responds_to_boosts_below_two(self):
@@ -103,12 +87,10 @@ class ChillDecodeTests(unittest.TestCase):
         end_mild = model.predict(mild, cond)[1][active]
         self.assertTrue(np.all(end_mild < end_plain), "boost 1.5 was decoded as no chill")
 
-
 class CaptureUsesInitialBoostTests(unittest.TestCase):
     def test_capture_prefers_initial_boost_over_decayed_array(self):
         engine = _fake_engine(chill_fraction=0.1)
         n = len(engine.mesh.voxel_centers)
-        # Simulate end-of-run state: dynamic array fully decayed.
         engine._chill_boost = np.ones(n, dtype=np.float32)
         engine._calculate_chill_influence = lambda: np.ones(n, dtype=np.float32)
         engine.compute_initial_chill_influence = lambda: np.full(n, 3.0, dtype=np.float32)
@@ -122,7 +104,6 @@ class CaptureUsesInitialBoostTests(unittest.TestCase):
             active = channels[0].reshape(-1) > 0.5
             boost = channels[CHILL_BOOST_CHANNEL].reshape(-1)[active]
             self.assertTrue(np.any(boost > 0.1), "chill_boost channel captured as zero")
-
 
 class ValidateRecordTests(unittest.TestCase):
     def _record(self, boost_value: float, chill_fraction: float):
@@ -154,19 +135,13 @@ class ValidateRecordTests(unittest.TestCase):
         record = self._record(boost_value=1.0, chill_fraction=0.0)
         self.assertIsNone(validate_record(record))
 
-
 class EngineInitialBoostTests(unittest.TestCase):
-    """Against a real solved engine, the t=0 field is non-trivial and pure."""
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.engine = _run_pipeline_with_patched_memory(_cast_with_chill_manager())
 
     def test_end_of_run_boost_is_flat(self):
-        # Documents the failure mode the fix guards.  The old capture read
-        # ``_chill_boost`` (None under thermal_coupled, decayed under the
-        # legacy loop) and fell back to ``_calculate_chill_influence()`` at
-        # end-of-run time.  Either way there is no chill signal left.
         saved = self.engine._chill_boost
         try:
             self.assertGreater(float(self.engine.time), 60.0)
@@ -208,7 +183,6 @@ class EngineInitialBoostTests(unittest.TestCase):
             chill = np.abs(channels[1].reshape(-1) - PART_TYPE_CHILL / PART_TYPE_DIVISOR) < 0.05
             boost = channels[CHILL_BOOST_CHANNEL].reshape(-1)[occupied & ~chill]
             self.assertGreater(float(boost.max()), 0.1)
-
 
 if __name__ == "__main__":
     unittest.main()

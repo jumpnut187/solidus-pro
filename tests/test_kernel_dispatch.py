@@ -1,10 +1,3 @@
-"""Serial twins of the Numba parallel kernels (physics/kernel_dispatch.py).
-
-A twin must give the same bits as its parallel kernel, since which one runs
-depends only on the mesh size. That holds for kernels compiled without
-``fastmath`` and is checked here on every twin the solver uses.
-"""
-
 from __future__ import annotations
 
 import unittest
@@ -15,9 +8,7 @@ from physics import heat_transfer, kernel_dispatch, solidification_physics
 
 NUMBA = heat_transfer.NUMBA_AVAILABLE and solidification_physics.NUMBA_AVAILABLE
 
-
 def _twins(module) -> list[tuple[str, object, object]]:
-    """(name, parallel kernel, serial twin) for every twin defined in ``module``."""
     found = []
     for name in sorted(vars(module)):
         if not name.endswith("_serial"):
@@ -26,7 +17,6 @@ def _twins(module) -> list[tuple[str, object, object]]:
         if parallel is not None:
             found.append((name, parallel, getattr(module, name)))
     return found
-
 
 @unittest.skipUnless(NUMBA, "numba not installed")
 class SerialTwinRulesTests(unittest.TestCase):
@@ -59,19 +49,15 @@ class SerialTwinRulesTests(unittest.TestCase):
                 self.assertTrue(kernel_dispatch.runs_serial(int(budget // 2), 2.0))
                 self.assertFalse(kernel_dispatch.runs_serial(int(budget // 2) + 1, 2.0))
                 self.assertTrue(kernel_dispatch.runs_serial(0, 1e9))
-        # One thread: the pool cannot help, whatever the size.
         with patch.object(kernel_dispatch, "get_num_threads", return_value=1):
             self.assertTrue(kernel_dispatch.runs_serial(10**9, 100.0))
-        # A zero budget turns the twins off, at any thread count.
         with patch.object(kernel_dispatch, "SERIAL_KERNEL_BUDGET_NS", 0.0):
             self.assertFalse(kernel_dispatch.runs_serial(1, 1.0))
             with patch.object(kernel_dispatch, "get_num_threads", return_value=1):
                 self.assertFalse(kernel_dispatch.runs_serial(1, 1.0))
 
-
 @unittest.skipUnless(NUMBA, "numba not installed")
 class SerialTwinBitEqualityTests(unittest.TestCase):
-    """Each twin against its parallel kernel, same inputs, exact comparison."""
 
     def setUp(self) -> None:
         self.rng = np.random.default_rng(20261120)
@@ -89,7 +75,6 @@ class SerialTwinBitEqualityTests(unittest.TestCase):
         )
 
     def _field(self, n: int) -> np.ndarray:
-        """Temperatures spanning the tables, with table points, end points and a NaN."""
         T = self.rng.uniform(-50.0, 1700.0, n)
         T[:6] = self.curve_t
         T[6] = np.nan
@@ -112,7 +97,6 @@ class SerialTwinBitEqualityTests(unittest.TestCase):
         return neighbors
 
     def test_zero_denominator_gives_the_same_non_finite_value(self) -> None:
-        # rho * cp = 0 at a curve point: k / 0 inside the loop.
         T = self._field(500)
         rho = self.curve_rho.copy()
         rho[2] = 0.0
@@ -151,7 +135,6 @@ class SerialTwinBitEqualityTests(unittest.TestCase):
                 np.testing.assert_array_equal(rho_cp, expected_capacity)
 
     def test_enthalpy_correction_matches_binary_search(self) -> None:
-        """The hinted table lookup against the same interpolation done by ``np.searchsorted``."""
 
         def lookup(x: np.ndarray, xp: np.ndarray, fp: np.ndarray) -> np.ndarray:
             j = np.clip(np.searchsorted(xp, x, side="right") - 1, 0, len(xp) - 2)
@@ -162,7 +145,6 @@ class SerialTwinBitEqualityTests(unittest.TestCase):
             cells = 3 * n
             indices = np.sort(self.rng.choice(cells, n, replace=False)).astype(np.int64)
             T_old = self.rng.uniform(-150.0, 2600.0, cells)
-            # Table points, both ends, and steps that cross the latent peaks or leave the table.
             T_old[indices[:40]] = self.rng.choice(self.fine_t, 40)
             T_old[indices[40:44]] = [self.fine_t[0], self.fine_t[-1], -100.25, 2499.75]
             T_new = T_old + self.rng.uniform(-spread, spread, cells) * (self.rng.random(cells) < 0.9)
@@ -239,8 +221,6 @@ class SerialTwinBitEqualityTests(unittest.TestCase):
             for parallel, serial in zip(*committed):
                 np.testing.assert_array_equal(serial, parallel)
 
-            # dt = 0 (the first update of a run): the parallel loop gives
-            # inf/NaN latent rates and does not raise; the twin must do the same.
             zero_dt = []
             for kernel in (
                 solidification_physics.commit_solidification_update_parallel,
@@ -263,10 +243,8 @@ class SerialTwinBitEqualityTests(unittest.TestCase):
                 corrected.append(out)
             np.testing.assert_array_equal(corrected[1], corrected[0])
 
-
 @unittest.skipUnless(NUMBA, "numba not installed")
 class ModelUsesTwinTests(unittest.TestCase):
-    """A model small enough for the twins gives the same field as one forced onto the pool."""
 
     def _run(self, budget_ns: float) -> np.ndarray:
         from types import SimpleNamespace
@@ -310,7 +288,6 @@ class ModelUsesTwinTests(unittest.TestCase):
 
     def test_twin_and_pool_give_the_same_field(self) -> None:
         np.testing.assert_array_equal(self._run(kernel_dispatch.SERIAL_KERNEL_BUDGET_NS), self._run(0.0))
-
 
 if __name__ == "__main__":
     unittest.main()

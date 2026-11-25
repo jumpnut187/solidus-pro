@@ -19,7 +19,6 @@ export type ViewportToolbarProps = {
   onOrthoChange: (ortho: boolean) => void;
   onCamera: (preset: CameraPreset) => void;
   onClearMeasurements: () => void;
-  /** Disabled until an assembly exists — there is nothing to look at. */
   hasParts: boolean;
 };
 
@@ -40,14 +39,6 @@ const VIEWS: { id: CameraPreset; label: string }[] = [
   { id: 'right', label: 'Right' }
 ];
 
-/**
- * The CAD-style floating toolbar over the canvas.
- *
- * Tools, views and projection used to live at the bottom of the results panel,
- * which put them below the fold at 1366x768 — you had to scroll a settings
- * panel to reach Fit. They belong on the canvas they act on, within a mouse
- * flick of the model.
- */
 export function ViewportToolbar({
   tool,
   onToolChange,

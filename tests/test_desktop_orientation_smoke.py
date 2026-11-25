@@ -1,13 +1,3 @@
-"""End-to-end smoke of the desktop Orient & Parting Line tool on a real MainWindow.
-
-``QVTKRenderWindowInteractor`` segfaults under ``QT_QPA_PLATFORM=offscreen``
-(QOpenGLWidget is unsupported there), so :func:`run_smoke` swaps it for a
-plain QWidget that owns an off-screen ``vtkRenderWindow``. Everything else --
-MainWindow, the visualizer, real VTK actors and picking -- is the production
-code. The smoke runs in a child process so a GUI crash or leftover Qt/VTK
-state cannot touch the rest of the suite, and nothing stays running.
-"""
-
 from __future__ import annotations
 
 import os
@@ -20,9 +10,7 @@ from tests.helpers.ci_models import ci_model
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SAMPLE_STL = ci_model("l_bracket.stl")
 
-
 def run_smoke() -> None:
-    """Import a lone casting, orient it, set the parting line, pick, save state."""
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
     out = sys.__stdout__
 
@@ -53,7 +41,6 @@ def run_smoke() -> None:
     visualizer_module.QVTKRenderWindowInteractor = OffscreenVTKWidget
     window = main_window_module.MainWindow()
 
-    # File > Add Part with a single casting into an empty project.
     main_window_module.QFileDialog.getOpenFileNames = staticmethod(lambda *a, **k: ([SAMPLE_STL], ""))
     window._add_part()
     parts = window.part_manager.get_all_parts()
@@ -63,32 +50,26 @@ def run_smoke() -> None:
     assert dialog.isVisible(), "tool should auto-open after importing a lone casting"
     assert dialog.windowTitle() == "Orient & Parting Line"
 
-    # Rotate X +90 (default step), keep on floor.
     dialog.rotate_buttons["Rotate X +"].click()
     assert np.allclose(part.rotation, (90.0, 0.0, 0.0)), part.rotation
     assert abs(part_world_bounds(part)[0, 2]) < 1e-9
-    # The drawn actor follows the same sxyz transform.
     actor_bounds = window.visualizer.part_actors[part.id].GetBounds()
     world = part_world_bounds(part)
     assert np.allclose(actor_bounds[0::2], world[0], atol=1e-6), (actor_bounds, world)
     assert np.allclose(actor_bounds[1::2], world[1], atol=1e-6), (actor_bounds, world)
 
-    # Widest section preset.
     dialog.preset_buttons["widest"].click()
     expected = orientation.suggest_parting_z(part.trimesh_obj, part.rotation, part.position, part.scale)
     parting = window.orientation_controller.parting
     assert parting is not None and abs(parting.z - expected["max_section"]) < 1e-9, parting
     assert window.visualizer.is_parting_plane_shown()
 
-    # Lower the part: the locked parting line follows it.
     z_before = parting.z
     dialog.lower_part_btn.click()
     assert abs(parting.z - (z_before - 0.25)) < 1e-9, parting.z
     dialog.drop_to_floor_btn.click()
     assert abs(parting.z - z_before) < 1e-9, parting.z
 
-    # Pick height through the real viewport picker: look down from the top
-    # and click the centroid of a top-facing triangle.
     dialog.parting_z_spin.setValue(0.5)
     window.visualizer.set_camera_view("top")
     window.visualizer.render_window.Render()
@@ -107,8 +88,6 @@ def run_smoke() -> None:
     assert dialog.pick_mode is None
     assert abs(parting.z - top) < 1e-3, (parting.z, top)
 
-    # Face down through the viewport on the same top face: the part flips so
-    # that face (model normal R_old^T @ +Z) now points -Z, still on the floor.
     model_normal = orientation.euler_to_matrix(part.rotation).T @ np.array([0.0, 0.0, 1.0])
     dialog.face_down_btn.click()
     assert window.visualizer.is_surface_pick_mode()
@@ -118,11 +97,9 @@ def run_smoke() -> None:
     assert np.allclose(turned, (0.0, 0.0, -1.0), atol=1e-6), (part.rotation, turned)
     assert abs(part_world_bounds(part)[0, 2]) < 1e-9
 
-    # Persistence: the parting line lands in ui_state.
     state = window._collect_project_state()
     assert state["ui_state"]["parting_line"]["z"] == parting.z, state["ui_state"]
 
-    # Hide the plane.
     dialog.show_parting_check.setChecked(False)
     assert not window.visualizer.is_parting_plane_shown()
 
@@ -131,10 +108,7 @@ def run_smoke() -> None:
     app.processEvents()
     print("SMOKE OK", file=out, flush=True)
     out.flush()
-    # Skip interpreter teardown of Qt/VTK/Taichi objects; the parent only
-    # needs the exit code and the marker line.
     os._exit(0)
-
 
 class DesktopOrientationSmokeTest(unittest.TestCase):
     def test_main_window_orient_and_parting_line(self) -> None:
@@ -149,7 +123,6 @@ class DesktopOrientationSmokeTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr[-4000:])
         self.assertIn("SMOKE OK", result.stdout)
-
 
 if __name__ == "__main__":
     unittest.main()

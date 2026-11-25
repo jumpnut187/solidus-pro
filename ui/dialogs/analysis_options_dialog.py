@@ -1,5 +1,3 @@
-"""Analysis options dialog."""
-
 from __future__ import annotations
 
 from ui.qt import (
@@ -15,9 +13,7 @@ from ui.qt import (
 
 from .base import DraggableDialog
 
-
 class AnalysisOptionsDialog(DraggableDialog):
-    """Modal dialog for selecting analysis types to run"""
 
     options_changed = Signal(dict)
 
@@ -28,7 +24,6 @@ class AnalysisOptionsDialog(DraggableDialog):
         self._original_values = {}
 
     def _setup_ui(self):
-        """Set up the analysis options dialog UI"""
         analysis_group = QGroupBox("Select Analyses to Run")
         analysis_layout = QVBoxLayout()
 
@@ -253,13 +248,6 @@ class AnalysisOptionsDialog(DraggableDialog):
         self.content_layout.addStretch()
 
     def set_filling_available(self, available: bool) -> None:
-        """Enable/disable the Mold Filling toggle based on pour-location state.
-
-        The mold-filling analysis needs a pour location to know where metal
-        enters the mold, so it is greyed out (with an explanatory tooltip)
-        until one has been picked, and forced off if the toggle happened to
-        be checked when the location is cleared.
-        """
         self.filling_check.setEnabled(available)
         if available:
             self.filling_check.setToolTip(self._filling_enabled_tooltip)
@@ -268,7 +256,6 @@ class AnalysisOptionsDialog(DraggableDialog):
             self.filling_check.setToolTip(self._filling_disabled_tooltip)
 
     def store_original_values(self):
-        """Store current settings"""
         self._original_values = {
             'shrinkage': self.shrinkage_check.isChecked(),
             'hotspot': self.hotspot_check.isChecked(),
@@ -285,7 +272,6 @@ class AnalysisOptionsDialog(DraggableDialog):
         }
 
     def restore_original_values(self):
-        """Restore original settings on cancel"""
         if self._original_values:
             self.shrinkage_check.setChecked(self._original_values['shrinkage'])
             self.hotspot_check.setChecked(self._original_values['hotspot'])
@@ -294,9 +280,6 @@ class AnalysisOptionsDialog(DraggableDialog):
             self.sand_burn_in_check.setChecked(self._original_values['sand_burn_in'])
             self.gas_porosity_check.setChecked(self._original_values['gas_porosity'])
             self.fraction_liquid_check.setChecked(self._original_values['fraction_liquid'])
-            # Only restore a checked filling toggle if it is still allowed --
-            # the checkbox may have been force-disabled (pour location
-            # cleared) while the dialog was open.
             if self.filling_check.isEnabled():
                 self.filling_check.setChecked(self._original_values.get('filling', False))
             self.feeding_path_check.setChecked(self._original_values.get('feeding_path', False))
@@ -305,11 +288,9 @@ class AnalysisOptionsDialog(DraggableDialog):
             self.sand_restraint_spin.setValue(self._original_values.get('sand_restraint_index', 0.5))
 
     def apply_values(self):
-        """Emit signal with current settings"""
         self.options_changed.emit(self.get_options())
 
     def get_options(self) -> dict:
-        """Get current analysis options"""
         return {
             'shrinkage': self.shrinkage_check.isChecked(),
             'hotspot': self.hotspot_check.isChecked(),
@@ -326,7 +307,6 @@ class AnalysisOptionsDialog(DraggableDialog):
         }
 
     def set_options(self, options: dict):
-        """Set analysis options from dict"""
         self.shrinkage_check.setChecked(options.get('shrinkage', True))
         self.hotspot_check.setChecked(options.get('hotspot', True))
         self.niyama_check.setChecked(options.get('niyama', False))
@@ -334,9 +314,6 @@ class AnalysisOptionsDialog(DraggableDialog):
         self.sand_burn_in_check.setChecked(options.get('sand_burn_in', False))
         self.gas_porosity_check.setChecked(options.get('gas_porosity', False))
         self.fraction_liquid_check.setChecked(options.get('fraction_liquid', False))
-        # 'filling' is intentionally not restored here: it stays gated by
-        # set_filling_available(), which main_window drives from whether a
-        # pour location currently exists, independent of a saved value.
         self.feeding_path_check.setChecked(options.get('feeding_path', False))
         self.stress_check.setChecked(options.get('stress_analysis', False))
         self.microstructure_check.setChecked(options.get('microstructure', False))
@@ -347,7 +324,6 @@ class AnalysisOptionsDialog(DraggableDialog):
         self.sand_restraint_spin.setValue(max(0.0, min(1.0, restraint_value)))
 
     def update_niyama_info(self, alloy_name: str):
-        """Update Niyama threshold info for selected alloy"""
         thresholds = {
             'WCB': 1.0,
             'CF8': 0.7,

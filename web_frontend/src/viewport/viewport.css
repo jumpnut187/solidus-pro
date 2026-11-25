@@ -1,15 +1,3 @@
-/*
- * Styles owned by the viewport.
- *
- * Every class is prefixed `vp-` and lives in this file rather than in the
- * shell's `styles.css`, so the two workstreams cannot collide over a name and
- * the shell can drop `<ColorBar>` anywhere without importing anything.
- *
- * Colors come from CSS custom properties with fallbacks, so the legend adopts
- * the shell's palette where one is defined and still reads correctly on its
- * own (in the standalone dev harness, for instance).
- */
-
 .vp-colorbar {
   --vp-fg: var(--castsim-fg, #e8edf5);
   --vp-fg-dim: var(--castsim-fg-dim, #9aa6b8);
@@ -65,8 +53,6 @@
   color: var(--vp-fg-dim);
 }
 
-/* A constant field prints one tick instead of six identical ones;
- * `space-between` would pin that lone tick to the top of the ramp. */
 .vp-colorbar-ticks-single {
   justify-content: center;
 }
@@ -83,7 +69,6 @@
   background: var(--vp-border);
 }
 
-/* Vertical: a tall ramp with the ticks running down its right-hand side. */
 .vp-colorbar-vertical .vp-colorbar-body {
   height: 180px;
 }
@@ -104,7 +89,6 @@
   margin-left: -8px;
 }
 
-/* Horizontal: a wide ramp with the ticks underneath it. */
 .vp-colorbar-horizontal .vp-colorbar-body {
   flex-direction: column;
   width: 240px;
@@ -153,7 +137,6 @@
   border-color: var(--vp-border);
 }
 
-/* An auto bound is the data's own range, not a choice the user made. */
 .vp-colorbar-end-auto {
   color: var(--vp-fg-dim);
   font-style: italic;

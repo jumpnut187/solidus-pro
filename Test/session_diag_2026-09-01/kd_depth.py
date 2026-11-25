@@ -5,7 +5,6 @@ from scipy.spatial import cKDTree
 pm = PartManager()
 import glob
 def depth(tree):
-    # iterative DFS over the Python node wrapper
     stack = [(tree.tree, 1)]
     best = 0
     n = 0

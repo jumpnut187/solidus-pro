@@ -1,13 +1,3 @@
-/**
- * Client-side layout transforms, mirroring `PartManager.auto_arrange_grid` and
- * `auto_arrange_line`.
- *
- * Both work from each part's *original* mesh bounds, not its current
- * transform, so re-arranging twice gives the same answer rather than drifting.
- * The web client has those bounds already in `meshData`, so the arrangement can
- * be computed here and pushed as position updates — no round trip, and the
- * viewport moves as the user watches.
- */
 import type { ProjectPart } from './api';
 
 export type Axis = 'x' | 'y' | 'z';
@@ -23,7 +13,6 @@ function boundsOf(part: ProjectPart): { min: [number, number, number]; size: [nu
   };
 }
 
-/** Square-ish grid in XY with every part's bottom sitting on Z = 0. */
 export function arrangeGrid(parts: ProjectPart[], spacing: number): PositionPatch[] {
   const measured = parts.map((part) => ({ part, box: boundsOf(part) })).filter((entry) => entry.box !== null);
   if (!measured.length) return [];
@@ -45,7 +34,6 @@ export function arrangeGrid(parts: ProjectPart[], spacing: number): PositionPatc
   });
 }
 
-/** Single file along one axis, each part's other axes aligned to the origin. */
 export function arrangeLine(parts: ProjectPart[], axis: Axis, spacing: number): PositionPatch[] {
   const index = { x: 0, y: 1, z: 2 }[axis];
   let cursor = 0;
@@ -67,5 +55,4 @@ export function arrangeLine(parts: ProjectPart[], axis: Axis, spacing: number): 
   return patches;
 }
 
-/** The desktop's duplicate offset: two inches in +X. */
 export const DUPLICATE_OFFSET: [number, number, number] = [2, 0, 0];

@@ -1,38 +1,3 @@
-"""Seeded casting assemblies (casting + riser + chill + sand core) for surrogate training data.
-
-``core.surrogate.geometries`` yields bare castings, so every record trained on
-them is a single CAST body cooling into sand. Real jobs are rigged: risers
-feed the heavy sections, chills pull heat where feeding falls short, and sand
-cores form internal cavities that saturate and turn into hot spots. This
-module builds such assemblies as ``GeometrySpec`` objects carrying a
-``parts`` list of ``(mesh, part_code)`` pairs, which ``generate_dataset``
-loads into a ``PartManager`` like a user's multi-STL job.
-
-Every assembly is a sound design, because a model learns whatever its
-training castings show: a builder makes the casting and its cores, then
-``core.surrogate.design_rules.rig`` places and sizes the risers and chills
-from steel-foundry rules (modulus, feeding distance, chill placement) and
-``design_rules.check`` vets the result. A sample that cannot be rigged
-soundly is drawn again. Cores always have prints, are at least 0.5 in across
-and leave at least ``MIN_WALL_IN`` of metal around them.
-
-Two size classes:
-
-- ``ASSEMBLY_FAMILIES`` (3-14 in): cored boxes and cylinders, and the bare
-  ``geometries`` families rigged.
-- ``COMPLEX_FAMILIES`` (12-36 in): ribbed plates with cored bosses, cored
-  housings with a heavy pad, flanged hubs with a cored bore and cored bolt
-  bosses, stepped blocks with a cored heavy step. Solve these with the
-  larger voxel budget of ``tools/generate_surrogate_data.py --complex``.
-- ``HEAVY_FAMILIES`` (18-48 in): cored blocks on a thinner foot, plates
-  carrying large bosses, and stepped blocks and flanged hubs drawn with
-  6-14 in sections, for the slow-freezing (1000-3500 s) heavy work the
-  other classes barely reach. Solve with ``--heavy``.
-
-Part codes resolve overlap toward the higher code (CAST 0 < RISER 1 < CHILL 2
-< CORE 4), so parts only need to touch or overlap; no booleans are needed.
-"""
-
 from __future__ import annotations
 
 from functools import partial
@@ -61,11 +26,9 @@ COMPLEX_MIN_DIM_IN = 12.0
 COMPLEX_MAX_DIM_IN = 36.0
 HEAVY_MIN_DIM_IN = 18.0
 HEAVY_MAX_DIM_IN = 48.0
-#: Thickness range of the heaviest section in the heavy families.
 HEAVY_SECTION_IN = (6.0, 14.0)
 MIN_WALL_IN = 0.375
 MIN_CORE_DIAMETER_IN = design_rules.MIN_CORE_DIAMETER_IN
-#: Draws per assembly before giving up on a family/seed position.
 MAX_DESIGN_ATTEMPTS = 25
 
 CORED_FAMILIES: List[str] = ["cored_box", "cored_cylinder", "cored_flanged_cylinder"]
@@ -86,43 +49,29 @@ HEAVY_FAMILIES: List[str] = [
 
 Built = Tuple[trimesh.Trimesh, List[trimesh.Trimesh], Dict[str, float], float]
 
-
 class DesignError(RuntimeError):
-    """No sound design was found for an assembly."""
-
+    pass
 
 def _log_uniform(rng: np.random.Generator, lo: float, hi: float) -> float:
     return float(np.exp(rng.uniform(np.log(lo), np.log(hi))))
 
-
 def _scaled_params(family: str, rng: np.random.Generator) -> Dict[str, float]:
-    """``geometries.sample_params`` for ``family``, rescaled into the assembly size range."""
     params = sample_params(family, rng)
     spec = make_spec(family, params)
     scale = _log_uniform(rng, MIN_MAX_DIM_IN, MAX_MAX_DIM_IN) / max(spec.max_dim, 1e-6)
     return {k: v if k.endswith("_count") else max(0.25, v * scale) for k, v in params.items()}
 
-
 def _y_cylinder(radius: float, length: float, centre) -> trimesh.Trimesh:
-    """Cylinder with its axis along y."""
     mesh = _cylinder(radius, length)
     mesh.apply_transform(trimesh.transformations.rotation_matrix(np.pi / 2, (1, 0, 0)))
     mesh.apply_translation(np.asarray(centre, dtype=np.float64))
     return mesh
 
-
 def _through_core_y(width: float, height: float, length_in_metal: float, centre, rng, cylindrical: bool):
-    """Core along y running through the casting with a print 0.75-1.5 in out of each face."""
     length = length_in_metal + 2 * rng.uniform(0.75, 1.5)
     if cylindrical:
         return _y_cylinder(0.5 * min(width, height), length, centre)
     return _box((width, length, height), centre)
-
-
-# ---------------------------------------------------------------------------
-# Small cored families (3-14 in)
-# ---------------------------------------------------------------------------
-
 
 def _cored_box(rng: np.random.Generator) -> Built:
     D = _log_uniform(rng, MIN_MAX_DIM_IN, MAX_MAX_DIM_IN)
@@ -137,7 +86,6 @@ def _cored_box(rng: np.random.Generator) -> Built:
               "core_height": core_h, "core_cylindrical": float(cylindrical)}
     return cast, [core], params, wall
 
-
 def _cored_cylinder(rng: np.random.Generator) -> Built:
     D = _log_uniform(rng, MIN_MAX_DIM_IN, MAX_MAX_DIM_IN)
     tall = bool(rng.uniform() < 0.5)
@@ -145,7 +93,6 @@ def _cored_cylinder(rng: np.random.Generator) -> Built:
     height = D if tall else max(2.0, D * rng.uniform(0.3, 0.8))
     cast = _cylinder(r_out, height)
     r_core = max(0.5 * MIN_CORE_DIAMETER_IN, (r_out - MIN_WALL_IN) * rng.uniform(0.25, 0.7))
-    # Bore open at the bottom (print) and capped at the top, or through with prints both ends.
     print_len = rng.uniform(0.75, 1.5)
     if rng.uniform() < 0.5:
         cap = max(MIN_WALL_IN, 0.2 * height)
@@ -155,7 +102,6 @@ def _cored_cylinder(rng: np.random.Generator) -> Built:
         core = _cylinder(r_core, height + 2 * print_len)
     params = {"outer_radius": r_out, "height": height, "core_radius": r_core}
     return cast, [core], params, r_out - r_core
-
 
 def _cored_flanged_cylinder(rng: np.random.Generator) -> Built:
     params = _scaled_params("flanged_cylinder", rng)
@@ -171,7 +117,6 @@ def _cored_flanged_cylinder(rng: np.random.Generator) -> Built:
     params["core_radius"] = r_core
     return cast, [core], params, min(params["flange_thickness"], params["radius"] - r_core)
 
-
 def _rigged(family: str):
     def build(rng: np.random.Generator) -> Built:
         params = _scaled_params(family, rng)
@@ -179,14 +124,7 @@ def _rigged(family: str):
         return spec.mesh, [], params, spec.min_thickness
     return build
 
-
-# ---------------------------------------------------------------------------
-# Complex families (12-36 in)
-# ---------------------------------------------------------------------------
-
-
 def _complex_ribbed_plate(rng: np.random.Generator) -> Built:
-    """Plate with ribs along x and bosses in the bays; about half the bosses carry a cored bolt hole."""
     L = _log_uniform(rng, COMPLEX_MIN_DIM_IN, COMPLEX_MAX_DIM_IN)
     W = L * rng.uniform(0.45, 0.8)
     t = float(np.clip(L * rng.uniform(0.03, 0.06), 0.6, 2.0))
@@ -217,9 +155,7 @@ def _complex_ribbed_plate(rng: np.random.Generator) -> Built:
               "boss_height": boss_h, "core_count": float(len(cores))}
     return _concat(shells), cores, params, min(t, rib_t)
 
-
 def _complex_cored_housing(rng: np.random.Generator) -> Built:
-    """Box housing with a through cavity core and a heavy top pad carrying its own through core."""
     L = _log_uniform(rng, COMPLEX_MIN_DIM_IN, COMPLEX_MAX_DIM_IN)
     W = L * rng.uniform(0.5, 0.85)
     H = L * rng.uniform(0.3, 0.55)
@@ -231,13 +167,11 @@ def _complex_cored_housing(rng: np.random.Generator) -> Built:
     overlap = JUNCTION_OVERLAP_FRACTION * min(wall, pad_h)
     cast = _concat([_box((L, W, H), (0.0, 0.0, H / 2)), _box((pad_l, pad_w, pad_h), (pad_x, 0.0, H - overlap + pad_h / 2))])
     cavity = _through_core_y(L - 2 * wall, H - 2 * wall, W, (0.0, 0.0, H / 2), rng, cylindrical=False)
-    # The pad core is a cored hole along y through the pad: small core, heavy metal.
     pad_core_d = float(max(min(pad_l, pad_h) * rng.uniform(0.25, 0.45), MIN_CORE_DIAMETER_IN))
     pad_core = _through_core_y(pad_core_d, pad_core_d, pad_w, (pad_x, 0.0, H - overlap + pad_h / 2), rng, cylindrical=True)
     params = {"length": L, "width": W, "height": H, "wall": wall, "pad_length": pad_l, "pad_width": pad_w,
               "pad_height": pad_h, "pad_core_diameter": pad_core_d}
     return cast, [cavity, pad_core], params, wall
-
 
 def _complex_flanged_hub(
     rng: np.random.Generator,
@@ -247,15 +181,6 @@ def _complex_flanged_hub(
     bore_frac: Tuple[float, float] = (0.55, 0.75),
     hub_wall: Optional[Tuple[float, float]] = None,
 ) -> Built:
-    """Large flanged hub: cored bore and cored bolt bosses on the flange.
-
-    ``hub_wall`` draws the hub wall (hub radius minus bore radius) from that
-    range instead of ``bore_frac``, around a bore at least as wide as the
-    wall: a core much thinner than the steel around it heats through, burns
-    in and cannot vent, so a foundry casts such a hub solid and machines the
-    bore. The hub widens (and the flange with it) to fit, the hub at most
-    0.85 of the flange radius.
-    """
     rf = _log_uniform(rng, *dims) / 2
     flange = rng.uniform(*flange_frac)
     r = rf * rng.uniform(0.4, 0.6)
@@ -284,17 +209,11 @@ def _complex_flanged_hub(
               "bore_radius": r_bore, "bolt_count": float(n_bolts), "boss_radius": boss_r}
     return _concat(shells), cores, params, min(tf, r - r_bore, 0.55 * boss_r)
 
-
 def _complex_stepped_block(
     rng: np.random.Generator,
     dims: Tuple[float, float] = (COMPLEX_MIN_DIM_IN, COMPLEX_MAX_DIM_IN),
     heavy_step: Optional[Tuple[float, float]] = None,
 ) -> Built:
-    """3-4 steps of different thickness with a cored hole through the heaviest step.
-
-    ``heavy_step`` redraws the heaviest step's thickness from that range (at
-    most the block width).
-    """
     L = _log_uniform(rng, *dims)
     W = L * rng.uniform(0.3, 0.6)
     steps = int(rng.integers(3, 5))
@@ -322,14 +241,7 @@ def _complex_stepped_block(
         params[f"step_thickness_{i}"] = float(thick[i])
     return _concat(shells), cores, params, float(thick.min())
 
-
-# ---------------------------------------------------------------------------
-# Heavy families (18-48 in, 6-14 in sections)
-# ---------------------------------------------------------------------------
-
-
 def _heavy_cored_block(rng: np.random.Generator) -> Built:
-    """Heavy block on a thinner full-length foot, with 0-2 cored holes along y through the block."""
     L = _log_uniform(rng, HEAVY_MIN_DIM_IN, HEAVY_MAX_DIM_IN)
     W = L * rng.uniform(0.4, 0.8)
     H = float(min(rng.uniform(*HEAVY_SECTION_IN), W))
@@ -348,9 +260,7 @@ def _heavy_cored_block(rng: np.random.Generator) -> Built:
               "core_count": float(n_cores), "core_diameter": float(core_d if cores else 0.0)}
     return cast, cores, params, foot_t
 
-
 def _heavy_bossed_plate(rng: np.random.Generator) -> Built:
-    """2-5 in plate carrying 1-3 heavy bosses (6-14 in across); about half are cored from below."""
     L = _log_uniform(rng, HEAVY_MIN_DIM_IN, HEAVY_MAX_DIM_IN)
     W = L * rng.uniform(0.5, 0.9)
     t = float(np.clip(L * rng.uniform(0.06, 0.12), 2.0, 5.0))
@@ -364,7 +274,6 @@ def _heavy_bossed_plate(rng: np.random.Generator) -> Built:
         y = float(rng.uniform(-0.25, 0.25)) * (W - boss_d)
         shells.append(_cylinder(boss_d / 2, boss_h, (float(x), y, t - overlap + boss_h / 2)))
         if rng.uniform() < 0.5:
-            # Blind hole from below: the print sits in the drag, the top stays clear for a riser.
             r_core = boss_d / 2 * rng.uniform(0.2, 0.35)
             print_len = rng.uniform(0.75, 1.5)
             top = t - overlap + boss_h * rng.uniform(0.4, 0.7)
@@ -372,7 +281,6 @@ def _heavy_bossed_plate(rng: np.random.Generator) -> Built:
     params = {"length": L, "width": W, "thickness": t, "boss_count": float(n), "boss_diameter": boss_d,
               "boss_height": boss_h, "core_count": float(len(cores))}
     return _concat(shells), cores, params, t
-
 
 _BUILDERS = {
     "cored_box": _cored_box,
@@ -394,12 +302,7 @@ _BUILDERS = {
     ),
 }
 
-
 def build_assembly(family: str, rng: np.random.Generator, index: int = 0) -> GeometrySpec:
-    """One sound assembly of ``family``: draws until ``design_rules.rig`` finds a design that passes.
-
-    Raises ``DesignError`` after ``MAX_DESIGN_ATTEMPTS`` unsound draws.
-    """
     if family not in _BUILDERS:
         raise ValueError(f"Unknown assembly family: {family}")
     for _attempt in range(MAX_DESIGN_ATTEMPTS):
@@ -413,8 +316,6 @@ def build_assembly(family: str, rng: np.random.Generator, index: int = 0) -> Geo
         params["chill_count"] = float(sum(1 for _, c in parts if c == PART_TYPE_CHILL))
         params["fed_fraction"] = report.metrics.get("fed_fraction", 0.0)
         params = _round_params(params)
-        # Rigging ray-cast these meshes; drop the cached embree scenes, or a
-        # batch holding hundreds of specs exhausts native memory and segfaults.
         for mesh, _code in parts:
             mesh._cache.clear()
         return GeometrySpec(
@@ -427,19 +328,11 @@ def build_assembly(family: str, rng: np.random.Generator, index: int = 0) -> Geo
         )
     raise DesignError(f"no sound {family} design in {MAX_DESIGN_ATTEMPTS} draws")
 
-
 def iter_assemblies(
     count: int,
     seed: int = 0,
     families: Sequence[str] = tuple(ASSEMBLY_FAMILIES),
 ) -> Iterator[GeometrySpec]:
-    """Yield up to ``count`` sound assemblies, cycling through ``families``.
-
-    Deterministic in ``(count, seed, families)``; a shorter run is a prefix
-    of a longer one. A family position that yields no sound design in
-    ``MAX_DESIGN_ATTEMPTS`` draws is skipped, so fewer than ``count`` may
-    come back.
-    """
     families = list(families)
     unknown = [f for f in families if f not in _BUILDERS]
     if unknown:

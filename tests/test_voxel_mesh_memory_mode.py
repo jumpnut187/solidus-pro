@@ -7,7 +7,6 @@ import trimesh
 from core.memory_manager import reset_memory_manager
 from core.voxel_mesh import AdaptiveVoxelMesh, RTREE_AVAILABLE
 
-
 class VoxelMeshMemoryModeTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_memory_manager()
@@ -47,7 +46,6 @@ class VoxelMeshMemoryModeTests(unittest.TestCase):
             self.assertNotIsInstance(mesh.voxel_volumes, np.memmap)
         finally:
             mesh.cleanup()
-
 
 class ChunkedVoxelizationTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -94,7 +92,6 @@ class ChunkedVoxelizationTests(unittest.TestCase):
             self.assertGreater(len(voxels), 0)
         finally:
             mesh.cleanup()
-
 
 if __name__ == "__main__":
     unittest.main()

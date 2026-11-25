@@ -1,16 +1,4 @@
 #!/usr/bin/env python3
-"""
-Deep surrogate vs full-solver benchmark (standalone verification script).
-
-Trains (or loads) the deep 3D U-Net surrogate and compares its schedule
-predictions against the full solver on held-out geometries (boxes, plates,
-bars).  Reports per-field RMSE / MAE / relative error for start / end /
-local times.
-
-Usage:
-    python3 tests/verify_deep_benchmarks.py                 # load models/deep_model/trained
-    python3 tests/verify_deep_benchmarks.py --train --grid 16 --epochs 20
-"""
 
 from __future__ import annotations
 
@@ -29,32 +17,30 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 try:
-    import torch  # noqa: F401
+    import torch
 except ImportError:
     print("torch not installed — run: venv/bin/pip install torch")
     sys.exit(2)
 
-from core import surrogate  # noqa: E402
-from core.materials import get_alloy  # noqa: E402
-from core.simulation_pipeline import PipelineInputs, run_pipeline  # noqa: E402
-from core.surrogate import run_surrogate_pipeline  # noqa: E402
-from core.surrogate.dataset import DEFAULT_DATASET_DIR  # noqa: E402
-from core.surrogate.metrics import compute_field_metrics  # noqa: E402
-
+from core import surrogate
+from core.materials import get_alloy
+from core.simulation_pipeline import PipelineInputs, run_pipeline
+from core.surrogate import run_surrogate_pipeline
+from core.surrogate.dataset import DEFAULT_DATASET_DIR
+from core.surrogate.metrics import compute_field_metrics
 
 def _loader_for(mesh):
     bounds = np.stack([mesh.bounds[0], mesh.bounds[1]], axis=1)
 
     class _Loader:
         trimesh_obj = mesh
-        is_valid = lambda self: True  # noqa: E731
+        is_valid = lambda self: True
         volume = float(getattr(mesh, "volume", 0.0) or 0.0)
 
         def get_bounds_array(self):
             return bounds
 
     return _Loader()
-
 
 def _inputs(loader, alloy="WCB", voxel_size=0.5):
     return PipelineInputs(
@@ -67,7 +53,6 @@ def _inputs(loader, alloy="WCB", voxel_size=0.5):
         show_progress=False,
     )
 
-
 def _geometries():
     return [
         ("box_2", trimesh.creation.box(extents=(2.0, 2.0, 2.0))),
@@ -75,9 +60,7 @@ def _geometries():
         ("bar_8x2x2", trimesh.creation.box(extents=(8.0, 2.0, 2.0))),
     ]
 
-
 def _train_fresh_model(grid, epochs, min_records):
-    """Train on the captured dataset (fallback: tiny synthetic dataset)."""
     from core.deep_model.training import train_deep_model
 
     data_dir = DEFAULT_DATASET_DIR
@@ -107,7 +90,6 @@ def _train_fresh_model(grid, epochs, min_records):
         progress_cb=lambda m: print(f"  {m}"),
     )
     return summary["saved_to"], summary
-
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Deep surrogate vs full-solver benchmark.")
@@ -181,7 +163,6 @@ def main() -> int:
     print("\nNOTE: low-data runs underperform until the dataset accumulates; "
           "auto-train refits on every new capture.")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

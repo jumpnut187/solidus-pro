@@ -1,39 +1,4 @@
 #!/usr/bin/env python3
-"""
-Generate surrogate training records from synthetic geometries with the full solver.
-
-Sweeps K seeded geometries (``core.surrogate.geometries``) x alloys x
-Chvorinov mold constants, captures each run as a ``.npz`` record and tracks
-progress in ``<out-dir>/generation_plan.json`` so an interrupted batch can be
-resumed (``capture_run`` names files from a time hash, so the sidecar is what
-identifies a finished combination).
-
-Voxel size per geometry (``voxel_size_for``): ``s = max(max_dim / grid,
-cbrt(volume / target_voxels))``, then ``s <= min_thickness / 3`` and
-``s >= cbrt(volume / 50000)``, rounded to 0.005 in.  ``--voxel-size`` pins a
-fixed value instead.
-
-Examples:
-
-    # Show the plan without solving
-    python tools/generate_surrogate_data.py --count 40 --dry-run
-
-    # 40 geometries x all alloys x one mold constant into the default dataset
-    python tools/generate_surrogate_data.py --count 40
-
-    # Smoke batch into a temp dir
-    python tools/generate_surrogate_data.py --count 3 --alloys WCB,CF8 \
-        --out-dir /tmp/surrogate_smoke
-
-    # 120 rigged assemblies (riser, chill, sand core), 3 alloys each
-    python tools/generate_surrogate_data.py --assemblies --count 120 --alloys-per-geometry 3
-
-    # 160 large multi-feature assemblies (12-36 in, several risers/cores/chills)
-    python tools/generate_surrogate_data.py --complex --count 160 --alloys-per-geometry 2
-
-    # 160 heavy-section assemblies (18-48 in, 6-14 in sections, 1000-3500 s freezes)
-    python tools/generate_surrogate_data.py --heavy --count 160 --alloys-per-geometry 2
-"""
 
 from __future__ import annotations
 
@@ -61,10 +26,8 @@ from core.surrogate.training import (
 
 PLAN_FILENAME = "generation_plan.json"
 
-
 def _parse_floats(text: str):
     return [float(x) for x in text.split(",") if x.strip()]
-
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate surrogate training records from synthetic geometries.")
@@ -118,9 +81,6 @@ def main() -> int:
         default_families = ASSEMBLY_FAMILIES if args.assemblies else FAMILIES
     families = [f.strip() for f in args.families.split(",") if f.strip()] or list(default_families)
     if args.assemblies or large:
-        # Built on the solver's large-stack thread: rigging rasterises and
-        # ray-casts every design, and the same native recursion that needs it
-        # in the solver segfaults on the 8 MB macOS main-thread stack.
         specs = _run_on_large_stack(lambda: list(iter_assemblies(args.count, seed=args.seed, families=families)))
     elif args.catalog:
         specs = list(named_catalog().values())
@@ -191,7 +151,6 @@ def main() -> int:
     for path, reason in skips:
         print(f"  skipped {os.path.basename(path)}: {reason}")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

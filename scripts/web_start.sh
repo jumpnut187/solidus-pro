@@ -1,9 +1,3 @@
-#!/usr/bin/env bash
-#
-# Start the Solidus web app (gunicorn) in the background with a pidfile.
-# Wrapper around: python run_web.py
-# Stops with: scripts/web_stop.sh
-#
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -37,9 +31,6 @@ for _ in $(seq 1 20); do
     if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
         echo "Solidus web app started (pid $(cat "$PIDFILE"))"
         echo "  Local:   http://localhost:$PORT/"
-        # The server binds every interface, so it is reachable across the LAN;
-        # this is the address to use from another device. en0/en1 cover Wi-Fi
-        # and Ethernet on macOS, in that order.
         LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)"
         if [[ -n "$LAN_IP" ]]; then
             echo "  Network: http://$LAN_IP:$PORT/"

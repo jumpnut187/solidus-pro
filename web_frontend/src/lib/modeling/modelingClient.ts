@@ -1,10 +1,3 @@
-/**
- * Main-thread half of the modeling worker.
- *
- * Sends each part's triangles to the worker once (keyed by geometry and
- * placement, so moving a part or replacing its file re-sends it) and turns
- * replies back into promises.
- */
 import type { ProjectPart } from '../api';
 import type { BodyPayload, ModelingRequest, ModelingResult } from '../../workers/modelingTypes';
 import { partWorldMatrix, type Box3, type CutPreview } from './kernel';
@@ -20,15 +13,12 @@ export type BuiltBody = {
   elapsedMs: number;
 };
 
-/** A body after its cuts, in its own frame, or `changed: false` when no cut reached it. */
 export type CutBody = ({ changed: true } & BuiltBody) | { changed: false; warnings: string[] };
 
 export type CutPreviewBody = CutPreview & { elapsedMs: number };
 
-/** A body to cut: its base triangles in its own frame, and where it sits. */
 export type CutSource = { name: string; positions: Float32Array; indices: Uint32Array; matrix: number[] };
 
-/** A feature the kernel refused; the message is for the user. */
 export class ModelingError extends Error {}
 
 export function partBodyKey(part: ProjectPart): string {
@@ -58,14 +48,12 @@ export function partMatrix(part: ProjectPart): number[] {
 
 type Pending = { resolve: (reply: ModelingResult) => void; reject: (error: Error) => void };
 
-/** Distributive omit, so each request variant keeps its own fields. */
 type WithoutId<T> = T extends unknown ? Omit<T, 'id'> : never;
 
 export class ModelingClient {
   private readonly _worker: Worker;
   private _nextId = 1;
   private readonly _pending = new Map<number, Pending>();
-  /** Keys whose triangles the worker already holds. */
   private readonly _sent = new Set<string>();
   private _disposed = false;
 
@@ -92,10 +80,6 @@ export class ModelingClient {
     };
   }
 
-  /**
-   * Build `feature` against `targets`. `assembly` is every part currently
-   * loaded, which tells the worker which cached bodies it may free.
-   */
   async build(feature: ExtrudeFeature, targets: ProjectPart[], assembly: ProjectPart[]): Promise<BuiltBody> {
     const reply = await this._cached((bodies) => ({ kind: 'build', feature, ...bodies }), targets, assembly);
     if (reply.kind !== 'build' || !reply.ok) throw new ModelingError('Unexpected reply from the modeling worker.');
@@ -106,11 +90,6 @@ export class ModelingClient {
     return body;
   }
 
-  /**
-   * What `cut` removes from `targets` (the bodies in its scope, as each was
-   * before any cut). `assembly` lists every body to keep cached, which must
-   * include `targets`.
-   */
   async previewCut(cut: CutFeature, targets: ProjectPart[], assembly: ProjectPart[]): Promise<CutPreviewBody> {
     const reply = await this._cached((bodies) => ({ kind: 'cutPreview', cut, ...bodies }), targets, assembly);
     if (reply.kind !== 'cutPreview' || !reply.ok) throw new ModelingError('Unexpected reply from the modeling worker.');
@@ -121,9 +100,7 @@ export class ModelingClient {
     return body;
   }
 
-  /** Cut one body by `cuts`, in history order. The result is in the body's own frame. */
   async cut(source: CutSource, cuts: CutFeature[]): Promise<CutBody> {
-    // The worker takes ownership of what it is sent; keep the caller's arrays.
     const target = { ...source, positions: source.positions.slice(), indices: source.indices.slice() };
     const reply = await this._send({ kind: 'cut', cuts, target }, [target.positions.buffer, target.indices.buffer]);
     if (reply.kind !== 'cut' || !reply.ok) throw new ModelingError('Unexpected reply from the modeling worker.');
@@ -135,7 +112,6 @@ export class ModelingClient {
     return body;
   }
 
-  /** The regions the sketch's contours divide its plane into. */
   async regions(sketch: Sketch): Promise<SketchRegion[]> {
     const reply = await this._send({ kind: 'regions', sketch }, []);
     if (reply.kind !== 'regions' || !reply.ok) throw new ModelingError('Unexpected reply from the modeling worker.');
@@ -149,7 +125,6 @@ export class ModelingClient {
     this._pending.clear();
   }
 
-  /** A request against cached bodies, resent once if the worker lost its cache. */
   private async _cached(
     make: (bodies: { bodies: BodyPayload[]; targetKeys: string[]; liveKeys: string[] }) => WithoutId<ModelingRequest>,
     targets: ProjectPart[],
@@ -167,7 +142,6 @@ export class ModelingClient {
     } catch (error) {
       const missing = (error as { missingKeys?: string[] }).missingKeys;
       if (!missing?.length) throw error;
-      // The worker lost its cache (a reload of the worker): send again, once.
       for (const key of missing) this._sent.delete(key);
       return attempt();
     }

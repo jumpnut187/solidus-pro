@@ -1,17 +1,3 @@
-/**
- * The Orient & Parting Line tool's state and actions.
- *
- * Every button computes its result here, in the browser, with the port of
- * `core/orientation.py` in `lib/orientation.ts`: the part moves on the frame
- * the button is pressed, and the placement is then written through the
- * ordinary part PUT. Only the widest-section suggestion and the cope/drag
- * volume split need the server, because they slice the mesh; those are
- * fetched in the background and shown when they arrive.
- *
- * The web client had no undo, so this tool keeps its own: every action
- * records the placements and parting line it is about to change, and
- * "Undo" puts back the last of them.
- */
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 
 import { api, type PartingLine, type PartingLineInfo, type ProjectPart } from '../lib/api';
@@ -36,15 +22,11 @@ import type { OrientPick, OrientPickMode, OrientViewState } from '../lib/viewSta
 export const ROTATION_STEPS = [90, 45, 15, 5] as const;
 export const HEIGHT_STEPS = [0.1, 0.25, 0.5, 1] as const;
 
-/** Parts that sit on the cope side of the parting line by default. */
 const SEAT_ABOVE: readonly string[] = ['riser', 'riser_post', 'sprue', 'pour_cup'];
-/** Parts that hang below it, in the drag, by default. */
 const HANG_BELOW: readonly string[] = ['runner', 'gate'];
 
 const UNDO_LIMIT = 50;
-/** How long the parting line waits for the last nudge before it is saved. */
 const PARTING_SAVE_DEBOUNCE_MS = 300;
-/** How long the cope/drag split waits for the last change before it is measured. */
 const INFO_DEBOUNCE_MS = 350;
 
 type PlacementFields = Pick<
@@ -59,14 +41,12 @@ export type OrientNotify = {
   fail: (error: unknown, fallback?: string) => void;
 };
 
-/** The side a part type sits on by default, or null for no suggestion. */
 export function suggestedPartingSide(partType: string): PartingSide | null {
   if (SEAT_ABOVE.includes(partType)) return 'above';
   if (HANG_BELOW.includes(partType)) return 'below';
   return null;
 }
 
-/** The casting the parting line belongs to: the first visible cast body, else the first cast body. */
 export function castingOf(parts: ProjectPart[]): ProjectPart | null {
   const castings = parts.filter((part) => part.part_type === 'cast');
   return castings.find((part) => part.visible !== false) ?? castings[0] ?? null;
@@ -83,7 +63,6 @@ function placementFields(part: ProjectPart): PlacementFields {
   };
 }
 
-/** Float noise off a coordinate, so 1.0000000000002 is stored and shown as 1. */
 function tidy(value: number): number {
   const rounded = Math.round(value * 1e6) / 1e6;
   return rounded === 0 ? 0 : rounded;
@@ -108,7 +87,6 @@ export type OrientOptions = {
   setSelectedPartId: (id: string | null) => void;
   partingLine: PartingLine | null;
   setPartingLine: Dispatch<SetStateAction<PartingLine | null>>;
-  /** The tool's panel is open. */
   active: boolean;
   notify: OrientNotify;
 };
@@ -126,13 +104,10 @@ export function useOrient(options: OrientOptions) {
   const [infoError, setInfoError] = useState<string | null>(null);
   const [measuring, setMeasuring] = useState(false);
 
-  // Read by the actions, which can fire twice before React re-renders (a
-  // double click): each must see the placement the one before it wrote.
   const partsRef = useRef(parts);
   partsRef.current = parts;
   const partingRef = useRef(partingLine);
   partingRef.current = partingLine;
-  /** Part writes, chained per part so the server sees them in the order they were made. */
   const writeChains = useRef(new Map<string, Promise<unknown>>());
 
   const casting = useMemo(() => castingOf(parts), [parts]);
@@ -143,7 +118,6 @@ export function useOrient(options: OrientOptions) {
   const targetBounds = useMemo(() => (target ? partWorldBounds(target) : null), [target]);
   const castingBounds = useMemo(() => (casting ? partWorldBounds(casting) : null), [casting]);
 
-  // A pick belongs to the open tool and the project it was armed in.
   useEffect(() => {
     if (!active) setPick(null);
   }, [active]);
@@ -153,8 +127,6 @@ export function useOrient(options: OrientOptions) {
     setInfo(null);
     setInfoError(null);
   }, [projectId]);
-
-  // --- Writes ---------------------------------------------------------------
 
   const writePart = useCallback(
     (part: ProjectPart) => {
@@ -169,7 +141,6 @@ export function useOrient(options: OrientOptions) {
     [projectId, notify]
   );
 
-  /** Set placements in state and on the server, after recording them for Undo. */
   const commit = useCallback(
     (label: string, patches: Array<{ id: string } & Partial<PlacementFields>>, parting?: PartingLine | null) => {
       const current = partsRef.current;
@@ -200,7 +171,6 @@ export function useOrient(options: OrientOptions) {
     [setParts, setPartingLine, writePart]
   );
 
-  /** Change only the parting line, recorded for Undo. */
   const commitParting = useCallback(
     (label: string, parting: PartingLine | null) => {
       setUndoStack((stack) => [...stack.slice(-(UNDO_LIMIT - 1)), { label, parts: [], parting: partingRef.current }]);
@@ -210,9 +180,6 @@ export function useOrient(options: OrientOptions) {
     [setPartingLine]
   );
 
-  // The parting line is saved on a short debounce: a run of nudges is one write.
-  // The shell sets the project id and its stored parting line in one update,
-  // so the first value seen for a project is what it was opened with.
   const savedParting = useRef<{ projectId: string | null; key: string }>({ projectId: null, key: '' });
   useEffect(() => {
     const key = JSON.stringify(partingLine);
@@ -228,11 +195,8 @@ export function useOrient(options: OrientOptions) {
     return () => window.clearTimeout(timer);
   }, [projectId, partingLine, notify]);
 
-  // --- Helpers --------------------------------------------------------------
-
   const latest = useCallback((id: string | undefined | null) => partsRef.current.find((part) => part.id === id) ?? null, []);
 
-  /** The part a button acts on, re-read so a double click sees the first click's result. */
   const currentTarget = useCallback(() => {
     const parts = partsRef.current;
     const selected = parts.find((part) => part.id === selectedPartId);
@@ -255,7 +219,6 @@ export function useOrient(options: OrientOptions) {
     [notify]
   );
 
-  /** Keep-on-floor: the Z shift that puts the new lowest point where the old one was. */
   const floorKeep = useCallback(
     (part: ProjectPart, before: WorldBounds, rotation: Vec3, position: Vec3): Vec3 => {
       if (!keepOnFloor) return position;
@@ -266,7 +229,6 @@ export function useOrient(options: OrientOptions) {
     [keepOnFloor]
   );
 
-  /** Move a part straight up or down by `dz`, carrying a locked parting line with the casting. */
   const shiftZ = useCallback(
     (label: string, part: ProjectPart, dz: number) => {
       if (Math.abs(dz) < 1e-9) return;
@@ -281,8 +243,6 @@ export function useOrient(options: OrientOptions) {
     },
     [commit]
   );
-
-  // --- Orientation ----------------------------------------------------------
 
   const rotate = useCallback(
     (axis: WorldAxis, sign: 1 | -1) => {
@@ -324,14 +284,12 @@ export function useOrient(options: OrientOptions) {
     if (!found) return;
     const { part, bounds } = found;
     const placement = placementOf(part);
-    // Undo the whole turn about the part's centre, so it comes back upright where it stands.
     const undoTurn = applyDelta(placement.rotation, placement.position, transpose(eulerToMatrix(placement.rotation)), boundsCenter(bounds));
     const rotation: Vec3 = [0, 0, 0];
     const position = floorKeep(part, bounds, rotation, undoTurn.position);
     commit('Reset orientation', [{ id: part.id, ...fieldsFrom(rotation, position) }]);
   }, [needGeometry, currentTarget, floorKeep, commit]);
 
-  /** Exact Euler angles from the advanced fields. */
   const setExactRotation = useCallback(
     (rotation: Vec3) => {
       const found = needGeometry(currentTarget());
@@ -342,8 +300,6 @@ export function useOrient(options: OrientOptions) {
     },
     [needGeometry, currentTarget, floorKeep, commit]
   );
-
-  // --- Height ---------------------------------------------------------------
 
   const nudgeHeight = useCallback(
     (sign: 1 | -1) => {
@@ -387,10 +343,7 @@ export function useOrient(options: OrientOptions) {
     [needGeometry, currentTarget, commit, notify]
   );
 
-  // --- Parting line ---------------------------------------------------------
-
   const suggestions = info?.suggestions ?? null;
-  /** Preset heights, from the server when it has measured the casting, else from its box. */
   const presets = useMemo(() => {
     const bottom = castingBounds ? castingBounds[0][2] : null;
     const top = castingBounds ? castingBounds[1][2] : null;
@@ -449,8 +402,6 @@ export function useOrient(options: OrientOptions) {
     [setPartingZ, heightStep]
   );
 
-  // --- Picks ----------------------------------------------------------------
-
   const armPick = useCallback((mode: OrientPickMode | null) => setPick((current) => (current === mode ? null : mode)), []);
 
   const handlePick = useCallback(
@@ -469,8 +420,6 @@ export function useOrient(options: OrientOptions) {
     },
     [setPartingZ, faceTo, notify]
   );
-
-  // --- Undo -----------------------------------------------------------------
 
   const undo = useCallback(() => {
     const entry = undoStack.at(-1);
@@ -492,8 +441,6 @@ export function useOrient(options: OrientOptions) {
     partingRef.current = entry.parting;
     setPartingLine(entry.parting);
   }, [undoStack, setParts, setPartingLine, writePart]);
-
-  // --- Server measurements --------------------------------------------------
 
   const castingPlacementKey = casting
     ? `${casting.id}|${casting.filepath}|${casting.rotation_x},${casting.rotation_y},${casting.rotation_z}|` +
@@ -534,11 +481,8 @@ export function useOrient(options: OrientOptions) {
       window.clearTimeout(timer);
       controller.abort();
     };
-    // `castingPlacementKey` stands for every casting field read above.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, projectId, castingPlacementKey, partingZ]);
 
-  /** Depths straight from the casting's box, so they follow every nudge without a round trip. */
   const depths = useMemo(() => {
     if (!partingLine || !castingBounds) return null;
     return {
@@ -547,7 +491,6 @@ export function useOrient(options: OrientOptions) {
     };
   }, [partingLine, castingBounds]);
 
-  /** The server's split, only while it describes the plane and placement on screen. */
   const split =
     info && partingLine && casting && info.part_id === casting.id && Math.abs(info.split_z - partingLine.z) < 1e-3
       ? info.split

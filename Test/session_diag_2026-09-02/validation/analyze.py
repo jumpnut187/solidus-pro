@@ -1,4 +1,3 @@
-"""Summarise one ledger; optionally diff two ledgers column by column."""
 import sys, csv, math
 import numpy as np
 
@@ -17,7 +16,6 @@ def load(path):
         parts = l.rstrip("\n").split(",")
         if len(parts) < n:
             continue
-        # last field is ragged (contains commas): rejoin the tail
         d = dict(zip(hdr[:-1], parts[:n-1]))
         d[hdr[-1]] = ",".join(parts[n-1:])
         rows.append(d)
@@ -37,11 +35,10 @@ def summarize(path, label):
         if k not in hdr: continue
         v = np.array([f(r,k) for r in rows])
         v = v[np.isfinite(v)]
-        if not v.size: 
+        if not v.size:
             print(f"  {k:20s} all non-finite/absent"); continue
         print(f"  {k:20s} first={v[0]:.6g} last={v[-1]:.6g} min={v.min():.6g} "
               f"max={v.max():.6g} p99={np.percentile(v,99):.6g} med={np.median(v):.6g}")
-    # monotonic wet mass?
     wm = np.array([f(r,"wet_mass") for r in rows])
     d = np.diff(wm)
     bad = np.nonzero(d < -1e-9)[0]
@@ -56,7 +53,6 @@ def summarize(path, label):
     return hdr, rows
 
 def parse_prof(s, part):
-    """pull 'part[z:n;z:n]' out of a wetz_by_type field"""
     key = part + "["
     i = s.find(key)
     if i < 0: return {}
@@ -84,7 +80,6 @@ def riser_check(path, label, riser="riser", below=("cast",)):
         zs = sorted(rp)
         if firstr is None:
             firstr = (r["step"], zs[0], zs[-1], dict(sorted(rp.items())))
-        # contiguity of the wet riser column set
         gaps = [z for z in range(zs[0], zs[-1]+1) if z not in rp]
         if gaps:
             noncontig.append((r["step"], zs[0], zs[-1], gaps[:12], len(gaps)))
@@ -96,7 +91,6 @@ def riser_check(path, label, riser="riser", below=("cast",)):
     print(f"  rows with a z-gap inside the wet riser span: {len(noncontig)}")
     for e in noncontig[:6]:
         print(f"    step {e[0]}: span {e[1]}..{e[2]}, {e[4]} empty planes inside, e.g. {e[3]}")
-    # global: highest wet z per part over time, and the front
     print("  --- per-part wet z span over the run (first / last row) ---")
     for r in (rows[0], rows[-1]):
         s = r["wetz_by_type"]
@@ -124,7 +118,6 @@ if __name__ == "__main__":
             print(f"{k:20s} {va[-1]:12.6g} {vb[-1]:12.6g} "
                   f"{(va.max() if va.size else float('nan')):12.6g} "
                   f"{(vb.max() if vb.size else float('nan')):12.6g}")
-        # step-aligned comparison on shared steps
         da = {int(r['step']): r for r in ra}; db = {int(r['step']): r for r in rb}
         shared = sorted(set(da) & set(db))
         print(f"\nshared steps: {len(shared)} ({shared[0] if shared else '-'}..{shared[-1] if shared else '-'})")

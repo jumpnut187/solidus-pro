@@ -1,25 +1,11 @@
-/**
- * Casting orientation math, a line-for-line port of `core/orientation.py`.
- *
- * Conventions match the engine (`core.part_manager.Part._apply_transform`):
- * Z-up, right-handed, inches, and a part's world vertex is `x = R (s v) + p`
- * with `R = Rz @ Ry @ Rx` (trimesh's static-XYZ `'sxyz'` Euler angles). The
- * Orient panel computes every button press here so the part moves on the
- * frame the button is pressed; `tests/orientation.check.ts` compares these
- * functions with the Python ones on fixed cases.
- *
- * Matrices are 3x3, row-major, column-vector convention (`m[row][col]`).
- */
 import type { ProjectPart } from './api';
 
 export type Vec3 = [number, number, number];
 export type Mat3 = [Vec3, Vec3, Vec3];
 export type WorldAxis = 'x' | 'y' | 'z';
-/** `[[xmin, ymin, zmin], [xmax, ymax, zmax]]`, as `core.orientation.world_bounds`. */
 export type WorldBounds = [Vec3, Vec3];
 export type PartingSide = 'above' | 'below';
 
-/** The placement fields of a part the orientation math reads and writes. */
 export type PartPlacement = {
   rotation: Vec3;
   position: Vec3;
@@ -27,11 +13,9 @@ export type PartPlacement = {
 };
 
 const AXES: Record<WorldAxis, Vec3> = { x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
-/** numpy's `finfo(float).eps * 4`, the threshold trimesh's `euler_from_matrix` uses. */
 const EULER_EPSILON = 2.220446049250313e-16 * 4;
 const DEG = Math.PI / 180;
 
-/** Wrap to (-180, 180] and round away float noise so 90 stays 90. */
 export function cleanAngle(value: number): number {
   const shifted = value + 180;
   let angle = (((shifted % 360) + 360) % 360) - 180;
@@ -40,7 +24,6 @@ export function cleanAngle(value: number): number {
   return rounded === 0 ? 0 : rounded;
 }
 
-/** 3x3 rotation matrix for static-XYZ Euler angles in degrees. */
 export function eulerToMatrix(rotationDeg: Vec3): Mat3 {
   const [ax, ay, az] = rotationDeg.map((value) => value * DEG);
   const cx = Math.cos(ax);
@@ -56,7 +39,6 @@ export function eulerToMatrix(rotationDeg: Vec3): Mat3 {
   ];
 }
 
-/** Static-XYZ Euler angles in degrees for a rotation matrix (trimesh `euler_from_matrix(..., 'sxyz')`). */
 export function matrixToEuler(m: Mat3): Vec3 {
   const cy = Math.hypot(m[0][0], m[1][0]);
   let ax: number;
@@ -116,7 +98,6 @@ function scaled(v: Vec3, s: number): Vec3 {
   return [v[0] * s, v[1] * s, v[2] * s];
 }
 
-/** Rotation about a world axis (`'x'`/`'y'`/`'z'` or a vector), trimesh `rotation_matrix`. */
 export function axisRotationMatrix(axis: WorldAxis | Vec3, angleDeg: number): Mat3 {
   const raw = typeof axis === 'string' ? AXES[axis] : axis;
   const d = scaled(raw, 1 / norm(raw));
@@ -131,13 +112,11 @@ export function axisRotationMatrix(axis: WorldAxis | Vec3, angleDeg: number): Ma
   ];
 }
 
-/** New position so a rotation `delta` turns the part about `pivot`: `p' = D (p - c) + c`. */
 export function pivotPosition(position: Vec3, delta: Mat3, pivot: Vec3): Vec3 {
   const turned = apply(delta, [position[0] - pivot[0], position[1] - pivot[1], position[2] - pivot[2]]);
   return [turned[0] + pivot[0], turned[1] + pivot[1], turned[2] + pivot[2]];
 }
 
-/** Compose `delta` onto the part's orientation (`R' = D R`) about `pivot`. */
 export function applyDelta(rotationDeg: Vec3, position: Vec3, delta: Mat3, pivot: Vec3): { rotation: Vec3; position: Vec3 } {
   return {
     rotation: matrixToEuler(multiply(delta, eulerToMatrix(rotationDeg))),
@@ -145,13 +124,6 @@ export function applyDelta(rotationDeg: Vec3, position: Vec3, delta: Mat3, pivot
   };
 }
 
-/**
- * Turn a part `angleDeg` about a world axis through `pivot`.
- *
- * Composes with the current orientation, so repeated 90 degree turns about
- * different axes do what the user sees on screen; adding to one Euler field
- * does not.
- */
 export function rotateAboutWorldAxis(
   rotationDeg: Vec3,
   position: Vec3,
@@ -162,7 +134,6 @@ export function rotateAboutWorldAxis(
   return applyDelta(rotationDeg, position, axisRotationMatrix(axis, angleDeg), pivot);
 }
 
-/** Smallest rotation taking direction `src` onto direction `dst`. */
 export function alignVectorMatrix(src: Vec3, dst: Vec3): Mat3 {
   const a = scaled(src, 1 / norm(src));
   const b = scaled(dst, 1 / norm(dst));
@@ -176,7 +147,6 @@ export function alignVectorMatrix(src: Vec3, dst: Vec3): Mat3 {
         [0, 0, 1]
       ];
     }
-    // Opposite: turn 180 degrees about any axis perpendicular to `a`.
     let perp = cross(a, [1, 0, 0]);
     if (norm(perp) < 1e-6) perp = cross(a, [0, 1, 0]);
     return axisRotationMatrix(scaled(perp, 1 / norm(perp)), 180);
@@ -185,12 +155,6 @@ export function alignVectorMatrix(src: Vec3, dst: Vec3): Mat3 {
   return axisRotationMatrix(scaled(axis, 1 / norm(axis)), angle);
 }
 
-/**
- * Turn a part so a picked face (`worldNormal`) points at `target`.
- *
- * Default target `-Z` lays the face flat on the floor ("Face down"); `+Z` is
- * "Face up".
- */
 export function faceToDirection(
   rotationDeg: Vec3,
   position: Vec3,
@@ -201,10 +165,6 @@ export function faceToDirection(
   return applyDelta(rotationDeg, position, alignVectorMatrix(worldNormal, target), pivot);
 }
 
-/**
- * World bounds of a placed vertex array (flat `[x, y, z, ...]`), as
- * `core.orientation.world_bounds`.
- */
 export function worldBounds(vertices: ArrayLike<number>, placement: PartPlacement): WorldBounds {
   const r = eulerToMatrix(placement.rotation);
   const s = placement.scale || 1;
@@ -240,34 +200,19 @@ export function boundsSize(bounds: WorldBounds): Vec3 {
   return [bounds[1][0] - bounds[0][0], bounds[1][1] - bounds[0][1], bounds[1][2] - bounds[0][2]];
 }
 
-/** Z shift that puts the part's lowest point on `floorZ`. */
 export function dropToFloorDz(bounds: WorldBounds, floorZ = 0): number {
   return floorZ - bounds[0][2];
 }
 
-/**
- * Z shift that seats a part on the parting plane.
- *
- * `above`: bottom face on the plane (cope-side riser, sprue).
- * `below`: top face on the plane (drag-side runner, gate).
- */
 export function snapToPartingDz(bounds: WorldBounds, partingZ: number, side: PartingSide = 'above'): number {
   return side === 'below' ? partingZ - bounds[1][2] : partingZ - bounds[0][2];
 }
 
-/** Round an angle to the nearest `step` degrees. */
 export function snapAngle(angleDeg: number, step = 15): number {
   if (step <= 0) return angleDeg;
   return cleanAngle(Math.round(angleDeg / step) * step);
 }
 
-/**
- * The unit quaternion `[x, y, z, w]` of a rotation matrix.
- *
- * Babylon's `Quaternion` uses the same component order and the same
- * right-hand rotation sense, so this is what `mesh.rotationQuaternion` takes
- * to place a part exactly as the engine does.
- */
 export function matrixToQuaternion(m: Mat3): [number, number, number, number] {
   const trace = m[0][0] + m[1][1] + m[2][2];
   let x: number;
@@ -303,7 +248,6 @@ export function matrixToQuaternion(m: Mat3): [number, number, number, number] {
   return [x / length, y / length, z / length, w / length];
 }
 
-/** The engine's rotation of a part as a Babylon-ready quaternion `[x, y, z, w]`. */
 export function partQuaternion(rotationDeg: Vec3): [number, number, number, number] {
   return matrixToQuaternion(eulerToMatrix(rotationDeg));
 }
@@ -316,17 +260,12 @@ export function placementOf(part: ProjectPart): PartPlacement {
   };
 }
 
-/** World bounds of a part from its triangles, or null while its geometry is not loaded. */
 export function partWorldBounds(part: ProjectPart): WorldBounds | null {
   const vertices = part.meshData?.vertices;
   if (!vertices?.length) return null;
   return worldBounds(vertices, placementOf(part));
 }
 
-/**
- * Conservative world bounds from the part's local box corners, for framing.
- * Cheap enough to run on every render; exact only for unrotated parts.
- */
 export function partBoxWorldBounds(part: ProjectPart): WorldBounds | null {
   const box = part.meshData?.bounds;
   if (!box) return null;

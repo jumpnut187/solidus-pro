@@ -5,11 +5,6 @@ import { referencePlaneProblem, sketchProblem, STANDARD_PLANES } from '../lib/mo
 import type { CameraPreset } from '../lib/viewState';
 import { SKETCH_TOOLS } from './sketchTools';
 
-/**
- * The CommandManager over the canvas while a body is being modeled: the
- * sketch tools within a mouse flick of the sketch, and the confirm/cancel
- * pair SOLIDWORKS keeps in the corner of the graphics area.
- */
 export function ModelingToolbar({
   modeling,
   onCamera

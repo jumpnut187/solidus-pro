@@ -5,7 +5,6 @@ from unittest.mock import MagicMock, patch
 
 from ui.main_window import MainWindow
 
-
 class DesktopAnalysisOptionsTests(unittest.TestCase):
     def test_fraction_liquid_does_not_force_thermal_solver(self) -> None:
         window = MainWindow.__new__(MainWindow)
@@ -61,7 +60,6 @@ class DesktopAnalysisOptionsTests(unittest.TestCase):
         window.visualizer.clear_visualization.assert_called_once_with()
         reset_memory_manager.assert_called_once_with()
         collect.assert_called_once_with()
-
 
 if __name__ == "__main__":
     unittest.main()

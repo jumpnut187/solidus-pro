@@ -1,9 +1,3 @@
-"""A walled tower with a ceramic slab across it: does the metal cross, and
-does any porous cell hold a negative population while it does?
-
-Sizing probe for the regression test that goes into
-tests/test_filling_stability.py.
-"""
 import os, sys
 sys.path.insert(0, "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -11,7 +5,6 @@ import numpy as np
 
 from tests.test_filling_stability import _walled_tower, _run, DX
 from core.part_manager import PART_TYPE_FILTER, PART_TYPE_CAST
-
 
 def filtered_tower(nz=14, width=3, band=(5, 7)):
     mesh = _walled_tower(nz=nz, width=width)
@@ -23,7 +16,6 @@ def filtered_tower(nz=14, width=3, band=(5, 7)):
     print("filter cells:", int(inband.sum()))
     mesh.voxel_part_types[inband] = PART_TYPE_FILTER
     return mesh
-
 
 def main():
     import physics.filling as pf
@@ -62,7 +54,6 @@ def main():
           "max wet_porous:", max(s[3] for s in samples))
     for m in msgs[-6:]:
         print("  msg:", m)
-
 
 if __name__ == "__main__":
     main()

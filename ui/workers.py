@@ -1,5 +1,3 @@
-"""Background workers for simulation and ML recommendations."""
-
 from __future__ import annotations
 
 import threading
@@ -19,12 +17,10 @@ from core.simulation_pipeline import (
     run_pipeline,
 )
 
-
 class SimulationWorker(QThread):
-    """Background thread for running simulation."""
 
     progress = Signal(str)
-    detailed_progress = Signal(int, int, str)  # current, total, stage
+    detailed_progress = Signal(int, int, str)
     finished = Signal(bool, str)
 
     def __init__(
@@ -55,12 +51,10 @@ class SimulationWorker(QThread):
         self.pour_location = pour_location
         self.voxel_mesh: Any = None
         self.simulation: Any = None
-        # Text of a MeshGenerationError, shown verbatim by the failure dialog.
         self.mesh_error_message: Optional[str] = None
         self._cancel_requested = threading.Event()
 
     def _log_mesh_training_example(self, outcome: dict) -> None:
-        """Feed the voxel-size recommender (``data/mesh_runs.csv``)."""
         log_mesh_training_example(
             self.stl_loader,
             {
@@ -75,11 +69,9 @@ class SimulationWorker(QThread):
         self.detailed_progress.emit(current, total, stage)
 
     def cancel(self) -> None:
-        """Request cancellation for the active simulation."""
         self._cancel_requested.set()
 
     def _maybe_capture_surrogate_training_data(self) -> None:
-        """Opt-in capture of this run as surrogate training data."""
         try:
             from config.settings import get_settings
 
@@ -118,7 +110,6 @@ class SimulationWorker(QThread):
             if use_incremental:
                 perf_flags.append("Incremental")
             perf_text = f" [{', '.join(perf_flags)}]" if perf_flags else ""
-            # None means settings.mesh.voxel_cut_cells.
             voxel_cut_cells = self.performance_options.get("voxel_cut_cells")
 
             self.progress.emit(f"Generating adaptive voxel mesh (Memory: {self.memory_mode.upper()}){perf_text}...")
@@ -209,9 +200,7 @@ class SimulationWorker(QThread):
             )
             self.finished.emit(False, "failed")
 
-
 class MeshSuggestionWorker(QThread):
-    """Background worker that generates ML mesh recommendations."""
 
     result_ready = Signal(object)
     error = Signal(str)
@@ -228,13 +217,11 @@ class MeshSuggestionWorker(QThread):
         except Exception as exc:
             self.error.emit(str(exc))
 
-
 class SurrogateTrainWorker(QThread):
-    """Background worker that trains a surrogate model from captured data."""
 
     progress = Signal(str)
-    detailed_progress = Signal(int, int, str)  # current, total, stage
-    finished = Signal(bool, str, object)  # success, status, summary
+    detailed_progress = Signal(int, int, str)
+    finished = Signal(bool, str, object)
 
     def __init__(
         self,
@@ -253,7 +240,6 @@ class SurrogateTrainWorker(QThread):
         self._cancel_requested = threading.Event()
 
     def cancel(self) -> None:
-        """Request cancellation for the active training run."""
         self._cancel_requested.set()
 
     def run(self) -> None:
@@ -286,12 +272,10 @@ class SurrogateTrainWorker(QThread):
             self.progress.emit(f"Error: {str(exc)}")
             self.finished.emit(False, "failed", None)
 
-
 class SurrogateWorker(QThread):
-    """Background worker that runs a surrogate (NPU/ML) simulation."""
 
     progress = Signal(str)
-    detailed_progress = Signal(int, int, str)  # current, total, stage
+    detailed_progress = Signal(int, int, str)
     finished = Signal(bool, str)
 
     def __init__(
@@ -311,7 +295,6 @@ class SurrogateWorker(QThread):
         super().__init__()
         self.stl_loader = stl_loader
         self.model = model
-        # None means settings.mesh.voxel_cut_cells.
         self.voxel_cut_cells = voxel_cut_cells
         self.alloy_name = alloy_name
         self.voxel_size = voxel_size
@@ -326,7 +309,6 @@ class SurrogateWorker(QThread):
         self._cancel_requested = threading.Event()
 
     def cancel(self) -> None:
-        """Request cancellation for the active surrogate run."""
         self._cancel_requested.set()
 
     def _progress_callback(self, current: int, total: int, stage: str) -> None:
@@ -369,13 +351,11 @@ class SurrogateWorker(QThread):
             self.progress.emit(f"Error: {str(exc)}")
             self.finished.emit(False, "failed")
 
-
 class DeepTrainWorker(QThread):
-    """Background worker that trains the deep 3D U-Net surrogate."""
 
     progress = Signal(str)
-    detailed_progress = Signal(int, int, str)  # current, total, stage
-    finished = Signal(bool, str, object)  # success, status, summary
+    detailed_progress = Signal(int, int, str)
+    finished = Signal(bool, str, object)
 
     def __init__(
         self,
@@ -400,7 +380,6 @@ class DeepTrainWorker(QThread):
         self._cancel_requested = threading.Event()
 
     def cancel(self) -> None:
-        """Request cancellation for the active training run."""
         self._cancel_requested.set()
 
     def run(self) -> None:
@@ -431,7 +410,6 @@ class DeepTrainWorker(QThread):
                 detailed_cb=_detailed,
                 cancel_cb=self._cancel_requested.is_set,
             )
-            # Refresh the auto-train state so cooldown applies after a manual train.
             signature = dataset_signature(self.data_dir)
             state = AutoTrainState(
                 signature_count=signature[0] if signature else 0,
@@ -449,12 +427,10 @@ class DeepTrainWorker(QThread):
             self.progress.emit(f"Error: {str(exc)}")
             self.finished.emit(False, "failed", None)
 
-
 class DeepExportWorker(QThread):
-    """Background worker that exports the deep model to an NPU target."""
 
     progress = Signal(str)
-    finished = Signal(bool, str, object)  # success, status, result
+    finished = Signal(bool, str, object)
 
     def __init__(self, model_dir: str, target: str, out_dir: str) -> None:
         super().__init__()
@@ -464,7 +440,6 @@ class DeepExportWorker(QThread):
         self._cancel_requested = threading.Event()
 
     def cancel(self) -> None:
-        """Request cancellation for the active export run."""
         self._cancel_requested.set()
 
     def run(self) -> None:
@@ -484,19 +459,11 @@ class DeepExportWorker(QThread):
             self.progress.emit(f"Error: {str(exc)}")
             self.finished.emit(False, "failed", None)
 
-
 class DeepAutoTrainWorker(QThread):
-    """Background worker that evaluates the retrain policy, then trains.
-
-    Watcher-driven (the main window owns the ``QFileSystemWatcher`` on the
-    dataset directory): this worker applies the policy (min records, cooldown,
-    dataset-changed, torch present, no other training/export) and either skips
-    (emitting a reason) or retrains on the entire accumulated dataset.
-    """
 
     progress = Signal(str)
-    detailed_progress = Signal(int, int, str)  # current, total, stage
-    finished = Signal(bool, str, object)  # success, status, summary
+    detailed_progress = Signal(int, int, str)
+    finished = Signal(bool, str, object)
     skipped = Signal(str)
 
     def __init__(
@@ -521,12 +488,11 @@ class DeepAutoTrainWorker(QThread):
         self.learning_rate = float(learning_rate)
         self.min_records = int(min_records)
         self.cooldown_seconds = int(cooldown_seconds)
-        self.state = state  # AutoTrainState; updated + persisted on completion
+        self.state = state
         self.export_in_progress = bool(export_in_progress)
         self._cancel_requested = threading.Event()
 
     def cancel(self) -> None:
-        """Request cancellation for the active auto-train run."""
         self._cancel_requested.set()
 
     def run(self) -> None:
@@ -544,7 +510,7 @@ class DeepAutoTrainWorker(QThread):
 
             torch_available = True
             try:
-                import torch  # noqa: F401
+                import torch
             except ImportError:
                 torch_available = False
 

@@ -1,18 +1,3 @@
-/**
- * The 45 solidification parameters, mirroring
- * `SolidificationParamsDialog.FIELD_DEFS` in `ui/main_window.py` field for
- * field: same labels, defaults, ranges, steps, decimals, units and help text.
- *
- * Two structural quirks of the desktop dialog are reproduced deliberately:
- *
- * - `INERT_FIELD_KEYS` are serialized and round-trip through saved projects but
- *   no solver reads them. They are hidden rather than deleted, because a
- *   control that promises to change the answer and does not is worse than no
- *   control at all.
- * - `FILTER_KEYS` share the Filling tab visually but live one level deeper in
- *   the persisted structure, at `filling.filter.*`.
- */
-
 export type ParamGroup =
   | 'feeding'
   | 'chill'
@@ -52,10 +37,8 @@ export const PARAM_TABS: ParamTab[] = [
   { id: 'filling', label: 'Filling' }
 ];
 
-/** Rendered as a slider paired with a numeric entry, not a bare number box. */
 export const SLIDER_KEYS: ReadonlySet<string> = new Set(['feeding_zone_vertical_bias']);
 
-/** Serialized but unread by any solver — hidden from the UI. */
 export const INERT_KEYS: ReadonlySet<string> = new Set([
   'pour_time_s',
   'rated_velocity_warn_factor',
@@ -64,7 +47,6 @@ export const INERT_KEYS: ReadonlySet<string> = new Set([
   'drag_enabled'
 ]);
 
-/** Filling-tab fields that persist under `filling.filter.*`. */
 export const FILTER_KEYS: ReadonlySet<string> = new Set([
   'porosity',
   'pore_diameter_mm',
@@ -78,13 +60,11 @@ export const FILTER_KEYS: ReadonlySet<string> = new Set([
   'drag_enabled'
 ]);
 
-/** A 0/1 field is a checkbox, not a spin box that accepts 0.5. */
 export function isBooleanParam(def: ParamDef): boolean {
   return def.min === 0 && def.max === 1 && def.step === 1 && def.decimals === 0;
 }
 
 export const PARAM_DEFS: ParamDef[] = [
-  // --- Feeding -------------------------------------------------------------
   {
     group: 'feeding',
     key: 'base_feeding_distance',
@@ -182,7 +162,6 @@ export const PARAM_DEFS: ParamDef[] = [
     help:
       'Strength of +Z directional solidification inside the riser feeding zone. Higher hardens directional freezing toward risers. 0 disables the feeding-zone extra (a constant 0.3 baseline bias still applies to the whole cast). No-op when no riser voxels are present.'
   },
-  // --- Chills --------------------------------------------------------------
   {
     group: 'chill',
     key: 'max_chill_boost',
@@ -243,7 +222,6 @@ export const PARAM_DEFS: ParamDef[] = [
     unit: 'voxels',
     help: 'When no explicit chill thickness is available, estimate as this x voxel_size.'
   },
-  // --- Exothermic ----------------------------------------------------------
   {
     group: 'exothermic',
     key: 'ignition_delay',
@@ -304,7 +282,6 @@ export const PARAM_DEFS: ParamDef[] = [
     unit: 'seconds',
     help: 'Time constant for exothermic effect decay after burnout.'
   },
-  // --- Air gap -------------------------------------------------------------
   {
     group: 'air_gap',
     key: 'time_constant',
@@ -341,7 +318,6 @@ export const PARAM_DEFS: ParamDef[] = [
     unit: 'fraction',
     help: 'Maximum slowdown at the surface due to the air gap (0.75 = 25% slower).'
   },
-  // --- Thermal boundary ----------------------------------------------------
   {
     group: 'thermal_boundary',
     key: 'mold_temperature',
@@ -414,7 +390,6 @@ export const PARAM_DEFS: ParamDef[] = [
     unit: 'W/m2K',
     help: 'Heat-transfer coefficient at the gating/filter-mold interface (sprue, runner, gate, pour cup, filter).'
   },
-  // --- Timing --------------------------------------------------------------
   {
     group: 'timing',
     key: 'chvorinov_mold_constant',
@@ -499,7 +474,6 @@ export const PARAM_DEFS: ParamDef[] = [
     unit: 'fraction',
     help: 'Maximum slowdown from heat-saturated sand (0.6 = 1.7x slower).'
   },
-  // --- Hot tear ------------------------------------------------------------
   {
     group: 'hot_tear',
     key: 'mold_restraint_index',
@@ -596,7 +570,6 @@ export const PARAM_DEFS: ParamDef[] = [
     unit: 'voxels',
     help: 'Search depth for the solidification path strain calculation.'
   },
-  // --- Filling -------------------------------------------------------------
   {
     group: 'filling',
     key: 'pour_rate_lb_s',
@@ -792,7 +765,6 @@ export const PARAM_DEFS: ParamDef[] = [
     unit: 'steps',
     help: 'Lattice steps between air-entrapment connected-component checks during the fill.'
   },
-  // Filter sub-group (persists under filling.filter.*)
   {
     group: 'filling',
     key: 'porosity',
@@ -915,7 +887,6 @@ export const PARAM_DEFS: ParamDef[] = [
   }
 ];
 
-/** Visible (non-inert) fields for one tab, filter fields last. */
 export function paramsForTab(tab: ParamGroup): { main: ParamDef[]; filter: ParamDef[] } {
   const visible = PARAM_DEFS.filter((def) => def.group === tab && !INERT_KEYS.has(def.key));
   return {

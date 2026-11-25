@@ -5,9 +5,7 @@ import { Modal } from './Modal';
 export type ConfirmRequest = {
   title: string;
   message: string;
-  /** Label for the confirming action. Defaults to "Confirm". */
   confirmLabel?: string;
-  /** Red-styles the confirming action for a destructive operation. */
   destructive?: boolean;
   onConfirm: () => void;
 };
@@ -53,11 +51,6 @@ export type PromptRequest = {
   onSubmit: (value: string) => void;
 };
 
-/**
- * Replaces the browser `prompt()` the desktop parity features would otherwise
- * need (arrange spacing, rename, save as). A native prompt is blocking, cannot
- * be styled, and is suppressed outright in some browsers.
- */
 export function PromptDialog({ request, onClose }: { request: PromptRequest; onClose: () => void }) {
   const [value, setValue] = useState(request.initialValue);
   const submit = () => {

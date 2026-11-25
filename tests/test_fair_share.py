@@ -1,5 +1,3 @@
-"""Tests for fair-share CPU/thread budgeting and memory gating."""
-
 from __future__ import annotations
 
 import os
@@ -25,9 +23,7 @@ from web.services.fair_share import (
 )
 from web.services.simulation_queue import default_queue_config
 
-
 class ThreadShareTests(unittest.TestCase):
-    """Fair-share core division math."""
 
     def test_resolve_usable_cores(self) -> None:
         self.assertEqual(resolve_usable_cores(24, 1), 23)
@@ -46,9 +42,7 @@ class ThreadShareTests(unittest.TestCase):
     def test_share_never_zero(self) -> None:
         self.assertGreaterEqual(compute_thread_share(4, 1000), 1)
 
-
 class MemoryGateTests(unittest.TestCase):
-    """Memory-aware concurrency gating."""
 
     def test_cap_reached_blocks(self) -> None:
         self.assertFalse(
@@ -110,9 +104,7 @@ class MemoryGateTests(unittest.TestCase):
             )
         )
 
-
 class BudgetProviderTests(unittest.TestCase):
-    """Budget provider applies shared values to the process."""
 
     def tearDown(self) -> None:
         set_process_thread_budget(None)
@@ -151,9 +143,7 @@ class BudgetProviderTests(unittest.TestCase):
     def test_provider_none_when_no_shared_value(self) -> None:
         self.assertIsNone(make_thread_budget_provider(None))
 
-
 class ThreadBudgetResolutionTests(unittest.TestCase):
-    """Budget resolution precedence and solidification target capping."""
 
     def tearDown(self) -> None:
         set_process_thread_budget(None)
@@ -190,9 +180,6 @@ class ThreadBudgetResolutionTests(unittest.TestCase):
     def test_hardware_cap_lowers_compute_count(self) -> None:
         base = hardware.get_optimal_thread_count('compute')
         hardware.set_thread_cap(2)
-        # A cap can only lower the count: on a runner with fewer than two
-        # usable cores the machine's own optimum wins. Mirrors the env-cap
-        # test below, which already expects min(base, cap).
         self.assertEqual(hardware.get_optimal_thread_count('compute'), min(base, 2))
         hardware.set_thread_cap(None)
         self.assertEqual(hardware.get_optimal_thread_count('compute'), base)
@@ -202,9 +189,7 @@ class ThreadBudgetResolutionTests(unittest.TestCase):
         os.environ["CASTSIM_THREAD_BUDGET"] = "3"
         self.assertEqual(hardware.get_optimal_thread_count('compute'), min(base, 3))
 
-
 class DefaultQueueConfigTests(unittest.TestCase):
-    """Env-driven queue configuration."""
 
     def tearDown(self) -> None:
         for name in (
@@ -237,7 +222,6 @@ class DefaultQueueConfigTests(unittest.TestCase):
         os.environ["CASTSIM_MAX_CONCURRENT_SIMULATIONS"] = "not-a-number"
         config = default_queue_config()
         self.assertGreaterEqual(config.max_concurrent_simulations, 1)
-
 
 if __name__ == "__main__":
     unittest.main()

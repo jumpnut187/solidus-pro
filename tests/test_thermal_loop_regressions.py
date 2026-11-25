@@ -1,16 +1,3 @@
-"""Regression tests for the thermal-coupled integration loop internals.
-
-Covers:
-- A3: latent heat applied in the SAME step (no one-step lag), so per-step
-  energy is conserved.
-- A4: the heuristic feeding-zone vertical solidification bias is disabled in
-  the temperature-driven thermal loop.
-- B8: unfinished voxels get NaN end/solidification times (never 0.0, which
-  would collide with chill/pre-solid semantics).
-- P1: the per-iteration thermal-gradient kernel and Niyama history sampler are
-  skipped when no downstream analysis (niyama/hot_tear/shrinkage/feeding_path)
-  consumes them.
-"""
 from __future__ import annotations
 
 import unittest
@@ -22,11 +9,9 @@ from core.solidification_loop import _run_thermal_coupled_integration, run_time_
 from core.solidification_params import SolidificationParameters
 from physics.solidification_physics import SolidificationModel
 
-
 class _DummyLogger:
     def info(self, _message: str, context=None) -> None:
         self.context = context
-
 
 class _DummyAlloy:
     name = "DUMMY"
@@ -38,15 +23,7 @@ class _DummyAlloy:
     specific_heat = 1.0
     critical_fraction_solid = 0.5
 
-
 class _RecordingHeatModel:
-    """Heat model that records the temperature field right after each step.
-
-    ``post_step_temperatures`` holds a copy taken immediately after the pure
-    diffusion step, so tests can verify the same-step latent correction is
-    added on top of the diffusion-only result. ``set_heat_source`` is kept to
-    prove the integration loop no longer calls it.
-    """
 
     def __init__(self, n_voxels: int, initial: np.ndarray, drop_per_step: float) -> None:
         self._temperatures = np.asarray(initial, dtype=np.float64).copy()
@@ -75,7 +52,6 @@ class _RecordingHeatModel:
     def set_heat_source(self, source: np.ndarray) -> None:
         self.set_heat_source_calls += 1
         self._heat_source[:] = source
-
 
 def _build_engine(
     *,
@@ -134,24 +110,13 @@ def _build_engine(
     engine._thermal_voxel_size_m = 0.00254
     return engine
 
-
 class ThermalLoopRegressionTests(unittest.TestCase):
     def test_latent_heat_applied_same_step(self) -> None:
-        """The latent release must be applied to the SAME step's post-diffusion
-        field via the implicit enthalpy solve (apparent-heat-capacity form),
-        not deferred to the next step via a heat source, and not as the naive
-        explicit correction that overshoots and stalls the mushy plateau."""
         engine = _build_engine(n_voxels=1, max_time=2.0, time_step=1.0)
         heat_model = engine._thermal_heat_model
 
         _run_thermal_coupled_integration(engine, show_progress=False, progress_callback=None)
 
-        # Dummy alloy: T_liq=100, T_sol=0, dT=100, latent=10, rho_l=rho_s=2,
-        # cp=1 -> beta = L_vol/rho_cp = (10*2)/(2*1) = 10 K per unit fs.
-        # Implicit mushy solve: T_final = (T_post + beta*(T_liq/dT - fs_prev)) / (1 + beta/dT)
-        # Step 1: T_post = 100 - 5 = 95, fs_prev = 0 -> T_final = (95 + 10)/1.1 = 95.4545...
-        # Step 2: T_post = 95.4545 - 5 = 90.4545, fs_prev = 0.04545
-        #         -> T_final = (90.4545 + 10*(1 - 0.04545))/1.1 = 90.9090...
         expected = np.array([90.9090909090909], dtype=np.float64)
         np.testing.assert_allclose(
             heat_model._temperatures,
@@ -162,15 +127,10 @@ class ThermalLoopRegressionTests(unittest.TestCase):
                 "implicit enthalpy solve, not via a one-step-lagged source"
             ),
         )
-        # The correction is positive (latent released this step) even though
-        # the diffusion-only field dropped: same-step behavior.
         self.assertGreater(float(heat_model._temperatures[0]), float(heat_model.post_step_temperatures[-1][0]))
         self.assertEqual(heat_model.set_heat_source_calls, 0)
 
     def test_heat_source_not_set_in_loop(self) -> None:
-        """The thermal loop must never call set_heat_source: latent heat is
-        applied via the same-step temperature correction, so the heat source
-        stays zeroed from initialization."""
         engine = _build_engine(n_voxels=2, max_time=2.0, time_step=1.0)
         heat_model = engine._thermal_heat_model
 
@@ -185,9 +145,6 @@ class ThermalLoopRegressionTests(unittest.TestCase):
         )
 
     def test_bias_disabled_in_thermal_mode(self) -> None:
-        """feeding_zone_vertical_bias must not change thermal-coupled results:
-        two identical engines with bias 0.0 vs 2.0 (riser assembly) produce
-        identical voxel states and solidification times."""
         weak_engine = _build_engine(
             n_voxels=4,
             feeding_bias=0.0,
@@ -239,8 +196,6 @@ class ThermalLoopRegressionTests(unittest.TestCase):
         )
 
     def test_unfinished_voxels_get_nan(self) -> None:
-        """Voxels still liquid at the max_time cap get NaN end/solidification
-        times (never 0.0); chill/pre-solid voxels keep their 0.0 times."""
         engine = _build_engine(
             n_voxels=3,
             initial_temperatures=np.array([90.0, 95.0, 200.0], dtype=np.float64),
@@ -249,7 +204,6 @@ class ThermalLoopRegressionTests(unittest.TestCase):
             time_step=1.0,
         )
         solidification_model = engine._thermal_solidification_model
-        # Pre-solid chill voxel 0 (as set up by _initialize_thermal_solver).
         solidification_model._fraction_solid[0] = 1.0
         solidification_model._fraction_solid_prev[0] = 1.0
         solidification_model._solidification_start[0] = 0.0
@@ -263,22 +217,18 @@ class ThermalLoopRegressionTests(unittest.TestCase):
         _run_thermal_coupled_integration(engine, show_progress=False, progress_callback=None)
 
         states = engine.mesh.voxel_states
-        # Voxel 1 started but did not finish; voxel 2 never started.
         self.assertLess(float(states[1]), 0.99)
         self.assertLess(float(states[2]), 0.99)
         self.assertGreater(float(states[1]), 0.0)
         self.assertAlmostEqual(float(states[2]), 0.0, places=6)
 
-        # Chill voxel keeps its pre-solid 0.0 times.
         self.assertEqual(float(engine.solidification_end_times[0]), 0.0)
         self.assertEqual(float(engine.solidification_times[0]), 0.0)
         self.assertEqual(float(engine.local_solidification_time[0]), 0.0)
 
-        # Unfinished voxels get NaN, never 0.0.
         for idx in (1, 2):
             self.assertTrue(np.isnan(engine.solidification_end_times[idx]), msg=f"end_times[{idx}] must be NaN")
             self.assertTrue(np.isnan(engine.solidification_times[idx]), msg=f"solidification_times[{idx}] must be NaN")
-        # Voxel 2 never started: local solidification time must be NaN, not 0.0.
         self.assertTrue(np.isnan(engine.local_solidification_time[2]))
 
         unfinished = states < 0.99
@@ -287,11 +237,9 @@ class ThermalLoopRegressionTests(unittest.TestCase):
         self.assertTrue(np.all(np.isnan(engine.solidification_end_times[unfinished])))
 
     def test_same_step_energy_math(self) -> None:
-        """Pure-math check of the same-step latent correction formula
-        ``correction = latent_rate * dt / rho_cp`` with sample values."""
         latent_rate = np.array([1.0e6, 2.0e6, 0.0], dtype=np.float64)
         dt = 0.05
-        rho_cp = 7200.0 * 600.0  # e.g. steel density * specific heat
+        rho_cp = 7200.0 * 600.0
 
         correction = latent_rate * dt / rho_cp
         expected = np.array(
@@ -299,7 +247,6 @@ class ThermalLoopRegressionTests(unittest.TestCase):
             dtype=np.float64,
         )
         np.testing.assert_allclose(correction, expected, rtol=1e-12)
-        # The correction always raises temperature (latent release is positive).
         self.assertTrue(np.all(correction >= 0.0))
         self.assertEqual(float(correction[2]), 0.0)
 
@@ -313,8 +260,6 @@ class ThermalLoopRegressionTests(unittest.TestCase):
         shrinkage: bool = False,
         feeding_path: bool = False,
     ) -> None:
-        """Overwrite analysis_options with an explicit flag set (no hidden
-        defaults), keeping the thermal-coupled solver mode."""
         engine.analysis_options = SimpleNamespace(
             fraction_liquid=fraction_liquid,
             niyama=niyama,
@@ -326,11 +271,6 @@ class ThermalLoopRegressionTests(unittest.TestCase):
         )
 
     def test_thermal_history_skipped_when_all_analyses_disabled(self) -> None:
-        """With niyama/hot_tear/shrinkage/feeding_path all disabled, the loop
-        must skip both the per-iteration gradient kernel and the Niyama history
-        sampler: thermal_gradients/_thermal_latest_gradients keep their initial
-        None and no Niyama eval sample is recorded, even though the
-        integration itself completes and solidifies the field."""
         engine = _build_engine(
             n_voxels=2,
             max_time=25.0,
@@ -338,8 +278,6 @@ class ThermalLoopRegressionTests(unittest.TestCase):
             drop_per_step=5.0,
         )
         engine.mesh.voxel_centers = np.zeros((2, 3), dtype=np.float64)
-        # Give the Niyama sampler real target arrays: without the gate it
-        # would sample voxels as they cross late solidification.
         engine._thermal_niyama_sampled = np.zeros(2, dtype=bool)
         engine._thermal_niyama_gradient_at_eval = np.zeros(2, dtype=np.float32)
         engine._thermal_niyama_cooling_rate_at_eval = np.zeros(2, dtype=np.float32)
@@ -359,19 +297,12 @@ class ThermalLoopRegressionTests(unittest.TestCase):
         )
 
         self.assertTrue(np.all(engine.mesh.voxel_states >= 0.99))
-        # Late solidification was crossed (fs starts 0.0 and reaches 1.0), so
-        # the sampler would have recorded samples if it had run.
         self.assertFalse(np.any(engine._thermal_niyama_sampled))
         self.assertIsNone(engine._thermal_latest_gradients)
         self.assertIsNone(engine.thermal_gradients)
-        # The cheap latest-temperature snapshot is still maintained.
         self.assertIsNotNone(engine._thermal_latest_temperatures)
 
     def test_thermal_history_populated_when_shrinkage_enabled(self) -> None:
-        """With shrinkage enabled (the real AnalysisOptions default), the
-        gradient kernel must run: thermal_gradients and
-        _thermal_latest_gradients are populated and consistent after the
-        integration loop."""
         engine = _build_engine(n_voxels=2, max_time=2.0, time_step=1.0)
         self._set_analysis_flags(engine, shrinkage=True)
 
@@ -387,7 +318,6 @@ class ThermalLoopRegressionTests(unittest.TestCase):
         self.assertIsNotNone(engine._thermal_latest_gradients)
         self.assertIsNotNone(engine.thermal_gradients)
         self.assertTrue(np.all(np.isfinite(engine.thermal_gradients)))
-        # The recording heat model reports a uniform field -> zero gradient.
         np.testing.assert_allclose(
             engine.thermal_gradients,
             np.zeros(2, dtype=np.float32),
@@ -397,7 +327,6 @@ class ThermalLoopRegressionTests(unittest.TestCase):
             engine.thermal_gradients,
             engine._thermal_latest_gradients,
         )
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,3 @@
-"""Post-solidification analysis strategy execution."""
-
 from __future__ import annotations
 
 from typing import Any
@@ -7,11 +5,7 @@ from typing import Any
 import numpy as np
 import time
 
-
 def run_post_analyses(engine: Any, *, show_progress: bool) -> None:
-    """
-    Execute analysis stages in dependency order and update engine stats.
-    """
     stage_timings = getattr(engine, "stage_timings", None)
 
     def _record(stage_name: str, started_at: float) -> None:

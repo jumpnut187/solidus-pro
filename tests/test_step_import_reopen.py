@@ -1,16 +1,3 @@
-"""Regression tests for STEP import: project reopen, unit scaling, naming.
-
-Covers:
-- a multi-body STEP project reopens as distinct bodies, not N copies of body 1;
-- a legacy project (no recorded body) reopens by saved order;
-- gating part types survive reopen;
-- a single-body STEP is named and typed from its file stem;
-- STEP length units: inch-authored files and an mm re-declaration of one.
-
-The multi-body file is built by merging the single-body ``Test_Model``
-STEP files into one exchange file, which cascadio reads as five bodies.
-"""
-
 from __future__ import annotations
 
 import glob
@@ -56,13 +43,7 @@ _INCH_UNIT_BLOCK = re.compile(
 )
 _MM_UNIT_BLOCK = "(\nLENGTH_UNIT()\nNAMED_UNIT(*)\nSI_UNIT(.MILLI.,.METRE.)\n)"
 
-
 def merge_step_files(sources, destination):
-    """Concatenate single-body STEP files into one multi-body STEP file.
-
-    Entity ids of each later file are offset past the previous ones; every
-    file keeps its own product and unit context.
-    """
     header = None
     data_sections = []
     offset = 0
@@ -81,9 +62,7 @@ def merge_step_files(sources, destination):
     with open(destination, "w", encoding="utf-8") as handle:
         handle.write(header + "DATA;" + "".join(data_sections) + "ENDSEC;\nEND-ISO-10303-21;\n")
 
-
 def write_mm_variant(source, destination):
-    """Re-declare an inch STEP file as millimetres; coordinates unchanged."""
     with open(source, "r", encoding="utf-8") as handle:
         text = handle.read()
     replaced, count = _INCH_UNIT_BLOCK.subn(_MM_UNIT_BLOCK, text)
@@ -92,9 +71,7 @@ def write_mm_variant(source, destination):
     with open(destination, "w", encoding="utf-8") as handle:
         handle.write(replaced)
 
-
 def save_and_reload(manager):
-    """Round-trip a PartManager through the desktop project format."""
     payload = build_project_state(
         manager,
         alloy_name="WCB",
@@ -109,10 +86,8 @@ def save_and_reload(manager):
     ).to_dict()
     return json.loads(json.dumps(payload))
 
-
 def warning_messages(mock_warning):
     return [str(call.args[0]) for call in mock_warning.call_args_list]
-
 
 @unittest.skipUnless(HAVE_STEP_FIXTURES, "cascadio or STEP fixtures not available")
 class MultiBodyProjectReopenTests(unittest.TestCase):
@@ -135,7 +110,6 @@ class MultiBodyProjectReopenTests(unittest.TestCase):
         return manager
 
     def _customise(self, manager):
-        """Give every part a distinct, non-default saved state."""
         for offset, part in enumerate(manager.get_all_parts()):
             part.set_position(1.0 + offset, -2.0 * offset, 0.5 * offset)
             part.set_rotation(0.0, 0.0, 10.0 * offset)
@@ -231,7 +205,6 @@ class MultiBodyProjectReopenTests(unittest.TestCase):
         self.assertTrue(all(ids[1:]))
 
     def test_duplicated_body_reopens_as_the_same_body(self) -> None:
-        """Review P1: a duplicate used to reopen as another body, or vanish."""
         original = self._loaded_assembly()
         riser = next(p for p in original.get_all_parts() if p.body_name == "Riser")
         riser.is_open_top = True
@@ -243,8 +216,6 @@ class MultiBodyProjectReopenTests(unittest.TestCase):
         self.assertTrue(copy.is_open_top)
         self.assertIsNot(copy.trimesh_obj, riser.trimesh_obj)
 
-        # Also remove a body so saved positions no longer line up with the
-        # scene -- the case that loaded the wrong geometry under the copy's name.
         gate = next(p for p in original.get_all_parts() if p.body_name == "Gate")
         original.remove_part(gate.id)
 
@@ -262,7 +233,6 @@ class MultiBodyProjectReopenTests(unittest.TestCase):
         )
 
     def test_mixed_group_ref_without_body_gets_first_body(self) -> None:
-        """A body-less ref among recorded ones is not matched by position."""
         original = self._loaded_assembly()
         saved = load_project_state(save_and_reload(original)).to_dict()
         extra = dict(saved["parts"][0])
@@ -292,12 +262,10 @@ class MultiBodyProjectReopenTests(unittest.TestCase):
         )
 
     def test_load_part_on_assembly_does_not_false_warn_units(self) -> None:
-        """Review P2: load_part keeps body 1 only; the whole-file check must not run."""
         manager = PartManager()
         with mock.patch.object(part_manager_module.logger, "warning") as warn:
             self.assertIsNotNone(manager.load_part(self.assembly_path))
         self.assertFalse(any("unit check failed" in m for m in warning_messages(warn)))
-
 
 class GatingTypeReopenTests(unittest.TestCase):
     def test_gating_part_types_survive_reopen(self) -> None:
@@ -356,7 +324,6 @@ class GatingTypeReopenTests(unittest.TestCase):
             self.assertEqual(restored.scale, 1.5)
             self.assertEqual(restored.color, (0.1, 0.2, 0.3))
 
-
 @unittest.skipUnless(HAVE_STEP_FIXTURES, "cascadio or STEP fixtures not available")
 class SingleBodyStepNamingTests(unittest.TestCase):
     def test_single_body_is_named_and_typed_from_file_stem(self) -> None:
@@ -366,7 +333,6 @@ class SingleBodyStepNamingTests(unittest.TestCase):
         part = manager.get_part(ids[0])
         self.assertEqual(part.name, "Feeding Distance Test - Down Sprue")
         self.assertIs(part.part_type, PartType.SPRUE)
-        # Provenance keeps the real CAD body name for re-tessellation.
         self.assertEqual(part.body_name, "Down Sprue")
         self.assertEqual(part.body_index, 0)
 
@@ -379,7 +345,6 @@ class SingleBodyStepNamingTests(unittest.TestCase):
         single_part = via_part.get_part(via_part.load_part(CASTING_STEP))
         self.assertEqual(assembly_part.name, single_part.name)
         self.assertIs(assembly_part.part_type, single_part.part_type)
-
 
 class DeclaredLengthUnitTests(unittest.TestCase):
     def _units(self, unit_entities):
@@ -426,14 +391,11 @@ class DeclaredLengthUnitTests(unittest.TestCase):
 
     @unittest.skipUnless(os.path.exists(CASTING_STEP), "STEP fixture not available")
     def test_inch_fixture_reads_as_inch_not_its_millimetre_base(self) -> None:
-        """An inch file also carries SI_UNIT(.MILLI.,.METRE.) as the inch's base."""
         with open(CASTING_STEP, "r", encoding="utf-8") as handle:
             self.assertAlmostEqual(step_declared_length_unit_inches(handle.read()), 1.0)
 
-
 @unittest.skipUnless(HAVE_STEP_FIXTURES, "cascadio or STEP fixtures not available")
 class StepUnitScalingTests(unittest.TestCase):
-    """The casting fixture is a 12 x 6 x 1 box in its declared unit."""
 
     def setUp(self) -> None:
         self.temp_dir = tempfile.mkdtemp()
@@ -468,7 +430,6 @@ class StepUnitScalingTests(unittest.TestCase):
                 self._extents(path)
 
     def test_mis_scaled_geometry_warns(self) -> None:
-        """Geometry 25.4x too small -- an inch file read as mm -- is flagged."""
         scene = trimesh.load(CASTING_STEP, force="scene")
         for body in scene.geometry.values():
             body.apply_scale(1.0 / 25.4)
@@ -477,7 +438,6 @@ class StepUnitScalingTests(unittest.TestCase):
         self.assertTrue(any("unit check failed" in m for m in warning_messages(warn)))
 
     def test_mis_scaled_large_geometry_warns(self) -> None:
-        """Geometry 25.4x too large -- an mm file read as inches -- is flagged."""
         scene = trimesh.load(self.mm_path, force="scene")
         for body in scene.geometry.values():
             body.apply_scale(25.4)
@@ -502,7 +462,7 @@ class StepUnitScalingTests(unittest.TestCase):
     def test_unit_check_skips_files_over_size_limit(self) -> None:
         scene = trimesh.load(CASTING_STEP, force="scene")
         for body in scene.geometry.values():
-            body.apply_scale(1.0 / 25.4)  # would fail the check if it ran
+            body.apply_scale(1.0 / 25.4)
         with mock.patch.object(part_manager_module, "STEP_SCALE_CHECK_MAX_BYTES", 10), \
                 mock.patch("builtins.open", side_effect=AssertionError("file was read")), \
                 mock.patch.object(part_manager_module.logger, "warning") as warn:
@@ -510,11 +470,9 @@ class StepUnitScalingTests(unittest.TestCase):
         self.assertEqual(warning_messages(warn), [])
 
     def test_no_filepath_keeps_legacy_positional_call(self) -> None:
-        """web/payloads.py calls _scale_step_to_inches(geometry) positionally."""
         mesh = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
         _scale_step_to_inches(mesh)
         np.testing.assert_allclose(mesh.extents, [39.3701] * 3, rtol=1e-6)
-
 
 if __name__ == "__main__":
     unittest.main()

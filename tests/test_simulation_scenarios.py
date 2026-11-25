@@ -14,7 +14,6 @@ from core.part_manager import PartManager, PartType
 from core.solidification import AnalysisOptions, SOLVER_MODE_SCHEDULE_LEGACY, SolidificationEngine
 from core.simulation_pipeline import PipelineInputs, build_part_manager_from_parts, run_pipeline
 
-
 def _ok_validation(*_args, **_kwargs) -> MemoryValidationResult:
     return MemoryValidationResult(
         can_proceed=True,
@@ -26,10 +25,8 @@ def _ok_validation(*_args, **_kwargs) -> MemoryValidationResult:
         message="ok",
     )
 
-
 def _memory_monitor_check(_self: object) -> tuple[bool, str]:
     return True, "ok"
-
 
 def _run_pipeline_with_patched_memory(
     part_manager: PartManager,
@@ -42,10 +39,6 @@ def _run_pipeline_with_patched_memory(
     voxel_cut_cells: bool | None = None,
     solidification_params: dict | None = None,
 ) -> object:
-    """Run the pipeline with the voxel memory checks patched out.
-
-    ``voxel_cut_cells`` None follows ``settings.mesh.voxel_cut_cells``.
-    """
     analysis_options = {
         "shrinkage": True,
         "hotspot": True,
@@ -85,7 +78,6 @@ def _run_pipeline_with_patched_memory(
         )
         return run_pipeline(inputs, part_manager=part_manager).engine
 
-
 def _single_cast_manager(filepath: str) -> PartManager:
     manager = PartManager()
     part_id = manager.load_part(filepath, name="cast")
@@ -95,7 +87,6 @@ def _single_cast_manager(filepath: str) -> PartManager:
     part.set_part_type(PartType.CAST)
     part.set_position(0.0, 0.0, 0.0)
     return manager
-
 
 def _cast_with_riser_manager() -> PartManager:
     manager = PartManager()
@@ -113,7 +104,6 @@ def _cast_with_riser_manager() -> PartManager:
     riser.set_position(0.0, 0.0, 0.5)
     return manager
 
-
 def _cast_with_chill_manager() -> PartManager:
     manager = PartManager()
     cast_id = manager.load_part(ci_model("block_2inch.stl"), name="cast")
@@ -130,13 +120,7 @@ def _cast_with_chill_manager() -> PartManager:
     chill.set_position(1.5, 0.0, 0.0)
     return manager
 
-
 def _cast_with_chill_and_riser_manager() -> PartManager:
-    """Casting with a chill on one face and a riser in full contact on top.
-
-    The riser makes the feeding-path trace run, which is what exposes any
-    feeding-history mis-scoring of the fast-freezing metal against the chill.
-    """
     manager = PartManager()
     cast_id = manager.load_part(ci_model("block_2inch.stl"), name="cast")
     chill_id = manager.load_part(ci_model("small_block.stl"), name="chill")
@@ -152,10 +136,9 @@ def _cast_with_chill_and_riser_manager() -> PartManager:
     chill.set_part_type(PartType.CHILL)
     riser.set_part_type(PartType.RISER)
     cast.set_position(0.0, 0.0, 0.0)
-    chill.set_position(1.5, 0.0, 0.0)   # flush against the +x face
-    riser.set_position(0.0, 0.0, 1.0)   # base flush on the top face
+    chill.set_position(1.5, 0.0, 0.0)
+    riser.set_position(0.0, 0.0, 1.0)
     return manager
-
 
 def _cast_with_two_risers_manager() -> PartManager:
     manager = PartManager()
@@ -177,7 +160,6 @@ def _cast_with_two_risers_manager() -> PartManager:
     riser_b.set_position(0.75, 0.0, 1.0)
     return manager
 
-
 def _cast_with_riser_post_manager() -> PartManager:
     manager = PartManager()
     cast_id = manager.load_part(ci_model("block_2inch.stl"), name="cast")
@@ -197,7 +179,6 @@ def _cast_with_riser_post_manager() -> PartManager:
     post.set_position(0.0, 0.0, 1.0)
     riser.set_position(0.0, 0.0, 2.0)
     return manager
-
 
 class ScenarioRegressionTests(unittest.TestCase):
     def test_saved_riser_post_payload_is_normalized_on_load(self) -> None:
@@ -337,7 +318,6 @@ class ScenarioRegressionTests(unittest.TestCase):
         )
 
     def test_riser_reduces_cast_shrinkage_and_keeps_pipe_behavior_in_riser(self) -> None:
-        # Plain voxels: the shrinkage thresholds (> 0.15 counts) were calibrated on old-voxel geometry at 0.5 in.
         baseline_engine = _run_pipeline_with_patched_memory(
             _single_cast_manager(ci_model("small_block.stl")), voxel_cut_cells=False
         )
@@ -359,19 +339,10 @@ class ScenarioRegressionTests(unittest.TestCase):
         self.assertIsNotNone(riser_engine.feeding_path_lengths)
         valid_cast_paths = cast_mask & (riser_engine.feeding_path_lengths >= 0.0)
         self.assertTrue(np.any(valid_cast_paths))
-        # Re-baselined 2026-08-14 for the thermal-coupled physics overhaul:
-        # with same-step latent heat the mush freezes within a couple of steps,
-        # so the history-aware tracer keeps only the riser-adjacent cast voxels
-        # open (feeding_path_lengths == surface_distances there) instead of
-        # routing paths that exceed the straight-line surface distance. The
-        # surviving guarantee is that the traced path still reaches into the
-        # casting from the riser.
         self.assertGreater(
             float(np.max(riser_engine.feeding_path_lengths[valid_cast_paths])),
             0.0,
         )
-        # A sleeved riser passes no heat to the sand, so this 2 x 3 in riser on a 1 in block is still
-        # partly liquid when the run stops: no time (NaN) means it froze after everything else.
         riser_times = np.asarray(riser_engine.solidification_times, dtype=np.float64)[riser_mask]
         self.assertGreaterEqual(
             float(np.max(np.where(np.isnan(riser_times), np.inf, riser_times))),
@@ -387,7 +358,6 @@ class ScenarioRegressionTests(unittest.TestCase):
         )
 
     def test_riser_post_behaves_like_feeder_neck_not_primary_defect_sink(self) -> None:
-        # Plain voxels: the fixture post stops 0.5 in below the riser; only 0.5 in voxels close that gap.
         baseline_engine = _run_pipeline_with_patched_memory(
             _single_cast_manager(ci_model("block_2inch.stl")), voxel_cut_cells=False
         )
@@ -409,11 +379,6 @@ class ScenarioRegressionTests(unittest.TestCase):
             float(np.mean(feeder_engine.shrinkage_probability[post_mask])),
             float(np.mean(feeder_engine.shrinkage_probability[riser_mask])),
         )
-        # Re-baselined 2026-08-14 (2nd pass) for the conservative-flux +
-        # implicit-enthalpy physics: the riser body now holds the porosity
-        # (post_porosity_to_riser_ratio ~0.47) because the feeder neck stays
-        # feedable, so the post is NOT the primary defect sink. The riser
-        # pipe carries the largest SHRINKAGE (asserted above).
         self.assertLess(
             float(np.mean(feeder_engine.porosity_probability[post_mask])),
             float(np.mean(feeder_engine.porosity_probability[riser_mask])),
@@ -424,7 +389,6 @@ class ScenarioRegressionTests(unittest.TestCase):
         )
 
     def test_two_risers_reduce_cast_shrinkage_more_than_single_riser(self) -> None:
-        # Plain voxels: at CAD size the 1 in risers freeze before the 2 in casting (cut cells: 130 s vs 166 s).
         baseline_engine = _run_pipeline_with_patched_memory(
             _single_cast_manager(ci_model("block_2inch.stl")), voxel_cut_cells=False
         )
@@ -629,7 +593,6 @@ class ScenarioRegressionTests(unittest.TestCase):
             float(low_engine.crack_susceptibility[2]),
             places=6,
         )
-
 
 if __name__ == "__main__":
     unittest.main()

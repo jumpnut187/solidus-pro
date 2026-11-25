@@ -1,5 +1,3 @@
-"""Deep learning model dialogs: train and NPU export."""
-
 from __future__ import annotations
 
 from ui.qt import (
@@ -17,9 +15,7 @@ from ui.qt import (
 
 from core.surrogate.dataset import DEFAULT_DATASET_DIR, dataset_summary
 
-
 class DeepTrainDialog(QDialog):
-    """Ask for deep training hyperparameters."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -83,7 +79,6 @@ class DeepTrainDialog(QDialog):
         layout.addWidget(buttons)
 
     def options(self) -> dict:
-        """Return the user's choices as a dict."""
         return {
             "epochs": int(self.epochs_spin.value()),
             "batch_size": int(self.batch_spin.value()),
@@ -92,9 +87,7 @@ class DeepTrainDialog(QDialog):
             "load_model": bool(self.load_check.isChecked()),
         }
 
-
 class DeepExportDialog(QDialog):
-    """Pick an NPU target and export the trained deep model."""
 
     TARGET_LABELS = {
         "coreml": "Apple ANE — Core ML (.mlpackage)",

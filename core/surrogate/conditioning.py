@@ -1,18 +1,3 @@
-"""Alloy + configuration conditioning vectors for surrogate models.
-
-Surrogate models consume two kinds of input:
-
-1. Per-voxel channel fields (see ``fields.py``) sampled on a fixed grid.
-2. A single global conditioning vector describing the alloy and the
-   simulation configuration.
-
-The conditioning vector is normalized to [0, 1] using deterministic
-reference ranges so a trained model is comparable across runs.  The
-inverse-normalization is exact (raw = v * (hi - lo) + lo), which lets a
-model reconstruct physical values (seconds, inches, °C) from the vector
-alone — the analytic reference model relies on this.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -21,7 +6,6 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from core.materials import AlloyProperties
-
 
 ALLOY_FEATURE_RANGES: Dict[str, tuple] = {
     "liquidus_temp": (1000.0, 1600.0),
@@ -43,7 +27,6 @@ ALLOY_FEATURE_RANGES: Dict[str, tuple] = {
 
 CONFIG_FEATURE_RANGES: Dict[str, tuple] = {
     "max_dim": (1.0, 60.0),
-    # Mesh length scale, inches: the voxel pitch.
     "voxel_size": (0.02, 0.5),
     "feeding_zone_vertical_bias": (0.0, 1.0),
     "chvorinov_mold_constant": (150.0, 400.0),
@@ -56,22 +39,16 @@ CONFIG_FEATURE_RANGES: Dict[str, tuple] = {
 ALLOY_FEATURES: List[str] = list(ALLOY_FEATURE_RANGES.keys())
 CONFIG_FEATURES: List[str] = list(CONFIG_FEATURE_RANGES.keys())
 
-
 def _normalize(value: float, lo: float, hi: float) -> float:
-    """Map ``value`` into [0, 1] using the reference range."""
     if hi <= lo:
         return 0.5
     return float(np.clip((value - lo) / (hi - lo), 0.0, 1.0))
 
-
 def denormalize(value: float, lo: float, hi: float) -> float:
-    """Recover the raw value from a normalized [0, 1] feature."""
     return float(value * (hi - lo) + lo)
-
 
 @dataclass
 class Conditioning:
-    """A conditioning vector plus its raw reconstruction."""
 
     vector: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
     names: List[str] = field(default_factory=list)
@@ -84,9 +61,7 @@ class Conditioning:
     def to_dict(self) -> Dict[str, Any]:
         return {"vector": self.vector.tolist(), "names": list(self.names), "raw": dict(self.raw)}
 
-
 def _alloy_raw(alloy: AlloyProperties) -> Dict[str, float]:
-    """Extract the raw (un-normalized) alloy feature dictionary."""
     melting_solvent = getattr(alloy, "melting_point_solvent", None)
     if melting_solvent is None:
         melting_solvent = float(getattr(alloy, "solidus_temp", 1400.0) or 1400.0)
@@ -108,9 +83,7 @@ def _alloy_raw(alloy: AlloyProperties) -> Dict[str, float]:
         "eutectic_fraction": float(getattr(alloy, "eutectic_fraction", 0.0) or 0.0),
     }
 
-
 def build_alloy_conditioning(alloy: AlloyProperties) -> Conditioning:
-    """Build a normalized conditioning vector from an alloy."""
     raw = _alloy_raw(alloy)
     values = [_normalize(raw[name], *ALLOY_FEATURE_RANGES[name]) for name in ALLOY_FEATURES]
     return Conditioning(
@@ -119,13 +92,7 @@ def build_alloy_conditioning(alloy: AlloyProperties) -> Conditioning:
         raw=raw,
     )
 
-
 def build_config_conditioning(config: Dict[str, float]) -> Conditioning:
-    """Build a normalized conditioning vector from configuration scalars.
-
-    Missing keys fall back to the midpoint of their reference range so a model
-    still sees a well-formed vector when callers omit optional config.
-    """
     raw = {}
     for name in CONFIG_FEATURES:
         lo, hi = CONFIG_FEATURE_RANGES[name]
@@ -140,9 +107,7 @@ def build_config_conditioning(config: Dict[str, float]) -> Conditioning:
         raw=raw,
     )
 
-
 def build_conditioning_vector(alloy: AlloyProperties, config: Dict[str, float]) -> Conditioning:
-    """Combine alloy + config conditioning into a single vector."""
     alloy_c = build_alloy_conditioning(alloy)
     config_c = build_config_conditioning(config)
     names = list(alloy_c.names) + list(config_c.names)
@@ -154,13 +119,7 @@ def build_conditioning_vector(alloy: AlloyProperties, config: Dict[str, float]) 
         raw=raw,
     )
 
-
 def raw_from_conditioning(conditioning: Conditioning) -> Dict[str, float]:
-    """Reconstruct raw feature values from a conditioning vector (exact).
-
-    Falls back to the stored ``raw`` dict when present, otherwise performs
-    the exact inverse normalization.
-    """
     if conditioning.raw:
         return dict(conditioning.raw)
     raw: Dict[str, float] = {}

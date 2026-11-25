@@ -1,10 +1,3 @@
-/*
- * Parametric modeling: the feature tree, the property managers, the canvas
- * command bar, and the sketcher's labels drawn over the 3D view.
- */
-
-/* --- Over the canvas ---------------------------------------------------- */
-
 .sketch-layer {
   position: absolute;
   inset: 0;
@@ -44,8 +37,6 @@
   color: #ffd6a6;
 }
 
-/* Position dimensions sit beside their extension lines, not on them, so the
- * X and Y labels of an entity near the origin do not stack on each other. */
 .sketch-dim-x {
   transform: translate(-50%, calc(-100% - 3px));
 }
@@ -72,7 +63,6 @@
   pointer-events: none;
 }
 
-/* Right to left: crossing selection, drawn dashed and green as SOLIDWORKS does. */
 .sketch-box.is-crossing {
   border: 1px dashed rgba(77, 210, 140, 0.95);
   background: rgba(77, 210, 140, 0.1);
@@ -173,7 +163,6 @@
   white-space: nowrap;
 }
 
-/* SOLIDWORKS' confirmation corner: OK and Cancel at the top right of the view. */
 .confirm-corner {
   position: absolute;
   top: var(--sp-4);
@@ -216,8 +205,6 @@
 .confirm-cancel:hover {
   background: var(--danger-dim);
 }
-
-/* --- Feature tree ------------------------------------------------------- */
 
 .model-commands {
   display: flex;
@@ -338,8 +325,6 @@ li[aria-selected='true'] > .feature-node,
   line-height: 16px;
   white-space: nowrap;
 }
-
-/* --- Property managers -------------------------------------------------- */
 
 .property-manager .panel-body {
   gap: var(--sp-4);
@@ -485,8 +470,6 @@ li[aria-selected='true'] > .feature-node,
   color: var(--accent-hover);
 }
 
-/* --- Sketch entities in the property manager ----------------------------- */
-
 .entity-list {
   display: flex;
   flex-direction: column;
@@ -557,8 +540,6 @@ li[aria-selected='true'] > .feature-node,
 .spin {
   animation: model-spin 0.9s linear infinite;
 }
-
-/* --- Reference planes, measure, construction ------------------------------ */
 
 .sketch-plane-label.is-preview {
   color: #ffc27a;

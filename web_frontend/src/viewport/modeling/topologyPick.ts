@@ -1,14 +1,3 @@
-/**
- * What the Measure tool's click is on: a vertex, an edge, or a face.
- *
- * An STL carries none of these, so they are recovered from the tessellation
- * the viewport already has: vertices are triangle corners, edges are the
- * feature edges drawn for "shaded with edges" (chained end to end until the
- * chain turns sharply or branches, then classified as a straight line or a
- * circular arc), and faces are the flat regions `planarFace` finds. Priority
- * follows SOLIDWORKS: a vertex within a few pixels beats an edge, an edge
- * beats the face under it.
- */
 import type { Camera } from '@babylonjs/core/Cameras/camera';
 import { Matrix, Vector3 } from '@babylonjs/core/Maths/math.vector';
 import type { Viewport } from '@babylonjs/core/Maths/math.viewport';
@@ -22,15 +11,11 @@ import type { PlanarFace } from './planarFace';
 
 const VERTEX_RADIUS_PX = 9;
 const EDGE_RADIUS_PX = 6;
-/** A chain continues through a vertex only if it turns less than this. */
 const CHAIN_TURN_DEG = 40;
 
 type EdgeGraph = {
-  /** World-space segment ends, six floats per segment. */
   segments: Float32Array;
-  /** Welded vertex index of each segment end, two per segment. */
   ends: Uint32Array;
-  /** Segments at each welded vertex (CSR). */
   offsets: Uint32Array;
   incident: Uint32Array;
   points: Vec3[];
@@ -99,7 +84,6 @@ function cross(a: Vec3, b: Vec3): Vec3 {
   return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 }
 
-/** Ordered points of the chain of feature edges through segment `seed`. */
 function chainThrough(graph: EdgeGraph, seed: number): { points: Vec3[]; closed: boolean } {
   const turnCos = Math.cos((CHAIN_TURN_DEG * Math.PI) / 180);
   const used = new Set<number>([seed]);
@@ -147,7 +131,6 @@ function isCorner(graph: EdgeGraph, point: Vec3): boolean {
   return dot(a, b) < Math.cos((CHAIN_TURN_DEG * Math.PI) / 180);
 }
 
-/** The circle through three points in space, or null if they are collinear. */
 function circle3(a: Vec3, b: Vec3, c: Vec3): { center: Vec3; radius: number; axis: Vec3 } | null {
   const ab = sub(b, a);
   const ac = sub(c, a);
@@ -205,7 +188,6 @@ function classifyChain(points: Vec3[], closed: boolean, partName: string | null)
 export type TopologyContext = {
   scene: Scene;
   camera: Camera;
-  /** Pointer, in `scene.pointerX` space. */
   x: number;
   y: number;
   mesh: AbstractMesh;
@@ -215,7 +197,6 @@ export type TopologyContext = {
   edges: LinesMesh | null;
   face: PlanarFace | null;
   partName: string | null;
-  /** Longest edge of the assembly, for depth tolerances. */
   assemblySize: number;
 };
 
@@ -236,7 +217,6 @@ export function pickTopology(context: TopologyContext): MeasurePick {
   const project = projector(scene, camera);
   const hit: Vec3 = [context.hitPoint.x, context.hitPoint.y, context.hitPoint.z];
 
-  // Vertex: a corner of the triangle under the pointer.
   const indices = mesh.getIndices();
   const positions = mesh.getVerticesData('position');
   if (indices && positions && faceId >= 0) {
@@ -250,16 +230,12 @@ export function pickTopology(context: TopologyContext): MeasurePick {
       const distance = Math.hypot(screen.x - x, screen.y - y);
       if (distance <= VERTEX_RADIUS_PX && (!best || distance < best.distance)) best = { point, distance };
     }
-    // Only a real corner of the model: a point where feature edges branch or
-    // turn sharply. A vertex inside a flat face's fan of triangles, or one of
-    // the points a circle is tessellated into, is not one.
     if (best && context.edges) {
       const graph = edgeGraph(context.edges);
       if (graph && isCorner(graph, best.point)) return { kind: 'vertex', point: best.point, partName };
     }
   }
 
-  // Edge: the nearest feature-edge segment on screen, near the hit in depth.
   if (context.edges) {
     const graph = edgeGraph(context.edges);
     if (graph) {
@@ -278,7 +254,6 @@ export function pickTopology(context: TopologyContext): MeasurePick {
         const distance = Math.hypot(x - (pa.x + t * dx), y - (pa.y + t * dy));
         if (distance > EDGE_RADIUS_PX || (best && distance >= best.distance)) continue;
         const onSegment: Vec3 = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
-        // Hidden edges behind the face under the pointer are not candidates.
         if (Math.hypot(...sub(onSegment, hit)) > depthTolerance) continue;
         best = { segment: i, distance };
       }

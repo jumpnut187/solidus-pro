@@ -1,15 +1,3 @@
-/**
- * Standalone bench for the results viewport.
- *
- * Served at `/dev.html`. It owns a `ResultViewState` and a control strip and
- * nothing else, which lets the renderer be exercised, screenshotted and
- * reviewed without waiting on the application shell -- and without either
- * workstream editing the other's `App.tsx`.
- *
- * Query parameters: `?project=<id>` picks a run, `?mode=`, `?time=`,
- * `?colormap=`, `?opacity=`, `?ui=0` preset the view. The headless screenshot
- * harness drives it entirely through those.
- */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type { ProjectPart } from '../../lib/api';
@@ -54,7 +42,6 @@ function initialView(): ResultViewState {
   const threshold = params.get('threshold');
   if (threshold) view.threshold = Number.parseFloat(threshold);
   if (params.get('castOnly') === '1') view.castOnly = true;
-  // section=<axis>:<position>[:flip], e.g. section=y:50 or section=x:35:flip
   const section = params.get('section');
   if (section) {
     const [axis, position, flag] = section.split(':');
@@ -79,8 +66,6 @@ async function loadParts(projectId: string): Promise<ProjectPart[]> {
   const body = (await response.json()) as { parts: ProjectPart[] };
   const parts = body.parts ?? [];
 
-  // Part rows carry a server-side path, not geometry. Fetch each STL through
-  // the uploads route and rebuild the triangles the viewport expects.
   return await Promise.all(
     parts.map(async (part) => {
       const filename = part.filepath.split('/').pop() ?? '';
@@ -121,8 +106,6 @@ export function Bench() {
         }
       })
       .catch((problem) => setError(String(problem)));
-    // Runs once; the project id is seeded from the URL or from this response.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -137,10 +120,6 @@ export function Bench() {
 
   const availableModes = useMemo(() => meta?.modes ?? [], [meta]);
 
-  // The bench exists to exercise the viewport, and `ViewportHandle` is half
-  // of what the shell will drive it with. Publishing the ref lets the
-  // screenshot harness call screenshot(), setCamera() and defectVolumeIn3()
-  // the way the shell will.
   useEffect(() => {
     const globals = window as unknown as { __viewport?: ViewportHandle | null };
     globals.__viewport = handleRef.current;
@@ -319,7 +298,7 @@ export function Bench() {
           </div>
         ) : null}
 
-        {/* The screenshot harness waits for this to disappear. */}
+        {}
         {status ? (
           <p className="bench-status" data-bench-status="busy">
             {status}

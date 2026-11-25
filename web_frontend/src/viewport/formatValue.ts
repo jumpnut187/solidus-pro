@@ -1,13 +1,3 @@
-/** Number formatting shared by the legend and the readouts around it. */
-
-/**
- * Format a value for a tick.
- *
- * Fields here span from 0..1 risks to 731-second solidification times to
- * micron SDAS, so a fixed precision is wrong for at least one of them. The
- * rule is "about three significant figures, and never scientific notation
- * where a plain number fits", because a legend is read at a glance.
- */
 export function formatFieldValue(value: number): string {
   if (!Number.isFinite(value)) return '--';
   const magnitude = Math.abs(value);

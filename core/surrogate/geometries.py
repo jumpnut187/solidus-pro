@@ -1,25 +1,3 @@
-"""Parametric synthetic casting geometries for surrogate training data.
-
-The captured dataset is dominated by a handful of boxes and cylinders.  This
-module generates a seeded family of foundry-relevant shapes with thin/thick
-junctions (plates with bosses, T-sections, L-brackets, stepped plates, hollow
-and flanged cylinders, framed boxes with a rectangular through-hole, tapered
-bars, wedges) so a model sees more than cubes.
-
-No boolean library (manifold3d) is installed, so compound shapes are built by
-concatenating closed primitive shells (``trimesh.util.concatenate``) with a
-small overlap.  The pipeline voxelizer (``AdaptiveVoxelMesh._create_uniform_grid``
--> ``trimesh.voxelized(pitch).fill()``, default ``method="holes"``, i.e.
-``scipy.ndimage.binary_fill_holes``: any cell not connected to the grid border
-is filled) was checked against analytic occupancy
-for plate+cylinder-boss, plate+box-boss and T-sections at overlaps 0-1.0 in:
-no hollow interior cells.  ``tests/test_surrogate_geometries.py`` repeats that
-check end to end.
-
-Round through-holes cannot be built without booleans; the framed box uses a
-rectangular hole made from four wall boxes instead.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -32,7 +10,6 @@ import trimesh
 MIN_MAX_DIM_IN = 2.0
 MAX_MAX_DIM_IN = 24.0
 
-#: Fraction of the thinner joined section by which two shells overlap.
 JUNCTION_OVERLAP_FRACTION = 0.25
 
 FAMILIES: List[str] = [
@@ -49,21 +26,8 @@ FAMILIES: List[str] = [
     "wedge",
 ]
 
-
 @dataclass
 class GeometrySpec:
-    """One synthetic casting geometry.
-
-    Attributes:
-        name: Deterministic name ``{family}_{index:03d}_{hash6}``.
-        family: One of ``FAMILIES``.
-        mesh: Closed trimesh (single shell or concatenated shells).
-        params: Sampled dimensions in inches.
-        min_thickness: Thinnest section (inches); used by the voxel-size rule.
-        parts: Optional ``(mesh, part_code)`` list for a multi-part assembly
-            (``core.surrogate.assemblies``); ``mesh`` is then their
-            concatenation, used for sizing only. None: ``mesh`` is one CAST.
-    """
 
     name: str
     family: str
@@ -79,10 +43,8 @@ class GeometrySpec:
     def as_pair(self):
         return self.name, self.mesh
 
-
 def _round_params(params: Dict[str, float]) -> Dict[str, float]:
     return {k: round(float(v), 3) for k, v in params.items()}
-
 
 def _spec_name(family: str, index: int, params: Dict[str, float]) -> str:
     h = hashlib.sha1()
@@ -91,37 +53,26 @@ def _spec_name(family: str, index: int, params: Dict[str, float]) -> str:
         h.update(f"{key}={params[key]:.3f};".encode())
     return f"{family}_{index:03d}_{h.hexdigest()[:6]}"
 
-
 def _box(extents, center=(0.0, 0.0, 0.0)) -> trimesh.Trimesh:
     mesh = trimesh.creation.box(extents=tuple(float(e) for e in extents))
     mesh.apply_translation(np.asarray(center, dtype=np.float64))
     return mesh
-
 
 def _cylinder(radius: float, height: float, center=(0.0, 0.0, 0.0), sections: int = 48) -> trimesh.Trimesh:
     mesh = trimesh.creation.cylinder(radius=float(radius), height=float(height), sections=sections)
     mesh.apply_translation(np.asarray(center, dtype=np.float64))
     return mesh
 
-
 def _concat(parts: Sequence[trimesh.Trimesh]) -> trimesh.Trimesh:
     mesh = trimesh.util.concatenate(list(parts))
     mesh.process(validate=False)
     return mesh
 
-
-# ---------------------------------------------------------------------------
-# Builders: params (inches) -> (mesh, min_thickness)
-# ---------------------------------------------------------------------------
-
-
 def build_box(p: Dict[str, float]):
     return _box((p["length"], p["width"], p["height"])), min(p["length"], p["width"], p["height"])
 
-
 def build_cylinder(p: Dict[str, float]):
     return _cylinder(p["radius"], p["height"]), min(2.0 * p["radius"], p["height"])
-
 
 def build_plate_with_boss(p: Dict[str, float]):
     L, W, t = p["length"], p["width"], p["thickness"]
@@ -130,12 +81,10 @@ def build_plate_with_boss(p: Dict[str, float]):
     overlap = JUNCTION_OVERLAP_FRACTION * min(t, h)
     plate = _box((L, W, t))
     parts = [plate]
-    # Bosses along the plate length, kept inside the footprint.
     xs = np.linspace(-(L / 2 - r - 0.25 * L / n), (L / 2 - r - 0.25 * L / n), n) if n > 1 else np.array([0.0])
     for x in xs:
         parts.append(_cylinder(r, h, center=(float(x), 0.0, t / 2 - overlap + h / 2)))
     return _concat(parts), min(t, 2.0 * r)
-
 
 def build_t_section(p: Dict[str, float]):
     L, Wf, tf = p["length"], p["flange_width"], p["flange_thickness"]
@@ -145,14 +94,12 @@ def build_t_section(p: Dict[str, float]):
     web = _box((L, tw, Hw), center=(0.0, 0.0, tf / 2 - overlap + Hw / 2))
     return _concat([flange, web]), min(tf, tw)
 
-
 def build_l_bracket(p: Dict[str, float]):
     L, a, b, ta, tb = p["length"], p["leg_a"], p["leg_b"], p["thickness_a"], p["thickness_b"]
     overlap = JUNCTION_OVERLAP_FRACTION * min(ta, tb)
     base = _box((L, a, ta))
     upright = _box((L, tb, b), center=(0.0, -(a / 2 - tb / 2), ta / 2 - overlap + b / 2))
     return _concat([base, upright]), min(ta, tb)
-
 
 def build_stepped_plate(p: Dict[str, float]):
     W = p["width"]
@@ -163,18 +110,15 @@ def build_stepped_plate(p: Dict[str, float]):
     parts = []
     x = -sum(lengths) / 2
     for i, (ln, th) in enumerate(zip(lengths, thicks)):
-        # Extend each step slightly into its neighbour so shells merge.
         lead = overlap if i > 0 else 0.0
         trail = overlap if i < steps - 1 else 0.0
         parts.append(_box((ln + lead + trail, W, th), center=(x + ln / 2 + (trail - lead) / 2, 0.0, th / 2)))
         x += ln
     return _concat(parts), min(thicks)
 
-
 def build_hollow_cylinder(p: Dict[str, float]):
     mesh = trimesh.creation.annulus(r_min=p["inner_radius"], r_max=p["outer_radius"], height=p["height"], sections=48)
     return mesh, min(p["outer_radius"] - p["inner_radius"], p["height"])
-
 
 def build_flanged_cylinder(p: Dict[str, float]):
     r, h = p["radius"], p["height"]
@@ -183,7 +127,6 @@ def build_flanged_cylinder(p: Dict[str, float]):
     flange = _cylinder(rf, tf, center=(0.0, 0.0, tf / 2))
     body = _cylinder(r, h, center=(0.0, 0.0, tf - overlap + h / 2))
     return _concat([flange, body]), min(tf, 2.0 * r)
-
 
 def build_framed_box(p: Dict[str, float]):
     L, W, H = p["length"], p["width"], p["height"]
@@ -199,7 +142,6 @@ def build_framed_box(p: Dict[str, float]):
     ]
     return _concat(parts), min(wall_x, wall_y, H)
 
-
 def build_tapered_bar(p: Dict[str, float]):
     L = p["length"]
     a0, b0, a1, b1 = p["base_width"], p["base_height"], p["tip_width"], p["tip_height"]
@@ -213,7 +155,6 @@ def build_tapered_bar(p: Dict[str, float]):
     )
     return trimesh.convex.convex_hull(pts), min(a1, b1)
 
-
 def build_wedge(p: Dict[str, float]):
     L, W, H = p["length"], p["width"], p["height"]
     tip = p["tip_thickness"]
@@ -224,7 +165,6 @@ def build_wedge(p: Dict[str, float]):
         ]
     )
     return trimesh.convex.convex_hull(pts), tip
-
 
 BUILDERS = {
     "box": build_box,
@@ -240,25 +180,16 @@ BUILDERS = {
     "wedge": build_wedge,
 }
 
-
-# ---------------------------------------------------------------------------
-# Parameter sampling
-# ---------------------------------------------------------------------------
-
-
 def _sample_max_dim(rng: np.random.Generator) -> float:
     return float(np.exp(rng.uniform(np.log(MIN_MAX_DIM_IN), np.log(MAX_MAX_DIM_IN))))
 
-
 def sample_params(family: str, rng: np.random.Generator) -> Dict[str, float]:
-    """Sample dimensions (inches) for ``family`` so the max dimension lies in
-    [MIN_MAX_DIM_IN, MAX_MAX_DIM_IN] and no section is thinner than 0.25 in."""
     D = _sample_max_dim(rng)
     u = rng.uniform
     if family == "box":
         return {"length": D, "width": D * u(0.3, 1.0), "height": max(0.25, D * u(0.1, 1.0))}
     if family == "cylinder":
-        if u() < 0.5:  # tall
+        if u() < 0.5:
             return {"height": D, "radius": max(0.25, D * u(0.08, 0.4))}
         return {"radius": D / 2, "height": max(0.25, D * u(0.1, 0.8))}
     if family == "plate_with_boss":
@@ -335,9 +266,7 @@ def sample_params(family: str, rng: np.random.Generator) -> Dict[str, float]:
         return {"length": D, "width": D * u(0.2, 0.8), "height": H, "tip_thickness": max(0.25, H * u(0.1, 0.4))}
     raise ValueError(f"Unknown geometry family: {family}")
 
-
 def make_spec(family: str, params: Dict[str, float], index: int = 0) -> GeometrySpec:
-    """Build a ``GeometrySpec`` for explicit parameters."""
     params = _round_params(params)
     mesh, min_thickness = BUILDERS[family](params)
     return GeometrySpec(
@@ -348,17 +277,11 @@ def make_spec(family: str, params: Dict[str, float], index: int = 0) -> Geometry
         min_thickness=float(min_thickness),
     )
 
-
 def iter_geometries(
     count: int,
     seed: int = 0,
     families: Sequence[str] = tuple(FAMILIES),
 ) -> Iterator[GeometrySpec]:
-    """Yield ``count`` seeded geometries, cycling through ``families``.
-
-    The same ``(count, seed, families)`` always yields the same specs; the
-    prefix of a longer run equals a shorter run with the same seed.
-    """
     families = list(families)
     unknown = [f for f in families if f not in BUILDERS]
     if unknown:
@@ -369,14 +292,10 @@ def iter_geometries(
         params = sample_params(family, rng)
         yield make_spec(family, params, index=index)
 
-
 def generate_geometries(count: int, seed: int = 0, families: Sequence[str] = tuple(FAMILIES)) -> List[GeometrySpec]:
     return list(iter_geometries(count, seed=seed, families=families))
 
-
 def named_catalog() -> Dict[str, GeometrySpec]:
-    """Small fixed catalog, one shape per family, for tests and the default
-    ``synthetic_geometries`` set."""
     fixed: Dict[str, Any] = {
         "box": {"length": 4.0, "width": 4.0, "height": 4.0},
         "cylinder": {"radius": 1.5, "height": 4.0},
@@ -407,7 +326,6 @@ def named_catalog() -> Dict[str, GeometrySpec]:
         catalog[family] = spec
     return catalog
 
-
 def voxel_size_for(
     spec: GeometrySpec,
     grid: int = 64,
@@ -415,22 +333,6 @@ def voxel_size_for(
     max_voxels: int = 50_000,
     dense: bool = False,
 ) -> float:
-    """Voxel size (inches) for solving ``spec``.
-
-    Rule, applied in order:
-      1. ``s = max(max_dim / grid, cbrt(volume / target_voxels))`` -- one
-         voxel per encoding cell when that is affordable, otherwise coarser so
-         the solver sees about ``target_voxels`` cells.
-      2. ``s = min(s, min_thickness / 3)`` -- at least three voxels across the
-         thinnest section.
-      3. ``s = max(s, cbrt(volume / max_voxels))`` -- hard count cap.
-      4. rounded to 0.005 in.
-    With ``dense=True`` step 1 uses ``max_dim / grid`` alone and step 3 is
-    skipped, so every encoding cell inside the part receives at least one
-    voxel and the 64^3 occupancy is dense like a UI capture.  Voxel counts
-    grow for small parts (a 2 in cylinder at grid 64 needs ~8x the voxels).
-    ``volume`` is the mesh volume (overlapping shells overcount slightly).
-    """
     volume = max(float(spec.mesh.volume), 1e-6)
     cell = spec.max_dim / float(grid)
     if dense:

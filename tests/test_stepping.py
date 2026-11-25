@@ -1,15 +1,8 @@
-"""Tests for core/stepping.py.
-
-``should_capture_fraction_history`` replaced three byte-identical copies of the
-same fallback in core/solidification_loop.py, one per integration path.
-"""
-
 from __future__ import annotations
 
 import unittest
 
 from core.stepping import SnapshotSchedule, should_capture_fraction_history
-
 
 class _Options:
     def __init__(self, **flags) -> None:
@@ -18,13 +11,11 @@ class _Options:
         self.shrinkage = flags.get("shrinkage", False)
         self.feeding_path = flags.get("feeding_path", False)
 
-
 class _Engine:
     def __init__(self, options, capture_fn=None) -> None:
         self.analysis_options = options
         if capture_fn is not None:
             self._should_capture_fraction_history = capture_fn
-
 
 class CaptureDecisionTests(unittest.TestCase):
     def test_engine_method_takes_precedence(self) -> None:
@@ -48,7 +39,6 @@ class CaptureDecisionTests(unittest.TestCase):
         engine._should_capture_fraction_history = "not callable"
         self.assertTrue(should_capture_fraction_history(engine))
 
-
 class SnapshotScheduleTests(unittest.TestCase):
     def test_rejects_non_positive_frame_counts(self) -> None:
         for bad in (0, -1):
@@ -60,7 +50,7 @@ class SnapshotScheduleTests(unittest.TestCase):
         self.assertTrue(SnapshotSchedule(frames=100).should_capture(0.0))
 
     def test_captures_once_per_interval(self) -> None:
-        schedule = SnapshotSchedule(frames=100)  # 1 % interval
+        schedule = SnapshotSchedule(frames=100)
         self.assertTrue(schedule.should_capture(0.0))
         self.assertFalse(schedule.should_capture(0.5))
         self.assertTrue(schedule.should_capture(1.0))
@@ -68,12 +58,11 @@ class SnapshotScheduleTests(unittest.TestCase):
         self.assertTrue(schedule.should_capture(2.0))
 
     def test_frame_count_over_a_full_run(self) -> None:
-        """Stepping 0..100 in 0.1 % increments yields ~frames captures."""
         schedule = SnapshotSchedule(frames=100)
         captured = sum(
             1 for i in range(1001) if schedule.should_capture(i * 0.1)
         )
-        self.assertEqual(captured, 101)  # 0 % through 100 % inclusive
+        self.assertEqual(captured, 101)
 
     def test_coarser_schedule_captures_fewer(self) -> None:
         schedule = SnapshotSchedule(frames=10)
@@ -81,7 +70,6 @@ class SnapshotScheduleTests(unittest.TestCase):
         self.assertEqual(captured, 11)
 
     def test_a_jump_in_progress_still_captures_once(self) -> None:
-        """A step that advances several intervals yields one frame, not several."""
         schedule = SnapshotSchedule(frames=100)
         self.assertTrue(schedule.should_capture(0.0))
         self.assertTrue(schedule.should_capture(40.0))
@@ -93,7 +81,6 @@ class SnapshotScheduleTests(unittest.TestCase):
         self.assertFalse(schedule.should_capture(50.5))
         schedule.reset()
         self.assertTrue(schedule.should_capture(50.5))
-
 
 if __name__ == "__main__":
     unittest.main()

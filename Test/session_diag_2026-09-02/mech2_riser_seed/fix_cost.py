@@ -22,7 +22,6 @@ print("   metal cells preserved:", int(mp.sum()), "==", int(metal.sum()), mp.sum
 for nmf, sl in [("x=0",op[0]),("x=-1",op[-1]),("y=0",op[:,0]),("y=-1",op[:,-1]),
                 ("z=0",op[:,:,0]),("z=-1",op[:,:,-1])]:
     print(f"   face {nmf:5s} all obstacle: {bool(sl.all())}")
-# vent mask survives?
 inlet = np.array(np.nonzero((t[:,:,t.shape[2]-1]==6))).T
 inlet = np.column_stack((inlet, np.full(len(inlet), t.shape[2]-1)))
 v0=_static_vent_mask(t, inlet, True)

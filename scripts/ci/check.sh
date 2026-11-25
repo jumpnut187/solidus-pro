@@ -1,12 +1,3 @@
-#!/usr/bin/env bash
-# CI checks, one subcommand per CI step so each shows up separately.
-# CI-provider neutral; also runs locally from the repo root:
-#
-#   scripts/ci/check.sh models   no CAD file is tracked outside tests/ci_models/
-#   scripts/ci/check.sh pins     every installed package is pinned in constraints-ci.txt
-#   scripts/ci/check.sh syntax   byte-compile all first-party packages
-#   scripts/ci/check.sh types    mypy over the mypy.ini allowlist
-#   scripts/ci/check.sh tests    full unittest regression suite (must exit 0)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -14,9 +5,6 @@ PY="${PYTHON:-python}"
 
 case "${1:-}" in
 models)
-    # CAD is ignored everywhere except the CI test models, but `git add -f`
-    # gets past .gitignore. Fail on any tracked STL/STEP outside
-    # tests/ci_models/, and on anything but .stl inside it.
     bad=$(git ls-files -z | tr '\0' '\n' \
         | grep -iE '\.(stl|step|stp)$' \
         | grep -vE '^tests/ci_models/[^/]+\.stl$' || true)
@@ -29,9 +17,6 @@ models)
     echo "CAD files tracked: only tests/ci_models/*.stl."
     ;;
 pins)
-    # A requirement added without regenerating constraints-ci.txt installs at
-    # whatever version is newest that day. Fail instead, so the pins stay the
-    # single source of versions.
     "$PY" - <<'EOF'
 import re, subprocess, sys
 norm = lambda n: re.sub(r"[-_.]+", "-", n).lower()
@@ -67,19 +52,11 @@ syntax)
     "$PY" -m compileall -q config core physics ui web tests tools scripts
     ;;
 types)
-    # mypy.ini `files=` is an explicit allowlist; only those files are checked.
     "$PY" -m mypy --config-file mypy.ini
     ;;
 tests)
     export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
     export MPLBACKEND="${MPLBACKEND:-Agg}"
-    # -X faulthandler prints a Python traceback when a Numba kernel or a Qt
-    # extension segfaults, instead of a bare exit 139. A heap-corrupting
-    # kernel once made discovery exit 139 and hid eight failures for weeks.
-    # The outer timeout sends SIGABRT before the CI job limit, which makes
-    # faulthandler dump every thread's stack for a hung test.
-    # Same discovery form as AGENT.md (`discover tests`): tests import as
-    # top-level `test_*` modules, which tests/helpers/module_stubs.py expects.
     cmd=("$PY" -X faulthandler -m unittest discover tests --durations 25)
     if command -v timeout >/dev/null 2>&1; then
         timeout --signal=ABRT "${CI_TEST_TIMEOUT:-25m}" "${cmd[@]}"

@@ -8,7 +8,6 @@ export type ReportModalProps = {
   formats: ReportFormat[];
   busy: boolean;
   error: string | null;
-  /** Whether a viewport screenshot can be captured right now. */
   canCaptureView: boolean;
   onGenerate: (format: string, sections: ReportSectionToggles) => void;
   onClose: () => void;

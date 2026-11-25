@@ -1,11 +1,8 @@
-"""Shrink and Microporosity envelope thresholds default to 70 % on desktop and web."""
-
 import re
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-
 
 class ShrinkageDefaultThresholdTests(unittest.TestCase):
     def test_desktop_default_is_70(self) -> None:
@@ -38,7 +35,6 @@ class ShrinkageDefaultThresholdTests(unittest.TestCase):
         match = re.search(r"^\s*porosity: (\d+),", source, re.M)
         self.assertIsNotNone(match)
         self.assertEqual(int(match.group(1)), 70)
-
 
 if __name__ == "__main__":
     unittest.main()

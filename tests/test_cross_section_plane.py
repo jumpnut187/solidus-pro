@@ -11,17 +11,12 @@ from tests.helpers.module_stubs import (
     snapshot_modules,
 )
 
-# Captured before any stub is installed, so tearDownModule can hand the real
-# vtk/Qt modules back to whatever runs next in this process.
 _MODULE_SNAPSHOT = snapshot_modules()
-
 
 def tearDownModule() -> None:
     restore_modules(_MODULE_SNAPSHOT)
 
-
 class _SpyVTKPlane:
-    """Minimal spy for vtkPlane that records normal and origin."""
 
     def __init__(self, *args, **kwargs):
         self._normal = (0.0, 0.0, 0.0)
@@ -39,7 +34,6 @@ class _SpyVTKPlane:
     def GetOrigin(self):
         return self._origin
 
-
 class _DummyActorCollection:
     def __init__(self):
         self._actors = []
@@ -53,7 +47,6 @@ class _DummyActorCollection:
     def AddItem(self, actor):
         self._actors.append(actor)
 
-
 class _DummyRenderer:
     def __init__(self):
         self._actors = _DummyActorCollection()
@@ -64,9 +57,7 @@ class _DummyRenderer:
     def AddActor(self, actor):
         self._actors.AddItem(actor)
 
-
 class _ChainingDummy:
-    """Dummy VTK object where any method returns self, enabling chaining."""
 
     def __init__(self, *args, **kwargs):
         pass
@@ -76,7 +67,6 @@ class _ChainingDummy:
             return self
         return _method
 
-
 class _DummyVTKClass:
     def __init__(self, *args, **kwargs):
         pass
@@ -85,7 +75,6 @@ class _DummyVTKClass:
         def _method(*args, **kwargs):
             return None
         return _method
-
 
 def _install_cross_section_stubs() -> None:
     vtk_module = types.ModuleType("vtk")
@@ -101,15 +90,13 @@ def _install_cross_section_stubs() -> None:
             return _DummyRenderer
         return _ChainingDummy
 
-    vtk_module.__getattr__ = _vtk_getattr  # type: ignore[attr-defined]
+    vtk_module.__getattr__ = _vtk_getattr
 
     vtk_util_module = types.ModuleType("vtk.util")
     numpy_support_module = types.ModuleType("vtk.util.numpy_support")
     numpy_support_module.numpy_to_vtk = lambda *args, **kwargs: _DummyVTKClass()
     vtk_util_module.numpy_support = numpy_support_module
 
-    # Forced install; tearDownModule restores the real modules. Also drops
-    # ui.visualizer/ui.main_window so they re-import against these stubs.
     install_stub_modules({
         "vtk": vtk_module,
         "vtk.util": vtk_util_module,
@@ -117,7 +104,6 @@ def _install_cross_section_stubs() -> None:
         **make_vtk_qt_stub_modules(_DummyVTKClass),
         **make_qt_stub_modules(_DummyVTKClass, lambda *a, **k: _DummyVTKClass()),
     })
-
 
 class CrossSectionPlaneTests(unittest.TestCase):
     @classmethod
@@ -170,12 +156,10 @@ class CrossSectionPlaneTests(unittest.TestCase):
         self.assertEqual(plane.get_position_range(), (-5, 15))
 
     def test_hide_visual_keeps_enabled(self) -> None:
-        """Hiding the actor should not disable the plane."""
         plane = self.visualizer.CrossSectionPlane(_DummyRenderer(), "X")
         plane.enable(show_plane=True)
         plane.plane_actor.SetVisibility(False)
         self.assertTrue(plane.enabled)
-
 
 if __name__ == "__main__":
     unittest.main()

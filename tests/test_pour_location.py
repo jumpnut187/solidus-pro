@@ -1,11 +1,3 @@
-"""Tests for ``core.pour_location``.
-
-Covers the pure data model (validation, normalization, JSON round-trip,
-unit conversion) and ``resolve_inlet_voxels``, which maps a pour point to
-nearby voxel indices on a small synthetic lattice built with numpy -- no
-mesh object involved, per the module's mesh-agnostic contract.
-"""
-
 from __future__ import annotations
 
 import math
@@ -14,7 +6,6 @@ import unittest
 import numpy as np
 
 from core.pour_location import PourLocation, resolve_inlet_voxels
-
 
 class PourLocationValidationTests(unittest.TestCase):
     def test_round_trip_to_dict_from_dict(self) -> None:
@@ -68,12 +59,10 @@ class PourLocationValidationTests(unittest.TestCase):
 
     def test_wrong_length_point_rejected(self) -> None:
         with self.assertRaises(ValueError):
-            PourLocation(point_in=(0.0, 0.0))  # type: ignore[arg-type]
-
+            PourLocation(point_in=(0.0, 0.0))
 
 class ResolveInletVoxelsTests(unittest.TestCase):
     def _lattice(self, voxel_size: float, n_per_axis: int = 5) -> np.ndarray:
-        """Build an (n^3, 3) grid of voxel centers spaced by voxel_size."""
         coords = np.arange(n_per_axis) * voxel_size
         xx, yy, zz = np.meshgrid(coords, coords, coords, indexing="ij")
         return np.stack([xx.ravel(), yy.ravel(), zz.ravel()], axis=1)
@@ -81,7 +70,6 @@ class ResolveInletVoxelsTests(unittest.TestCase):
     def test_finds_expected_voxels_near_point(self) -> None:
         voxel_size = 1.0
         centers = self._lattice(voxel_size)
-        # Pick a point exactly on a lattice node well inside the grid.
         target = np.array([2.0, 2.0, 2.0])
         location = PourLocation(point_in=tuple(target))
 
@@ -93,9 +81,7 @@ class ResolveInletVoxelsTests(unittest.TestCase):
         found_points = centers[indices]
         distances = np.linalg.norm(found_points - target, axis=1)
         self.assertTrue(np.all(distances <= 1.5 * voxel_size))
-        # The target point itself must be included.
         self.assertTrue(np.any(np.all(np.isclose(found_points, target), axis=1)))
-        # Nothing outside the radius should sneak in.
         all_distances = np.linalg.norm(centers - target, axis=1)
         expected_count = int(np.count_nonzero(all_distances <= 1.5 * voxel_size))
         self.assertEqual(len(indices), expected_count)
@@ -119,8 +105,6 @@ class ResolveInletVoxelsTests(unittest.TestCase):
         target = np.array([2.0, 2.0, 2.0])
         location = PourLocation(point_in=tuple(target))
 
-        # Assign part-type code 7 (RUNNER-like) only to the exact target
-        # voxel; everything else is code 0 (CAST-like).
         part_types = np.zeros(len(centers), dtype=np.int32)
         target_idx = np.flatnonzero(np.all(np.isclose(centers, target), axis=1))
         part_types[target_idx] = 7
@@ -164,9 +148,6 @@ class ResolveInletVoxelsTests(unittest.TestCase):
             location, large_centers, large_voxel, radius_voxels=1.5
         )
 
-        # Same lattice shape both times, but the physical search radius is
-        # 1.5x bigger when the voxel size doubles, so more of the (equally
-        # spaced-out) large lattice's neighbors fall within range.
         small_radius = 1.5 * small_voxel
         large_radius = 1.5 * large_voxel
         self.assertLess(small_radius, large_radius)
@@ -190,7 +171,6 @@ class ResolveInletVoxelsTests(unittest.TestCase):
         centers = self._lattice(1.0)
         with self.assertRaises(ValueError):
             resolve_inlet_voxels(location, centers, 0.0)
-
 
 if __name__ == "__main__":
     unittest.main()

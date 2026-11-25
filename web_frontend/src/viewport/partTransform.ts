@@ -1,14 +1,3 @@
-/**
- * A part's placement on a Babylon node, exactly as the engine places it.
- *
- * The engine turns a part with static-XYZ Euler angles, `R = Rz @ Ry @ Rx`
- * (`core.part_manager.Part._apply_transform`). Babylon's `node.rotation` is a
- * yaw-pitch-roll triple applied in a different order, so any rotation about
- * more than one axis drew the part somewhere other than where it was
- * simulated. The rotation is set as a quaternion of the engine's own matrix
- * instead; `tests/orientation.check.ts` compares the resulting world vertices
- * with `core.orientation.world_bounds`.
- */
 import { Quaternion } from '@babylonjs/core/Maths/math.vector';
 import type { TransformNode } from '@babylonjs/core/Meshes/transformNode';
 

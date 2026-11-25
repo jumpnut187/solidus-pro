@@ -1,10 +1,3 @@
-"""Is the inlet layer's velocity destroyed by bounce-back off the lid above?
-
-A 4x4x40 metal column, inlet pinned at the top exactly as the stage does it,
-reporting the inlet layer's measured u_z against the u_z one and five cells
-below it. If the lid is the brake, the inlet sits near zero while the column
-below runs away from it.
-"""
 import sys, numpy as np
 sys.path.insert(0, "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim")
 from physics.filling import (create_state, step, ensure_interface_skin,

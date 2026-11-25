@@ -1,5 +1,3 @@
-"""Tests for the routes that store bodies modeled in the browser."""
-
 from __future__ import annotations
 
 import sqlite3
@@ -16,7 +14,6 @@ from web.routes_modeling import modeling_bp
 from web.routes_tools import tools_bp
 from web.services.simulation_queue import SimulationQueueManager
 
-
 def _box_mesh(size: float = 2.0, offset: float = 0.0) -> dict:
     box = trimesh.creation.box(extents=(size, size, size))
     box.apply_translation([offset, 0.0, 0.0])
@@ -24,7 +21,6 @@ def _box_mesh(size: float = 2.0, offset: float = 0.0) -> dict:
         "vertices": box.vertices.reshape(-1).tolist(),
         "faces": box.faces.reshape(-1).tolist(),
     }
-
 
 def _feature(**overrides) -> dict:
     feature = {
@@ -44,7 +40,6 @@ def _feature(**overrides) -> dict:
     }
     feature.update(overrides)
     return feature
-
 
 class WebModelingTestCase(unittest.TestCase):
     def setUp(self) -> None:
@@ -129,7 +124,6 @@ class WebModelingTestCase(unittest.TestCase):
     def test_update_keeps_a_file_another_part_still_uses(self) -> None:
         created = self._create().get_json()
         old_path = created["part"]["filepath"]
-        # The browser's Duplicate reuses the source part's file.
         self.client.post(
             f"/api/projects/{self.project_id}/parts",
             json={"name": "copy", "part_type": "riser", "filepath": old_path},
@@ -167,12 +161,8 @@ class WebModelingTestCase(unittest.TestCase):
         self.assertEqual(list(self.upload_folder.iterdir()), [])
 
     def test_rejects_a_body_that_is_not_closed_once_welded(self) -> None:
-        # One face missing: an open box.
         box = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
         open_box = {"vertices": box.vertices.reshape(-1).tolist(), "faces": box.faces[1:].reshape(-1).tolist()}
-        # Two boxes that share one edge: closed apart, but once the shared
-        # positions are welded that edge sits on four triangles -- what an
-        # extrude that ran into a seam between two bodies used to send.
         a = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
         b = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
         b.apply_translation([1.0, 1.0, 0.0])
@@ -230,7 +220,6 @@ class WebModelingTestCase(unittest.TestCase):
         url = f"/api/projects/{self.project_id}/reference-planes"
         response = self.client.put(url, json={"planes": planes})
         self.assertEqual(response.status_code, 200)
-        # The shell's autosave sends a ui_state without the planes.
         self.client.put(f"/api/projects/{self.project_id}", json={"name": "Renamed", "ui_state": {}})
         project = self.client.get(f"/api/projects/{self.project_id}").get_json()["project"]
         self.assertEqual(project["ui_state"]["reference_planes"], planes)
@@ -241,8 +230,6 @@ class WebModelingTestCase(unittest.TestCase):
         self.assertEqual(self.client.put(url, json={"planes": "x"}).status_code, 400)
         self.assertEqual(self.client.put(url, json={"planes": [{"id": 1}]}).status_code, 400)
         self.assertEqual(self.client.put("/api/projects/nope/reference-planes", json={"planes": []}).status_code, 404)
-
-    # --- Extrude cuts --------------------------------------------------------
 
     def _cut(self, part_id: str, mesh) -> dict:
         return self.client.put(f"/api/projects/{self.project_id}/parts/{part_id}/cut", json={"mesh": mesh})
@@ -260,7 +247,6 @@ class WebModelingTestCase(unittest.TestCase):
         self.assertAlmostEqual(part["mesh_data"]["volume"], 1.0, places=4)
         first_cut = Path(part["filepath"])
 
-        # A second cut replaces the cut file and keeps the same base.
         part = self._cut(part_id, _box_mesh(size=1.5)).get_json()["part"]
         self.assertEqual(part["base_filepath"], original)
         self.assertFalse(first_cut.exists())
@@ -302,7 +288,6 @@ class WebModelingTestCase(unittest.TestCase):
         self.assertAlmostEqual(trimesh.load(part["base_filepath"], force="mesh").volume, 27.0, places=4)
         self.assertFalse(Path(created["part"]["filepath"]).exists())
 
-        # Rebuilt without cuts: the old cut file and base both go.
         old = [Path(part["filepath"]), Path(part["base_filepath"])]
         part = self.client.put(
             f"/api/projects/{self.project_id}/features/{part_id}",
@@ -347,8 +332,6 @@ class WebModelingTestCase(unittest.TestCase):
         self.assertEqual(self.client.put(url, json={"cuts": [{"kind": "cut"}]}).status_code, 400)
         self.assertEqual(self.client.put(url, json={"cuts": [{**cuts[0], "partIds": [1]}]}).status_code, 400)
 
-        # A duplicated project's cuts name the copied bodies, and the copy has
-        # its own base file.
         self._cut(part_id, _box_mesh(size=1.0))
         copy_id = self.client.post(f"/api/projects/{self.project_id}/duplicate", json={}).get_json()["id"]
         copy = self.client.get(f"/api/projects/{copy_id}").get_json()
@@ -378,7 +361,6 @@ class WebModelingTestCase(unittest.TestCase):
         part = repo.get_part(legacy, "x", "p1")
         assert part is not None
         self.assertIsNone(part["feature"])
-
 
 if __name__ == "__main__":
     unittest.main()

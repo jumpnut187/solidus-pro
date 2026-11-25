@@ -1,12 +1,3 @@
-/**
- * Screen-space lines a few pixels wide, for the sketch.
- *
- * WebGL draws `LINES` one device pixel wide whatever is asked for, which on a
- * 2x display is half a CSS pixel: right for the floor grid and the feature
- * edges, too faint for the profile being drawn, which is the thing the user
- * is looking at. Babylon's GreasedLine extrudes each segment into a
- * camera-facing ribbon of constant pixel width instead.
- */
 import { GreasedLineMeshMaterialType } from '@babylonjs/core/Materials/GreasedLine/greasedLineMaterialInterfaces';
 import type { GreasedLineSimpleMaterial } from '@babylonjs/core/Materials/GreasedLine/greasedLineSimpleMaterial';
 import type { Color3 } from '@babylonjs/core/Maths/math.color';
@@ -15,14 +6,6 @@ import { CreateGreasedLine } from '@babylonjs/core/Meshes/Builders/greasedLineBu
 import type { Mesh } from '@babylonjs/core/Meshes/mesh';
 import type { Scene } from '@babylonjs/core/scene';
 
-/**
- * The `width` to pass for a line this many CSS pixels wide.
- *
- * With size attenuation GreasedLine offsets each side by width/4 device
- * pixels (half the width, through a projection it then divides back out
- * against a resolution measured in full NDC units), so the drawn line is
- * width/2 device pixels: double it, and convert CSS to device pixels.
- */
 function devicePixels(scene: Scene, cssPixels: number): number {
   return (2 * cssPixels) / scene.getEngine().getHardwareScalingLevel();
 }
@@ -42,8 +25,6 @@ export function createFatLines(
     { points },
     {
       materialType: GreasedLineMeshMaterialType.MATERIAL_TYPE_SIMPLE,
-      // In GreasedLine's terms "size attenuation" is what makes the width a
-      // constant number of pixels on screen.
       sizeAttenuation: true,
       width: devicePixels(scene, cssWidth),
       color,
@@ -55,7 +36,6 @@ export function createFatLines(
   return mesh;
 }
 
-/** Keep a line's pixel width right after the canvas or the pixel ratio changes. */
 export function syncFatLineResolution(mesh: Mesh | null, scene: Scene): void {
   const material = mesh?.material as GreasedLineSimpleMaterial | null | undefined;
   if (!material || !('resolution' in material)) return;

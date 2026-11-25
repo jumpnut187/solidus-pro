@@ -4,7 +4,6 @@ import numpy as np
 
 from core.memory_manager import create_managed_array, get_memory_manager, reset_memory_manager
 
-
 class MemoryManagerModesTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_memory_manager()
@@ -41,7 +40,6 @@ class MemoryManagerModesTests(unittest.TestCase):
 
         self.assertIsInstance(arr, np.memmap)
         self.assertTrue(np.all(arr == 0.0))
-
 
 if __name__ == "__main__":
     unittest.main()

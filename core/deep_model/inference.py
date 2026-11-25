@@ -1,24 +1,3 @@
-"""Deep surrogate inference: ``DeepSurrogateModel`` (``SurrogateModel`` ABC).
-
-The deep model drops into the shared ``SurrogateModel`` interface, so the
-existing ``run_surrogate_pipeline``, ``SurrogateWorker``, and UI paths run it
-unchanged.  Prediction is backend-aware:
-
-1. Core ML — exported ``.mlpackage`` (Apple ANE / GPU / CPU) when present.
-2. ONNX Runtime — exported ``.onnx`` graph on the best execution provider
-   (Qualcomm / Intel / AMD NPU, NVIDIA GPU, DirectML, or ONNX Runtime CPU).
-   On the first prediction the ONNX output is checked against PyTorch, and in
-   ``auto`` mode both are timed and the faster one is kept.
-3. PyTorch MPS — Apple GPU.
-4. PyTorch CPU — universal fallback.
-
-The network predicts ``log1p(start)`` and ``log1p(local)`` and derives
-``end = start + local`` in-graph (``UNet3D.forward``).  ``reconstruct_schedule``
-then applies the active-cell mask and the ``max_simulation_time`` clamp; it is
-the single reconstruction used by ``DeepSurrogateModel.predict`` and by
-``training._evaluate`` so reported accuracy measures what inference returns.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -42,42 +21,19 @@ from core.solidification_params import DEFAULT_MAX_SIMULATION_TIME_S
 
 DEFAULT_MAX_SIMULATION_TIME = DEFAULT_MAX_SIMULATION_TIME_S
 
-#: The ONNX output must match PyTorch on active cells within
-#: ``atol + rtol * |torch|`` seconds before ONNX Runtime is used.  The
-#: tolerance covers fp16 execution on an NPU; it matches the Core ML export
-#: regression test.
 ONNX_MATCH_RTOL = 0.03
 ONNX_MATCH_ATOL_S = 2.0
-#: Timed predictions per backend when ``auto`` chooses between ONNX Runtime
-#: and PyTorch (median of these, after the validation run as warm-up).
 BENCHMARK_RUNS = 3
 
 _LOG = logging.getLogger(__name__)
 
-
 def max_simulation_time_from(conditioning: Conditioning) -> float:
-    """Recover ``max_simulation_time`` (seconds) from a conditioning vector."""
     raw = raw_from_conditioning(conditioning)
     return float(raw.get("max_simulation_time", DEFAULT_MAX_SIMULATION_TIME))
-
 
 def reconstruct_schedule(
     network_output: np.ndarray, channels: np.ndarray, max_time: float
 ) -> np.ndarray:
-    """Turn a ``UNet3D.forward`` output into the ``SurrogateModel`` schedule.
-
-    Args:
-        network_output: ``(3, R, R, R)`` physical seconds ``[start, end, local]``
-            as returned by ``UNet3D.forward`` (or an exported graph of it).
-        channels: ``(7, R, R, R)`` input channels; ``channels[0] > 0.5`` marks
-            active cells.
-        max_time: ``max_simulation_time`` for the run (seconds).
-
-    Returns:
-        ``(3, R, R, R)`` float32 ``[start, end, local]`` with
-        ``end == start + local`` on active cells (bounded by ``max_time`` and
-        floored at ``END_TIME_FLOOR``) and 0 on inactive cells.
-    """
     pred = np.asarray(network_output, dtype=np.float32)
     if pred.shape[0] != 3 or pred.ndim != 4:
         raise ValueError(f"Expected (3, R, R, R) network output, got {pred.shape}")
@@ -94,14 +50,7 @@ def reconstruct_schedule(
     out[:, ~active] = 0.0
     return out
 
-
 def build_unet_from_artifact(model_dir: str, manifest: ModelManifest) -> UNet3D:
-    """Build a ``UNet3D`` from ``weights.pt`` + manifests in ``model_dir``.
-
-    The deep manifest's ``target_mean`` / ``target_std`` are authoritative
-    for denormalization and are copied onto the model buffers after the
-    weights load.  Shared by inference and export.
-    """
     import torch
 
     weights_path = os.path.join(model_dir, "weights.pt")
@@ -124,9 +73,7 @@ def build_unet_from_artifact(model_dir: str, manifest: ModelManifest) -> UNet3D:
     model.eval()
     return model
 
-
 class DeepSurrogateModel(SurrogateModel):
-    """A trained 3D U-Net exposed through the :class:`SurrogateModel` ABC."""
 
     def __init__(
         self,
@@ -161,11 +108,8 @@ class DeepSurrogateModel(SurrogateModel):
         self.onnx_path: Optional[str] = None
         self._coreml_model: Optional[Any] = None
         self._onnx: Optional[Any] = None
-        #: Set until the first prediction checks the ONNX graph against PyTorch.
         self._onnx_check_pending = False
-        #: ``auto`` only: also time ONNX Runtime against PyTorch and keep the faster.
         self._benchmark_pending = False
-        #: What the ONNX check and benchmark found; shown by ``describe``.
         self.selection: Dict[str, Any] = {}
 
         if chosen in ("auto", "coreml"):
@@ -176,8 +120,6 @@ class DeepSurrogateModel(SurrogateModel):
         if self.mlpackage_path is not None:
             self._backend = DeepBackend.COREML
         elif self.onnx_path is not None:
-            # Explicit "onnx" starts on ONNX; "auto" starts on PyTorch and
-            # switches only if ONNX Runtime matches it and is faster.
             self._backend = DeepBackend.ONNX if chosen == "onnx" else self._torch_backend
             self._onnx_check_pending = True
             self._benchmark_pending = chosen == "auto"
@@ -189,10 +131,7 @@ class DeepSurrogateModel(SurrogateModel):
         self._device = torch.device(torch_device_for(self._torch_backend))
         self._model_device: Optional[Any] = None
 
-    # -- helpers -------------------------------------------------------------
     def _find_mlpackage(self) -> Optional[str]:
-        # export_for_target defaults to <model_dir>/export; the desktop settings
-        # default (models/deep_model/export) is the sibling of the trained dir.
         candidates = []
         for base in (
             self.model_dir,
@@ -207,7 +146,6 @@ class DeepSurrogateModel(SurrogateModel):
         return candidates[0] if candidates else None
 
     def _coreml(self):
-        """Load the Core ML model once and reuse it across predict calls."""
         if self._coreml_model is None:
             try:
                 import coremltools as ct
@@ -223,9 +161,7 @@ class DeepSurrogateModel(SurrogateModel):
         )
         return np.asarray(out["schedule"], dtype=np.float32)[0]
 
-    # -- ONNX Runtime ---------------------------------------------------------
     def _reject_onnx(self, reason: str) -> None:
-        """Stay on (or return to) PyTorch and record why ONNX Runtime was not used."""
         _LOG.warning("Deep model: not using ONNX Runtime: %s", reason)
         self._backend = self._torch_backend
         self._onnx = None
@@ -233,13 +169,6 @@ class DeepSurrogateModel(SurrogateModel):
         self._backend_state.update(self.selection)
 
     def _settle_onnx(self, channels: np.ndarray, conditioning: Conditioning) -> np.ndarray:
-        """Check the ONNX graph against PyTorch and pick the backend.
-
-        Runs once, on the first prediction, because the check needs a real
-        input.  ONNX Runtime is used only when its output matches PyTorch on the
-        active cells; in ``auto`` mode it must also be faster.  Returns the raw
-        network output from the backend that was kept.
-        """
         from core.deep_model.onnx_runner import OnnxRunner, median_seconds
 
         self._onnx_check_pending = False
@@ -305,7 +234,6 @@ class DeepSurrogateModel(SurrogateModel):
 
     @property
     def device_summary(self) -> str:
-        """One line naming the hardware predictions run on."""
         torch_name = "PyTorch MPS (Apple GPU)" if self._torch_backend == DeepBackend.MPS else "PyTorch CPU"
         if self._backend == DeepBackend.COREML:
             return "Core ML (Apple Neural Engine / GPU / CPU)"
@@ -318,7 +246,6 @@ class DeepSurrogateModel(SurrogateModel):
             return f"ONNX Runtime on {onnx_provider_description(provider)}"
         return torch_name
 
-    # -- SurrogateModel ABC --------------------------------------------------
     def predict(self, channels: np.ndarray, conditioning: Conditioning) -> np.ndarray:
         if channels.ndim != 4:
             raise ValueError(f"Expected 4D channels, got shape {channels.shape}")
@@ -358,19 +285,7 @@ class DeepSurrogateModel(SurrogateModel):
             )
         return lines
 
-
 def load_deep_model(path: str, backend: Optional[str] = None) -> ModelLoadResult:
-    """Load a ``torch_unet`` artifact directory into a :class:`DeepSurrogateModel`.
-
-    Args:
-        path: Directory containing ``manifest.json`` + ``weights.pt``.
-        backend: Optional override of the inference backend: ``"auto"``,
-            ``"coreml"``, ``"onnx"``, ``"mps"`` or ``"cpu"``.  ``None`` uses
-            ``settings.deep.inference_backend``.
-
-    Returns:
-        :class:`ModelLoadResult` with the model or an error message.
-    """
     from core.surrogate.model import _read_manifest
 
     path = os.fspath(path)

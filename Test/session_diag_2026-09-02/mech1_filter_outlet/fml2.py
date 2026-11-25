@@ -1,26 +1,3 @@
-"""Mechanism-1 probe v2: per-operation mass ledger at the filter's bottom plane.
-
-Derived from Test/session_diag_2026-09-01/filter_mass_ledger.py (never ran; it
-died on NUMBA_NUM_THREADS).  Changes made here:
-
-  * the weight rule below was re-verified line by line against the CURRENT
-    free_surface_kernel (physics/fluid_flow.py 1600-1637 at f1daf97) -- it was
-    already correct, the porous branch uses UNCLAMPED eps on both sides
-  * the global row is written even when the watch set is empty, so the onset
-    can be seen before any cell is over-full
-  * the watch set is (re)armed lazily: the first time any porous-adjacent wet
-    cell exceeds EPS_WATCH, and never re-armed after
-  * added a whole-grid mass ledger per operation: exchange / transitions /
-    heal / external(stage), summed over all non-obstacle cells, so "is mass
-    created" is answered globally and not only on the watch set
-  * added a whole-grid straddling-pair antisymmetry audit restricted to the
-    porous boundary (every wet porous cell x every wet neighbour), which is
-    cheap enough to run every AUDIT_EVERY steps
-  * added w1 (weight-1) and wpor (weight-porosity) counterfactual direction
-    sums per watched cell, so amplification is separable from transport
-
-  CASTSIM_THREAD_BUDGET=8 START=5000 STOP=13000 ./venv/bin/python fml2.py
-"""
 from __future__ import annotations
 
 import collections
@@ -31,7 +8,7 @@ import time
 sys.path.insert(0, "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-import numpy as np  # noqa: E402
+import numpy as np
 
 START = int(os.environ.get("START", "5000"))
 STOP = int(os.environ.get("STOP", "13000"))
@@ -42,38 +19,22 @@ OUT = os.environ.get("OUT", "fml2")
 
 S = {}
 
-
 def log(m):
     print(f"[{time.strftime('%H:%M:%S')}] {m}", flush=True)
 
-
-# ---------------------------------------------------------------------------
-# weight rule, replicated from free_surface_kernel (fluid_flow.py 1600-1637)
-#
-#   por_here = porosity[x]; denom = rho[x]*por_here
-#   eps_here = mass_in[x]/denom          (UNCLAMPED)
-#   eps_here_c = clip(eps_here, 0, 1)
-#   if por_here < 1 or por_nb < 1:  w = 0.5*(eps_here   + eps_nb)     UNCLAMPED
-#   elif flag==FLUID or nflag==FLUID: w = 1.0
-#   else:                           w = 0.5*(eps_here_c + eps_nb_c)   CLAMPED
-# ---------------------------------------------------------------------------
 def _eps_raw(mass, rho32, por, idx):
     den = np.float64(rho32[idx]) * por[idx]
     return mass[idx] / den if den > 0.0 else 0.0
 
-
 def _clamp01(v):
     return 0.0 if v < 0.0 else (1.0 if v > 1.0 else v)
 
-
 def pair_weight(flag_a, flag_b, por_a, por_b, eps_a, eps_b, FLUID):
-    """Weight cell A uses for its pair with B."""
     if por_a < 1.0 or por_b < 1.0:
         return 0.5 * (eps_a + eps_b), "porous"
     if flag_a == FLUID or flag_b == FLUID:
         return 1.0, "fluid"
     return 0.5 * (_clamp01(eps_a) + _clamp01(eps_b)), "iface"
-
 
 def install(fs):
     import physics.filling as pf
@@ -139,7 +100,6 @@ def install(fs):
             idx = idx[order]
         return idx
 
-    # ------------------------------------------------------------------
     def fsk(post, streamed, flags, rho, u, porosity, entry_offset, primed,
             C, Cii, W, Op, gas_density, mass_in, mass_out, f_out):
         mass_before = mass_in.copy()
@@ -160,7 +120,6 @@ def install(fs):
         do_audit = (i % AUDIT_EVERY == 0)
         nx, ny, nz = flags.shape
 
-        # -------- whole-grid antisymmetry audit over the porous boundary ----
         if do_audit:
             resid_max = 0.0
             resid_max_str = 0.0
@@ -233,7 +192,6 @@ def install(fs):
         S["dm_w1"] = dm_w1
         S["dm_wpor"] = dm_wpor
 
-    # ------------------------------------------------------------------
     def _wrap(orig, key):
         def inner(state, *a, **kw):
             i = n["i"] + 1
@@ -256,7 +214,6 @@ def install(fs):
     heal = _wrap(orig_heal, "heal")
     reset = _wrap(orig_reset, "reset")
 
-    # ------------------------------------------------------------------
     def step(state, units, **kw):
         i = n["i"] + 1
         idx = S.get("watch")
@@ -286,7 +243,6 @@ def install(fs):
             log(f"NON-FINITE at step {i}")
             raise SystemExit(0)
 
-        # arm the watch lazily, once
         if S.get("watch") is None or S["watch"].shape[0] == 0:
             w = watch_indices(state)
             if w.shape[0]:
@@ -384,7 +340,6 @@ def install(fs):
     log(f"instrumentation installed: START={START} STOP={STOP} "
         f"LOG_EVERY={LOG_EVERY} AUDIT_EVERY={AUDIT_EVERY}")
 
-
 def main():
     import scipy.spatial as ss
     o = ss.cKDTree
@@ -411,7 +366,7 @@ def main():
                     if p.suffix.lower() in (".stl", ".step", ".stp")):
         try:
             pm.load_assembly_parts(str(f))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log(f"skip {f.name}: {e}")
     sprue = next(p for p in pm.get_all_parts() if p.part_type is PartType.SPRUE)
     b = sprue.get_bounds()
@@ -435,7 +390,6 @@ def main():
                              progress_message_callback=lambda m: log(f"FILL: {m}"))
     except SystemExit:
         log("probe stop")
-
 
 if __name__ == "__main__":
     import threading

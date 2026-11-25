@@ -1,10 +1,3 @@
-"""Application-shell routes: project management extras, reports, hardware info,
-job logs, project file import/export.
-
-Owned by the shell/parity workstream. Registered by
-``web.app_factory.create_app``. Everything here lives under ``/api``.
-"""
-
 from __future__ import annotations
 
 from collections import OrderedDict
@@ -22,20 +15,13 @@ from web import repository as repo
 from web.payloads import read_artifact
 from web.services.simulation_queue import SimulationQueueManager
 
-#: A project file is settings, not geometry. The app-wide 500 MB limit exists
-#: for STEP assemblies and is far too generous for a JSON blob read into memory.
 MAX_PROJECT_FILE_BYTES = 4 * 1024 * 1024
 
-#: Cap on a client-supplied report screenshot, decoded.
 MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024
 
-#: PNG signature. The report renderer embeds images under a hardcoded
-#: ``data:image/png`` URL, so anything else would be mislabelled.
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
-
 def _triple(value: Any) -> List[float]:
-    """Three finite floats from untrusted JSON, defaulting to the origin."""
     if not isinstance(value, (list, tuple)) or len(value) != 3:
         return [0.0, 0.0, 0.0]
     out: List[float] = []
@@ -49,34 +35,20 @@ def _triple(value: Any) -> List[float]:
 
 tools_bp = Blueprint("web_tools", __name__, url_prefix="/api")
 
-
 def _database_path() -> Path:
     return Path(current_app.config["DATABASE"])
 
-
 def _upload_folder() -> Path:
     return Path(current_app.config["UPLOAD_FOLDER"])
-
 
 def _queue_manager() -> Optional[SimulationQueueManager]:
     manager = current_app.extensions.get("simulation_queue_manager")
     return cast(Optional[SimulationQueueManager], manager)
 
-
-#: Parsed artifacts, keyed by (path, mtime_ns, size). Artifacts run to 50-180
-#: MB of JSON and the report re-reads one per request; two
-#: entries is enough to keep an interactive session off the disk while bounding
-#: the memory a web worker holds.
 _ARTIFACT_CACHE: "OrderedDict[Tuple[str, int, int], Dict[str, Any]]" = OrderedDict()
 _ARTIFACT_CACHE_MAX = 2
 
-
 def _read_artifact_cached(artifact_path: str) -> Optional[Dict[str, Any]]:
-    """Parse an artifact, reusing the last few parses.
-
-    The key includes mtime and size so a re-run's artifact is never served from
-    a stale entry -- the path alone is reused for every run of a project.
-    """
     path = Path(artifact_path)
     try:
         stat = path.stat()
@@ -94,14 +66,7 @@ def _read_artifact_cached(artifact_path: str) -> Optional[Dict[str, Any]]:
         _ARTIFACT_CACHE.popitem(last=False)
     return artifact
 
-
 def _load_artifact(project_id: str) -> Optional[Dict[str, Any]]:
-    """The completed run's artifact, from the queue cache or from disk.
-
-    Mirrors ``web.routes._load_artifact``; duplicated rather than imported so a
-    change to the legacy blueprint's private helper cannot silently alter these
-    endpoints.
-    """
     manager = _queue_manager()
     if manager is not None:
         cached = manager.get_result(project_id)
@@ -112,16 +77,9 @@ def _load_artifact(project_id: str) -> Optional[Dict[str, Any]]:
         return None
     return _read_artifact_cached(artifact_path)
 
-
 @tools_bp.route("/tools/health")
 def tools_health():
     return jsonify({"ok": True, "blueprint": "web_tools"})
-
-
-# ---------------------------------------------------------------------------
-# Project management
-# ---------------------------------------------------------------------------
-
 
 @tools_bp.route("/projects/<project_id>/rename", methods=["POST"])
 def rename_project(project_id: str):
@@ -132,14 +90,8 @@ def rename_project(project_id: str):
         return jsonify({"error": "Project not found"}), 404
     return jsonify({"project": repo.get_project(_database_path(), project_id)})
 
-
 @tools_bp.route("/projects/<project_id>/duplicate", methods=["POST"])
 def duplicate_project(project_id: str):
-    """Copy a project's setup (parts, settings, pour location) but not results.
-
-    Each part's CAD file is copied on disk as well, so deleting either project
-    later cannot unlink geometry the other one still points at.
-    """
     database_path = _database_path()
     source = repo.get_project(database_path, project_id)
     if source is None:
@@ -154,10 +106,6 @@ def duplicate_project(project_id: str):
         if not stored:
             return None
         try:
-            # Rows written before the path check landed may still name a file
-            # anywhere on the filesystem. Copying one into the upload folder
-            # would publish it through /api/uploads, so refuse instead: this
-            # endpoint must not be a way to launder a path past the check.
             original = Path(repo.resolve_upload_path(stored, upload_folder))
         except repo.UnsafePartFileError:
             return None
@@ -167,14 +115,10 @@ def duplicate_project(project_id: str):
         try:
             shutil.copy2(original, copy_path)
         except OSError:
-            # A missing or unreadable source file should not abort the whole
-            # duplicate -- the copied row keeps pointing at the original.
             return None
         return str(copy_path)
 
     filepath_map: Dict[str, str] = {}
-    # A body an extrude cut has cut also keeps its pre-cut STL, which the copy
-    # needs for its cuts to stay editable.
     base_map: Dict[str, str] = {}
     for part in repo.get_parts(database_path, project_id):
         copied = copy_into_uploads(str(part.get("filepath") or ""))
@@ -189,21 +133,8 @@ def duplicate_project(project_id: str):
         return jsonify({"error": "Project not found"}), 404
     return jsonify({"id": new_id, "project": repo.get_project(database_path, new_id)}), 201
 
-
-# ---------------------------------------------------------------------------
-# Job log
-# ---------------------------------------------------------------------------
-
-
 @tools_bp.route("/projects/<project_id>/log")
 def project_log(project_id: str):
-    """Progress lines for a run, live while it works and after it finishes.
-
-    ``since`` is a monotonic sequence cursor, not an index into the lines
-    returned: the buffer is a ring, so once it wraps an index would point at
-    the wrong line (or at nothing, forever). Pass back the ``next`` value from
-    the previous response.
-    """
     try:
         since = max(0, int(request.args.get("since", 0)))
     except (TypeError, ValueError):
@@ -212,25 +143,11 @@ def project_log(project_id: str):
     manager = _queue_manager()
     payload = manager.get_log(project_id, since) if manager is not None else None
     if payload is None:
-        # Not an error: a project that has never run simply has no log.
         return jsonify({"lines": [], "next": 0, "dropped": 0, "available": False})
     return jsonify({**payload, "available": True})
 
-
-# ---------------------------------------------------------------------------
-# Hardware
-# ---------------------------------------------------------------------------
-
-
 @tools_bp.route("/hardware")
 def hardware():
-    """Detected hardware, mirroring the desktop Help > Hardware Info dialog.
-
-    Every field is optional from the client's point of view: detection runs
-    through ``psutil`` and platform-specific probes that can fail on an
-    unfamiliar host, and a missing core count should degrade the panel, not
-    500 the request.
-    """
     payload: Dict[str, Any] = {
         "cpu_brand": "Unknown",
         "cpu_vendor": "Unknown",
@@ -258,11 +175,6 @@ def hardware():
                 "cpu_vendor": str(config.cpu_vendor),
                 "physical_cores": config.physical_cores,
                 "logical_cores": config.logical_cores,
-                # `performance_cores`/`efficiency_cores` assume perflevel0 is
-                # the fast tier, which is wrong on chips whose tiers are named
-                # otherwise; `core_tiers` carries the OS's own names and is
-                # what the UI shows. See config.hardware_config for why the
-                # older pair is not simply corrected.
                 "performance_cores": config.performance_cores,
                 "efficiency_cores": config.efficiency_cores,
                 "core_tiers": [
@@ -277,7 +189,7 @@ def hardware():
                 "neural_engine_available": bool(config.neural_engine_available),
             }
         )
-    except Exception as exc:  # pragma: no cover - host-specific detection
+    except Exception as exc:
         payload["detection_error"] = str(exc)
 
     try:
@@ -285,32 +197,13 @@ def hardware():
 
         backend = get_gpu_compute().backend
         payload["gpu_backend"] = str(getattr(backend, "value", backend))
-    except Exception:  # pragma: no cover - optional accelerator stack
+    except Exception:
         payload["gpu_backend"] = "none"
 
     return jsonify(payload)
 
-
-# ---------------------------------------------------------------------------
-# Project file import and export (desktop-compatible)
-# ---------------------------------------------------------------------------
-#
-# The desktop format (``ui/project_state.py``, schema v2) and the web project
-# row disagree in three ways, and every one of them is a silent data-loss trap
-# if translated carelessly:
-#
-#   * the desktop nests settings under ``simulation`` and calls the alloy
-#     ``alloy_name``; the web row is flat and calls it ``alloy``. Feeding
-#     ``alloy_name`` straight to the pipeline yields WCB whatever the file said.
-#   * the desktop keeps ``pour_location`` in ``simulation``; the web keeps it
-#     inside the ``ui_state`` blob and mirrors it to a top-level key on read.
-#   * part paths in the file are relative to the file's own directory, which
-#     means nothing on a server. Imports match them to uploaded blobs by name.
-
-
 @tools_bp.route("/projects/<project_id>/export")
 def export_project_file(project_id: str):
-    """Download a project as a desktop-compatible ``.solidus-project.json``."""
     from flask import send_file
     import io
     import json
@@ -345,28 +238,17 @@ def export_project_file(project_id: str):
         },
         "parts": [
             {
-                # Lets an import point features and cuts that name a body at
-                # that body's new row. The desktop loader ignores it.
                 "id": part["id"],
                 "name": part["name"],
-                # The original file name, without the server's storage prefix
-                # and without a path: an absolute server path means nothing on
-                # another machine, and the prefix is not what the user's copy of
-                # the file is called.
                 "filepath": repo.strip_upload_prefix(os.path.basename(str(part["filepath"]))),
                 "part_type": part["part_type"],
                 "position": [part["position_x"], part["position_y"], part["position_z"]],
                 "rotation": [part["rotation_x"], part["rotation_y"], part["rotation_z"]],
                 "scale": part["scale"],
-                # The web parts table has no colour column; the desktop schema
-                # requires the key, so emit its own load-time default.
                 "color": [0.7, 0.7, 0.7],
                 "visible": bool(part["visible"]),
                 "is_open_top": bool(part["is_open_top"]),
                 "riser_sleeve": part.get("riser_sleeve", "insulating"),
-                # A body modeled in the browser carries the sketch and extrude
-                # that made it, so it stays editable after a round trip. The
-                # desktop loader ignores keys it does not know.
                 **({"feature": part["feature"]} if part.get("feature") else {}),
             }
             for part in parts
@@ -384,15 +266,8 @@ def export_project_file(project_id: str):
         download_name=f"{safe_name}.solidus-project.json",
     )
 
-
 @tools_bp.route("/projects/import", methods=["POST"])
 def import_project_file():
-    """Create a project from a ``.solidus-project.json`` plus its CAD files.
-
-    Multipart: ``project`` is the JSON file, ``files`` are the STL/STEP parts it
-    references. Parts whose files were not supplied are reported back rather
-    than silently dropped, so the user knows exactly what to re-attach.
-    """
     import json
 
     from ui.project_state import load_project_state
@@ -402,9 +277,6 @@ def import_project_file():
     if upload is None:
         return jsonify({"error": "Attach a .solidus-project.json file."}), 400
 
-    # The app's MAX_CONTENT_LENGTH is 500 MB to admit large STEP assemblies; a
-    # project file is a few kilobytes of settings, so it gets its own cap and
-    # is parsed off the stream rather than read whole into memory first.
     head = upload.read(MAX_PROJECT_FILE_BYTES + 1)
     if len(head) > MAX_PROJECT_FILE_BYTES:
         return jsonify(
@@ -418,10 +290,6 @@ def import_project_file():
         return jsonify({"error": "A project file must contain a JSON object."}), 400
 
     try:
-        # Schema v1 files are migrated forward here -- including the legacy
-        # pour-rate repair, which nothing on the web side reproduces.
-        # TypeError as well as ValueError: `int(payload["schema_version"])` on a
-        # non-scalar raises the former, which used to escape as a 500.
         state = load_project_state(payload).to_dict()
     except (ValueError, TypeError) as exc:
         return jsonify({"error": f"That project file could not be read: {exc}"}), 400
@@ -432,20 +300,12 @@ def import_project_file():
     ui_state = state.get("ui_state", {})
     ui_state = dict(ui_state) if isinstance(ui_state, dict) else {}
 
-    # Store the uploaded CAD files, indexed by the display name each body
-    # reports. Indexing by the *upload's* filename collapsed a multi-body STEP
-    # onto whichever body came last, and let bracket.stl and bracket.step
-    # overwrite one another; the display name is per body and is what the
-    # project file's paths are matched against.
     stored: Dict[str, Dict[str, Any]] = {}
     collisions: List[str] = []
     for file in request.files.getlist("files"):
         if not file.filename:
             continue
         try:
-            # Tessellate STEP bodies for the imported project's own voxel
-            # size; upload_voxel_size_in falls back to the default when the
-            # saved value is missing or invalid.
             for entry in upload_cad_file(
                 file, _upload_folder(), simulation.get("voxel_size")
             ):
@@ -473,17 +333,12 @@ def import_project_file():
             "performance_options": simulation.get("performance_options", {}),
             "solidification_params": simulation.get("solidification_params", {}),
             "ui_state": ui_state,
-            # create_project folds this into ui_state for us.
             "pour_location": simulation.get("pour_location"),
         },
     )
 
     missing: List[str] = []
-    # Exported part id -> imported part id, for features and cuts that name a body.
     id_map: Dict[str, str] = {}
-    # `load_project_state` keeps the desktop schema only, so a modeled body's
-    # feature definition is read from the raw entry at the same index (the
-    # loader keeps every entry, in order, or raises).
     raw_parts = payload.get("parts") if isinstance(payload.get("parts"), list) else []
     for index, part in enumerate(state.get("parts", [])):
         if not isinstance(part, dict):
@@ -491,10 +346,6 @@ def import_project_file():
         raw_part = raw_parts[index] if index < len(raw_parts) and isinstance(raw_parts[index], dict) else {}
         raw_feature = raw_part.get("feature")
         feature = raw_feature if isinstance(raw_feature, dict) else None
-        # A project file may name a part by its original file name, by the
-        # server's prefixed storage name (an export from an older build), with
-        # or without an extension. Try all four rather than making the user
-        # guess which one the importer wants.
         stem = os.path.basename(str(part.get("filepath", "")))
         candidates = [
             os.path.splitext(stem)[0].lower(),
@@ -532,9 +383,6 @@ def import_project_file():
         if isinstance(raw_part.get("id"), str):
             id_map[raw_part["id"]] = new_part_id
 
-    # Point what names a body at the imported rows. An imported body has no
-    # pre-cut base: the file it was imported from is taken as its base, and
-    # Rebuild in the Model panel applies the cuts to it again.
     if id_map:
         for imported in repo.get_parts(_database_path(), project_id):
             feature = imported.get("feature")
@@ -550,28 +398,12 @@ def import_project_file():
             "id": project_id,
             "project": repo.get_project(_database_path(), project_id),
             "missing_parts": missing,
-            # Bodies that shared a display name; only the first was kept, and
-            # the user needs to know the rest were not silently applied.
             "name_collisions": collisions,
             "schema_version": state.get("schema_version"),
         }
     ), 201
 
-
-# ---------------------------------------------------------------------------
-# Reports
-# ---------------------------------------------------------------------------
-
-
 def _pdf_backend() -> Optional[str]:
-    """Which PDF renderer ``ReportGenerator`` would find, if any.
-
-    ``ReportGenerator._html_to_pdf`` degrades *silently* when neither backend
-    is installed: it writes a ``.html`` and a ``.txt`` beside the requested
-    path, returns the ``.pdf`` path anyway, and raises nothing. Probing up
-    front is what lets the UI grey the option out with a reason instead of
-    handing the user a download that does not exist.
-    """
     for module in ("weasyprint", "pdfkit"):
         try:
             __import__(module)
@@ -580,9 +412,7 @@ def _pdf_backend() -> Optional[str]:
             continue
     return None
 
-
 REPORT_FORMATS = ("html", "markdown", "pdf")
-
 
 @tools_bp.route("/report/formats")
 def report_formats():
@@ -604,7 +434,6 @@ def report_formats():
         }
     )
 
-
 def _report_settings_text(project: Dict[str, Any]) -> str:
     analysis = project.get("analysis_options", {}) or {}
     enabled = sorted(key for key, value in analysis.items() if value is True)
@@ -624,10 +453,8 @@ def _report_settings_text(project: Dict[str, Any]) -> str:
         lines.append(f"Pour location: ({point}) in")
     return "\n".join(lines)
 
-
 @tools_bp.route("/projects/<project_id>/report", methods=["POST"])
 def project_report(project_id: str):
-    """Build a report for a completed run and return it as a download."""
     from flask import send_file
 
     database_path = _database_path()
@@ -646,8 +473,6 @@ def project_report(project_id: str):
             {"error": "PDF export needs weasyprint or pdfkit installed on the server."}
         ), 503
 
-    # `sections` used to be read with `.get` on whatever arrived, so a list or a
-    # string turned into an AttributeError and a 500.
     sections = payload.get("sections")
     if sections is None:
         sections = {}
@@ -702,15 +527,9 @@ def project_report(project_id: str):
         )
 
     if want("statistics"):
-        # The project row carries the same summary the artifact does, recorded
-        # by mark_project_completed. Prefer it: reading it avoids parsing a
-        # 50-180 MB artifact whose visualization arrays this section never
-        # touches. The artifact is only opened when the row has no summary.
         summary = project.get("summary") or {}
         if not summary:
             summary = (_load_artifact(project_id) or {}).get("summary", {}) or {}
-        # add_metrics_section formats every value with `f"{value:.2f}"`, so a
-        # string statistic (the Niyama metadata is full of them) would raise.
         metrics = {
             key: float(value)
             for key, value in _flat_summary(summary).items()
@@ -732,12 +551,8 @@ def project_report(project_id: str):
             return jsonify(
                 {"error": f"The screenshot exceeds {MAX_SCREENSHOT_BYTES // (1024 * 1024)} MB."}
             ), 413
-        # The renderer hardcodes `data:image/png`, so anything that is not a
-        # PNG would be embedded under a lying media type.
         if not image.startswith(PNG_MAGIC):
             return jsonify({"error": "The screenshot must be a PNG."}), 400
-        # `_process_image` treats a str as a FILE PATH, so the PNG has to be
-        # handed over as bytes.
         generator.add_image_section("Result View", image, caption="Viewport screenshot")
 
     import tempfile
@@ -747,10 +562,9 @@ def project_report(project_id: str):
         target = Path(temp_dir) / f"report{suffix}"
         try:
             generator.generate(target)
-        except Exception as exc:  # pragma: no cover - depends on optional backends
+        except Exception as exc:
             return jsonify({"error": f"Report generation failed: {exc}"}), 500
         if not target.exists():
-            # The silent-fallback branch above; treat it as the failure it is.
             return jsonify(
                 {"error": "The server could not render that format. Try HTML or Markdown."}
             ), 503
@@ -773,9 +587,7 @@ def project_report(project_id: str):
         download_name=f"{safe_name}_report{suffix}",
     )
 
-
 def _flat_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
-    """One level of flattening, matching what the results panel shows."""
     flat: Dict[str, Any] = {}
     for key, value in summary.items():
         if key in {"raw_ranges", "available_modes", "bounds"}:
@@ -788,13 +600,7 @@ def _flat_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
             flat[key] = value
     return flat
 
-
 def _decode_data_url(value: str) -> Optional[bytes]:
-    """Decode a ``data:image/png;base64,...`` URL, or a bare base64 payload.
-
-    Refuses anything longer than the screenshot cap before decoding, so a
-    gigabyte of base64 is not expanded in memory just to be rejected after.
-    """
     import base64
 
     if len(value) > MAX_SCREENSHOT_BYTES * 2:
@@ -805,15 +611,8 @@ def _decode_data_url(value: str) -> Optional[bytes]:
     except Exception:
         return None
 
-
-# ---------------------------------------------------------------------------
-# Help
-# ---------------------------------------------------------------------------
-
-
 @tools_bp.route("/help/alloys")
 def help_alloys():
-    """The alloy reference table behind Help > Help Guide."""
     rows = []
     for name in get_all_alloy_names():
         alloy = get_alloy(name)

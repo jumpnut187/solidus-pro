@@ -10,20 +10,13 @@ from core.materials import get_alloy
 from core.solidification import AnalysisOptions, SolidificationEngine
 from physics.heat_transfer import BoundaryType, HeatTransferModel
 
-CHILL_ALPHA = 1.17e-4  # graphite thermal diffusivity (m^2/s) wired in solidification.py
-
+CHILL_ALPHA = 1.17e-4
 
 def _build_engine(
     *,
     with_chill: bool = False,
     voxel_sizes: Optional[np.ndarray] = None,
 ) -> SolidificationEngine:
-    """Build a tiny 8-voxel engine exercising the thermal-coupled model init.
-
-    Voxel layout: 8 collinear voxels; the last two become CHILL (part type 2)
-    when ``with_chill`` is set, otherwise everything is CAST. Every voxel is a
-    surface voxel so boundary registration is trivially observable.
-    """
     centers = []
     part_types = []
     for i in range(8):
@@ -59,7 +52,7 @@ def _build_engine(
     def _get_surface_voxel_indices() -> np.ndarray:
         return np.arange(n_voxels, dtype=np.int32)
 
-    mesh.get_surface_voxel_indices = _get_surface_voxel_indices  # type: ignore[attr-defined]
+    mesh.get_surface_voxel_indices = _get_surface_voxel_indices
 
     engine = SolidificationEngine(mesh, get_alloy("WCB"), AnalysisOptions())
     engine.solidification_times = np.zeros(n_voxels, dtype=np.float32)
@@ -68,7 +61,6 @@ def _build_engine(
     engine.local_solidification_time = np.zeros(n_voxels, dtype=np.float32)
     engine.feeding_fraction_solid = np.full(n_voxels, np.nan, dtype=np.float32)
     return engine
-
 
 class ThermalBoundaryConfigTests(unittest.TestCase):
     def test_heat_model_uses_temperature_dependent_properties_and_voxel_sizes(self) -> None:
@@ -82,19 +74,18 @@ class ThermalBoundaryConfigTests(unittest.TestCase):
         self.assertTrue(model.use_temperature_dependent)
         self.assertIsNotNone(model._voxel_sizes)
         self.assertEqual(len(model._voxel_sizes), n_voxels)
-        # Per-voxel sizes arrive in meters (inches * 0.0254).
         np.testing.assert_allclose(model._voxel_sizes, np.full(n_voxels, 0.5 * 0.0254), atol=1e-12)
 
     def test_voxel_sizes_fallback_to_uniform_scalar(self) -> None:
         n_voxels = 8
-        engine = _build_engine()  # no mesh.voxel_sizes -> uniform fallback
+        engine = _build_engine()
 
         engine._initialize_thermal_models(show_progress=False)
 
         model = engine._thermal_heat_model
         self.assertIsNotNone(model._voxel_sizes)
         self.assertEqual(len(model._voxel_sizes), n_voxels)
-        expected = 1.0 * 0.0254  # base_voxel_size = 1.0 inch
+        expected = 1.0 * 0.0254
         np.testing.assert_allclose(model._voxel_sizes, np.full(n_voxels, expected), atol=1e-12)
 
     def test_chill_voxels_become_diffusivity_overrides_with_interface_boundary(self) -> None:
@@ -107,7 +98,6 @@ class ThermalBoundaryConfigTests(unittest.TestCase):
         chill_indices = np.where(np.asarray(engine.mesh.voxel_part_types) == 2)[0]
         self.assertEqual(len(chill_indices), 2)
 
-        # B4: per-voxel graphite diffusivity overrides cover exactly the chills.
         overrides = model._diffusivity_overrides
         self.assertIsNotNone(overrides)
         override_idx, override_vals = overrides
@@ -120,7 +110,6 @@ class ThermalBoundaryConfigTests(unittest.TestCase):
             atol=1e-12,
         )
 
-        # Chill surface voxels carry an INTERFACE (ambient heat loss) boundary.
         chill_surface = np.intersect1d(
             chill_indices,
             np.arange(n_voxels, dtype=np.int64),
@@ -136,7 +125,6 @@ class ThermalBoundaryConfigTests(unittest.TestCase):
             float(engine.analysis_options.solidification_params.thermal_boundary.chill_ambient_htc),
         )
 
-        # Chills must NOT be pinned with a FIXED_TEMPERATURE boundary.
         fixed_bcs = [bc for bc in model._boundaries if bc.type == BoundaryType.FIXED_TEMPERATURE]
         for bc in fixed_bcs:
             self.assertFalse(
@@ -166,26 +154,17 @@ class ThermalBoundaryConfigTests(unittest.TestCase):
         mold_k = float(tb.mold_thermal_conductivity)
         mold_alpha = float(tb.mold_thermal_diffusivity)
 
-        # Semi-infinite sand-mold penetration model (multiplier convention):
-        #   h_eff(t) = 1 / (1/h0 + 1/h_pen(t)),  h_pen(t) = k / sqrt(pi*alpha*t)
-        # floored at h0 * htc_floor_fraction. The INTERFACE branch multiplies
-        # bc.htc by this function, so the returned value is h_eff/h0: 1.0 at
-        # t=0 and decaying as the mold heats up.
         self.assertAlmostEqual(float(bc.time_function(0.0)), 1.0, places=6)
 
-        # At t = 1 s the penetration resistance is already substantial:
-        # h_pen = 0.6/sqrt(pi*3.3e-7*1) ~ 589 W/m^2K -> h_eff ~ 271 W/m^2K.
         t = 1.0
         h_pen = mold_k / np.sqrt(np.pi * mold_alpha * t)
         h_eff = 1.0 / (1.0 / h0 + 1.0 / h_pen)
         expected = max(h_eff / h0, floor)
         self.assertAlmostEqual(float(bc.time_function(t)), expected, places=4)
 
-        # Late times decay toward (and clamp at) the air-gap floor fraction.
         h_late_mult = float(bc.time_function(1.0e4))
         self.assertAlmostEqual(h_late_mult / floor, 1.0, delta=1e-3)
 
-        # The multiplier must be monotonically decreasing.
         t_grid = np.logspace(-2, 4, 100)
         h_grid = np.array([float(bc.time_function(tv)) for tv in t_grid])
         self.assertTrue(np.all(np.diff(h_grid) <= 1e-9))
@@ -205,12 +184,9 @@ class ThermalBoundaryConfigTests(unittest.TestCase):
             values = np.asarray(curves[key], dtype=np.float64)
             self.assertEqual(values.shape, (6,), f"property curve '{key}' must have 6 points")
             self.assertTrue(np.all(np.isfinite(values)))
-        # Reference points must be monotonically increasing.
         self.assertTrue(np.all(np.diff(np.asarray(curves["temp_points"])) > 0))
 
-
 class AdaptiveTimestepTests(unittest.TestCase):
-    """CFL-adaptive timestep selection in thermal-coupled mode."""
 
     def _init_models(self, *, env_value: Optional[str] = None) -> SolidificationEngine:
         engine = _build_engine()
@@ -233,8 +209,6 @@ class AdaptiveTimestepTests(unittest.TestCase):
     def test_large_cfl_timestep_is_used_when_adaptive_enabled(self) -> None:
         engine = self._init_models()
         dt_stable = float(engine._thermal_heat_model.get_stable_timestep())
-        # 1-inch voxels give a generous CFL bound; the adaptive path must pick
-        # it up (clamped to the 2.0s max) instead of the fixed 0.1s default.
         self.assertGreater(dt_stable, 0.2)
         self.assertGreaterEqual(engine.time_step, 0.2)
         self.assertLessEqual(engine.time_step, 2.0)
@@ -252,15 +226,11 @@ class AdaptiveTimestepTests(unittest.TestCase):
         _os.environ.pop("CASTSIM_THERMAL_ADAPTIVE_DT", None)
         try:
             engine._initialize_thermal_models(show_progress=False)
-            # Patch the CURRENT model instance so the adaptive path sees a
-            # small CFL bound with no 2x headroom and keeps 0.1s.
             engine._thermal_heat_model.get_stable_timestep = _types.MethodType(
                 lambda self: 0.05,
                 engine._thermal_heat_model,
             )
             engine.time_step = 0.1
-            # Call the adaptive block directly against the patched model:
-            # 0.05 < 2 * 0.1, so time_step must remain 0.1.
             if _os.getenv("CASTSIM_THERMAL_ADAPTIVE_DT", "1").strip().lower() not in ("0", "false", "no"):
                 dt_cfl = float(engine._thermal_heat_model.get_stable_timestep())
                 if dt_cfl > 0.0 and np.isfinite(dt_cfl):
@@ -273,7 +243,6 @@ class AdaptiveTimestepTests(unittest.TestCase):
             else:
                 _os.environ["CASTSIM_THERMAL_ADAPTIVE_DT"] = old
         self.assertEqual(engine.time_step, 0.1)
-
 
 if __name__ == "__main__":
     unittest.main()

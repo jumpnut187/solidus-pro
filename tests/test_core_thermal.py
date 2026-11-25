@@ -1,12 +1,3 @@
-"""Sand cores as a volumetric thermal body.
-
-A core is mold sand enclosed by metal: it absorbs heat early, saturates, and
-then insulates the metal around it, so the metal against an enclosed core
-freezes last. These tests pin the model pieces (sand property overrides,
-mold-temperature start, pre-solid state, metal-sand contact conductance,
-core-print boundary) and the end-to-end effect on the solidification order.
-"""
-
 from __future__ import annotations
 
 import contextlib
@@ -31,9 +22,7 @@ from tests.test_simulation_scenarios import _memory_monitor_check, _ok_validatio
 
 NUMBA = heat_transfer.NUMBA_AVAILABLE
 
-
 def _line_engine(part_types: list[int]) -> SolidificationEngine:
-    """Engine over collinear 1 in voxels with the given part codes, every voxel on the surface."""
     n_voxels = len(part_types)
     centers = np.asarray([[float(i), 0.0, 0.0] for i in range(n_voxels)], dtype=np.float32)
     neighbors = np.full((n_voxels, 26), -1, dtype=np.int32)
@@ -49,7 +38,7 @@ def _line_engine(part_types: list[int]) -> SolidificationEngine:
         voxel_neighbors=neighbors,
         base_voxel_size=1.0,
     )
-    mesh.get_surface_voxel_indices = lambda: np.arange(n_voxels, dtype=np.int32)  # type: ignore[attr-defined]
+    mesh.get_surface_voxel_indices = lambda: np.arange(n_voxels, dtype=np.int32)
     engine = SolidificationEngine(mesh, get_alloy("WCB"), AnalysisOptions())
     engine.solidification_times = np.full(n_voxels, np.nan, dtype=np.float32)
     engine.solidification_start_times = np.full(n_voxels, np.nan, dtype=np.float32)
@@ -58,11 +47,8 @@ def _line_engine(part_types: list[int]) -> SolidificationEngine:
     engine.feeding_fraction_solid = np.full(n_voxels, np.nan, dtype=np.float32)
     return engine
 
-
-# CAST CAST CORE CORE CAST CHILL
 LINE = [PART_TYPE_CAST, PART_TYPE_CAST, PART_TYPE_CORE, PART_TYPE_CORE, PART_TYPE_CAST, PART_TYPE_CHILL]
 CORE_IDX = np.array([2, 3])
-
 
 class CoreThermalModelTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -78,7 +64,7 @@ class CoreThermalModelTests(unittest.TestCase):
         for i in CORE_IDX:
             self.assertAlmostEqual(alpha[i], self.tb.core_thermal_conductivity / rho_cp, places=15)
             self.assertAlmostEqual(capacity[i], rho_cp)
-        self.assertIn(5, alpha)  # the chill keeps its graphite override
+        self.assertIn(5, alpha)
         self.assertAlmostEqual(alpha[5], 1.17e-4)
 
     def test_contact_conductance_marks_only_core_cells(self) -> None:
@@ -125,7 +111,6 @@ class CoreThermalModelTests(unittest.TestCase):
     def test_contact_core_cells_list_cast_voxels_touching_a_core(self) -> None:
         np.testing.assert_array_equal(self.engine._get_core_contact_cast_indices(), [1, 4])
 
-
 class CoreParamsTests(unittest.TestCase):
     def test_defaults_match_the_mold_sand_diffusivity(self) -> None:
         tb = ThermalBoundaryParams()
@@ -149,9 +134,7 @@ class CoreParamsTests(unittest.TestCase):
         self.assertEqual(restored.thermal_boundary.htc_core_contact, 750.0)
         self.assertEqual(restored.thermal_boundary.core_specific_heat, 1000.0)
 
-
 def _two_cell_model(h: float | None, *, numba: bool) -> HeatTransferModel:
-    """Metal cell 0 | sand cell 1, linked by one face slot each way."""
     neighbors = np.full((2, 26), -1, dtype=np.int32)
     neighbors[0, 0] = 1
     neighbors[1, 1] = 0
@@ -169,7 +152,6 @@ def _two_cell_model(h: float | None, *, numba: bool) -> HeatTransferModel:
     model.set_initial_temperature(np.array([1500.0, 20.0]))
     model._numba_parallel_eligible = False
     return model
-
 
 class ContactConductanceTests(unittest.TestCase):
     def _step(self, h: float | None, numba: bool) -> tuple[HeatTransferModel, np.ndarray]:
@@ -200,14 +182,9 @@ class ContactConductanceTests(unittest.TestCase):
         _, d_numba = self._step(500.0, numba=True)
         np.testing.assert_allclose(d_numba, d_numpy, rtol=1e-10)
 
-
 class SandSlabHeatingTests(unittest.TestCase):
-    """A sand slab heated from both faces matches the analytic Fourier-number solution."""
 
     def test_centre_reaches_half_the_face_rise_at_fo_0_379(self) -> None:
-        # 21 nodes, faces held at 1000 C, half-thickness L = 10 dx. Corner
-        # slots carry the x neighbours too, so the 27-point stencil reduces
-        # to the exact 1-D Laplacian (weights 0.5 + 4 * 0.125 per side).
         n = 21
         dx = 0.002
         neighbors = np.full((n, 26), -1, dtype=np.int32)
@@ -236,9 +213,7 @@ class SandSlabHeatingTests(unittest.TestCase):
         model.step(t_half)
         self.assertAlmostEqual(float(model.temperatures[10]) / 1000.0, 0.5, delta=0.02)
 
-
 def _cored_block_manager() -> PartManager:
-    """2 in cube casting with a 1 in sand core fully enclosed at its centre."""
     manager = PartManager()
     cast_id = manager.load_part(ci_model("block_2inch.stl"), name="cast")
     core_id = manager.load_part(ci_model("small_block.stl"), name="core")
@@ -251,7 +226,6 @@ def _cored_block_manager() -> PartManager:
     cast.set_position(0.0, 0.0, 0.0)
     core.set_position(0.0, 0.0, 0.0)
     return manager
-
 
 class EnclosedCorePipelineTests(unittest.TestCase):
     @classmethod
@@ -301,7 +275,6 @@ class EnclosedCorePipelineTests(unittest.TestCase):
     def test_enclosed_core_faces_are_gas_sources(self) -> None:
         generation = np.asarray(self.engine.gas_generation, dtype=float)
         self.assertGreater(float(np.max(generation[self.contact])), 0.0)
-
 
 if __name__ == "__main__":
     unittest.main()

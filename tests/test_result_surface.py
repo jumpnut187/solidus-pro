@@ -1,9 +1,3 @@
-"""Surface-based result renderer: lattice, painting, envelope, caps, picking.
-
-Runs against real VTK filters on a small synthetic block (no window is
-created; only a vtkRenderer holds the actors).
-"""
-
 from __future__ import annotations
 
 import unittest
@@ -21,9 +15,7 @@ from ui.result_surface import (
     subdivide_skin,
 )
 
-
 def _block(nx=8, ny=6, nz=5, spacing=0.5):
-    """Regular voxel block: centers, sizes and a field peaking in the middle."""
     ix, iy, iz = np.meshgrid(np.arange(nx), np.arange(ny), np.arange(nz), indexing="ij")
     centers = np.column_stack([ix.ravel(), iy.ravel(), iz.ravel()]).astype(np.float64) * spacing
     sizes = np.full(len(centers), spacing)
@@ -31,7 +23,6 @@ def _block(nx=8, ny=6, nz=5, spacing=0.5):
     d = np.linalg.norm(centers - c, axis=1)
     field = np.clip(1.0 - d / (d.max() or 1.0), 0.0, 1.0).astype(np.float32)
     return centers, sizes, field
-
 
 def _box_mesh(lo, hi):
     x0, y0, z0 = lo
@@ -41,7 +32,6 @@ def _box_mesh(lo, hi):
     f = np.array([[0, 2, 1], [0, 3, 2], [4, 5, 6], [4, 6, 7], [0, 1, 5], [0, 5, 4],
                   [1, 2, 6], [1, 6, 5], [2, 3, 7], [2, 7, 6], [3, 0, 4], [3, 4, 7]])
     return v, f
-
 
 class DenseGridTests(unittest.TestCase):
     def test_lattice_roundtrip_and_fill(self) -> None:
@@ -59,7 +49,6 @@ class DenseGridTests(unittest.TestCase):
         dense = scatter_and_fill(field, cells, np.ones(len(cells), dtype=bool), nearest_known_map(np.ones(lattice.cell_count, bool), lattice), lattice)
         self.assertAlmostEqual(float(dense[cells[0]]), float(field[0]), places=6)
 
-
 class SubdivisionTests(unittest.TestCase):
     def test_subdivision_refines_without_cracks(self) -> None:
         v, f = _box_mesh((0, 0, 0), (2, 1, 1))
@@ -69,8 +58,6 @@ class SubdivisionTests(unittest.TestCase):
         feat.SetInputData(pd)
         feat.BoundaryEdgesOn(); feat.FeatureEdgesOff(); feat.ManifoldEdgesOff(); feat.NonManifoldEdgesOn()
         feat.Update()
-        # A closed box stays closed: no boundary or non-manifold edges after subdivision.
-        # (Normals split vertices at sharp edges, so check on the pre-normals topology.)
         raw = vtk.vtkAdaptiveSubdivisionFilter()
         raw_in = vtk.vtkPolyData()
         pts = vtk.vtkPoints()
@@ -90,8 +77,7 @@ class SubdivisionTests(unittest.TestCase):
     def test_triangle_cap_binds(self) -> None:
         v, f = _box_mesh((0, 0, 0), (4, 4, 4))
         pd = subdivide_skin(v, f, max_edge=0.01, max_triangles=2000)
-        self.assertLessEqual(pd.GetNumberOfPolys(), 2000 * 4)  # split normals can duplicate points, not polys past ~cap
-
+        self.assertLessEqual(pd.GetNumberOfPolys(), 2000 * 4)
 
 class RendererTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -136,7 +122,6 @@ class RendererTests(unittest.TestCase):
     def test_skin_paint_follows_the_field(self) -> None:
         self.rs.show("niyama", self.field, 0.0, 1.0, 0.3, palette_niyama)
         colours = self.rs._colors_for_cells(self.rs._cell_of_voxel)
-        # Centre voxel is the field maximum -> red end; corner is the minimum -> blue end.
         centre = int(np.argmax(self.field)); corner = int(np.argmin(self.field))
         self.assertGreater(colours[centre][0], 200); self.assertLess(colours[centre][2], 50)
         self.assertGreater(colours[corner][2], 200); self.assertLess(colours[corner][0], 50)
@@ -171,7 +156,7 @@ class RendererTests(unittest.TestCase):
         self.rs.show("hotspot", self.field, 0.0, 1.0, 0.3, palette_hotspot)
         for idx in (0, 17, len(self.centers) - 1):
             self.assertEqual(self.rs.voxel_at(self.centers[idx] + 0.1), idx)
-        self.assertGreaterEqual(self.rs.voxel_at((-50.0, -50.0, -50.0)), 0)  # clamps to nearest
+        self.assertGreaterEqual(self.rs.voxel_at((-50.0, -50.0, -50.0)), 0)
 
     def test_clear_leaves_ghost_only(self) -> None:
         self.rs.show("hotspot", self.field, 0.0, 1.0, 0.3, palette_hotspot)
@@ -184,7 +169,6 @@ class RendererTests(unittest.TestCase):
 
     def test_wrong_length_values_are_refused(self) -> None:
         self.assertFalse(self.rs.show("hotspot", self.field[:-1], 0.0, 1.0, 0.3, palette_hotspot))
-
 
 if __name__ == "__main__":
     unittest.main()

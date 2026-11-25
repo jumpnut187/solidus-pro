@@ -1,16 +1,3 @@
-"""
-Metal Backend Parity Tests
-
-Validates that the MLX + Taichi Metal GPU backend produces numerically
-identical results to the Numba CPU reference for:
-- Distance computations
-- Solidification front updates (including feeding-zone logic)
-- Voxel containment
-
-These tests only run on Apple Silicon (darwin). On other platforms they
-are automatically skipped.
-"""
-
 from __future__ import annotations
 
 import sys
@@ -27,16 +14,13 @@ from core.acceleration import (
     update_solidification_with_feeding_connectivity,
 )
 
-
 @unittest.skipUnless(sys.platform == 'darwin', 'Apple Silicon Metal GPU only')
 class MetalBackendParityTest(unittest.TestCase):
-    """Test that Metal GPU backend produces identical results to Numba CPU reference."""
 
     def setUp(self) -> None:
         np.random.seed(42)
 
     def test_metal_backend_detected(self) -> None:
-        """Test that Metal backend is properly detected on Apple Silicon."""
         mgr = GPUComputeManager()
         mgr._detection_attempted = False
         mgr._detect_backends()
@@ -50,7 +34,6 @@ class MetalBackendParityTest(unittest.TestCase):
             self.skipTest('Metal not available (mlx/taichi not installed)')
 
     def test_distance_parity(self) -> None:
-        """Test MLX distance computation matches Numba CPU reference."""
         mgr = GPUComputeManager()
         mgr._detection_attempted = False
         mgr._detect_backends()
@@ -71,7 +54,6 @@ class MetalBackendParityTest(unittest.TestCase):
         )
 
     def test_solidification_parity(self) -> None:
-        """Test Taichi solidification update matches Numba CPU reference."""
         mgr = GPUComputeManager()
         mgr._detection_attempted = False
         mgr._detect_backends()
@@ -115,7 +97,6 @@ class MetalBackendParityTest(unittest.TestCase):
         )
 
     def test_solidification_feeding_zone_logic(self) -> None:
-        """Test that feeding zone bug fix is working correctly."""
         mgr = GPUComputeManager()
         mgr._detection_attempted = False
         mgr._detect_backends()
@@ -168,7 +149,6 @@ class MetalBackendParityTest(unittest.TestCase):
         )
 
     def test_voxel_containment_metal(self) -> None:
-        """Test Taichi ray-triangle containment matches expected results."""
         mgr = GPUComputeManager()
         mgr._detection_attempted = False
         mgr._detect_backends()
@@ -237,7 +217,6 @@ class MetalBackendParityTest(unittest.TestCase):
             accuracy, 0.9,
             msg=f"Voxel containment accuracy {accuracy:.1%} is below 90% (got {result})"
         )
-
 
 if __name__ == "__main__":
     unittest.main()

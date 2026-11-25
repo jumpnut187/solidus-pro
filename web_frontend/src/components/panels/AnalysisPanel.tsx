@@ -14,7 +14,6 @@ export type AnalysisPanelProps = {
 
 type Toggle = { key: string; label: string; note: string };
 
-/** Mirrors `ui/dialogs/analysis_options_dialog.py`, including gas porosity. */
 const CORE_TOGGLES: Toggle[] = [
   {
     key: 'shrinkage',

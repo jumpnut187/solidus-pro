@@ -1,21 +1,3 @@
-"""NPU export pipeline: torch -> Core ML / ONNX / TFLite.
-
-All three artifacts are produced from the same trained weights
-(``weights.pt`` + ``manifest.json`` in a deep model directory):
-
-* ``coreml`` — ``.mlpackage`` for the Apple ANE (compute_units=all).
-* ``onnx`` — fp32 ONNX graph validated on the CPU EP, plus an fp16 copy.  The
-  fp32 graph is what ``inference.py`` loads through ONNX Runtime on any
-  execution provider (QNN runs it at fp16 on the Hexagon NPU).
-* ``tflite`` — int8 post-training-quantized TFLite for Google Tensor
-  (torch -> ONNX -> onnx2tf), validated with tflite-runtime.
-
-Each target updates ``deep_manifest.json`` with the artifact path,
-quantization, and validation status.  Target-specific toolchains are imported
-lazily and fail with a clear message rather than a crash (onnx2tf may lag
-Python 3.13 / arm64).
-"""
-
 from __future__ import annotations
 
 import os
@@ -42,7 +24,6 @@ ARTIFACT_NAMES = {
     "tflite": "SolidusPro_Deep.tflite",
 }
 
-# Per-target notes for the export UI.
 TARGET_NOTES = {
     "coreml": "Apple ANE — .mlpackage, compute_units=all (ANE/GPU/CPU). "
               "ANE active when tensor shapes fit ANE tiles.",
@@ -53,14 +34,7 @@ TARGET_NOTES = {
               "(Edge TPU delegate).",
 }
 
-
 def _build_model(model_dir: str) -> UNet3D:
-    """Load weights + manifests and build the U-Net for export.
-
-    The exported graph is ``UNet3D.forward``: physical ``(1, 3, R, R, R)``
-    seconds ``[start, end, local]`` with the target denormalization and
-    ``end = start + local`` inside the graph.
-    """
     manifest = _read_manifest(model_dir)
     if manifest is None:
         raise ValueError(f"No manifest.json found at {model_dir}")
@@ -73,7 +47,6 @@ def _build_model(model_dir: str) -> UNet3D:
         )
     return build_unet_from_artifact(model_dir, manifest)
 
-
 def _update_deep_manifest(
     model_dir: str, target: str, artifact_path: str, quantization: str, validated: bool, note: str
 ) -> None:
@@ -83,12 +56,10 @@ def _update_deep_manifest(
     save_deep_manifest(deep, model_dir)
     _append_export_log(model_dir, target, artifact_path, quantization, validated, note)
 
-
 def _empty_deep_manifest():
     from core.deep_model.model import DeepModelManifest
 
     return DeepModelManifest()
-
 
 def _append_export_log(
     model_dir: str, target: str, artifact_path: str, quantization: str, validated: bool, note: str
@@ -115,25 +86,12 @@ def _append_export_log(
     with open(log_path, "w") as fh:
         json.dump(entries, fh, indent=2)
 
-
-# ---------------------------------------------------------------------------
-# Per-target exporters
-# ---------------------------------------------------------------------------
-
 def _export_coreml(model_dir: str, out_dir: str, grid: int, progress_cb: ProgressCallback) -> Dict[str, Any]:
     import torch
     import torch.nn as nn
     import coremltools as ct
 
     class _GroupNormExport(nn.Module):
-        """GroupNorm equivalent tracing with constant ops (Core ML-safe).
-
-        ``nn.GroupNorm`` decomposes to a rank-6 reshape that Core ML rejects;
-        this computes the same math (normalize each channel within its group,
-        shared per-channel affine) with fixed-slice operations that trace to
-        constants (no ``aten::Int`` / rank-6 intermediates), reusing the
-        original weight/bias Parameters so state_dict keys are unchanged.
-        """
 
         def __init__(self, num_groups: int, num_channels: int, eps: float = 1e-5):
             super().__init__()
@@ -149,9 +107,6 @@ def _export_coreml(model_dir: str, out_dir: str, grid: int, progress_cb: Progres
             normalized = []
             for g in range(self.num_groups):
                 sl = x[:, g * per_group : (g + 1) * per_group]
-                # GroupNorm statistics span every channel in the group plus the
-                # spatial dims; per-channel stats (dims 2-4 only) would be
-                # InstanceNorm and diverge from the trained weights.
                 mean = sl.mean(dim=(1, 2, 3, 4), keepdim=True)
                 var = sl.var(dim=(1, 2, 3, 4), keepdim=True, unbiased=False)
                 normalized.append((sl - mean) / torch.sqrt(var + self.eps))
@@ -221,7 +176,6 @@ def _export_coreml(model_dir: str, out_dir: str, grid: int, progress_cb: Progres
         "note": note,
     }
 
-
 def _export_onnx(model_dir: str, out_dir: str, grid: int, progress_cb: ProgressCallback) -> Dict[str, Any]:
     import torch
     import onnxruntime as ort
@@ -257,7 +211,6 @@ def _export_onnx(model_dir: str, out_dir: str, grid: int, progress_cb: ProgressC
     except Exception as exc:
         note = f"{note} fp32 validation failed: {exc}"
 
-    # fp16 artifact for the QNN EP.
     fp16_path = base_path + ".fp16"
     if progress_cb:
         progress_cb("Exporting fp16 ONNX graph (QNN EP)...")
@@ -296,12 +249,11 @@ def _export_onnx(model_dir: str, out_dir: str, grid: int, progress_cb: ProgressC
         "note": note,
     }
 
-
 def _export_tflite(model_dir: str, out_dir: str, grid: int, progress_cb: ProgressCallback) -> Dict[str, Any]:
     import torch
 
     try:
-        import onnx2tf  # noqa: F401
+        import onnx2tf
     except ImportError as exc:
         raise ImportError(
             "onnx2tf is not installed — the Google Tensor (TFLite) export "
@@ -372,11 +324,6 @@ def _export_tflite(model_dir: str, out_dir: str, grid: int, progress_cb: Progres
         "note": note,
     }
 
-
-# ---------------------------------------------------------------------------
-# Public entry point
-# ---------------------------------------------------------------------------
-
 def export_for_target(
     model_path: str,
     target: str,
@@ -384,17 +331,6 @@ def export_for_target(
     progress_cb: ProgressCallback = None,
     cancel_cb: CancelCallback = None,
 ) -> Dict[str, Any]:
-    """Export a trained deep model to one NPU target.
-
-    Args:
-        model_path: Deep model directory (manifest.json + weights.pt).
-        target: One of ``"coreml"``, ``"onnx"``, ``"tflite"``.
-        out_dir: Artifact directory (defaults to ``<model_dir>/export``).
-
-    Returns:
-        Dict with ``target``, ``artifact_path``, ``quantization``,
-        ``validated``, and ``note``.
-    """
     if target not in TARGETS:
         raise ValueError(f"Unknown target '{target}' — choose from {TARGETS}")
     model_path = os.fspath(model_path)

@@ -1,17 +1,3 @@
-"""Regression tests for sand burn-in risk, in particular chill proximity.
-
-``_calculate_sand_burn_in`` reduces burn-in risk near chills, because metal
-against a chill solidifies before it can penetrate the sand. That reduction had
-never actually executed: the block read ``chill_burn_in_radius`` eight lines
-before assigning it, and a broad ``except Exception`` downgraded the resulting
-NameError to a printed warning.
-
-The spatial assertion below is what distinguishes the two states. With the
-reduction disabled the chill still perturbs burn-in indirectly through
-solidification time, so near-chill risk is only ~7 % below the far side
-(ratio ~0.93). With it active the reduction is ~35 % (ratio ~0.65).
-"""
-
 from __future__ import annotations
 
 import unittest
@@ -23,7 +9,6 @@ from tests.test_simulation_scenarios import (
     _run_pipeline_with_patched_memory,
 )
 
-
 class SandBurnInChillProximityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -33,11 +18,6 @@ class SandBurnInChillProximityTests(unittest.TestCase):
         )
 
     def _cast_surface_split(self):
-        """Split cast surface voxels into near-chill and far-side halves.
-
-        ``_cast_with_chill_manager`` puts the chill at +1.5 on X, so the
-        higher-X half of the cast surface is the chill-facing side.
-        """
         engine = self.engine
         part_types = np.asarray(engine.mesh.voxel_part_types, dtype=np.int32)
         surface = np.asarray(engine.mesh.surface_voxels, dtype=bool)
@@ -59,11 +39,6 @@ class SandBurnInChillProximityTests(unittest.TestCase):
         self.assertEqual(len(np.asarray(risk)), len(self.engine.mesh.voxel_centers))
 
     def test_chill_proximity_reduces_burn_in_risk(self) -> None:
-        """Surfaces facing the chill must carry materially less burn-in risk.
-
-        Guards the use-before-assignment of chill_burn_in_radius: with that bug
-        present this ratio is ~0.93 and the assertion fails.
-        """
         near, far = self._cast_surface_split()
         risk = np.asarray(self.engine.sand_burn_in_risk, dtype=np.float32)
 
@@ -83,13 +58,10 @@ class SandBurnInChillProximityTests(unittest.TestCase):
         )
 
     def test_chill_proximity_block_does_not_swallow_programming_errors(self) -> None:
-        """A NameError in the chill block must propagate, not become a warning."""
         import inspect
 
         import core.solidification as solidification
 
-        # Checked structurally rather than by provoking a real failure: the
-        # point is that the broad handler must not sit in front of NameError.
         src = inspect.getsource(
             solidification.SolidificationEngine._calculate_sand_burn_in
         )
@@ -99,7 +71,6 @@ class SandBurnInChillProximityTests(unittest.TestCase):
             "the chill-proximity handler no longer re-raises NameError, so a "
             "use-before-assignment bug there would be silently swallowed again",
         )
-
 
 if __name__ == "__main__":
     unittest.main()

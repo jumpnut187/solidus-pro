@@ -16,7 +16,6 @@ from core.solidification_loop import compute_schedule_fraction_solid
 from core.solidification import SOLVER_MODE_SCHEDULE_LEGACY, SOLVER_MODE_THERMAL_COUPLED
 from core.solidification_loop import build_schedule_fraction_history
 
-
 def _ok_validation(*_args, **_kwargs) -> MemoryValidationResult:
     return MemoryValidationResult(
         can_proceed=True,
@@ -28,10 +27,8 @@ def _ok_validation(*_args, **_kwargs) -> MemoryValidationResult:
         message="ok",
     )
 
-
 def _memory_monitor_check(_self: object) -> tuple[bool, str]:
     return True, "ok"
-
 
 def _single_cast_manager(filepath: str) -> PartManager:
     manager = PartManager()
@@ -42,7 +39,6 @@ def _single_cast_manager(filepath: str) -> PartManager:
     part.set_part_type(PartType.CAST)
     part.set_position(0.0, 0.0, 0.0)
     return manager
-
 
 def _run_pipeline_with_patched_memory(
     filepath: str,
@@ -85,7 +81,6 @@ def _run_pipeline_with_patched_memory(
         stack.enter_context(patch("core.voxel_mesh.MemoryMonitor.check", _memory_monitor_check))
         return run_pipeline(inputs, part_manager=_single_cast_manager(filepath)).engine
 
-
 class FractionLiquidTimingConsistencyTests(unittest.TestCase):
     @unittest.skip("schedule_legacy is now opt-in; thermal_coupled fraction_liquid does not track completion field the same way")
     def test_fraction_liquid_tracks_completion_field_on_block(self) -> None:
@@ -115,19 +110,12 @@ class FractionLiquidTimingConsistencyTests(unittest.TestCase):
         self.assertEqual(engine._get_solver_mode(), SOLVER_MODE_THERMAL_COUPLED)
         self.assertEqual(engine.niyama_metadata["source"], "thermal_history")
 
-
 class LargeModulusScheduleRegressionTests(unittest.TestCase):
     def test_fraction_liquid_final_snapshot_no_artificial_append(self) -> None:
         engine = _run_pipeline_with_patched_memory(ci_model("block_2inch.stl"))
         self.assertGreaterEqual(len(engine.fraction_liquid_history), 2)
         last_history = engine.fraction_liquid_history[-1]
         last_time = engine.fraction_liquid_times[-1]
-        # The thermal_coupled loop in core/solidification_loop.py exits when
-        # ``np.all(previous_states >= 0.99)`` is true at the top of an
-        # iteration, so the final snapshot can legitimately have some voxels
-        # slightly under 1.0 (clipped to 1.0 only on the next step that the
-        # loop never reaches). We assert "essentially all solid" with a
-        # tolerance of 0.01, which is the convergence threshold.
         self.assertTrue(
             np.all(last_history >= 0.99),
             msg=f"Final snapshot should be essentially all-solid, got min={np.min(last_history):.6f}",
@@ -189,7 +177,6 @@ class LargeModulusScheduleRegressionTests(unittest.TestCase):
             final_time + 0.12,
             msg="Last time should be at or near final_time, not final_time + 0.1 with fake append",
         )
-
 
 class FeederTimingSpreadTests(unittest.TestCase):
     def test_riser_and_riser_post_have_meaningful_spread(self) -> None:
@@ -289,7 +276,6 @@ class FeederTimingSpreadTests(unittest.TestCase):
                     f"only all-liquid or all-solid for all {len(times_arr)} frames"
                 ),
             )
-
 
 if __name__ == "__main__":
     unittest.main()

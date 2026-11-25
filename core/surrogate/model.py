@@ -1,24 +1,3 @@
-"""Surrogate model contracts, manifests, and loaders.
-
-A ``SurrogateModel`` maps ``(channels, conditioning) -> schedule fields``:
-
-* Input channels: the 7 fixed-grid fields from ``fields.CHANNELS``.
-* Conditioning: the normalized alloy + config vector from ``conditioning.py``.
-* Output: three fixed-grid fields ``[start_time, end_time, local_time]`` which
-  the pipeline unprojects onto the native voxel mesh and feeds into the
-  existing post-analysis stack.
-
-Two in-repo models are provided:
-
-* ``NumpyDemoModel`` — a deterministic, physics-derived reference model with no
-  learned weights (the out-of-the-box default and the parity-test baseline).
-* ``NumpyWeightsModel`` — a tiny linear-log model fit by least squares over
-  captured training data; the trainer's dependency-free default.
-
-Core ML / MLX artifacts are loaded through the same interface; their inference
-wrappers are added by the trainer once model export exists.
-"""
-
 from __future__ import annotations
 
 import json
@@ -46,9 +25,7 @@ WCB_DIFFUSIVITY = 45 / (7200 * 600)
 WCB_LATENT = 272000.0
 _TIME_STEP_FLOOR = 0.1
 
-
 def _material_factor(raw: Dict[str, float]) -> float:
-    """Mirror ``SolidificationEngine._calculate_max_simulation_time`` material scaling."""
     conductivity = max(float(raw.get("thermal_conductivity", 45.0)), 1e-9)
     density = max(float(raw.get("density_solid", 7500.0)), 1.0)
     specific_heat = max(float(raw.get("specific_heat", 600.0)), 1.0)
@@ -56,17 +33,8 @@ def _material_factor(raw: Dict[str, float]) -> float:
     latent = max(float(raw.get("latent_heat", 270000.0)), 1.0)
     return float(math.sqrt((WCB_DIFFUSIVITY / diffusivity) * (latent / WCB_LATENT)))
 
-
 def _decode_chill_boost(channel: np.ndarray, log6: float) -> np.ndarray:
-    """Invert ``fields.encode_channels`` channel 5 back to the chill boost factor.
-
-    The encoder stores ``log1p(boost - 1) / log(6) == log(boost) / log(6)``, so
-    the inverse is ``exp(c * log(6))``.  An earlier ``expm1`` decode returned
-    ``boost - 1`` and, after the ``>= 1`` clamp, read every boost in [1, 2] as
-    exactly 1.0 (no chill effect) and under-read everything above it by one.
-    """
     return np.maximum(np.exp(np.asarray(channel, dtype=np.float64) * log6), 1.0)
-
 
 def _mushy_fraction(raw: Dict[str, float]) -> float:
     liquidus = float(raw.get("liquidus_temp", 1450.0))
@@ -76,20 +44,14 @@ def _mushy_fraction(raw: Dict[str, float]) -> float:
     freezing_range = max(liquidus - solidus, 1.0)
     return float(np.clip(freezing_range / (superheat + freezing_range), 0.15, 0.45))
 
-
 @dataclass
 class ModelManifest:
-    """Describes a surrogate model artifact so it can be validated on load."""
 
     name: str
     version: str
     kind: str
     backend: str
     grid_resolution: int = 64
-    #: Divisor used to encode part-type codes into channel 1 at capture
-    #: time. Recorded so an artifact trained under one encoding is not
-    #: silently fed inputs built under another; see fields.PART_TYPE_DIVISOR.
-    #: Defaults to 3.0 so manifests written before this field are accepted.
     part_type_divisor: float = PART_TYPE_DIVISOR
     channels: List[str] = field(default_factory=lambda: list(CHANNELS))
     outputs: List[str] = field(default_factory=lambda: list(OUTPUTS))
@@ -112,17 +74,13 @@ class ModelManifest:
         clean = {k: v for k, v in data.items() if k in allowed}
         return cls(**clean)
 
-
 @dataclass
 class ModelLoadResult:
-    """Result of a model load attempt."""
 
     model: Optional["SurrogateModel"] = None
     error: str = ""
 
-
 class SurrogateModel(ABC):
-    """Interface all surrogate backends implement."""
 
     manifest: ModelManifest
 
@@ -132,19 +90,11 @@ class SurrogateModel(ABC):
 
     @abstractmethod
     def predict(self, channels: np.ndarray, conditioning: Conditioning) -> np.ndarray:
-        """Run inference.
-
-        Args:
-            channels: Shape ``(C, R, R, R)``, channels ordered per ``CHANNELS``.
-            conditioning: Normalized alloy + config conditioning vector.
-
-        Returns:
-            Shape ``(3, R, R, R)`` ordered per ``OUTPUTS`` (start, end, local).
-        """
+        pass
 
     @abstractmethod
     def close(self) -> None:
-        """Release any backend resources (no-op for NumPy models)."""
+        pass
 
     def describe(self) -> str:
         m = self.manifest
@@ -168,9 +118,7 @@ class SurrogateModel(ABC):
             lines.append(f"  Notes: {m.notes}")
         return "\n".join(lines)
 
-
 def _fmt_num(value: Any, digits: int) -> str:
-    """Format a manifest number; ``None``/NaN render as ``n/a``."""
     if value is None:
         return "n/a"
     try:
@@ -181,14 +129,7 @@ def _fmt_num(value: Any, digits: int) -> str:
         return "n/a"
     return f"{f:.{digits}f}"
 
-
 class NumpyDemoModel(SurrogateModel):
-    """Deterministic, physics-derived reference model (no learned weights).
-
-    Applies Chvorinov's rule per voxel using the conditioning vector's
-    reconstructed material constants.  Produces plausible absolute-time
-    schedules and serves as the out-of-the-box default and test baseline.
-    """
 
     def __init__(self, manifest: Optional[ModelManifest] = None, resolution: int = 64):
         self.manifest = manifest or build_demo_manifest(resolution=resolution)
@@ -233,17 +174,7 @@ class NumpyDemoModel(SurrogateModel):
     def close(self) -> None:
         pass
 
-
 class NumpyWeightsModel(SurrogateModel):
-    """Linear-log surrogate fit by least squares over captured runs.
-
-    The feature matrix per cell combines the physics-informed channels and the
-    reconstructed conditioning constants.  Two ridge least-squares heads share
-    it: ``weights`` predicts ``log(end_time)`` and ``local_weights`` predicts
-    ``log(local_time)``.  ``local_weights`` is optional so a ``weights.npz``
-    written before the local head existed still loads; it then falls back to
-    ``local = end * mushy_fraction``.
-    """
 
     FEATURE_NAMES: List[str] = [
         "intercept",
@@ -285,7 +216,6 @@ class NumpyWeightsModel(SurrogateModel):
     def has_local_head(self) -> bool:
         return self.local_weights is not None
 
-    # -- feature building shared by fit (dataset) and predict (inference) ----
     @staticmethod
     def _features(channels: np.ndarray, conditioning: Conditioning) -> tuple[np.ndarray, np.ndarray]:
         from core.surrogate.fields import _LOG6
@@ -333,7 +263,6 @@ class NumpyWeightsModel(SurrogateModel):
         target_list: List[np.ndarray],
         ridge: float = 1e-3,
     ) -> np.ndarray:
-        """Ridge least-squares fit of ``log(target)`` over active cells with target > 0."""
         X_rows: List[np.ndarray] = []
         y_rows: List[np.ndarray] = []
         for channels, conditioning, target in zip(channels_list, conditioning_list, target_list):
@@ -360,7 +289,6 @@ class NumpyWeightsModel(SurrogateModel):
         end_list: List[np.ndarray],
         ridge: float = 1e-3,
     ) -> np.ndarray:
-        """Least-squares fit of ``log(end_time)`` over all active cells."""
         return NumpyWeightsModel._fit_log_target(channels_list, conditioning_list, end_list, ridge)
 
     @staticmethod
@@ -370,7 +298,6 @@ class NumpyWeightsModel(SurrogateModel):
         local_list: List[np.ndarray],
         ridge: float = 1e-3,
     ) -> np.ndarray:
-        """Least-squares fit of ``log(local_time)`` over all active cells."""
         return NumpyWeightsModel._fit_log_target(channels_list, conditioning_list, local_list, ridge)
 
     def predict(self, channels: np.ndarray, conditioning: Conditioning) -> np.ndarray:
@@ -411,9 +338,7 @@ class NumpyWeightsModel(SurrogateModel):
             text += "\n  Local-time head: learned log(local_time) ridge fit"
         return text
 
-
 def build_demo_manifest(resolution: int = 64, name: str = "Reference Chvorinov Model") -> ModelManifest:
-    """Build the manifest for the bundled analytic reference model."""
     from core.surrogate.conditioning import ALLOY_FEATURES, CONFIG_FEATURES
 
     return ModelManifest(
@@ -438,21 +363,17 @@ def build_demo_manifest(resolution: int = 64, name: str = "Reference Chvorinov M
         notes="Deterministic physics-derived reference; no learned weights.",
     )
 
-
 def _save_manifest(manifest: ModelManifest, directory: str) -> str:
     path = os.path.join(directory, "manifest.json")
     with open(path, "w") as fh:
         json.dump(manifest.to_dict(), fh, indent=2)
     return path
 
-
 def save_numpy_demo(directory: str, resolution: int = 64) -> str:
-    """Persist a NumpyDemoModel manifest so ``load_model`` can find it."""
     os.makedirs(directory, exist_ok=True)
     manifest = build_demo_manifest(resolution=resolution)
     _save_manifest(manifest, directory)
     return directory
-
 
 def _read_manifest(directory: str) -> Optional[ModelManifest]:
     path = os.path.join(directory, "manifest.json")
@@ -465,17 +386,7 @@ def _read_manifest(directory: str) -> Optional[ModelManifest]:
     except Exception:
         return None
 
-
 def load_model(path: Union[str, os.PathLike]) -> ModelLoadResult:
-    """Load a surrogate model artifact.
-
-    Args:
-        path: A directory containing ``manifest.json`` (optionally plus a
-            ``weights.npz``), or a ``.json`` manifest file.
-
-    Returns:
-        :class:`ModelLoadResult` with the model (or an error message).
-    """
     path = os.fspath(path)
     if os.path.isfile(path) and path.endswith(".json"):
         directory = os.path.dirname(path) or "."
@@ -490,10 +401,6 @@ def load_model(path: Union[str, os.PathLike]) -> ModelLoadResult:
         return ModelLoadResult(error=f"No manifest.json found at {path}")
 
     if not math.isclose(manifest.part_type_divisor, PART_TYPE_DIVISOR, rel_tol=1e-9):
-        # The part-type channel encoding changed since this artifact was
-        # trained, so its inputs no longer mean what it learned. Without this
-        # check the model would load and quietly produce worse predictions --
-        # the failure mode adding a PartType would otherwise introduce.
         return ModelLoadResult(
             error=(
                 f"Model {manifest.name!r} was trained with "
@@ -512,9 +419,6 @@ def load_model(path: Union[str, os.PathLike]) -> ModelLoadResult:
         try:
             with np.load(weights_path) as npz:
                 weights = npz["weights"]
-                # Artifacts written before the local head have no
-                # ``local_weights``; the model then falls back to the
-                # mushy-fraction local time.
                 local_weights = npz["local_weights"] if "local_weights" in npz.files else None
             model = NumpyWeightsModel(manifest, weights, local_weights)
             model.manifest.artifact_path = weights_path

@@ -51,7 +51,6 @@ export type ModelPanelProps = {
   onClose: () => void;
 };
 
-/** Body types offered for a modeled body, most used first. */
 const BODY_TYPES: PartType[] = ['riser', 'chill', 'riser_post', 'core', 'cast', 'pour_cup', 'sprue', 'runner', 'gate', 'filter', 'mold'];
 
 export function ModelPanel(props: ModelPanelProps) {
@@ -65,14 +64,9 @@ export function ModelPanel(props: ModelPanelProps) {
   return session.feature.kind === 'cut' ? <CutManager {...props} /> : <ExtrudeManager {...props} />;
 }
 
-// ---------------------------------------------------------------------------
-// FeatureManager tree
-// ---------------------------------------------------------------------------
-
 function FeatureTree({ modeling, parts, selectedPartId, onSelectPart, onRemovePart, onClose }: ModelPanelProps) {
   const imported = parts.filter((part) => !featureOf(part));
   const modeled = parts.filter((part) => featureOf(part));
-  // Bodies and cuts in history order, the way the FeatureManager lists them.
   const history: Array<{ seq: number; part: ProjectPart; cut?: never } | { seq: number; cut: CutFeature; part?: never }> = [
     ...modeled.map((part) => ({ seq: featureOf(part)?.seq ?? 0, part })),
     ...modeling.cutFeatures.map((cut) => ({ seq: cut.seq, cut }))
@@ -302,10 +296,6 @@ function FeatureTree({ modeling, parts, selectedPartId, onSelectPart, onRemovePa
   );
 }
 
-/**
- * Which regions of the sketch the feature uses. They are picked in the view,
- * as in Onshape; this says how many and offers the way back to the default.
- */
 function RegionsGroup({ modeling }: { modeling: ModelingController }) {
   const regions = modeling.regions;
   const session = modeling.session;
@@ -341,10 +331,6 @@ function endConditionLabel(id: EndCondition): string {
 function cutEndConditionLabel(id: CutEndCondition): string {
   return CUT_END_CONDITIONS.find((entry) => entry.id === id)?.label ?? id;
 }
-
-// ---------------------------------------------------------------------------
-// Property managers
-// ---------------------------------------------------------------------------
 
 function ManagerHeader({
   title,
@@ -1268,10 +1254,6 @@ function CutManager({ modeling, parts }: ModelPanelProps) {
     </ManagerShell>
   );
 }
-
-// ---------------------------------------------------------------------------
-// A number input that commits on Enter or blur, like a CAD modify box
-// ---------------------------------------------------------------------------
 
 function NumberField({
   label,

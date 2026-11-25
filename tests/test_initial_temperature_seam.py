@@ -1,15 +1,3 @@
-"""Tests for SolidificationEngine.set_initial_temperature_field.
-
-This is the seam a mold-filling stage hands its result to. Before it existed,
-``_initialize_thermal_models`` assumed the cavity filled instantaneously at
-``alloy.pouring_temp`` -- one uniform assignment that constituted the entire
-pour model, and which README.md and PROJECT_OVERVIEW.md both list as a known
-simplification.
-
-Filling and solidification stay separate sequential stages: the fill runs to
-completion, then hands over a temperature field. These tests pin that handover.
-"""
-
 from __future__ import annotations
 
 import unittest
@@ -29,9 +17,7 @@ from core.simulation_pipeline import (
 )
 from core.solidification import SolidificationEngine
 
-
 def _build_engine(part_manager, analysis_options=None):
-    """Build an initialized engine over a small mesh, without running it."""
     inputs = PipelineInputs(
         alloy_name="WCB",
         voxel_size=0.5,
@@ -62,7 +48,6 @@ def _build_engine(part_manager, analysis_options=None):
     engine = SolidificationEngine(mesh, alloy, options)
     engine.initialize()
     return engine
-
 
 class ValidationTests(unittest.TestCase):
     @classmethod
@@ -98,7 +83,6 @@ class ValidationTests(unittest.TestCase):
             )
 
     def test_field_is_copied_not_aliased(self) -> None:
-        """Mutating the caller's array must not change the engine's copy."""
         field = np.full(self.n_voxels, 1500.0)
         self.engine.set_initial_temperature_field(field)
         field[:] = 9999.0
@@ -111,9 +95,7 @@ class ValidationTests(unittest.TestCase):
         )
         np.testing.assert_allclose(self.engine._fill_arrival_times, times)
 
-
 class SeededSolveTests(unittest.TestCase):
-    """The seeded field must actually reach the solver."""
 
     @staticmethod
     def _run(seed_offset):
@@ -129,7 +111,6 @@ class SeededSolveTests(unittest.TestCase):
         return engine
 
     def test_hotter_seed_lengthens_solidification(self) -> None:
-        """Superheated metal must take longer to freeze."""
         baseline = float(np.mean(self._run(None).solidification_times))
         hotter = float(np.mean(self._run(+120.0).solidification_times))
 
@@ -143,7 +124,6 @@ class SeededSolveTests(unittest.TestCase):
         )
 
     def test_seeding_pouring_temp_matches_the_default(self) -> None:
-        """Seeding exactly what the default would produce must change nothing."""
         baseline = self._run(None)
         seeded = self._run(0.0)
 
@@ -154,9 +134,7 @@ class SeededSolveTests(unittest.TestCase):
             atol=1e-9,
         )
 
-
 class ChillOverrideTests(unittest.TestCase):
-    """Chills are mold material, so a fill field must not heat them."""
 
     @staticmethod
     def _thermal_field_after_seeding(seed_value):
@@ -166,14 +144,10 @@ class ChillOverrideTests(unittest.TestCase):
             engine.set_initial_temperature_field(
                 np.full(n, seed_value, dtype=np.float64)
             )
-        # Build the thermal models without running the solve, so the field
-        # observed is exactly what the override produced.
         engine._initialize_thermal_models(show_progress=False)
-        # The field carries the mold sand after the mesh's own cells.
         return engine, np.asarray(engine._thermal_heat_model.temperatures[:n], dtype=np.float64)
 
     def test_chills_are_forced_to_mold_temperature(self) -> None:
-        """Even seeded as molten, chills must start at chill temperature."""
         engine, field = self._thermal_field_after_seeding(1600.0)
 
         part_types = np.asarray(engine.mesh.voxel_part_types, dtype=np.int32)
@@ -186,7 +160,6 @@ class ChillOverrideTests(unittest.TestCase):
         np.testing.assert_allclose(field[chill_mask], chill_temperature, atol=1e-9)
 
     def test_metal_keeps_the_seeded_value(self) -> None:
-        """The override must apply to chills only, not to the whole field."""
         engine, field = self._thermal_field_after_seeding(1600.0)
 
         part_types = np.asarray(engine.mesh.voxel_part_types, dtype=np.int32)
@@ -202,7 +175,6 @@ class ChillOverrideTests(unittest.TestCase):
         np.testing.assert_allclose(
             field[metal_mask], engine.alloy.pouring_temp, atol=1e-9
         )
-
 
 if __name__ == "__main__":
     unittest.main()

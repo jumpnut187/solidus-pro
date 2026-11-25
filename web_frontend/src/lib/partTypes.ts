@@ -1,20 +1,9 @@
-/**
- * The part types the simulation engine understands, mirroring
- * `core/part_manager.py` (`PartType`, `PART_TYPE_COLORS`, `PART_TYPE_KEYWORDS`,
- * `infer_part_type_from_name`).
- *
- * The web client previously exposed only five, which meant a gating system
- * uploaded as sprue/runner/gate silently became five castings and every one of
- * them got scored for shrinkage.
- */
 import type { PartType } from './api';
 
 export type PartTypeDef = {
   id: PartType;
   label: string;
-  /** `PART_TYPE_COLORS` converted from 0..1 floats to hex. */
   color: string;
-  /** One-line description for the type picker's tooltip. */
   hint: string;
 };
 
@@ -32,7 +21,6 @@ export const PART_TYPES: PartTypeDef[] = [
   { id: 'mold', label: 'Mold', color: '#9e66db', hint: 'Sand mold (flask, cope, drag) around the assembly. Not metal.' }
 ];
 
-/** Sand bodies: translucent while setting up, hidden while a result is on screen. */
 export const SAND_TYPES: readonly PartType[] = ['core', 'mold'];
 
 export function isSandType(partType: string): boolean {
@@ -53,24 +41,12 @@ export function partTypeColor(id: string): string {
   return partTypeDef(id).color;
 }
 
-/**
- * Only a riser can be marked open-top, matching the desktop parts dialog:
- * the flag feeds the filling stage's riser venting, which is defined for
- * risers alone.
- */
 export const OPEN_TOP_TYPES: readonly PartType[] = ['riser'];
 
 export function supportsOpenTop(partType: string): boolean {
   return OPEN_TOP_TYPES.includes(partType as PartType);
 }
 
-/**
- * Keyword table from `PART_TYPE_KEYWORDS`, in the same precedence order
- * `infer_part_type_from_name` walks: core, chill, the gating group (whose names
- * would otherwise be swallowed by the generic 'post' / 'pad' / 'bridge'
- * keywords), riser post, riser, cast, then mold (so "molded_part" stays a
- * casting).
- */
 const KEYWORD_ORDER: { type: PartType; keywords: string[] }[] = [
   { type: 'core', keywords: ['core', 'sand_core', 'sand core'] },
   { type: 'chill', keywords: ['chill'] },
@@ -85,11 +61,6 @@ const KEYWORD_ORDER: { type: PartType; keywords: string[] }[] = [
   { type: 'mold', keywords: ['mold', 'mould', 'flask', 'cope', 'drag'] }
 ];
 
-/**
- * Infer a part type from a file or body name, matching the server's inference
- * exactly so the type the user sees in the table is the type the run uses.
- * Defaults to `cast` when nothing matches.
- */
 export function inferPartType(name: string): PartType {
   const base = name
     .split(/[\\/]/)

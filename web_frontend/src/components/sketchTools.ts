@@ -16,7 +16,6 @@ import type { ComponentType } from 'react';
 
 import type { SketchTool } from '../lib/modeling/types';
 
-/** The sketch tools, shared by the property manager and the canvas command bar. */
 export const SKETCH_TOOLS: { id: SketchTool; label: string; hint: string; Icon: ComponentType<{ size?: number }> }[] = [
   { id: 'select', label: 'Select', hint: 'Select, drag or delete; drag a line end to move it (Esc)', Icon: MousePointer2 },
   { id: 'line', label: 'Line', hint: 'Click points to chain lines; it stops when the contour closes. Double-click or Enter to stop (L)', Icon: Slash },

@@ -2,13 +2,6 @@ import { Modal } from './Modal';
 import { buildStatGroups } from '../../lib/statLabels';
 import type { GridMeta } from '../../lib/viewState';
 
-/**
- * Everything the run reported, in full.
- *
- * The desktop has no statistics view at all — roughly twenty-five scalars come
- * out of `export_results` and none of them were ever shown. The panel section
- * carries the headline numbers; this dialog is where you read the rest.
- */
 export function StatisticsModal({ meta, onClose }: { meta: GridMeta | null; onClose: () => void }) {
   const groups = meta
     ? buildStatGroups(meta.stats, {

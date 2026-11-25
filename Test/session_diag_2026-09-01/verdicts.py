@@ -1,4 +1,3 @@
-"""What the stage would say on each ground-truth grid."""
 import sys
 sys.path.insert(0, "/Users/brendonjarett/Desktop/Active Codebase/Python_Cast_Sim")
 import numpy as np
